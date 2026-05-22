@@ -1111,6 +1111,80 @@ static uint64_t sys_setitimer(uint64_t which, uint64_t new_val_ptr,
   return 0;
 }
 
+// ── Resource Limits (getrlimit / prlimit64) ──────────────────────────────────
+struct rlimit {
+  uint64_t rlim_cur;
+  uint64_t rlim_max;
+};
+
+#define RLIM_INFINITY ((uint64_t)-1)
+
+static uint64_t sys_getrlimit(uint64_t resource, uint64_t rlim_ptr, uint64_t a2,
+                              uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  struct rlimit *r = (struct rlimit *)rlim_ptr;
+  if (!r)
+    return (uint64_t)-14; // EFAULT
+
+  // Simple stubs: everything is infinite for now
+  r->rlim_cur = RLIM_INFINITY;
+  r->rlim_max = RLIM_INFINITY;
+
+  // Some apps specifically check RLIMIT_NOFILE
+  if (resource == 7) { // RLIMIT_NOFILE
+    r->rlim_cur = MAX_FDS;
+    r->rlim_max = MAX_FDS;
+  }
+
+  return 0;
+}
+
+static uint64_t sys_prlimit64(struct syscall_regs *regs) {
+  uint32_t pid = (uint32_t)regs->rdi;
+  uint32_t resource = (uint32_t)regs->rsi;
+  struct rlimit *new_limit = (struct rlimit *)regs->rdx;
+  struct rlimit *old_limit = (struct rlimit *)regs->r10;
+
+  if (pid != 0) {
+    struct thread *t = sched_get_thread_by_tid(pid);
+    if (!t)
+      return (uint64_t)-3; // ESRCH
+    if (t != sched_get_current())
+      return (uint64_t)-1; // EPERM (only self for now)
+  }
+
+  if (old_limit) {
+    old_limit->rlim_cur = RLIM_INFINITY;
+    old_limit->rlim_max = RLIM_INFINITY;
+    if (resource == 7) { // RLIMIT_NOFILE
+      old_limit->rlim_cur = MAX_FDS;
+      old_limit->rlim_max = MAX_FDS;
+    }
+  }
+
+  if (new_limit) {
+    // Stub: we don't actually enforce many limits yet,
+    // so we just ignore the new limits for now.
+  }
+
+  return 0;
+}
+
+static uint64_t sys_membarrier(uint64_t cmd, uint64_t flags, uint64_t a2,
+                               uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)cmd;
+  (void)flags;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  // Stub: success
+  return 0;
+}
+
 // ── Registration ────────────────────────────────────────────────────────────
 static uint64_t sys_sched_yield(uint64_t a0, uint64_t a1, uint64_t a2,
                                 uint64_t a3, uint64_t a4, uint64_t a5) {
@@ -1155,5 +1229,8 @@ void syscall_register_process(void) {
   syscall_register_raw(SYS_SETSID, sys_setsid);
   syscall_register_raw(SYS_SETUID, sys_setuid);
   syscall_register_raw(SYS_SETGID, sys_setgid);
+  syscall_register(SYS_GETRLIMIT, sys_getrlimit);
+  syscall_register_raw(SYS_PRLIMIT64, sys_prlimit64);
+  syscall_register(SYS_MEMBARRIER, sys_membarrier);
   syscall_register(SYS_SCHED_YIELD, sys_sched_yield);
 }

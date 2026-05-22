@@ -1,12 +1,12 @@
 #include "net/udp.h"
-#include "console/klog.h"
-#include <stdint.h>
-#include <stdbool.h>
 #include "console/console.h"
+#include "console/klog.h"
 #include "lib/string.h"
 #include "net/byteorder.h"
 #include "net/ipv4.h"
 #include "net/netif.h"
+#include <stdbool.h>
+#include <stdint.h>
 
 static udp_socket_t sockets[MAX_UDP_SOCKETS];
 
@@ -17,22 +17,24 @@ int udp_bind(uint16_t port, udp_recv_cb_t callback) {
     // Assign ephemeral port
     static uint16_t next_ephemeral = 32768;
     for (int i = 0; i < 1024; i++) {
-        uint16_t p = next_ephemeral++;
-        if (next_ephemeral == 0) next_ephemeral = 32768;
+      uint16_t p = next_ephemeral++;
+      if (next_ephemeral == 0)
+        next_ephemeral = 32768;
 
-        bool used = false;
-        for (int j = 0; j < MAX_UDP_SOCKETS; j++) {
-            if (sockets[j].valid && sockets[j].local_port == p) {
-                used = true;
-                break;
-            }
+      bool used = false;
+      for (int j = 0; j < MAX_UDP_SOCKETS; j++) {
+        if (sockets[j].valid && sockets[j].local_port == p) {
+          used = true;
+          break;
         }
-        if (!used) {
-            port = p;
-            break;
-        }
+      }
+      if (!used) {
+        port = p;
+        break;
+      }
     }
-    if (port == 0) return -1;
+    if (port == 0)
+      return -1;
   }
 
   // Check if already bound

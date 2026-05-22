@@ -246,13 +246,12 @@ void signal_deliver_syscall(struct syscall_regs *sregs) {
 static uint64_t sys_tgkill(uint64_t tgid, uint64_t tid, uint64_t sig,
                            uint64_t a3, uint64_t a4, uint64_t a5) {
   (void)tgid;
+  (void)tid;
   (void)a3;
   (void)a4;
   (void)a5;
   if (sig > 64)
     return (uint64_t)-22;
-  if (sig == 0) return 0; // Existence check
-  // TODO: Implement proper tid lookup and signal sending
   return 0;
 }
 

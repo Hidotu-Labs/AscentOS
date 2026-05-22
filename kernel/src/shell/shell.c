@@ -731,8 +731,8 @@ static void execute_command(char *cmd) {
     struct thread *current = sched_get_current();
     if (current && current->mm) {
       // Wire up dummy permissions map in active tree to prove it resolves
-      if (vma_add(&current->mm->vmas, fault_vaddr, fault_vaddr + 4096, 0x3, 0x22,
-                  -1, 0) != -1) {
+      if (vma_add(&current->mm->vmas, fault_vaddr, fault_vaddr + 4096, 0x3,
+                  0x22, -1, 0) != -1) {
         volatile uint64_t *fault_ptr = (volatile uint64_t *)fault_vaddr;
 
         // -> CRASH INDUCED <-

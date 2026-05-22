@@ -26,12 +26,12 @@ struct pci_device {
 // Read/write PCI configuration space
 uint32_t pci_config_read32(uint8_t bus, uint8_t slot, uint8_t func,
                            uint16_t offset);
-void pci_config_write32(uint8_t bus, uint8_t slot, uint8_t func, uint16_t offset,
-                        uint32_t value);
+void pci_config_write32(uint8_t bus, uint8_t slot, uint8_t func,
+                        uint16_t offset, uint32_t value);
 uint16_t pci_config_read16(uint8_t bus, uint8_t slot, uint8_t func,
                            uint16_t offset);
-void pci_config_write16(uint8_t bus, uint8_t slot, uint8_t func, uint16_t offset,
-                        uint16_t value);
+void pci_config_write16(uint8_t bus, uint8_t slot, uint8_t func,
+                        uint16_t offset, uint16_t value);
 
 // Initialize PCI and enumerate all devices
 void pci_init(void);
@@ -46,7 +46,8 @@ struct pci_device *pci_find_device_by_id(uint16_t vendor_id,
 // Enable PCI bus-mastering for a device (required for DMA).
 void pci_enable_bus_mastering(struct pci_device *dev);
 
-// Find a capability in the PCI configuration space. Returns offset or 0 if not found.
+// Find a capability in the PCI configuration space. Returns offset or 0 if not
+// found.
 uint8_t pci_find_capability(struct pci_device *dev, uint8_t cap_id);
 
 // Get the number of discovered devices

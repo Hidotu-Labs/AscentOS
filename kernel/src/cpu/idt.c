@@ -53,6 +53,7 @@ extern void isr45(void);
 extern void isr46(void);
 extern void isr47(void);
 extern void isr48(void);
+extern void isr49(void);
 extern void isr255(void);
 
 void idt_set_gate(uint8_t num, uint64_t base, uint16_t sel, uint8_t flags) {
@@ -127,6 +128,9 @@ void idt_init(void) {
 
   // LAPIC timer interrupt vector
   idt_set_gate(48, (uint64_t)isr48, sel, flags);
+
+  // Reschedule IPI vector
+  idt_set_gate(49, (uint64_t)isr49, sel, flags);
 
   // LAPIC spurious interrupt vector
   idt_set_gate(255, (uint64_t)isr255, sel, flags);

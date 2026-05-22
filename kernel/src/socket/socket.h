@@ -97,9 +97,29 @@ struct socket;
 struct sock_ops;
 struct vfs_node;
 
-// ── Socket Address Structure (generic) ───────────────────────────────────────
+// ── Socket Address Family Type ──────────────────────────────────────────────
 typedef uint16_t sa_family_t;
 
+// ── IPv4 Address Structure ──────────────────────────────────────────────────
+struct in_addr {
+  uint32_t s_addr;
+};
+
+// ── IPv4 Socket Address structure ───────────────────────────────────────────
+struct sockaddr_in {
+  sa_family_t sin_family;
+  uint16_t sin_port;
+  struct in_addr sin_addr;
+  char sin_zero[8];
+};
+
+// ── IP Protocols ─────────────────────────────────────────────────────────────
+#define IPPROTO_IP 0
+#define IPPROTO_ICMP 1
+#define IPPROTO_TCP 6
+#define IPPROTO_UDP 17
+
+// ── Socket Address Structure (generic) ───────────────────────────────────────
 struct sockaddr {
   sa_family_t sa_family;
   char sa_data[14];
@@ -141,7 +161,7 @@ typedef struct socket {
   int domain;            // AF_UNIX, AF_INET, etc.
   int type;              // SOCK_STREAM, SOCK_DGRAM, etc.
   int protocol;          // Protocol (usually 0)
-  int state;             // SS_UNCONNECTED, SS_CONNECTED, etc.
+  volatile int state;    // SS_UNCONNECTED, SS_CONNECTED, etc.
   int fd;                // File descriptor for this socket
   int flags;             // Socket flags (SOCK_NONBLOCK, etc.)
   int error;             // Socket error code
@@ -175,6 +195,10 @@ int socket_listen(socket_t *sock, int backlog);
 int socket_accept(socket_t *sock, socket_t **newsock);
 ssize_t socket_send(socket_t *sock, const void *buf, size_t len, int flags);
 ssize_t socket_recv(socket_t *sock, void *buf, size_t len, int flags);
+ssize_t socket_sendto(socket_t *sock, const void *buf, size_t len, int flags,
+                      struct sockaddr *dest_addr, int addrlen);
+ssize_t socket_recvfrom(socket_t *sock, void *buf, size_t len, int flags,
+                        struct sockaddr *src_addr, int *addrlen);
 
 // ── Socketpair Creation
 // ───────────────────────────────────────────────────────

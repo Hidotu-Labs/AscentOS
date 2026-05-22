@@ -10,14 +10,14 @@ syscall_entry:
     ; KERNEL_GS_BASE contains pointer to cpu_info.
     swapgs
 
-    ; Save user RSP temporarily into cpu_info->scratch_rsp (offset 58 for packed struct)
-    mov gs:[58], rsp
+    ; Save user RSP temporarily into cpu_info->scratch_rsp (offset 336 for aligned struct)
+    mov gs:[336], rsp
 
-    ; Switch to kernel stack: cpu_info->stack_top (offset 17)
-    mov rsp, gs:[17]
+    ; Switch to kernel stack: cpu_info->stack_top (offset 24)
+    mov rsp, gs:[24]
 
     ; Push standard state to construct struct syscall_regs
-    push qword gs:[58] ; User RSP
+    push qword gs:[336] ; User RSP
     push r11           ; User RFLAGS
     push rcx           ; User RIP
 

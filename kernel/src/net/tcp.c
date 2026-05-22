@@ -3,11 +3,11 @@
 #include "console/klog.h"
 #include "drivers/timer/pit.h"
 #include "lib/string.h"
+#include "mm/heap.h"
 #include "net/byteorder.h"
 #include "net/ipv4.h"
 #include "net/net.h"
 #include "net/netif.h"
-#include "mm/heap.h"
 #include "sched/sched.h"
 #include "sched/wait.h"
 
@@ -52,28 +52,32 @@ static uint16_t tcp_calculate_checksum(uint32_t src_ip, uint32_t dst_ip,
   const uint16_t *sip16 = (const uint16_t *)&sip;
   const uint16_t *dip16 = (const uint16_t *)&dip;
 
-  sum += sip16[0] + sip16[1];
-  sum += dip16[0] + dip16[1];
-  sum += htons(PROTO_TCP);
-  sum += htons(tcp_len);
+  sum += (uint16_t)sip16[0];
+  sum += (uint16_t)sip16[1];
+  sum += (uint16_t)dip16[0];
+  sum += (uint16_t)dip16[1];
+
+  sum += (uint16_t)htons(PROTO_TCP);
+  sum += (uint16_t)htons(tcp_len);
 
   // TCP Segment
   const uint16_t *buf = (const uint16_t *)tcp_segment;
   int len = tcp_len;
   while (len > 1) {
-    sum += *buf++;
+    sum += (uint32_t)*buf++;
     len -= 2;
   }
 
   if (len > 0) {
-    sum += *(const uint8_t *)buf;
+    sum += (uint32_t)*(const uint8_t *)buf;
   }
 
+  // Fold 32-bit sum to 16-bit
   while (sum >> 16) {
     sum = (sum & 0xFFFF) + (sum >> 16);
   }
 
-  return ~sum;
+  return (uint16_t)~sum;
 }
 
 static void tcp_send_segment(tcp_socket_t *sock, uint8_t flags,
@@ -99,6 +103,16 @@ static void tcp_send_segment(tcp_socket_t *sock, uint8_t flags,
 
   hdr->checksum = tcp_calculate_checksum(sock->local_ip, sock->remote_ip,
                                          packet, total_len);
+
+  klog_puts("[TCP] TX to ");
+  tcp_print_ip(sock->remote_ip);
+  klog_puts(" flags=");
+  klog_hex32(flags);
+  klog_puts(" seq=");
+  klog_uint64(sock->seq_num);
+  klog_puts(" csum=0x");
+  klog_hex32(hdr->checksum);
+  klog_puts("\n");
 
   ipv4_send_packet(sock->remote_ip, PROTO_TCP, packet, total_len);
 }
@@ -179,38 +193,46 @@ int tcp_connect(uint32_t ip, uint16_t port, tcp_recv_cb_t on_recv) {
   uint64_t last_retransmit = start_ticks;
   uint32_t poll_count = 0;
 
+  // Check if loopback already established the connection synchronously
+  if (sock->state == TCP_STATE_ESTABLISHED) {
+    if (wq_entry) {
+      wait_queue_remove(&sock->wait_queue, wq_entry);
+      kfree(wq_entry);
+    }
+    return sock_id;
+  }
+
   tcp_send_segment(sock, TCP_FLAG_SYN, NULL, 0);
 
   while (sock->state == TCP_STATE_SYN_SENT && sock->valid) {
-    net_poll();
+    if (sock->state == TCP_STATE_ESTABLISHED || sock->state == TCP_STATE_CLOSED)
+      break;
+
     uint64_t now = pit_get_ticks();
-    poll_count++;
 
     if (now - start_ticks > 5000) { // 5 seconds timeout
       break;
     }
 
-    if (now - last_retransmit > 1000 ||
-        poll_count > 1000) { // retransmit every 1 sec or 1000 polls
+    if (now - last_retransmit > 1000) { // retransmit every 1 sec
       tcp_send_segment(sock, TCP_FLAG_SYN, NULL, 0);
       last_retransmit = now;
-      poll_count = 0;
     }
 
+    // Yield to let other threads (and the network thread) run
     sched_yield();
   }
-
-  if (current && wq_entry) {
+  if (wq_entry) {
     wait_queue_remove(&sock->wait_queue, wq_entry);
     kfree(wq_entry);
   }
 
-  if (sock->state == TCP_STATE_ESTABLISHED) {
-    return sock_id;
+  if (sock->state != TCP_STATE_ESTABLISHED) {
+    sock->valid = false;
+    return -1;
   }
 
-  sock->valid = false;
-  return -1; // Timeout
+  return sock_id;
 }
 
 int tcp_send(int sock_id, const void *data, uint16_t len) {
@@ -239,19 +261,15 @@ int tcp_send(int sock_id, const void *data, uint16_t len) {
 
   while (sock->seq_num != start_seq + len &&
          sock->state == TCP_STATE_ESTABLISHED && sock->valid) {
-    net_poll();
     uint64_t now = pit_get_ticks();
-    poll_count++;
 
     if (now - start_ticks > 5000) { // 5 sec timeout
       break;
     }
 
-    if (now - last_retransmit > 1000 ||
-        poll_count > 1000) { // retransmit every 1 sec or 1000 polls
+    if (now - last_retransmit > 1000) { // Retransmit every 1 sec
       tcp_send_segment(sock, TCP_FLAG_ACK | TCP_FLAG_PSH, data, len);
       last_retransmit = now;
-      poll_count = 0;
     }
 
     sched_yield();
@@ -292,7 +310,6 @@ void tcp_close(int sock_id) {
     uint64_t last_retransmit = start_ticks;
 
     while (sock->state != TCP_STATE_CLOSED && sock->valid) {
-      net_poll();
       uint64_t now = pit_get_ticks();
 
       if (now - start_ticks > 3000) {
@@ -331,6 +348,21 @@ void tcp_handle_packet(const uint8_t *payload, uint16_t length, uint32_t src_ip,
     return;
 
   const tcp_header_t *hdr = (const tcp_header_t *)payload;
+
+  klog_puts("[TCP] RX from ");
+  tcp_print_ip(src_ip);
+  klog_puts(":");
+  klog_uint64(ntohs(hdr->src_port));
+  klog_puts(" -> to our :");
+  klog_uint64(ntohs(hdr->dst_port));
+  klog_puts(" flags=");
+  klog_hex32(hdr->flags);
+  klog_puts(" seq=");
+  klog_uint64(ntohl(hdr->seq_num));
+  klog_puts(" ack=");
+  klog_uint64(ntohl(hdr->ack_num));
+  klog_puts("\n");
+
   uint16_t src_port = ntohs(hdr->src_port);
   uint16_t dst_port = ntohs(hdr->dst_port);
   uint32_t seq = ntohl(hdr->seq_num);
@@ -350,6 +382,11 @@ void tcp_handle_packet(const uint8_t *payload, uint16_t length, uint32_t src_ip,
     if (sockets[i].valid && sockets[i].local_port == dst_port) {
       if (sockets[i].remote_ip == src_ip &&
           sockets[i].remote_port == src_port) {
+        sock = &sockets[i];
+        break;
+      } else if (sockets[i].state == TCP_STATE_SYN_SENT &&
+                 sockets[i].remote_ip == src_ip && (hdr->flags & TCP_FLAG_RST)) {
+        // Fallback: match by IP if we are in SYN_SENT and receive an RST
         sock = &sockets[i];
         break;
       } else if (sockets[i].state == TCP_STATE_LISTEN) {
@@ -385,6 +422,9 @@ void tcp_handle_packet(const uint8_t *payload, uint16_t length, uint32_t src_ip,
 
           tcp_send_segment(new_sock, TCP_FLAG_SYN | TCP_FLAG_ACK, NULL, 0);
           wait_queue_wake_all(&listen_sock->wait_queue);
+          if (listen_sock->event_callback) {
+            listen_sock->event_callback(listen_sock_idx);
+          }
           return;
         }
       }
@@ -392,6 +432,25 @@ void tcp_handle_packet(const uint8_t *payload, uint16_t length, uint32_t src_ip,
   }
 
   if (!sock) {
+    klog_puts("[TCP] No match: local_port=");
+    klog_uint64(dst_port);
+    klog_puts(" from ");
+    tcp_print_ip(src_ip);
+    klog_puts(":");
+    klog_uint64(src_port);
+    klog_puts(" (Existing: ");
+    for (int i = 0; i < MAX_TCP_SOCKETS; i++) {
+      if (sockets[i].valid) {
+        klog_puts("[L=");
+        klog_uint64(sockets[i].local_port);
+        klog_puts(" R=");
+        tcp_print_ip(sockets[i].remote_ip);
+        klog_puts(":");
+        klog_uint64(sockets[i].remote_port);
+        klog_puts("] ");
+      }
+    }
+    klog_puts(")\n");
     return;
   }
 
@@ -411,6 +470,9 @@ void tcp_handle_packet(const uint8_t *payload, uint16_t length, uint32_t src_ip,
       sock->state = TCP_STATE_ESTABLISHED;
       tcp_send_segment(sock, TCP_FLAG_ACK, NULL, 0);
       wait_queue_wake_all(&sock->wait_queue);
+      if (sock->event_callback) {
+        sock->event_callback(sock - sockets);
+      }
     }
     break;
 
@@ -431,7 +493,13 @@ void tcp_handle_packet(const uint8_t *payload, uint16_t length, uint32_t src_ip,
           sock->recv_callback(sock - sockets, data, data_len);
         }
         sock->ack_num += data_len;
-        wait_queue_wake_all(&sock->wait_queue);
+      }
+      wait_queue_wake_all(&sock->wait_queue);
+      if (sock->parent_sock_id >= 0) {
+        wait_queue_wake_all(&sockets[sock->parent_sock_id].wait_queue);
+        if (sockets[sock->parent_sock_id].event_callback) {
+          sockets[sock->parent_sock_id].event_callback(sock->parent_sock_id);
+        }
       }
     }
     break;
@@ -514,15 +582,19 @@ int tcp_accept(int sock_id) {
 }
 
 int tcp_get_remote_info(int sock_id, uint32_t *ip, uint16_t *port) {
-  if (sock_id < 0 || sock_id >= MAX_TCP_SOCKETS)
+  if (sock_id < 0 || sock_id >= MAX_TCP_SOCKETS || !sockets[sock_id].valid)
     return -1;
-  tcp_socket_t *sock = &sockets[sock_id];
-  if (!sock->valid)
-    return -1;
-
   if (ip)
-    *ip = sock->remote_ip;
+    *ip = sockets[sock_id].remote_ip;
   if (port)
-    *port = sock->remote_port;
+    *port = sockets[sock_id].remote_port;
   return 0;
+}
+
+void tcp_set_callbacks(int sock_id, tcp_recv_cb_t rcb,
+                       void (*ecb)(int sock_id)) {
+  if (sock_id < 0 || sock_id >= MAX_TCP_SOCKETS || !sockets[sock_id].valid)
+    return;
+  sockets[sock_id].recv_callback = rcb;
+  sockets[sock_id].event_callback = ecb;
 }

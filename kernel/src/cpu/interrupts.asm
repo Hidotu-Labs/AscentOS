@@ -69,6 +69,9 @@ ISR_NOERRCODE 47
 ; LAPIC timer interrupt vector
 ISR_NOERRCODE 48
 
+; Reschedule IPI vector
+ISR_NOERRCODE 49
+
 ; LAPIC spurious interrupt vector
 ISR_NOERRCODE 255
 

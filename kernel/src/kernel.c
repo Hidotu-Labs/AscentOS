@@ -15,6 +15,7 @@
 #include "drivers/audio/audio_dsp.h"
 #include "drivers/audio/hda.h"
 #include "drivers/audio/sb16.h"
+#include "drivers/gpu/drm/drm.h"
 #include "drivers/input/evdev.h"
 #include "drivers/input/keyboard.h"
 #include "drivers/input/mouse.h"
@@ -30,12 +31,13 @@
 #include "drivers/timer/hpet.h"
 #include "drivers/timer/pit.h"
 #include "drivers/timer/rtc.h"
+
 #include "drivers/usb/ehci.h"
 #include "drivers/usb/ohci.h"
 #include "drivers/usb/uhci.h"
 #include "drivers/usb/usb.h"
 #include "drivers/virtio/virtio.h"
-#include "drivers/virtio/virtio_gpu.h"
+
 #include "fb/framebuffer.h"
 #include "fs/ext2.h"
 #include "fs/fat32.h"
@@ -54,6 +56,7 @@
 #include "sched/sched.h"
 #include "shell/shell.h"
 #include "smp/cpu.h"
+#include "socket/af_inet.h"
 #include "socket/epoll.h"
 #include "socket/socket.h"
 #include "syscalls/syscall.h"
@@ -311,12 +314,6 @@ void kmain(void) {
   acpi_parse_fadt();
 
   // ═══════════════════════════════════════════════════════════════════════
-  //  Phase 5: Transition from legacy PIC → APIC
-  // ═══════════════════════════════════════════════════════════════════════
-  uint32_t lapic_base = acpi_get_lapic_base();
-  uint32_t ioapic_base = acpi_get_ioapic_base();
-
-  // ═══════════════════════════════════════════════════════════════════════
   //  Phase 5: Multitasking & CPU Initialization
   // ═══════════════════════════════════════════════════════════════════════
   cpu_init();
@@ -423,6 +420,7 @@ void kmain_high_half(void) {
 
   pci_init();
   usb_init();
+
   ehci_init();
   ehci_self_test();
   ehci_hand_to_companion(); // Hand ports to UHCI before it probes
@@ -431,9 +429,7 @@ void kmain_high_half(void) {
   ohci_init();
 
   // ── VirtIO subsystem ─────────────────────────────────────────────────────
-  virtio_self_test();     // Phase 1: virtqueue foundation tests
-  virtio_gpu_init();      // Phase 2: GPU device discovery & init
-  virtio_gpu_self_test(); // Phase 2: GPU device tests
+  virtio_self_test(); // Phase 1: virtqueue foundation tests
 
   if (ahci_init() == 0) {
     ata_init();
@@ -482,6 +478,8 @@ mount_success:
   // Re-populate /dev in the new root
   block_repopulate_devices();
   fb_register_vfs();
+  drm_init();
+  drm_register_vfs();
   mouse_register_vfs();
   random_register_vfs();
   procfs_init();
@@ -499,18 +497,18 @@ mount_fail:
   hda_register_vfs();
   audio_dsp_register_vfs();
 
-  // Initialize networking BEFORE spawning init thread so DHCP completes first
-  if (nic_is_present()) {
-    net_init();
-    // FORCE Net thread to CPU 3 to avoid BSP contention
-    sched_create_kernel_thread(net_thread_entry, cpu_get_info(3), true);
-  }
-
   // ═══════════════════════════════════════════════════════════════════════
   //  Phase 7: Userland
   // ═══════════════════════════════════════════════════════════════════════
-  klog_puts("\n[OK] Kernel initialization complete.\n");
-  klog_puts("[INFO] Spawning init thread...\n\n");
+  // Initialize networking and run stress tests BEFORE spawning init thread
+  if (nic_is_present()) {
+    net_init();
+
+
+    // Run self-test as a background thread on any available CPU
+    extern void af_inet_self_test(void);
+    // sched_create_kernel_thread((void *)af_inet_self_test, NULL, true);
+  }
 
   // FORCE Init thread to BSP to ensure it gets first slice
   struct thread *init_thread =

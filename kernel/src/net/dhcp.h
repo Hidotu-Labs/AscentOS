@@ -15,6 +15,7 @@
 #define DHCP_MSG_OFFER    2
 #define DHCP_MSG_REQUEST  3
 #define DHCP_MSG_ACK      5
+#define DHCP_MSG_NAK      6
 
 #define DHCP_MAGIC_COOKIE 0x63825363
 

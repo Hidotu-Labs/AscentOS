@@ -77,6 +77,12 @@ typedef enum {
   THREAD_ZOMBIE
 } thread_state_t;
 
+#define SCHED_PRIORITY_LEVELS 32
+#define SCHED_PRIORITY_INTERACTIVE 0
+#define SCHED_PRIORITY_DEFAULT 16
+#define SCHED_PRIORITY_BACKGROUND 24
+#define SCHED_PRIORITY_IDLE 31
+
 // Information saved on context switch.
 // We push callee-saved registers manually in switch.asm.
 struct context {
@@ -136,9 +142,20 @@ struct thread {
   // Using stack-allocated entries is unsafe because the stack frame becomes
   // invalid when the thread is descheduled, leading to corrupted wait queues
   struct wait_queue_entry *wq_entry_next; // For multi-wait (epoll)
+
+  // Scheduling/MLFQ priority state
+  uint32_t cpu_index;      // Index of CPU this thread is enqueued on
+  uint8_t priority;        // Current dynamic priority (0-31)
+  uint8_t static_priority; // Base priority
+  uint64_t time_slice;     // Remaining ticks in current quantum
+  uint64_t runtime_total;  // Total CPU time consumed
+  uint64_t runtime_burst;  // CPU time used in current quantum (for MLFQ)
 };
 
 void sched_init(void);
+void sched_run_phase1_test(void);
+void sched_wakeup(struct thread *t);
+void sched_yield(void);
 
 struct cpu_info;
 struct thread *sched_create_kernel_thread(void (*entry_point)(void),

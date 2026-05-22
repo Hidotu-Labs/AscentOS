@@ -1,4 +1,5 @@
 #include "net/dhcp.h"
+#include "drivers/timer/pit.h"
 #include "console/console.h"
 #include "lib/string.h"
 #include "net/byteorder.h"
@@ -6,6 +7,7 @@
 #include "net/net.h"
 #include "net/netif.h"
 #include "net/udp.h"
+#include "sched/sched.h"
 
 static uint32_t current_xid = 0xAA55CC33;
 static volatile bool dhcp_done = false;
@@ -100,10 +102,19 @@ static void dhcp_recv_cb(uint16_t local_port, const uint8_t *payload,
   dhcp_packet_t *pkt = (dhcp_packet_t *)payload;
   if (pkt->op != DHCP_OP_REPLY)
     return;
-  if (ntohl(pkt->xid) != current_xid)
+  if (ntohl(pkt->xid) != current_xid) {
+    // console_puts("[DHCP] XID mismatch: expected 0x");
+    // klog_hex32(current_xid);
+    // console_puts(" got 0x");
+    // klog_hex32(ntohl(pkt->xid));
+    // console_puts("\n");
     return;
-  if (ntohl(pkt->magic_cookie) != DHCP_MAGIC_COOKIE)
+  }
+
+  if (ntohl(pkt->magic_cookie) != 0x63825363) {
+    console_puts("[DHCP] Invalid magic cookie!\n");
     return;
+  }
 
   uint8_t msg_type = 0;
   uint32_t router = 0;
@@ -140,11 +151,26 @@ static void dhcp_recv_cb(uint16_t local_port, const uint8_t *payload,
     offered_ip = pkt->yiaddr;
     server_ip = server_id;
     dhcp_state = 2;
-  } else if (msg_type == DHCP_MSG_ACK && dhcp_state == 3) {
+    console_puts("[DHCP] State: OFFER received.\n");
+  } else if (msg_type == DHCP_MSG_ACK && (dhcp_state == 3 || dhcp_state == 2)) {
     offered_netmask = netmask;
     offered_router = router;
     dhcp_state = 4;
     dhcp_done = true;
+    console_puts("[DHCP] State: ACK received.\n");
+  } else if (msg_type == DHCP_MSG_NAK) {
+    console_puts("[DHCP] Received NAK from server.\n");
+  } else {
+    // Hidden debug info to avoid terminal clutter unless manually enabled
+    /*
+    console_puts("[DHCP] RX msg=");
+    klog_uint64(msg_type);
+    console_puts(" state=");
+    klog_uint64(dhcp_state);
+    console_puts(" xid=0x");
+    klog_hex32(ntohl(pkt->xid));
+    console_puts("\n");
+    */
   }
 }
 
@@ -159,12 +185,10 @@ bool dhcp_negotiate(void) {
   for (int attempts = 0; attempts < 3 && dhcp_state < 2; attempts++) {
     console_puts("[DHCP] Sending DISCOVER...\n");
     dhcp_send_discover();
-    for (int wait = 0; wait < 50000; wait++) {
+    uint64_t start = pit_get_ticks();
+    while (dhcp_state < 2 && (pit_get_ticks() - start < 200)) { // 2s timeout
       net_poll();
-      if (dhcp_state >= 2)
-        break;
-      for (volatile int d = 0; d < 10000; d++)
-        ;
+      sched_yield();
     }
   }
 
@@ -174,12 +198,10 @@ bool dhcp_negotiate(void) {
     for (int attempts = 0; attempts < 3 && dhcp_state < 4; attempts++) {
       console_puts("[DHCP] Sending REQUEST...\n");
       dhcp_send_request();
-      for (int wait = 0; wait < 50000; wait++) {
+      uint64_t start = pit_get_ticks();
+      while (dhcp_state < 4 && (pit_get_ticks() - start < 200)) { // 2s timeout
         net_poll();
-        if (dhcp_state == 4)
-          break;
-        for (volatile int d = 0; d < 10000; d++)
-          ;
+        sched_yield();
       }
     }
   }

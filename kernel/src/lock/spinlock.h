@@ -55,4 +55,17 @@ static inline void spinlock_release_restore(spinlock_t *lock, uint64_t flags) {
   __asm__ volatile("push %0; popfq" : : "r"(flags) : "memory");
 }
 
+static inline bool spinlock_try_acquire(spinlock_t *lock) {
+  unsigned long flags;
+  __asm__ volatile("pushfq; pop %0; cli" : "=r"(flags) : : "memory");
+
+  if (!__atomic_test_and_set(&lock->locked, __ATOMIC_ACQUIRE)) {
+    lock->saved_flags = flags;
+    return true;
+  }
+
+  __asm__ volatile("push %0; popfq" : : "r"(flags) : "memory");
+  return false;
+}
+
 #endif

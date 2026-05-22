@@ -12,7 +12,6 @@
  */
 
 #include "drivers/net/e1000.h"
-#include "drivers/manager/device.h"
 #include "acpi/acpi.h"
 #include "apic/ioapic.h"
 #include "apic/lapic.h"
@@ -20,6 +19,7 @@
 #include "console/klog.h"
 #include "cpu/irq.h"
 #include "cpu/isr.h"
+#include "drivers/manager/device.h"
 #include "drivers/pci/pci.h"
 #include "io/io.h"
 #include "lib/string.h"
@@ -428,7 +428,7 @@ static void e1000_irq_handler(struct registers *regs) {
 static int e1000_probe(struct device *dev) {
   // Use resources from 'dev' instead of global scanning
   // For now, we'll keep using the existing logic but wrapped in match
-  
+
   console_puts("[E1000] Probing device ");
   console_puts(dev->name);
   console_puts("\n");
@@ -436,11 +436,11 @@ static int e1000_probe(struct device *dev) {
   // Step 2: Map the MMIO region from BAR0
   // Note: resources[0] should be BAR0 MMIO
   if (dev->resource_count == 0 || dev->resources[0].type != RES_MEM) {
-      return -1;
+    return -1;
   }
 
   uint64_t bar0_phys = dev->resources[0].start;
-  
+
   // Map 128KB of MMIO space as UNCACHED (PCD|PWT)
 #define E1000_MMIO_SIZE (128 * 1024)
   uint64_t mmio_virt = bar0_phys + pmm_get_hhdm_offset();
@@ -454,28 +454,33 @@ static int e1000_probe(struct device *dev) {
   vmm_flush_tlb(mmio_virt);
 
   mmio_base = (volatile uint8_t *)mmio_virt;
-  
+
   // Find IRQ resource
   for (size_t i = 0; i < dev->resource_count; i++) {
-      if (dev->resources[i].type == RES_IRQ) {
-          nic_irq = (uint8_t)dev->resources[i].start;
-          break;
-      }
+    if (dev->resources[i].type == RES_IRQ) {
+      nic_irq = (uint8_t)dev->resources[i].start;
+      break;
+    }
   }
 
   // ── Step 3: Enable PCI bus mastering (required for DMA) ─────────────
-  // We need the bus/slot/func. We can store them in dev->driver_data 
-  // or use a helper. For now, we'll just scan the legacy PCI data using vendor/device.
-  struct pci_device *pci_dev = pci_find_device_by_id(dev->vendor_id, dev->device_id);
-  if (!pci_dev) return -1;
-  
+  // We need the bus/slot/func. We can store them in dev->driver_data
+  // or use a helper. For now, we'll just scan the legacy PCI data using
+  // vendor/device.
+  struct pci_device *pci_dev =
+      pci_find_device_by_id(dev->vendor_id, dev->device_id);
+  if (!pci_dev)
+    return -1;
+
   pci_enable_bus_mastering(pci_dev);
 
   // Also enable memory space access in the PCI command register
-  uint32_t cmd = pci_config_read32(pci_dev->bus, pci_dev->slot, pci_dev->func, 0x04);
-  cmd |= (1 << 1);  // Memory Space Enable
+  uint32_t cmd =
+      pci_config_read32(pci_dev->bus, pci_dev->slot, pci_dev->func, 0x04);
+  cmd |= (1 << 1);   // Memory Space Enable
   cmd &= ~(1 << 10); // ENABLE interrupts (clear Interrupt Disable bit)
-  pci_config_write16(pci_dev->bus, pci_dev->slot, pci_dev->func, 0x04, (uint16_t)cmd);
+  pci_config_write16(pci_dev->bus, pci_dev->slot, pci_dev->func, 0x04,
+                     (uint16_t)cmd);
 
   // ── Step 4: Software reset ──────────────────────────────────────────
   uint32_t ctrl = e1000_read(E1000_CTRL);
@@ -578,19 +583,13 @@ static int e1000_probe(struct device *dev) {
 }
 
 static struct device_id e1000_ids[] = {
-    { .type = ID_PCI, .pci = { .vendor = E1000_VENDOR_ID, .device = E1000_DEVICE_ID } }
-};
+    {.type = ID_PCI,
+     .pci = {.vendor = E1000_VENDOR_ID, .device = E1000_DEVICE_ID}}};
 
 static struct driver e1000_driver = {
-    .name = "e1000",
-    .ids = e1000_ids,
-    .id_count = 1,
-    .probe = e1000_probe
-};
+    .name = "e1000", .ids = e1000_ids, .id_count = 1, .probe = e1000_probe};
 
-void e1000_init(void) {
-  dm_register_driver(&e1000_driver);
-}
+void e1000_init(void) { dm_register_driver(&e1000_driver); }
 
 const uint8_t *e1000_get_mac(void) {
   if (!nic_present)

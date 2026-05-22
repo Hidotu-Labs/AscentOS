@@ -1,7 +1,10 @@
-#include "apic/lapic.h"
-#include "console/console.h"
-#include "cpu/isr.h"
-#include "mm/pmm.h"
+#include "lapic.h"
+#include "../console/console.h"
+#include "../cpu/isr.h"
+#include "../mm/pmm.h"
+#include <stddef.h>
+#include <stdint.h>
+#include <stdbool.h>
 
 // ── MMIO Base (virtual address after HHDM translation) ───────────────────────
 static volatile uint32_t *lapic_base = NULL;
@@ -91,4 +94,18 @@ void lapic_init(uint64_t base_phys) {
   console_puts(", Version: 0x");
   print_hex32(lapic_read(LAPIC_VERSION) & 0xFF);
   console_puts("\n");
+}
+
+void lapic_send_ipi(uint32_t lapic_id, uint8_t vector) {
+  if (!lapic_base) return;
+  lapic_write(LAPIC_ICR_HIGH, lapic_id << 24);
+  lapic_write(LAPIC_ICR_LOW, LAPIC_ICR_ASSERT | LAPIC_ICR_FIXED | vector);
+  // Wait for delivery
+  while (lapic_read(LAPIC_ICR_LOW) & LAPIC_ICR_PENDING);
+}
+
+void lapic_send_ipi_all_but_self(uint8_t vector) {
+  if (!lapic_base) return;
+  lapic_write(LAPIC_ICR_LOW, LAPIC_ICR_ASSERT | LAPIC_ICR_FIXED | LAPIC_ICR_DEST_ALL_BUT_SELF | vector);
+  while (lapic_read(LAPIC_ICR_LOW) & LAPIC_ICR_PENDING);
 }

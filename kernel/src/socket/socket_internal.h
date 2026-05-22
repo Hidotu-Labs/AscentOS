@@ -54,16 +54,16 @@ typedef struct unix_sock {
   // State flags
   bool is_listener;
   bool is_accepted;
-  bool is_abstract; // Abstract namespace (not filesystem)
-  bool read_shutdown;  // SHUT_RD - read side shutdown
-  bool write_shutdown; // SHUT_WR - write side shutdown
-  bool orphaned;       // Client closed before accept - pending cleanup
+  bool is_abstract;       // Abstract namespace (not filesystem)
+  bool read_shutdown;     // SHUT_RD - read side shutdown
+  bool write_shutdown;    // SHUT_WR - write side shutdown
+  bool orphaned;          // Client closed before accept - pending cleanup
   bool accepted_orphaned; // Accepted socket whose peer closed before accept
 
   // Socket options (Phase 6)
-  bool passcred;       // SO_PASSCRED - pass credentials in recvmsg
-  int rcvtimeo_ms;     // SO_RCVTIMEO - receive timeout in ms
-  int sndtimeo_ms;     // SO_SNDTIMEO - send timeout in ms
+  bool passcred;   // SO_PASSCRED - pass credentials in recvmsg
+  int rcvtimeo_ms; // SO_RCVTIMEO - receive timeout in ms
+  int sndtimeo_ms; // SO_SNDTIMEO - send timeout in ms
 } unix_sock_t;
 
 // ── Socket Buffer (sk_buff-like structure)
@@ -74,6 +74,10 @@ typedef struct sk_buff {
   size_t len;
   size_t capacity;
   struct sk_buff *next;
+
+  // Metadata for recvfrom
+  uint32_t src_ip;
+  uint16_t src_port;
 } sk_buff_t;
 
 // ── Socket Buffer Queue

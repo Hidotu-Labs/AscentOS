@@ -39,6 +39,7 @@
 
 // ── Spurious Interrupt Vector ────────────────────────────────────────────────
 #define LAPIC_SPURIOUS_VECTOR 0xFF
+#define IPI_VECTOR_RESCHEDULE 49
 
 // ── ICR Delivery Modes ───────────────────────────────────────────────────────
 #define LAPIC_ICR_FIXED (0 << 8)
@@ -84,5 +85,13 @@ bool lapic_is_ready(void);
 
 // Returns the BSP's APIC ID.
 uint32_t lapic_get_id(void);
+
+// ── IPI support ─────────────────────────────────────────────────────────────
+#define LAPIC_ICR_DEST_SELF        (1 << 18)
+#define LAPIC_ICR_DEST_ALL         (2 << 18)
+#define LAPIC_ICR_DEST_ALL_BUT_SELF (3 << 18)
+
+void lapic_send_ipi(uint32_t lapic_id, uint8_t vector);
+void lapic_send_ipi_all_but_self(uint8_t vector);
 
 #endif

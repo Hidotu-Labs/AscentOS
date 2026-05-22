@@ -31,17 +31,19 @@ fi
 install_apk() {
     local PKG_NAME=$1
     local REPO=$2
+    local BRANCH=${3:-"v3.21"}
+    local PKG_MARKER="${ROOTFS_DIR}/etc/ascentos-pkg/${BRANCH}-${REPO}-${PKG_NAME}"
     
-    if [ -f "${ROOTFS_DIR}/etc/ascentos-pkg/${PKG_NAME}" ]; then
+    if [ -f "${PKG_MARKER}" ]; then
         echo "[*] Package ${PKG_NAME} already installed, skipping."
         return 0
     fi
 
-    echo "[*] Installing package: ${PKG_NAME} from ${REPO}..."
+    echo "[*] Installing package: ${PKG_NAME} from ${REPO} (branch: ${BRANCH})..."
     
     # Escape dots and pluses in PKG_NAME for grep
     local ESCAPED_PKG_NAME=$(echo "${PKG_NAME}" | sed 's/\./\\./g;s/+/\\+/g')
-    local APK_FILENAME=$(curl -sL "https://dl-cdn.alpinelinux.org/alpine/v3.21/${REPO}/x86_64/" | grep -oP ">${ESCAPED_PKG_NAME}-[0-9][^<]*\.apk<" | sed 's/>//;s/<//' | sort -V | tail -n 1)
+    local APK_FILENAME=$(curl -sL "https://dl-cdn.alpinelinux.org/alpine/${BRANCH}/${REPO}/x86_64/" | grep -oP ">${ESCAPED_PKG_NAME}-[0-9][^<]*\.apk<" | sed 's/>//;s/<//' | sort -V | tail -n 1)
     
     # Fallback to a known version if the search fails
     if [ -z "${APK_FILENAME}" ] && [ "${PKG_NAME}" == "st" ]; then
@@ -49,11 +51,11 @@ install_apk() {
     fi
     
     if [ -z "${APK_FILENAME}" ]; then
-        echo "[!] Could not find package ${PKG_NAME} in ${REPO}"
+        echo "[!] Could not find package ${PKG_NAME} in ${REPO} (${BRANCH})"
         return 1
     fi
     
-    local APK_URL="https://dl-cdn.alpinelinux.org/alpine/v3.21/${REPO}/x86_64/${APK_FILENAME}"
+    local APK_URL="https://dl-cdn.alpinelinux.org/alpine/${BRANCH}/${REPO}/x86_64/${APK_FILENAME}"
     
     if [ ! -f "${BUILD_DIR}/${APK_FILENAME}" ]; then
         echo "[*] Downloading ${APK_URL}..."
@@ -66,7 +68,7 @@ install_apk() {
     
     # Mark as installed
     mkdir -p "${ROOTFS_DIR}/etc/ascentos-pkg"
-    touch "${ROOTFS_DIR}/etc/ascentos-pkg/${PKG_NAME}"
+    touch "${PKG_MARKER}"
 }
 
 # Install st terminal and its dependencies
@@ -206,6 +208,35 @@ install_apk "gtksourceview" "community"
 install_apk "mousepad" "community"
 install_apk "gspell" "community"
 install_apk "libxfce4ui" "community"
+# NetSurf Web Browser
+echo "[*] Installing NetSurf and dependencies..."
+install_apk "netsurf" "community" "edge"
+install_apk "duktape" "community" "edge"
+install_apk "zstd-libs" "main" "edge"
+install_apk "xz-libs" "main" "edge"
+install_apk "curl" "main" "edge"
+install_apk "libcurl" "main" "edge"
+install_apk "libsharpyuv" "main" "edge"
+install_apk "libwebp" "main" "edge"
+install_apk "lcms2" "main" "edge"
+install_apk "libgcc" "main" "edge"
+install_apk "libdav1d" "main" "edge"
+install_apk "dav1d" "main" "edge"
+install_apk "libxml2" "main" "edge"
+install_apk "libxslt" "main" "edge"
+install_apk "librsvg" "community" "edge"
+install_apk "openssl" "main" "edge"
+install_apk "libssl3" "main" "edge"
+install_apk "libcrypto3" "main" "edge"
+install_apk "nghttp2-libs" "main" "edge"
+install_apk "libidn2" "main" "edge"
+install_apk "libunistring" "main" "edge"
+install_apk "libpsl" "main" "edge"
+install_apk "c-ares" "main" "edge"
+install_apk "brotli-libs" "main" "edge"
+install_apk "ca-certificates" "main"
+install_apk "libbz2" "main"
+install_apk "zlib" "main"
 
 # 4. Finalize GTK environment
 echo "[*] Compiling GSettings schemas..."
@@ -215,23 +246,52 @@ if [ -d "${ROOTFS_DIR}/usr/share/glib-2.0/schemas" ]; then
     fi
 fi
 
+echo "[*] Updating MIME database..."
+if [ -d "${ROOTFS_DIR}/usr/share/mime" ]; then
+    if command -v update-mime-database >/dev/null 2>&1; then
+        update-mime-database "${ROOTFS_DIR}/usr/share/mime"
+    fi
+fi
+
 echo "[*] Injecting gdk-pixbuf loaders cache..."
-# Manually register PNG and SVG loaders since we can't run the query tool
+# Manually register PNG, JPEG and SVG loaders since we can't run the query tool
 LOADERS_DIR="/usr/lib/gdk-pixbuf-2.0/2.10.0"
 mkdir -p "${ROOTFS_DIR}${LOADERS_DIR}"
 cat > "${ROOTFS_DIR}${LOADERS_DIR}/loaders.cache" <<EOF
-"${LOADERS_DIR}/loaders/libpixbufloader-png.so"
+# GdkPixbuf Image Loader Modules file
+# Automatically generated file, do not edit
+
+"/usr/lib/libgdk_pixbuf-2.0.so.0"
 "png" 5 "gdk-pixbuf" "PNG" "LGPL"
 "image/png" ""
 "png" ""
 "\211PNG\r\n\032\n" "" 100
 
-"${LOADERS_DIR}/loaders/libpixbufloader-svg.so"
+"/usr/lib/libgdk_pixbuf-2.0.so.0"
+"jpeg" 5 "gdk-pixbuf" "JPEG" "LGPL"
+"image/jpeg" ""
+"jpeg" "jpe" "jpg" ""
+"\377\330" "" 100
+
+"${LOADERS_DIR}/loaders/libpixbufloader-gif.so"
+"gif" 4 "gdk-pixbuf" "GIF" "LGPL"
+"image/gif" ""
+"gif" ""
+"GIF8" "" 100
+
+"${LOADERS_DIR}/loaders/libpixbufloader-bmp.so"
+"bmp" 5 "gdk-pixbuf" "BMP" "LGPL"
+"image/bmp" "image/x-bmp" "image/x-MS-bmp" ""
+"bmp" ""
+"BM" "" 100
+
+"${LOADERS_DIR}/loaders/libpixbufloader_svg.so"
 "svg" 6 "gdk-pixbuf" "Scalable Vector Graphics" "LGPL"
 "image/svg+xml" "image/svg" "image/svg-xml" "image/vnd.adobe.svg+xml" "text/xml-svg" "image/svg+xml-compressed" ""
 "svg" "svgz" "svg.gz" ""
 " <svg" "* " 100
 " <!DOCTYPE svg" "* " 100
+
 EOF
 
 # 4. Inject custom binaries

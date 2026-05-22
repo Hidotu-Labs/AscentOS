@@ -6,6 +6,7 @@
 #include "../lib/string.h"
 #include "../mm/heap.h"
 #include "../sched/sched.h"
+#include "../socket/af_inet.h"
 #include "../socket/socket.h"
 #include "../socket/socket_internal.h"
 #include "syscall.h"
@@ -245,7 +246,21 @@ static uint64_t sys_accept(uint64_t sockfd, uint64_t addr_ptr,
     return (uint64_t)newfd;
   }
 
-  // TODO: Fill in addr and addrlen
+  // Fill in addr and addrlen for AF_INET
+  if (newsock->domain == AF_INET) {
+    inet_sock_t *newinet = (inet_sock_t *)newsock->sk;
+    if (addr && addrlen) {
+      struct sockaddr_in sin;
+      memset(&sin, 0, sizeof(sin));
+      sin.sin_family = AF_INET;
+      sin.sin_port = newinet->remote_addr.sin_port;
+      sin.sin_addr.s_addr = newinet->remote_addr.sin_addr.s_addr;
+
+      int copy_len = *addrlen < (int)sizeof(sin) ? *addrlen : (int)sizeof(sin);
+      memcpy(addr, &sin, copy_len);
+      *addrlen = sizeof(sin);
+    }
+  }
 
   return (uint64_t)newfd;
 }
@@ -258,7 +273,7 @@ static uint64_t sys_sendto(uint64_t sockfd, uint64_t buf_ptr, uint64_t len,
   int fd = (int)sockfd;
 
   // Validate buffer pointer
-  if (!is_user_ptr(buf_ptr) || !is_user_ptr(buf_ptr + len)) {
+  if (!is_user_ptr(buf_ptr) || (len > 0 && !is_user_ptr(buf_ptr + len - 1))) {
     return (uint64_t)-14; // EFAULT
   }
 
@@ -269,9 +284,15 @@ static uint64_t sys_sendto(uint64_t sockfd, uint64_t buf_ptr, uint64_t len,
   }
 
   const void *buf = (const void *)buf_ptr;
+  struct sockaddr *dest_addr = NULL;
+  if (dest_addr_ptr) {
+    if (!is_user_ptr(dest_addr_ptr))
+      return (uint64_t)-14;
+    dest_addr = (struct sockaddr *)dest_addr_ptr;
+  }
 
-  // Phase 1: Ignore dest_addr for connected sockets
-  ssize_t ret = socket_send(sock, buf, len, (int)flags);
+  ssize_t ret =
+      socket_sendto(sock, buf, len, (int)flags, dest_addr, (int)addrlen);
   return (uint64_t)ret;
 }
 
@@ -282,7 +303,7 @@ static uint64_t sys_recvfrom(uint64_t sockfd, uint64_t buf_ptr, uint64_t len,
   int fd = (int)sockfd;
 
   // Validate buffer pointer
-  if (!is_user_ptr(buf_ptr) || !is_user_ptr(buf_ptr + len)) {
+  if (!is_user_ptr(buf_ptr) || (len > 0 && !is_user_ptr(buf_ptr + len - 1))) {
     return (uint64_t)-14; // EFAULT
   }
 
@@ -293,9 +314,22 @@ static uint64_t sys_recvfrom(uint64_t sockfd, uint64_t buf_ptr, uint64_t len,
   }
 
   void *buf = (void *)buf_ptr;
+  struct sockaddr *src_addr = NULL;
+  int *addrlen = NULL;
 
-  // Phase 1: Ignore src_addr for connected sockets
-  ssize_t ret = socket_recv(sock, buf, len, (int)flags);
+  if (src_addr_ptr) {
+    if (!is_user_ptr(src_addr_ptr))
+      return (uint64_t)-14;
+    src_addr = (struct sockaddr *)src_addr_ptr;
+  }
+
+  if (addrlen_ptr) {
+    if (!is_user_ptr(addrlen_ptr))
+      return (uint64_t)-14;
+    addrlen = (int *)addrlen_ptr;
+  }
+
+  ssize_t ret = socket_recvfrom(sock, buf, len, (int)flags, src_addr, addrlen);
   return (uint64_t)ret;
 }
 
@@ -662,6 +696,29 @@ static uint64_t sys_getsockname(uint64_t sockfd, uint64_t addr_ptr,
     *addrlen = actual_len;
 
     return 0;
+  } else if (sock->domain == AF_INET) {
+    inet_sock_t *inet = (inet_sock_t *)sock->sk;
+    if (!inet)
+      return (uint64_t)-22;
+
+    int *addrlen = (int *)addrlen_ptr;
+    int user_len = *addrlen;
+
+    struct sockaddr_in sin;
+    memset(&sin, 0, sizeof(sin));
+    sin.sin_family = AF_INET;
+    sin.sin_port = inet->local_addr.sin_port;
+    sin.sin_addr.s_addr = inet->local_addr.sin_addr.s_addr;
+
+    int actual_len = sizeof(struct sockaddr_in);
+    int copy_len = user_len < actual_len ? user_len : actual_len;
+
+    if (copy_len > 0) {
+      memcpy((void *)addr_ptr, &sin, copy_len);
+    }
+    *addrlen = actual_len;
+
+    return 0;
   }
 
   return (uint64_t)-95; // EOPNOTSUPP
@@ -732,6 +789,31 @@ static uint64_t sys_getpeername(uint64_t sockfd, uint64_t addr_ptr,
     // Update addrlen to actual size
     *addrlen = actual_len;
 
+    return 0;
+  } else if (sock->domain == AF_INET) {
+    inet_sock_t *inet = (inet_sock_t *)sock->sk;
+    if (!inet)
+      return (uint64_t)-22;
+
+    if (sock->state != SS_CONNECTED)
+      return (uint64_t)-107; // ENOTCONN
+
+    int *addrlen = (int *)addrlen_ptr;
+    int user_len = *addrlen;
+
+    struct sockaddr_in sin;
+    memset(&sin, 0, sizeof(sin));
+    sin.sin_family = AF_INET;
+    sin.sin_port = inet->remote_addr.sin_port;
+    sin.sin_addr.s_addr = inet->remote_addr.sin_addr.s_addr;
+
+    int actual_len = sizeof(struct sockaddr_in);
+    int copy_len = user_len < actual_len ? user_len : actual_len;
+
+    if (copy_len > 0) {
+      memcpy((void *)addr_ptr, &sin, copy_len);
+    }
+    *addrlen = actual_len;
     return 0;
   }
 

@@ -9,6 +9,7 @@
 #include "../mm/heap.h"
 #include "../sched/sched.h"
 #include "../sched/wait.h"
+#include "af_inet.h"
 #include "af_unix.h"
 #include "socket_internal.h"
 #include <stdint.h>
@@ -147,7 +148,10 @@ void socket_wait(socket_t *sock) {
   wait_queue_entry_t entry = {.thread = current, .next = NULL};
 
   wait_queue_add(sock->wait_queue, &entry);
+
+  current->state = THREAD_BLOCKED;
   sched_yield();
+
   wait_queue_remove(sock->wait_queue, &entry);
 }
 
@@ -161,7 +165,7 @@ void socket_wake(socket_t *sock) {
 
 socket_t *socket_create(int domain, int type, int protocol) {
   // Validate domain
-  if (domain != AF_UNIX) {
+  if (domain != AF_UNIX && domain != AF_INET) {
     klog_puts("[WARN] socket: unsupported domain\n");
     return NULL; // EAFNOSUPPORT
   }
@@ -177,7 +181,7 @@ socket_t *socket_create(int domain, int type, int protocol) {
   }
 
   // For AF_UNIX, protocol must be 0
-  if (protocol != 0) {
+  if (domain == AF_UNIX && protocol != 0) {
     klog_puts("[WARN] socket: invalid protocol for AF_UNIX\n");
     return NULL; // EPROTONOSUPPORT
   }
@@ -356,6 +360,28 @@ ssize_t socket_recv(socket_t *sock, void *buf, size_t len, int flags) {
     return -95; // EOPNOTSUPP
 
   return sock->ops->recv(sock, buf, len, flags);
+}
+
+ssize_t socket_sendto(socket_t *sock, const void *buf, size_t len, int flags,
+                      struct sockaddr *dest_addr, int addrlen) {
+  if (!sock || !buf)
+    return -22;
+
+  if (!sock->ops || !sock->ops->sendto)
+    return -95;
+
+  return sock->ops->sendto(sock, buf, len, flags, dest_addr, addrlen);
+}
+
+ssize_t socket_recvfrom(socket_t *sock, void *buf, size_t len, int flags,
+                        struct sockaddr *src_addr, int *addrlen) {
+  if (!sock || !buf)
+    return -22;
+
+  if (!sock->ops || !sock->ops->recvfrom)
+    return -95;
+
+  return sock->ops->recvfrom(sock, buf, len, flags, src_addr, addrlen);
 }
 
 // ── Socketpair Creation
@@ -616,6 +642,7 @@ void socket_init(void) {
 
   // Register socket families
   af_unix_init();
+  af_inet_init();
 
   klog_puts("[OK] Socket subsystem initialized (max sockets: ");
   klog_uint64(SOCKET_MAX_COUNT);

@@ -33,11 +33,14 @@ struct cpu_info {
 
   // -- Task Scheduling --
   struct thread *current_thread;
-  struct thread *runqueue;
+  struct thread *idle_thread;   // Permanent pointer to the idle task
+  struct thread *runqueues[32]; // Heads of priority queues
+  uint32_t runqueue_bitmap;     // Bit set if runqueues[i] is NOT empty
   spinlock_t queue_lock;
+  uint32_t runnable_count;      // Number of READY or RUNNING threads
   uint64_t scratch_rsp;
   uint64_t reserved;
-} __attribute__((packed));
+} __attribute__((aligned(64)));
 
 // ── Public API ───────────────────────────────────────────────────────────────
 

@@ -43,32 +43,43 @@ void wait_queue_wake_all(wait_queue_t *wq) {
   if (!wq)
     return;
 
+  uint64_t rflags;
+  __asm__ volatile("pushfq; pop %0; cli" : "=r"(rflags) : : "memory");
   spinlock_acquire(&wq->lock);
+
   wait_queue_entry_t *curr = wq->head;
   while (curr) {
-    if (curr->thread && curr->thread->state == THREAD_BLOCKED) {
-      curr->thread->state = THREAD_READY;
+    if (curr->thread) {
+      sched_wakeup(curr->thread);
       curr->thread->wakeup_ticks = 0; // Clear any pending timeout
     }
     curr = curr->next;
   }
+
   spinlock_release(&wq->lock);
+  __asm__ volatile("push %0; popfq" : : "r"(rflags) : "memory");
 }
 
 void wait_queue_wake_one(wait_queue_t *wq) {
   if (!wq)
     return;
 
+  uint64_t rflags;
+  __asm__ volatile("pushfq; pop %0; cli" : "=r"(rflags) : : "memory");
   spinlock_acquire(&wq->lock);
+
   wait_queue_entry_t *curr = wq->head;
   while (curr) {
-    if (curr->thread && curr->thread->state == THREAD_BLOCKED) {
-      curr->thread->state = THREAD_READY;
+    if (curr->thread) {
+      sched_wakeup(curr->thread);
       curr->thread->wakeup_ticks = 0;
       spinlock_release(&wq->lock);
+      __asm__ volatile("push %0; popfq" : : "r"(rflags) : "memory");
       return; // Only wake one thread
     }
     curr = curr->next;
   }
+
   spinlock_release(&wq->lock);
+  __asm__ volatile("push %0; popfq" : : "r"(rflags) : "memory");
 }
