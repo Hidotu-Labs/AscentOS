@@ -291,7 +291,14 @@ disk.img: assets/test.wav assets/test.bmp assets/test.tar userland/hello.elf use
 		echo "write userland/terrain.png terrain.png"; \
 		echo "rm texpacks/classicube.zip"; \
 		echo "write userland/texpacks/classicube.zip texpacks/classicube.zip"; \
+		echo "rm texpacks/default.zip"; \
+		echo "write userland/texpacks/classicube.zip texpacks/default.zip"; \
 	} | debugfs -w /tmp/part.img >/dev/null 2>&1 || true
+	@echo "Writing ClassiCube options.txt (texture pack config)..."
+	@printf 'texture-pack=classicube.zip\nskin-server=\n' > /tmp/classicube_options.txt
+	debugfs -w -R "rm options.txt" /tmp/part.img >/dev/null 2>&1 || true
+	debugfs -w -R "write /tmp/classicube_options.txt options.txt" /tmp/part.img >/dev/null 2>&1 || true
+	rm -f /tmp/classicube_options.txt
 	rm -f /tmp/ascentos_hello.txt /tmp/ascentos_readme.txt
 	@echo "Populating root filesystem with additional tools..."
 
@@ -825,5 +832,14 @@ userland/dns_lookup.elf: userland/dns_lookup.c $(MUSL_LIBC)
 
 userland/classicube.elf: scripts/build-classicube.sh
 	./scripts/build-classicube.sh
+
+userland/texpacks/classicube.zip:
+	@echo "ERROR: userland/texpacks/classicube.zip not found."
+	@echo "Please place the original ClassiCube texture pack zip at: userland/texpacks/classicube.zip"
+	@exit 1
+
+userland/terrain.png: userland/texpacks/classicube.zip
+	@echo "Extracting terrain.png from classicube.zip..."
+	cd userland && unzip -o texpacks/classicube.zip terrain.png
 
 .PHONY: all qemu clean
