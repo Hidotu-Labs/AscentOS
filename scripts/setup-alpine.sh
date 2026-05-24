@@ -162,6 +162,10 @@ install_apk "util-linux" "main"
 install_apk "libbz2" "main"
 install_apk "brotli-libs" "main"
 install_apk "zlib" "main"
+install_apk "lua5.4" "main"
+install_apk "lua5.4-libs" "main"
+install_apk "readline" "main"
+install_apk "libncursesw" "main"
 
 # GTK 3.0 and its core dependencies
 echo "[*] Installing GTK 3.0 and dependencies..."

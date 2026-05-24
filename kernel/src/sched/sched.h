@@ -129,6 +129,8 @@ struct thread {
   uint32_t egid;               // Effective Group ID
   uint32_t suid;               // Saved set-user-ID
   uint32_t sgid;               // Saved set-group-ID
+  uint32_t fsuid;              // File system User ID
+  uint32_t fsgid;              // File system Group ID
   uint32_t umask;              // File creation mask
 
   // Controlling terminal (set when opening PTY slave as session leader)

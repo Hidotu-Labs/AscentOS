@@ -1015,6 +1015,30 @@ static uint64_t sys_setgid(struct syscall_regs *regs) {
   return 0;
 }
 
+// ── sys_setfsuid (syscall 122) ──────────────────────────────────────────────
+static uint64_t sys_setfsuid(struct syscall_regs *regs) {
+  uint32_t fsuid = (uint32_t)regs->rdi;
+  struct thread *t = sched_get_current();
+  if (!t)
+    return (uint64_t)-1;
+  // Return the previous fsuid value
+  uint32_t old_fsuid = t->fsuid;
+  t->fsuid = fsuid;
+  return old_fsuid;
+}
+
+// ── sys_setfsgid (syscall 123) ──────────────────────────────────────────────
+static uint64_t sys_setfsgid(struct syscall_regs *regs) {
+  uint32_t fsgid = (uint32_t)regs->rdi;
+  struct thread *t = sched_get_current();
+  if (!t)
+    return (uint64_t)-1;
+  // Return the previous fsgid value
+  uint32_t old_fsgid = t->fsgid;
+  t->fsgid = fsgid;
+  return old_fsgid;
+}
+
 // ── sys_getppid ─────────────────────────────────────────────────────────────
 static uint64_t sys_getppid(struct syscall_regs *regs) {
   (void)regs;
@@ -1229,6 +1253,8 @@ void syscall_register_process(void) {
   syscall_register_raw(SYS_SETSID, sys_setsid);
   syscall_register_raw(SYS_SETUID, sys_setuid);
   syscall_register_raw(SYS_SETGID, sys_setgid);
+  syscall_register_raw(SYS_SETFSUID, sys_setfsuid);
+  syscall_register_raw(SYS_SETFSGID, sys_setfsgid);
   syscall_register(SYS_GETRLIMIT, sys_getrlimit);
   syscall_register_raw(SYS_PRLIMIT64, sys_prlimit64);
   syscall_register(SYS_MEMBARRIER, sys_membarrier);
