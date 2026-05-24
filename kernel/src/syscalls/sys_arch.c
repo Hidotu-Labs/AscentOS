@@ -111,10 +111,19 @@ static uint64_t sys_clock_gettime(uint64_t clk_id, uint64_t tp_ptr, uint64_t a2,
 
   switch (clk_id) {
   case 0: // CLOCK_REALTIME
+  case 4: // CLOCK_REALTIME_COARSE (map to REALTIME)
     ((uint64_t *)tp_ptr)[0] = rtc_get_boot_timestamp() + sec;
     ((uint64_t *)tp_ptr)[1] = nsec;
     return 0;
   case 1: // CLOCK_MONOTONIC
+  case 6: // CLOCK_MONOTONIC_COARSE (map to monotonic)
+  case 7: // CLOCK_BOOTTIME (map to monotonic for simplicity)
+  case 11: // CLOCK_TAI (map to monotonic)
+    ((uint64_t *)tp_ptr)[0] = sec;
+    ((uint64_t *)tp_ptr)[1] = nsec;
+    return 0;
+  case 2: // CLOCK_PROCESS_CPUTIME_ID - use monotonic time
+  case 3: // CLOCK_THREAD_CPUTIME_ID - use monotonic time
     ((uint64_t *)tp_ptr)[0] = sec;
     ((uint64_t *)tp_ptr)[1] = nsec;
     return 0;
@@ -210,8 +219,8 @@ static uint64_t sys_mlock(uint64_t addr, uint64_t len, uint64_t a2, uint64_t a3,
   return 0;
 }
 
-// membarrier(cmd, flags, cpu_id) - syscall 302 (stub)
-// Memory barrier syscall - we don't need it for single-core, return success
+// membarrier(cmd, flags, cpu_id) - syscall 324
+// Memory barrier syscall - support all commands for GTK
 static uint64_t sys_membarrier(uint64_t cmd, uint64_t flags, uint64_t cpu_id,
                                uint64_t a3, uint64_t a4, uint64_t a5) {
   (void)flags;
@@ -220,16 +229,21 @@ static uint64_t sys_membarrier(uint64_t cmd, uint64_t flags, uint64_t cpu_id,
   (void)a4;
   (void)a5;
 
-  // CMD 0 = MEMBARRIER_CMD_QUERY, return supported commands
-  // CMD 1 = MEMBARRIER_CMD_GLOBAL (shared)
-  // For a hobby OS, just return success for common commands
+  // MEMBARRIER_CMD_QUERY (0) - Return supported commands bitmask
   if (cmd == 0) {
-    return 1; // Report support for MEMBARRIER_CMD_GLOBAL
+    // Return bitmask of all supported commands
+    return 0xFF; // Support everything
   }
-  if (cmd == 1) {
-    return 0; // Success for MEMBARRIER_CMD_GLOBAL
-  }
-  return (uint64_t)-38; // ENOSYS for unknown commands
+
+  // For all other commands, just return success (0)
+  // This includes:
+  // - MEMBARRIER_CMD_GLOBAL (1)
+  // - MEMBARRIER_CMD_GLOBAL_EXPEDITED (2)
+  // - MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED (3)
+  // - MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED (4)
+  // - MEMBARRIER_CMD_PRIVATE_EXPEDITED (5)
+  // - Any other future commands
+  return 0;
 }
 
 void syscall_register_arch(void) {

@@ -141,7 +141,6 @@ build_bash() {
         --without-bash-malloc \
         --enable-static-link \
         --disable-readline \
-        --disable-history \
         --disable-bang-history \
         --disable-progcomp \
         --disable-net-redirections \

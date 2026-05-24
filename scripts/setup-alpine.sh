@@ -71,8 +71,10 @@ install_apk() {
     touch "${PKG_MARKER}"
 }
 
-# Install st terminal and its dependencies
+# Install st terminal and X11 utilities and their dependencies
 install_apk "st" "community"
+install_apk "feh" "community"
+install_apk "xclock" "community" "edge"
 install_apk "libxft" "main"
 install_apk "fontconfig" "main"
 install_apk "libxrender" "main"
@@ -97,6 +99,28 @@ install_apk "libxrender" "main"
 install_apk "libxft" "main"
 install_apk "fastfetch" "community"
 install_apk "hwdata-pci" "main"
+
+# IceWM window manager and dependencies
+echo "[*] Installing IceWM window manager..."
+install_apk "icewm" "community"
+install_apk "libxinerama" "main"
+install_apk "libxrandr" "main"
+install_apk "libxpm" "main"
+install_apk "libjpeg" "main"
+install_apk "libpng" "main"
+install_apk "libsm" "main"
+install_apk "libice" "main"
+install_apk "imlib2" "main"
+install_apk "libstdc++" "main"
+
+# X11 utilities and toolkit libraries (xclock, xterm, etc.)
+echo "[*] Installing X11 utilities and toolkit libraries..."
+install_apk "libxt" "main"
+install_apk "libxmu" "main"
+install_apk "libxaw" "main"
+install_apk "libxext" "main"
+install_apk "libxkbfile" "main"
+install_apk "xeyes" "community" "edge"
 
 # Minimal GTK (GTK 2.0) and core dependencies
 echo "[*] Installing GTK 2.0 and core dependencies..."
@@ -196,6 +220,7 @@ install_apk "libepoxy-dev" "main"
 install_apk "wayland-dev" "main"
 install_apk "libxkbcommon-dev" "main"
 install_apk "mesa-dev" "main"
+install_apk "mesa" "main"
 
 # Mousepad (Text Editor) + GTK Plumbing
 install_apk "libpng" "main"
@@ -208,6 +233,20 @@ install_apk "gtksourceview" "community"
 install_apk "mousepad" "community"
 install_apk "gspell" "community"
 install_apk "libxfce4ui" "community"
+
+# PCManFM (Lightweight File Manager)
+echo "[*] Installing PCManFM file manager and dependencies..."
+install_apk "menu-cache" "community"
+install_apk "pcmanfm" "community"
+install_apk "libfm" "community"
+install_apk "libfm-extra" "community"
+install_apk "libexif" "community"
+install_apk "tumbler" "community"
+install_apk "gvfs" "community"
+install_apk "gvfs-archive" "community"
+install_apk "gvfs-fuse" "community"
+install_apk "file" "main"
+
 # NetSurf Web Browser
 echo "[*] Installing NetSurf and dependencies..."
 install_apk "netsurf" "community" "edge"
@@ -237,6 +276,7 @@ install_apk "brotli-libs" "main" "edge"
 install_apk "ca-certificates" "main"
 install_apk "libbz2" "main"
 install_apk "zlib" "main"
+
 
 # 4. Finalize GTK environment
 echo "[*] Compiling GSettings schemas..."

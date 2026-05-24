@@ -23,6 +23,7 @@ static inline uint32_t tcp_generate_isn(void) {
 
 static tcp_socket_t sockets[MAX_TCP_SOCKETS];
 static uint16_t next_local_port = 45000;
+static bool tcp_debug_logging = false; // Set to true for verbose logging
 
 static void tcp_print_ip(uint32_t ip) {
   klog_uint64((ip >> 24) & 0xFF);
@@ -104,15 +105,17 @@ static void tcp_send_segment(tcp_socket_t *sock, uint8_t flags,
   hdr->checksum = tcp_calculate_checksum(sock->local_ip, sock->remote_ip,
                                          packet, total_len);
 
-  klog_puts("[TCP] TX to ");
-  tcp_print_ip(sock->remote_ip);
-  klog_puts(" flags=");
-  klog_hex32(flags);
-  klog_puts(" seq=");
-  klog_uint64(sock->seq_num);
-  klog_puts(" csum=0x");
-  klog_hex32(hdr->checksum);
-  klog_puts("\n");
+  if (tcp_debug_logging) {
+    klog_puts("[TCP] TX to ");
+    tcp_print_ip(sock->remote_ip);
+    klog_puts(" flags=");
+    klog_hex32(flags);
+    klog_puts(" seq=");
+    klog_uint64(sock->seq_num);
+    klog_puts(" csum=0x");
+    klog_hex32(hdr->checksum);
+    klog_puts("\n");
+  }
 
   ipv4_send_packet(sock->remote_ip, PROTO_TCP, packet, total_len);
 }
@@ -210,11 +213,11 @@ int tcp_connect(uint32_t ip, uint16_t port, tcp_recv_cb_t on_recv) {
 
     uint64_t now = pit_get_ticks();
 
-    if (now - start_ticks > 5000) { // 5 seconds timeout
+    if (now - start_ticks > 1500) { // 1.5 seconds timeout
       break;
     }
 
-    if (now - last_retransmit > 1000) { // retransmit every 1 sec
+    if (now - last_retransmit > 150) { // retransmit every 150ms
       tcp_send_segment(sock, TCP_FLAG_SYN, NULL, 0);
       last_retransmit = now;
     }
@@ -263,11 +266,11 @@ int tcp_send(int sock_id, const void *data, uint16_t len) {
          sock->state == TCP_STATE_ESTABLISHED && sock->valid) {
     uint64_t now = pit_get_ticks();
 
-    if (now - start_ticks > 5000) { // 5 sec timeout
+    if (now - start_ticks > 2000) { // 2 sec timeout
       break;
     }
 
-    if (now - last_retransmit > 1000) { // Retransmit every 1 sec
+    if (now - last_retransmit > 200) { // Retransmit every 200ms
       tcp_send_segment(sock, TCP_FLAG_ACK | TCP_FLAG_PSH, data, len);
       last_retransmit = now;
     }
@@ -312,13 +315,13 @@ void tcp_close(int sock_id) {
     while (sock->state != TCP_STATE_CLOSED && sock->valid) {
       uint64_t now = pit_get_ticks();
 
-      if (now - start_ticks > 3000) {
+      if (now - start_ticks > 1500) {
         break;
       }
 
       if ((sock->state == TCP_STATE_FIN_WAIT1 ||
            sock->state == TCP_STATE_FIN_WAIT2) &&
-          now - last_retransmit > 1000) {
+          now - last_retransmit > 150) {
         tcp_send_segment(sock, TCP_FLAG_FIN | TCP_FLAG_ACK, NULL, 0);
         last_retransmit = now;
       }
@@ -349,19 +352,21 @@ void tcp_handle_packet(const uint8_t *payload, uint16_t length, uint32_t src_ip,
 
   const tcp_header_t *hdr = (const tcp_header_t *)payload;
 
-  klog_puts("[TCP] RX from ");
-  tcp_print_ip(src_ip);
-  klog_puts(":");
-  klog_uint64(ntohs(hdr->src_port));
-  klog_puts(" -> to our :");
-  klog_uint64(ntohs(hdr->dst_port));
-  klog_puts(" flags=");
-  klog_hex32(hdr->flags);
-  klog_puts(" seq=");
-  klog_uint64(ntohl(hdr->seq_num));
-  klog_puts(" ack=");
-  klog_uint64(ntohl(hdr->ack_num));
-  klog_puts("\n");
+  if (tcp_debug_logging) {
+    klog_puts("[TCP] RX from ");
+    tcp_print_ip(src_ip);
+    klog_puts(":");
+    klog_uint64(ntohs(hdr->src_port));
+    klog_puts(" -> to our :");
+    klog_uint64(ntohs(hdr->dst_port));
+    klog_puts(" flags=");
+    klog_hex32(hdr->flags);
+    klog_puts(" seq=");
+    klog_uint64(ntohl(hdr->seq_num));
+    klog_puts(" ack=");
+    klog_uint64(ntohl(hdr->ack_num));
+    klog_puts("\n");
+  }
 
   uint16_t src_port = ntohs(hdr->src_port);
   uint16_t dst_port = ntohs(hdr->dst_port);
@@ -432,25 +437,27 @@ void tcp_handle_packet(const uint8_t *payload, uint16_t length, uint32_t src_ip,
   }
 
   if (!sock) {
-    klog_puts("[TCP] No match: local_port=");
-    klog_uint64(dst_port);
-    klog_puts(" from ");
-    tcp_print_ip(src_ip);
-    klog_puts(":");
-    klog_uint64(src_port);
-    klog_puts(" (Existing: ");
-    for (int i = 0; i < MAX_TCP_SOCKETS; i++) {
-      if (sockets[i].valid) {
-        klog_puts("[L=");
-        klog_uint64(sockets[i].local_port);
-        klog_puts(" R=");
-        tcp_print_ip(sockets[i].remote_ip);
-        klog_puts(":");
-        klog_uint64(sockets[i].remote_port);
-        klog_puts("] ");
+    if (tcp_debug_logging) {
+      klog_puts("[TCP] No match: local_port=");
+      klog_uint64(dst_port);
+      klog_puts(" from ");
+      tcp_print_ip(src_ip);
+      klog_puts(":");
+      klog_uint64(src_port);
+      klog_puts(" (Existing: ");
+      for (int i = 0; i < MAX_TCP_SOCKETS; i++) {
+        if (sockets[i].valid) {
+          klog_puts("[L=");
+          klog_uint64(sockets[i].local_port);
+          klog_puts(" R=");
+          tcp_print_ip(sockets[i].remote_ip);
+          klog_puts(":");
+          klog_uint64(sockets[i].remote_port);
+          klog_puts("] ");
+        }
       }
+      klog_puts(")\n");
     }
-    klog_puts(")\n");
     return;
   }
 

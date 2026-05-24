@@ -105,6 +105,7 @@ struct thread {
   uint64_t wakeup_ticks;
   vfs_node_t *fds[MAX_FDS];
   uint64_t fd_offsets[MAX_FDS]; // Track seek offset per file descriptor
+  char fd_paths[MAX_FDS][256];  // Track full path for each file descriptor
   uint64_t cr3;                 // Per-process page table (0 = inherited/kernel)
   bool is_forked_child;         // True for forked children (affects sys_exit)
   bool is_idle;                 // True for idle thread (cannot be terminated)

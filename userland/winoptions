@@ -1,0 +1,4 @@
+# IceWM Window Rules
+# Force decoration on xeyes windows
+
+xeyes.xeyes: option noshape +fullKeys +decor +titlebar

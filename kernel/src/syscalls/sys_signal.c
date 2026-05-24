@@ -246,12 +246,40 @@ void signal_deliver_syscall(struct syscall_regs *sregs) {
 static uint64_t sys_tgkill(uint64_t tgid, uint64_t tid, uint64_t sig,
                            uint64_t a3, uint64_t a4, uint64_t a5) {
   (void)tgid;
-  (void)tid;
   (void)a3;
   (void)a4;
   (void)a5;
+
+  // Validate signal number (1-64 are valid)
   if (sig > 64)
-    return (uint64_t)-22;
+    return (uint64_t)-22; // EINVAL
+
+  // Signal 0 is used for existence check - just return success
+  if (sig == 0)
+    return 0;
+
+  // Try to find target thread
+  struct thread *target = sched_get_thread_by_tid((uint32_t)tid);
+  if (!target) {
+    // If thread not found by tid, try current thread
+    struct thread *current = sched_get_current();
+    if (!current)
+      return (uint64_t)-3; // ESRCH
+    
+    // If tid matches current's tid, use current
+    if (current->tid == (uint32_t)tid) {
+      target = current;
+    } else {
+      // For now, just succeed silently (GTK doesn't care about actual delivery)
+      return 0;
+    }
+  }
+
+  // Queue signal if we found target
+  if (target && sig > 0 && sig <= 64) {
+    target->pending_signals |= (1ULL << (sig - 1));
+  }
+
   return 0;
 }
 

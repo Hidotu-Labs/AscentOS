@@ -182,6 +182,46 @@ struct statx {
 
 struct termios console_termios;
 
+// ── inotify implementation ──────────────────────────────────────────────────
+// Simple inotify support for file/directory monitoring
+#define MAX_INOTIFY_WATCHES 128
+#define MAX_INOTIFY_INSTANCES 32
+
+typedef struct {
+  uint32_t wd;        // Watch descriptor
+  char path[256];     // Path being watched
+  uint32_t mask;      // Event mask (IN_*)
+  uint32_t event_mask;// Accumulated events
+} inotify_watch_t;
+
+typedef struct {
+  uint32_t instance_id;  // Unique inotify instance ID
+  inotify_watch_t watches[MAX_INOTIFY_WATCHES];
+  uint32_t num_watches;
+  uint64_t event_queue[256]; // Simple event queue
+  uint32_t queue_head;
+  uint32_t queue_tail;
+} inotify_instance_t;
+
+// Global inotify instances
+static inotify_instance_t inotify_instances[MAX_INOTIFY_INSTANCES];
+static uint32_t next_instance_id = 1;
+static uint32_t next_watch_id = 1;
+
+// inotify events (basic subset)
+#define IN_ACCESS 0x1
+#define IN_MODIFY 0x2
+#define IN_ATTRIB 0x4
+#define IN_CLOSE_WRITE 0x8
+#define IN_CLOSE_NOWRITE 0x10
+#define IN_OPEN 0x20
+#define IN_MOVED_FROM 0x40
+#define IN_MOVED_TO 0x80
+#define IN_CREATE 0x100
+#define IN_DELETE 0x200
+#define IN_DELETE_SELF 0x400
+#define IN_MOVE_SELF 0x800
+
 int alloc_fd(struct thread *t) {
   klog_puts("[SYSCALL] alloc_fd: t=");
   klog_uint64((uint64_t)t);
@@ -417,6 +457,26 @@ open_done:
   vfs_open(node);
   t->fds[fd] = node;
   t->fd_offsets[fd] = 0;
+  
+  // Store the full path for fchdir support
+  if (path[0] == '/') {
+    // Absolute path - use as-is
+    strncpy(t->fd_paths[fd], path, sizeof(t->fd_paths[fd]) - 1);
+    t->fd_paths[fd][sizeof(t->fd_paths[fd]) - 1] = '\0';
+  } else {
+    // Relative path - build full path from cwd
+    t->fd_paths[fd][0] = '\0';
+    if (t->cwd_path[0] && strcmp(t->cwd_path, "/") != 0) {
+      strncpy(t->fd_paths[fd], t->cwd_path, sizeof(t->fd_paths[fd]) - 1);
+      strncat(t->fd_paths[fd], "/", sizeof(t->fd_paths[fd]) - strlen(t->fd_paths[fd]) - 1);
+      strncat(t->fd_paths[fd], path, sizeof(t->fd_paths[fd]) - strlen(t->fd_paths[fd]) - 1);
+    } else {
+      strcpy(t->fd_paths[fd], "/");
+      strncat(t->fd_paths[fd], path, sizeof(t->fd_paths[fd]) - 2);
+    }
+    t->fd_paths[fd][sizeof(t->fd_paths[fd]) - 1] = '\0';
+  }
+  
   klog_puts("[SYSCALL] open_done AFTER: fd=");
   klog_uint64(fd);
   klog_puts(" node=");
@@ -1376,10 +1436,10 @@ static uint64_t sys_mkdir(uint64_t pathname, uint64_t mode, uint64_t a2,
   klog_puts("\n");
 
   // Split path into parent directory + new dir name
-  char parent_path[128];
+  char parent_path[256];
   char dir_name[128];
   size_t len = strlen(path);
-  if (len == 0 || len >= sizeof(dir_name))
+  if (len == 0 || len >= 256)
     return (uint64_t)-14;
 
   const char *slash = 0;
@@ -1399,6 +1459,13 @@ static uint64_t sys_mkdir(uint64_t pathname, uint64_t mode, uint64_t a2,
         parent_path[i] = path[i];
       parent_path[parent_len] = '\0';
       parent = vfs_resolve_path(parent_path);
+      
+      // Parent yoksa recursive mkdir yap
+      if (!parent) {
+        klog_puts("[MKDIR] Parent not found, creating recursively\n");
+        sys_mkdir((uint64_t)parent_path, mode, 0, 0, 0, 0);
+        parent = vfs_resolve_path(parent_path);
+      }
     }
     size_t dlen = strlen(slash + 1);
     if (dlen == 0 || dlen >= sizeof(dir_name))
@@ -2790,6 +2857,255 @@ static uint64_t sys_select(uint64_t nfds, uint64_t readfds, uint64_t writefds,
   return do_pselect6(nfds, readfds, writefds, exceptfds, timeout_ms);
 }
 
+// fchdir(2) - syscall 81
+// Change current directory using file descriptor
+static uint64_t sys_fchdir(uint64_t fd, uint64_t a2, uint64_t a3,
+                           uint64_t a4, uint64_t a5, uint64_t a6) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  (void)a6;
+
+  struct thread *t = sched_get_current();
+  if (!t)
+    return (uint64_t)-1; // EACCES
+
+  // Validate fd exists
+  if (fd >= MAX_FDS)
+    return (uint64_t)-9; // EBADF
+
+  if (!t->fds[fd])
+    return (uint64_t)-9; // EBADF
+
+  // Check if it's a directory
+  if ((t->fds[fd]->flags & FS_TYPE_MASK) != FS_DIRECTORY)
+    return (uint64_t)-20; // ENOTDIR
+
+  // Change to the directory stored in fd_paths[fd]
+  if (t->fd_paths[fd][0]) {
+    strncpy(t->cwd_path, t->fd_paths[fd], sizeof(t->cwd_path) - 1);
+    t->cwd_path[sizeof(t->cwd_path) - 1] = '\0';
+    
+    klog_puts("[FCHDIR] Changed cwd to: ");
+    klog_puts(t->cwd_path);
+    klog_puts(" via fd=");
+    klog_uint64(fd);
+    klog_puts("\n");
+    
+    return 0; // Success
+  }
+
+  return (uint64_t)-9; // EBADF - no path associated with fd
+}
+
+// statfs(2) - syscall 137
+// Returns filesystem statistics for a given path
+static uint64_t sys_statfs(uint64_t path_ptr, uint64_t buf_ptr, uint64_t a3,
+                           uint64_t a4, uint64_t a5, uint64_t a6) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  (void)a6;
+
+  if (!path_ptr || !buf_ptr)
+    return (uint64_t)-14; // EFAULT
+  if (!is_user_ptr(path_ptr) || !is_user_ptr(buf_ptr))
+    return (uint64_t)-14; // EFAULT
+
+  // statfs structure (Linux x86_64)
+  struct statfs_buf {
+    uint64_t f_type;
+    uint64_t f_bsize;
+    uint64_t f_blocks;
+    uint64_t f_bfree;
+    uint64_t f_bavail;
+    uint64_t f_files;
+    uint64_t f_ffree;
+    uint64_t f_fsid[2];
+    uint64_t f_namelen;
+    uint64_t f_frsize;
+    uint64_t f_flags;
+    uint64_t f_spare[4];
+  } *buf = (struct statfs_buf *)buf_ptr;
+
+  // Basic stub implementation - return dummy values
+  buf->f_type = 0x61657673;    // "aev" in hex - custom filesystem type
+  buf->f_bsize = 4096;         // 4K block size
+  buf->f_blocks = 1024 * 256;  // ~1GB total
+  buf->f_bfree = 1024 * 128;   // ~512MB free
+  buf->f_bavail = 1024 * 128;  // ~512MB available to user
+  buf->f_files = 10000;        // max inodes
+  buf->f_ffree = 5000;         // free inodes
+  buf->f_fsid[0] = 1;
+  buf->f_fsid[1] = 0;
+  buf->f_namelen = 255;
+  buf->f_frsize = 4096;
+  buf->f_flags = 0;
+
+  return 0; // Success
+}
+
+// inotify_init(2) - syscall 253 (x86_64 AscentOS)
+// Initialize an inotify instance
+static uint64_t sys_inotify_init(uint64_t a1, uint64_t a2, uint64_t a3,
+                                 uint64_t a4, uint64_t a5, uint64_t a6) {
+  (void)a1;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  (void)a6;
+
+  struct thread *t = sched_get_current();
+  if (!t)
+    return (uint64_t)-1;
+
+  // Find an available inotify instance slot
+  inotify_instance_t *instance = NULL;
+  for (int i = 0; i < MAX_INOTIFY_INSTANCES; i++) {
+    if (inotify_instances[i].instance_id == 0) {
+      instance = &inotify_instances[i];
+      break;
+    }
+  }
+
+  if (!instance)
+    return (uint64_t)-23; // ENFILE - too many open files
+
+  // Initialize the instance
+  instance->instance_id = next_instance_id++;
+  instance->num_watches = 0;
+  instance->queue_head = 0;
+  instance->queue_tail = 0;
+
+  // Allocate a file descriptor for this inotify instance
+  int fd = alloc_fd(t);
+  if (fd < 0)
+    return (uint64_t)-24; // EMFILE
+
+  // Create a special vfs_node to represent this inotify instance
+  vfs_node_t *node = kmalloc(sizeof(vfs_node_t));
+  if (!node)
+    return (uint64_t)-12; // ENOMEM
+
+  vfs_node_init(node);
+  node->flags = FS_CHARDEV; // Treat as character device
+  node->mask = 0600;
+  node->impl = instance->instance_id; // Store instance ID in impl field
+  node->name[0] = '\0';
+  strcat(node->name, "inotify");
+
+  vfs_open(node);
+  t->fds[fd] = node;
+  t->fd_offsets[fd] = 0;
+  
+  // Build fd_path string: "inotify" (instance ID is stored in node->impl)
+  strcpy(t->fd_paths[fd], "inotify");
+
+  klog_puts("[INOTIFY_INIT] Created instance ");
+  klog_uint64(instance->instance_id);
+  klog_puts(" with fd=");
+  klog_uint64(fd);
+  klog_puts("\n");
+
+  return fd;
+}
+
+// inotify_init1(2) - syscall 294 (x86_64)
+// Initialize an inotify instance with flags
+static uint64_t sys_inotify_init1(uint64_t flags, uint64_t a2, uint64_t a3,
+                                  uint64_t a4, uint64_t a5, uint64_t a6) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  (void)a6;
+  // Flags: IN_NONBLOCK (0x800), IN_CLOEXEC (0x80000)
+  (void)flags;
+
+  // For now, same implementation as inotify_init (ignoring flags)
+  return sys_inotify_init(0, 0, 0, 0, 0, 0);
+}
+
+// inotify_add_watch(2) - syscall 254 (x86_64)
+// Add a watch to an inotify instance
+static uint64_t sys_inotify_add_watch(uint64_t fd, uint64_t pathname,
+                                      uint64_t mask, uint64_t a4, uint64_t a5,
+                                      uint64_t a6) {
+  (void)a4;
+  (void)a5;
+  (void)a6;
+
+  struct thread *t = sched_get_current();
+  if (!t)
+    return (uint64_t)-1;
+
+  if (!pathname)
+    return (uint64_t)-14; // EFAULT
+  if (!is_user_ptr(pathname))
+    return (uint64_t)-14; // EFAULT
+
+  // Validate inotify fd
+  if (fd >= MAX_FDS || !t->fds[fd])
+    return (uint64_t)-9; // EBADF
+
+  vfs_node_t *node = t->fds[fd];
+  if (strcmp(node->name, "inotify") != 0)
+    return (uint64_t)-22; // EINVAL - not an inotify fd
+
+  // Get the inotify instance
+  uint32_t instance_id = node->impl;
+  inotify_instance_t *instance = NULL;
+  for (int i = 0; i < MAX_INOTIFY_INSTANCES; i++) {
+    if (inotify_instances[i].instance_id == instance_id) {
+      instance = &inotify_instances[i];
+      break;
+    }
+  }
+
+  if (!instance)
+    return (uint64_t)-22; // EINVAL
+
+  // Check if we have space for another watch
+  if (instance->num_watches >= MAX_INOTIFY_WATCHES)
+    return (uint64_t)-23; // ENFILE
+
+  const char *path = (const char *)pathname;
+
+  // Check if this path is already being watched
+  for (uint32_t i = 0; i < instance->num_watches; i++) {
+    if (strcmp(instance->watches[i].path, path) == 0) {
+      // Update the mask for existing watch
+      instance->watches[i].mask = (uint32_t)mask;
+      klog_puts("[INOTIFY_ADD_WATCH] Updated watch for path: ");
+      klog_puts(path);
+      klog_puts("\n");
+      return instance->watches[i].wd;
+    }
+  }
+
+  // Add new watch
+  inotify_watch_t *watch = &instance->watches[instance->num_watches];
+  watch->wd = next_watch_id++;
+  watch->mask = (uint32_t)mask;
+  watch->event_mask = 0;
+  strncpy(watch->path, path, sizeof(watch->path) - 1);
+  watch->path[sizeof(watch->path) - 1] = '\0';
+
+  instance->num_watches++;
+
+  klog_puts("[INOTIFY_ADD_WATCH] Added watch wd=");
+  klog_uint64(watch->wd);
+  klog_puts(" for path: ");
+  klog_puts(path);
+  klog_puts(" in instance ");
+  klog_uint64(instance_id);
+  klog_puts("\n");
+
+  return watch->wd;
+}
+
 void syscall_register_io(void) {
   syscall_register(SYS_READ, sys_read);
   syscall_register(SYS_WRITE, sys_write);
@@ -2822,6 +3138,7 @@ void syscall_register_io(void) {
   syscall_register(SYS_OPENAT, sys_openat);
   syscall_register(SYS_FCHMODAT, sys_fchmodat);
   syscall_register(SYS_FCHOWNAT, sys_fchownat);
+  syscall_register(SYS_FCHDIR, sys_fchdir);
   syscall_register(SYS_NEWFSTATAT, sys_newfstatat);
   syscall_register(SYS_UNLINK, sys_unlink);
   syscall_register(SYS_RENAME, sys_rename);
@@ -2839,6 +3156,10 @@ void syscall_register_io(void) {
   syscall_register(SYS_FCHMOD, sys_fchmod);
   syscall_register(SYS_LINK, sys_link);
   syscall_register(SYS_FADVISE64, sys_fadvise64);
+  syscall_register(SYS_STATFS, sys_statfs);
+  syscall_register(SYS_INOTIFY_INIT, sys_inotify_init);
+  syscall_register(SYS_INOTIFY_INIT1, sys_inotify_init1);
+  syscall_register(SYS_INOTIFY_ADD_WATCH, sys_inotify_add_watch);
 
   console_termios.c_lflag = 0x0000000b;
   console_termios.c_iflag = 0x00000100;
