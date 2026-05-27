@@ -31,11 +31,11 @@
 struct vfs_node;
 
 typedef struct pty_pair {
-  int index;      // PTY index (0-15)
-  bool allocated; // Is this pair in use?
-  bool locked;    // Is slave locked (cannot be opened)?
-  bool master_open;       // Is the master side open?
-  int slave_open_count;   // Number of open slave handles
+  int index;            // PTY index (0-15)
+  bool allocated;       // Is this pair in use?
+  bool locked;          // Is slave locked (cannot be opened)?
+  bool master_open;     // Is the master side open?
+  int slave_open_count; // Number of open slave handles
 
   // Master → Slave buffer (data written by master, read by slave)
   uint8_t master_to_slave[PTY_BUFFER_SIZE];

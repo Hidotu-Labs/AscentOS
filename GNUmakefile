@@ -112,10 +112,10 @@ run-fat32: edk2-ovmf $(IMAGE_NAME).iso fat32_test.img
 		$(QEMUFLAGS)
 
 # Create a 64MB ext2 disk image with sample files for testing
-disk.img: assets/test.wav assets/test.bmp assets/test.tar assets/room.png userland/hello.elf userland/test_cpp.elf userland/test_cow.elf userland/test_syscalls.elf userland/test_kilo_syscalls.elf userland/test_wait4_complex.elf userland/kilo.elf userland/test_args.elf userland/test_stat.elf userland/ls.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/test_mmap_shared_private.elf userland/playwav.elf userland/showbmp.elf userland/test_uname_pipe.elf userland/test_pipe_fork.elf userland/test_sys_access.elf userland/test_sys_cwd.elf userland/test_newfstatat.elf userland/test_unlink_rename.elf userland/wget.elf userland/kria.elf userland/doom.elf userland/poll_test.elf userland/pty_test.elf userland/test_tcc_libc.c userland/test_mm.c userland/test_dynamic.elf userland/test_dup.elf userland/test_attrib.elf userland/test_symlink.elf userland/test_cred.elf userland/test_time.elf userland/test_tsc_manual.elf userland/test_unix_sock.elf userland/test_unix_fdpass.elf userland/test_fb.elf userland/test_events.elf userland/test_socket_phase3.elf userland/test_socket_phase3_advanced.elf userland/test_socket_phase3_megastress.elf userland/test_socket_phase4.elf userland/test_socket_phase5.elf userland/test_socket_phase6.elf userland/test_socket_phase7.elf userland/test_socket_phase7_advanced.elf userland/test_socket_phase8.elf userland/test_socket_phase9.elf userland/test_socket_phase10.elf userland/test_socket_phase11.elf userland/test_inet_stress.elf userland/dns_lookup.elf userland/xeyes.elf userland/test_x11_simple.elf userland/xkbcomp.elf userland/test_shared_irq.elf userland/jwm.elf userland/doom_x11.elf userland/gtk_test.elf userland/tglgears_fb.elf userland/tglgears_drm.elf userland/drm_bench.elf userland/test_clone_futex.elf userland/test_clone_futex_stress.elf userland/test_mem_stress.elf userland/test_io_leak.elf userland/classicube.elf userland/terrain.png userland/texpacks/classicube.zip initrd/startx.sh
+disk.img: assets/test.wav assets/test.bmp assets/test.tar assets/room.png userland/hello.elf userland/test_cpp.elf userland/test_cow.elf userland/test_syscalls.elf userland/test_kilo_syscalls.elf userland/test_wait4_complex.elf userland/kilo.elf userland/test_args.elf userland/test_stat.elf userland/ls.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/test_mmap_shared_private.elf userland/playwav.elf userland/showbmp.elf userland/test_uname_pipe.elf userland/test_pipe_fork.elf userland/test_sys_access.elf userland/test_sys_cwd.elf userland/test_newfstatat.elf userland/test_unlink_rename.elf userland/wget.elf userland/kria.elf userland/doom.elf userland/poll_test.elf userland/pty_test.elf userland/test_tcc_libc.c userland/test_mm.c userland/test_dynamic.elf userland/test_dup.elf userland/test_attrib.elf userland/test_symlink.elf userland/test_cred.elf userland/test_time.elf userland/test_tsc_manual.elf userland/test_unix_sock.elf userland/test_unix_fdpass.elf userland/test_fb.elf userland/test_events.elf userland/test_read.elf userland/test_socket_phase3.elf userland/test_socket_phase3_advanced.elf userland/test_socket_phase3_megastress.elf userland/test_socket_phase4.elf userland/test_socket_phase5.elf userland/test_socket_phase6.elf userland/test_socket_phase7.elf userland/test_socket_phase7_advanced.elf userland/test_socket_phase8.elf userland/test_socket_phase9.elf userland/test_socket_phase10.elf userland/test_socket_phase11.elf userland/test_inet_stress.elf userland/dns_lookup.elf userland/xeyes.elf userland/test_x11_simple.elf userland/xkbcomp.elf userland/test_shared_irq.elf userland/jwm.elf userland/doom_x11.elf userland/gtk_test.elf userland/tinywl.elf userland/tglgears_fb.elf userland/tglgears_drm.elf userland/tglhello_drm.elf userland/drm_bench.elf userland/test_drm_kms.elf userland/test_drm_flip.elf userland/test_clone_futex.elf userland/test_clone_futex_stress.elf userland/test_mem_stress.elf userland/test_io_leak.elf userland/classicube.elf userland/terrain.png userland/texpacks/classicube.zip initrd/startx.sh initrd/weston.ini
 	@echo "Creating root filesystem (ext3)..."
 	rm -f /tmp/part.img
-	dd if=/dev/zero of=/tmp/part.img bs=1M count=511
+	dd if=/dev/zero of=/tmp/part.img bs=1M count=2047
 	mkfs.ext3 -F -b 1024 -I 128 /tmp/part.img
 	@echo "Populating root filesystem..."
 	@echo "Hello from AscentOS!" > /tmp/ascentos_hello.txt
@@ -129,6 +129,13 @@ disk.img: assets/test.wav assets/test.bmp assets/test.tar assets/room.png userla
 		echo "write /tmp/ascentos_hello.txt hello.txt"; \
 		echo "rm bin/startx.sh"; \
 		echo "write initrd/startx.sh bin/startx.sh"; \
+		echo "rm bin/startw.sh"; \
+		echo "write initrd/startw.sh bin/startw.sh"; \
+		echo "rm bin/tinywl"; \
+		echo "write userland/tinywl.elf bin/tinywl"; \
+		echo "mkdir etc"; \
+		echo "rm etc/weston.ini"; \
+		echo "write initrd/weston.ini etc/weston.ini"; \
 		echo "rm lib/libc.so"; \
 		echo "write toolchain/musl-sysroot/lib/libc.so lib/libc.so"; \
 		echo "rm lib/ld-musl-x86_64.so.1"; \
@@ -242,6 +249,8 @@ disk.img: assets/test.wav assets/test.bmp assets/test.tar assets/room.png userla
 		echo "write userland/test_socket_phase3_megastress.elf bin/test_socket_phase3_megastress"; \
 		echo "rm bin/test_socket_phase4"; \
 		echo "write userland/test_socket_phase4.elf bin/test_socket_phase4"; \
+		echo "rm bin/test_read"; \
+		echo "write userland/test_read.elf bin/test_read"; \
 		echo "rm bin/test_socket_phase4_detailed"; \
 		echo "write userland/test_socket_phase4_detailed.elf bin/test_socket_phase4_detailed"; \
 		echo "rm bin/test_socket_phase5"; \
@@ -270,8 +279,14 @@ disk.img: assets/test.wav assets/test.bmp assets/test.tar assets/room.png userla
 		echo "write userland/tglgears_fb.elf bin/tglgears"; \
 		echo "rm bin/tglgears_drm"; \
 		echo "write userland/tglgears_drm.elf bin/tglgears_drm"; \
+		echo "rm bin/tglhello_drm"; \
+		echo "write userland/tglhello_drm.elf bin/tglhello_drm"; \
 		echo "rm bin/drm_bench"; \
 		echo "write userland/drm_bench.elf bin/drm_bench"; \
+		echo "rm bin/test_drm_kms"; \
+		echo "write userland/test_drm_kms.elf bin/test_drm_kms"; \
+		echo "rm bin/test_drm_flip"; \
+		echo "write userland/test_drm_flip.elf bin/test_drm_flip"; \
 		echo "rm bin/test_clone_futex"; \
 		echo "write userland/test_clone_futex.elf bin/test_clone_futex"; \
 		echo "rm bin/test_clone_futex_stress"; \
@@ -296,6 +311,10 @@ disk.img: assets/test.wav assets/test.bmp assets/test.tar assets/room.png userla
 	debugfs -w -R "write /tmp/classicube_options.txt options.txt" /tmp/part.img >/dev/null 2>&1 || true
 	rm -f /tmp/classicube_options.txt
 	rm -f /tmp/ascentos_hello.txt /tmp/ascentos_readme.txt
+	@if [ -d build/alpine/rootfs ]; then \
+		echo "Populating Alpine Linux rootfs into disk image..."; \
+		./scripts/populate-ext2-dir.sh /tmp/part.img build/alpine/rootfs /; \
+	fi
 	@echo "Populating root filesystem with additional tools..."
 
 	@if [ -d toolchain/musl-sysroot/opt/tcc ]; then \
@@ -436,7 +455,7 @@ disk.img: assets/test.wav assets/test.bmp assets/test.tar assets/room.png userla
 		debugfs -w -R "write initrd/.Xauthority root/.Xauthority" /tmp/part.img >/dev/null 2>&1 || true; \
 	fi
 	@echo "Creating partitioned disk image (MBR)..."
-	dd if=/dev/zero of=disk.img bs=1M count=512
+	dd if=/dev/zero of=disk.img bs=1M count=2048
 	parted -s disk.img mklabel msdos
 	parted -s disk.img mkpart primary ext3 1MiB 100%
 	parted -s disk.img set 1 boot on
@@ -781,6 +800,10 @@ userland/test_events.elf: userland/test_events.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/test_events.c -o userland/test_events.elf
 
+userland/test_read.elf: userland/test_read.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_read.c -o userland/test_read.elf
+
 userland/test_x11_simple.elf: userland/test_x11_simple.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/test_x11_simple.c -L$(MUSL_SYSROOT)/lib -lX11 -lxcb -lXau -lXdmcp -o userland/test_x11_simple.elf
@@ -801,6 +824,10 @@ userland/jwm.elf: scripts/build-jwm.sh
 
 userland/gtk_test.elf: userland/gtk_test.c scripts/build-gtktest.sh scripts/setup-alpine.sh
 	./scripts/build-gtktest.sh
+
+userland/tinywl.elf: userland/tinywl.c scripts/build-tinywl.sh scripts/setup-alpine.sh
+	chmod +x scripts/build-tinywl.sh
+	./scripts/build-tinywl.sh
 
 userland/tglgears_fb.elf: userland/tglgears_fb.c $(MUSL_LIBC) scripts/build-tinygl.sh
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
@@ -826,9 +853,21 @@ userland/tglgears_drm.elf: userland/tglgears_drm.c $(MUSL_LIBC) scripts/build-ti
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/tglgears_drm.c -I$(MUSL_SYSROOT)/opt/tinygl/include -L$(MUSL_SYSROOT)/opt/tinygl/lib -lTinyGL -lm -o userland/tglgears_drm.elf
 
+userland/tglhello_drm.elf: userland/tglhello_drm.c $(MUSL_LIBC) scripts/build-tinygl.sh
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/tglhello_drm.c -I$(MUSL_SYSROOT)/opt/tinygl/include -L$(MUSL_SYSROOT)/opt/tinygl/lib -lTinyGL -lm -o userland/tglhello_drm.elf
+
 userland/drm_bench.elf: userland/drm_bench.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/drm_bench.c -o userland/drm_bench.elf
+
+userland/test_drm_kms.elf: userland/test_drm_kms.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_drm_kms.c -o userland/test_drm_kms.elf
+
+userland/test_drm_flip.elf: userland/test_drm_flip.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_drm_flip.c -o userland/test_drm_flip.elf
 
 userland/dns_lookup.elf: userland/dns_lookup.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \

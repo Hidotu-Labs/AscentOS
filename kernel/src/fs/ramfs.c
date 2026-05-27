@@ -1,6 +1,7 @@
 #include "ramfs.h"
 #include "../lib/string.h"
 #include "../mm/heap.h"
+#include "../console/klog.h"
 
 // ── Internal Structures ─────────────────────────────────────────────────────
 
@@ -21,6 +22,9 @@ typedef struct {
 } ramfs_dir_t;
 
 static uint32_t next_inode = 1;
+
+static int ramfs_chmod(vfs_node_t *node, uint16_t permission);
+static int ramfs_chown(vfs_node_t *node, uint32_t uid, uint32_t gid);
 
 // ── VFS Implementations ─────────────────────────────────────────────────────
 
@@ -153,6 +157,14 @@ static struct dirent *ramfs_readdir(vfs_node_t *node, uint32_t index) {
 static vfs_node_t *ramfs_finddir(vfs_node_t *node, char *name) {
   if (!node || !node->device)
     return 0;
+
+  // Log searches in /sys
+  klog_puts("[RAMFS] finddir: parent=");
+  klog_puts(node->name);
+  klog_puts(" looking for=");
+  klog_puts(name);
+  klog_puts("\n");
+
   ramfs_dir_t *dir = (ramfs_dir_t *)node->device;
 
   if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
@@ -202,6 +214,9 @@ static vfs_node_t *ramfs_make_node(char *name, uint16_t perm, uint32_t type) {
     n->write = ramfs_write;
     n->truncate = ramfs_truncate;
   }
+
+  n->chmod = ramfs_chmod;
+  n->chown = ramfs_chown;
   // Block devices would be populated via ramfs_mount_node
 
   return n;
@@ -265,8 +280,25 @@ static int ramfs_mkdir(vfs_node_t *node, char *name, uint16_t permission) {
   new_node->unlink = ramfs_unlink;
   new_node->rename = ramfs_rename;
   new_node->mknod = ramfs_mknod;
+  new_node->chmod = ramfs_chmod;
+  new_node->chown = ramfs_chown;
 
   ramfs_add_child(node, new_node);
+  return 0;
+}
+
+static int ramfs_chmod(vfs_node_t *node, uint16_t permission) {
+  if (!node)
+    return -1;
+  node->mask = permission & 0x0FFF;
+  return 0;
+}
+
+static int ramfs_chown(vfs_node_t *node, uint32_t uid, uint32_t gid) {
+  if (!node)
+    return -1;
+  node->uid = uid;
+  node->gid = gid;
   return 0;
 }
 
@@ -388,6 +420,8 @@ void ramfs_mount_on(vfs_node_t *node) {
   node->unlink = ramfs_unlink;
   node->rename = ramfs_rename;
   node->mknod = ramfs_mknod;
+  node->chmod = ramfs_chmod;
+  node->chown = ramfs_chown;
 }
 
 void ramfs_mount_at(char *path) {

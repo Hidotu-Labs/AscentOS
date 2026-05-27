@@ -33,22 +33,40 @@ static uint64_t sys_socket(uint64_t domain, uint64_t type, uint64_t protocol,
   // Create socket
   socket_t *sock = socket_create(dom, typ, proto);
   if (!sock) {
-    // Determine error
-    if (dom != AF_UNIX)
+    // Determine error - extract base type for comparison
+    int base = typ & ~SOCK_NONBLOCK & ~SOCK_CLOEXEC;
+    if (dom != AF_UNIX && dom != AF_INET && dom != AF_NETLINK)
       return (uint64_t)-EAFNOSUPPORT;
-    if (proto != 0)
-      return (uint64_t)-EPROTONOSUPPORT;
-    if (typ != SOCK_STREAM && typ != SOCK_DGRAM)
+    if (base != SOCK_STREAM && base != SOCK_DGRAM &&
+        base != SOCK_RAW && base != SOCK_SEQPACKET)
       return (uint64_t)-EPROTONOSUPPORT;
     return (uint64_t)-12; // ENOMEM
   }
 
   // Allocate FD
   int fd = socket_alloc_fd(sock);
+  struct thread *t = sched_get_current();
   if (fd < 0) {
+    klog_puts("[SOCKET] tid=");
+    if (t) klog_uint64(t->tid);
+    klog_puts(" alloc_fd failed: ");
+    klog_uint64((uint64_t)fd);
+    klog_puts("\n");
     socket_put(sock);
     return (uint64_t)fd;
   }
+
+  klog_puts("[SOCKET] tid=");
+  if (t) klog_uint64(t->tid);
+  klog_puts(" domain=");
+  klog_uint64(domain);
+  klog_puts(" type=");
+  klog_uint64(type);
+  klog_puts(" protocol=");
+  klog_uint64(protocol);
+  klog_puts(" returned fd=");
+  klog_uint64((uint64_t)fd);
+  klog_puts("\n");
 
   return (uint64_t)fd;
 }
@@ -116,13 +134,40 @@ static uint64_t sys_bind(uint64_t sockfd, uint64_t addr_ptr, uint64_t addrlen,
     return (uint64_t)-14; // EFAULT
   }
 
-  // Get socket from FD
   socket_t *sock = socket_from_fd(fd);
+  struct thread *t = sched_get_current();
   if (!sock) {
+    klog_puts("[BIND] tid=");
+    if (t) klog_uint64(t->tid);
+    klog_puts(" EBADF: invalid fd=");
+    klog_uint64(fd);
+    klog_puts("\n");
     return (uint64_t)-9; // EBADF
   }
 
+  klog_puts("[BIND] tid=");
+  if (t) klog_uint64(t->tid);
+  klog_puts(" fd=");
+  klog_uint64(fd);
+  klog_puts(" addrlen=");
+  klog_uint64(addrlen);
+  // For AF_UNIX, print the path
+  if (addr->sa_family == 1 && addrlen > 2) {
+    struct sockaddr_un *sun = (struct sockaddr_un *)addr;
+    klog_puts(" path=");
+    if (sun->sun_path[0] == '\0') {
+      klog_puts("@");
+      klog_puts(sun->sun_path + 1);
+    } else {
+      klog_puts(sun->sun_path);
+    }
+  }
+  klog_puts("\n");
+
   int ret = socket_bind(sock, addr, (int)addrlen);
+  klog_puts("[BIND] returned ");
+  klog_uint64((uint64_t)ret);
+  klog_puts("\n");
   return (uint64_t)ret;
 }
 
@@ -138,7 +183,10 @@ static uint64_t sys_connect(uint64_t sockfd, uint64_t addr_ptr,
   int fd = (int)sockfd;
   struct sockaddr *addr = (struct sockaddr *)addr_ptr;
 
-  klog_puts("[CONNECT] fd=");
+  struct thread *t = sched_get_current();
+  klog_puts("[CONNECT] tid=");
+  if (t) klog_uint64(t->tid);
+  klog_puts(" fd=");
   klog_uint64(fd);
   klog_puts(" addr_ptr=");
   klog_uint64(addr_ptr);
@@ -194,12 +242,26 @@ static uint64_t sys_listen(uint64_t sockfd, uint64_t backlog, uint64_t _arg2,
   (void)_arg5;
 
   int fd = (int)sockfd;
+  struct thread *t = sched_get_current();
 
   // Get socket from FD
   socket_t *sock = socket_from_fd(fd);
   if (!sock) {
+    klog_puts("[LISTEN] tid=");
+    if (t) klog_uint64(t->tid);
+    klog_puts(" EBADF: invalid fd=");
+    klog_uint64(fd);
+    klog_puts("\n");
     return (uint64_t)-9; // EBADF
   }
+
+  klog_puts("[LISTEN] tid=");
+  if (t) klog_uint64(t->tid);
+  klog_puts(" fd=");
+  klog_uint64(fd);
+  klog_puts(" backlog=");
+  klog_uint64(backlog);
+  klog_puts("\n");
 
   int ret = socket_listen(sock, (int)backlog);
   return (uint64_t)ret;
@@ -215,12 +277,24 @@ static uint64_t sys_accept(uint64_t sockfd, uint64_t addr_ptr,
   (void)_arg5;
 
   int fd = (int)sockfd;
+  struct thread *t = sched_get_current();
 
   // Get socket from FD
   socket_t *sock = socket_from_fd(fd);
   if (!sock) {
+    klog_puts("[ACCEPT] tid=");
+    if (t) klog_uint64(t->tid);
+    klog_puts(" EBADF: invalid fd=");
+    klog_uint64(fd);
+    klog_puts("\n");
     return (uint64_t)-9; // EBADF
   }
+
+  klog_puts("[ACCEPT] tid=");
+  if (t) klog_uint64(t->tid);
+  klog_puts(" fd=");
+  klog_uint64(fd);
+  klog_puts("\n");
 
   // Validate pointers (can be NULL)
   struct sockaddr *addr = NULL;
@@ -261,6 +335,12 @@ static uint64_t sys_accept(uint64_t sockfd, uint64_t addr_ptr,
       *addrlen = sizeof(sin);
     }
   }
+
+  klog_puts("[ACCEPT] tid=");
+  if (t) klog_uint64(t->tid);
+  klog_puts(" returned newfd=");
+  klog_uint64((uint64_t)newfd);
+  klog_puts("\n");
 
   return (uint64_t)newfd;
 }
@@ -334,20 +414,7 @@ static uint64_t sys_recvfrom(uint64_t sockfd, uint64_t buf_ptr, uint64_t len,
 }
 
 // ── Structures for recvmsg/sendmsg ─────────────────────────────────────────
-struct iovec {
-  void *iov_base;
-  size_t iov_len;
-};
 
-struct msghdr {
-  void *msg_name;        // Source address (for recvmsg)
-  size_t msg_namelen;    // Address length
-  struct iovec *msg_iov; // Scatter/gather array
-  size_t msg_iovlen;     // Number of iovec elements
-  void *msg_control;     // Ancillary data
-  size_t msg_controllen; // Ancillary data length
-  int msg_flags;         // Flags on received message
-};
 
 // ── Syscall: sendmsg(int sockfd, struct msghdr *msg, int flags)
 // ───────────────────────────────────────────────────────────────────
@@ -377,7 +444,12 @@ static uint64_t sys_sendmsg(uint64_t sockfd, uint64_t msg_ptr, uint64_t flags,
     return (uint64_t)-14; // EFAULT
   }
 
-  // Send data from iovec buffers
+  // Use family-specific sendmsg if available
+  if (sock->ops && sock->ops->sendmsg) {
+    return (uint64_t)sock->ops->sendmsg(sock, msg, (int)flags);
+  }
+
+  // Fallback to simple send from iovec array
   ssize_t total_sent = 0;
   for (size_t i = 0; i < msg->msg_iovlen; i++) {
     struct iovec *iov = &msg->msg_iov[i];
@@ -437,7 +509,12 @@ static uint64_t sys_recvmsg(uint64_t sockfd, uint64_t msg_ptr, uint64_t flags,
     return (uint64_t)-14; // EFAULT
   }
 
-  // Receive data into iovec buffers
+  // Use family-specific recvmsg if available
+  if (sock->ops && sock->ops->recvmsg) {
+    return (uint64_t)sock->ops->recvmsg(sock, msg, (int)flags);
+  }
+
+  // Fallback to simple recv into iovec array
   ssize_t total_received = 0;
   for (size_t i = 0; i < msg->msg_iovlen; i++) {
     struct iovec *iov = &msg->msg_iov[i];
@@ -466,7 +543,7 @@ static uint64_t sys_recvmsg(uint64_t sockfd, uint64_t msg_ptr, uint64_t flags,
     }
   }
 
-  // Update msghdr fields for user space
+  // Update msghdr fields for user space (stub behavior for non-msg sockets)
   msg->msg_namelen = 0;
   msg->msg_controllen = 0;
   msg->msg_flags = 0;
@@ -502,30 +579,25 @@ static uint64_t sys_shutdown(uint64_t sockfd, uint64_t how, uint64_t _arg2,
 // ── Syscall: getsockopt(int sockfd, int level, int optname, ...)
 // ──────────────
 static uint64_t sys_getsockopt(uint64_t sockfd, uint64_t level,
-                               uint64_t optname, uint64_t optval_ptr,
-                               uint64_t optlen_ptr, uint64_t _arg5) {
+                                uint64_t optname, uint64_t optval_ptr,
+                                uint64_t optlen_ptr, uint64_t _arg5) {
   (void)_arg5;
 
   int fd = (int)sockfd;
-
-  // Get socket from FD
   socket_t *sock = socket_from_fd(fd);
-  if (!sock) {
-    return (uint64_t)-9; // EBADF
-  }
+  if (!sock) return (uint64_t)-9;
 
-  // Validate pointers
-  if (!is_user_ptr(optval_ptr) || !is_user_ptr(optlen_ptr)) {
-    return (uint64_t)-14; // EFAULT
-  }
+  if (!is_user_ptr(optval_ptr) || !is_user_ptr(optlen_ptr))
+    return (uint64_t)-14;
 
-  void *optval = (void *)optval_ptr;
   int *optlen = (int *)optlen_ptr;
 
   // Validate optlen
   if (*optlen < (int)sizeof(int)) {
     return (uint64_t)-22; // EINVAL
   }
+
+  void *optval = (void *)optval_ptr;
 
   // Handle socket-level options
   if ((int)level == SOL_SOCKET) {
@@ -586,8 +658,22 @@ static uint64_t sys_setsockopt(uint64_t sockfd, uint64_t level,
   // Get socket from FD
   socket_t *sock = socket_from_fd(fd);
   if (!sock) {
+    klog_puts("[SETSOCKOPT] EBADF: fd=");
+    klog_uint64(fd);
+    klog_puts("\n");
     return (uint64_t)-9; // EBADF
   }
+
+  klog_puts("[SETSOCKOPT] tid=");
+  struct thread *_curr = sched_get_current();
+  if (_curr) klog_uint64(_curr->tid);
+  klog_puts(" fd=");
+  klog_uint64(fd);
+  klog_puts(" level=");
+  klog_uint64(level);
+  klog_puts(" optname=");
+  klog_uint64(optname);
+  klog_puts("\n");
 
   // Validate pointer
   if (!is_user_ptr(optval_ptr)) {
@@ -605,7 +691,8 @@ static uint64_t sys_setsockopt(uint64_t sockfd, uint64_t level,
   if ((int)level == SOL_SOCKET) {
     const int *val = (const int *)optval;
     switch ((int)optname) {
-    case SO_RCVBUF: {
+    case SO_RCVBUF:
+    case SO_RCVBUFFORCE: {
       int v = *val;
       if (v < 256)
         v = 256;
@@ -614,7 +701,8 @@ static uint64_t sys_setsockopt(uint64_t sockfd, uint64_t level,
       sock->rcvbuf = v;
       return 0;
     }
-    case SO_SNDBUF: {
+    case SO_SNDBUF:
+    case SO_SNDBUFFORCE: {
       int v = *val;
       if (v < 256)
         v = 256;
@@ -626,6 +714,9 @@ static uint64_t sys_setsockopt(uint64_t sockfd, uint64_t level,
     case SO_REUSEADDR:
       sock->reuseaddr = *val;
       return 0;
+    case SO_KEEPALIVE:
+    case SO_BROADCAST:
+      return 0; // Stub success
     default:
       break;
     }
@@ -636,6 +727,15 @@ static uint64_t sys_setsockopt(uint64_t sockfd, uint64_t level,
     int ret = sock->ops->setsockopt(sock, (int)level, (int)optname, optval,
                                     (int)optlen);
     return (uint64_t)ret;
+  }
+
+  // Default stub for common SOL_SOCKET options if not handled by family
+  if ((int)level == SOL_SOCKET) {
+    switch ((int)optname) {
+    case SO_PASSCRED:
+    case 26: // SO_ATTACH_FILTER
+      return 0;
+    }
   }
 
   return (uint64_t)-92; // ENOPROTOOPT
@@ -667,61 +767,10 @@ static uint64_t sys_getsockname(uint64_t sockfd, uint64_t addr_ptr,
     return (uint64_t)-14; // EFAULT
   }
 
-  // Get socket family-specific data
-  if (sock->domain == AF_UNIX) {
-    unix_sock_t *usock = (unix_sock_t *)sock->sk;
-    if (!usock) {
-      return (uint64_t)-22; // EINVAL
-    }
+  int *addrlen = (int *)addrlen_ptr;
+  struct sockaddr *addr = (struct sockaddr *)addr_ptr;
 
-    int *addrlen = (int *)addrlen_ptr;
-    int user_len = *addrlen;
-
-    // Calculate actual address length
-    int actual_len = usock->addr_len;
-    if (actual_len == 0) {
-      // Socket not bound, return empty address
-      actual_len = sizeof(sa_family_t);
-    }
-
-    // Copy as much as fits
-    int copy_len = user_len < actual_len ? user_len : actual_len;
-
-    // Copy address to user space
-    if (copy_len > 0) {
-      memcpy((void *)addr_ptr, &usock->addr, copy_len);
-    }
-
-    // Update addrlen to actual size
-    *addrlen = actual_len;
-
-    return 0;
-  } else if (sock->domain == AF_INET) {
-    inet_sock_t *inet = (inet_sock_t *)sock->sk;
-    if (!inet)
-      return (uint64_t)-22;
-
-    int *addrlen = (int *)addrlen_ptr;
-    int user_len = *addrlen;
-
-    struct sockaddr_in sin;
-    memset(&sin, 0, sizeof(sin));
-    sin.sin_family = AF_INET;
-    sin.sin_port = inet->local_addr.sin_port;
-    sin.sin_addr.s_addr = inet->local_addr.sin_addr.s_addr;
-
-    int actual_len = sizeof(struct sockaddr_in);
-    int copy_len = user_len < actual_len ? user_len : actual_len;
-
-    if (copy_len > 0) {
-      memcpy((void *)addr_ptr, &sin, copy_len);
-    }
-    *addrlen = actual_len;
-
-    return 0;
-  }
-
-  return (uint64_t)-95; // EOPNOTSUPP
+  return (uint64_t)socket_getsockname(sock, addr, addrlen);
 }
 
 // ── Syscall: getpeername(int sockfd, struct sockaddr *addr, ...)
@@ -750,74 +799,10 @@ static uint64_t sys_getpeername(uint64_t sockfd, uint64_t addr_ptr,
     return (uint64_t)-14; // EFAULT
   }
 
-  // Get socket family-specific data
-  if (sock->domain == AF_UNIX) {
-    unix_sock_t *usock = (unix_sock_t *)sock->sk;
-    if (!usock) {
-      return (uint64_t)-22; // EINVAL
-    }
+  int *addrlen = (int *)addrlen_ptr;
+  struct sockaddr *addr = (struct sockaddr *)addr_ptr;
 
-    // Socket must be connected
-    if (sock->state != SS_CONNECTED) {
-      return (uint64_t)-107; // ENOTCONN
-    }
-
-    int *addrlen = (int *)addrlen_ptr;
-    int user_len = *addrlen;
-
-    // Get peer's address
-    unix_sock_t *peer = usock->peer;
-    if (!peer) {
-      return (uint64_t)-107; // ENOTCONN
-    }
-
-    // Calculate actual address length
-    int actual_len = peer->addr_len;
-    if (actual_len == 0) {
-      // Peer not bound, return empty address
-      actual_len = sizeof(sa_family_t);
-    }
-
-    // Copy as much as fits
-    int copy_len = user_len < actual_len ? user_len : actual_len;
-
-    // Copy peer address to user space
-    if (copy_len > 0) {
-      memcpy((void *)addr_ptr, &peer->addr, copy_len);
-    }
-
-    // Update addrlen to actual size
-    *addrlen = actual_len;
-
-    return 0;
-  } else if (sock->domain == AF_INET) {
-    inet_sock_t *inet = (inet_sock_t *)sock->sk;
-    if (!inet)
-      return (uint64_t)-22;
-
-    if (sock->state != SS_CONNECTED)
-      return (uint64_t)-107; // ENOTCONN
-
-    int *addrlen = (int *)addrlen_ptr;
-    int user_len = *addrlen;
-
-    struct sockaddr_in sin;
-    memset(&sin, 0, sizeof(sin));
-    sin.sin_family = AF_INET;
-    sin.sin_port = inet->remote_addr.sin_port;
-    sin.sin_addr.s_addr = inet->remote_addr.sin_addr.s_addr;
-
-    int actual_len = sizeof(struct sockaddr_in);
-    int copy_len = user_len < actual_len ? user_len : actual_len;
-
-    if (copy_len > 0) {
-      memcpy((void *)addr_ptr, &sin, copy_len);
-    }
-    *addrlen = actual_len;
-    return 0;
-  }
-
-  return (uint64_t)-95; // EOPNOTSUPP
+  return (uint64_t)socket_getpeername(sock, addr, addrlen);
 }
 
 // ── Socket Syscall Registration

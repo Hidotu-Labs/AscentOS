@@ -188,14 +188,14 @@ struct termios console_termios;
 #define MAX_INOTIFY_INSTANCES 32
 
 typedef struct {
-  uint32_t wd;        // Watch descriptor
-  char path[256];     // Path being watched
-  uint32_t mask;      // Event mask (IN_*)
-  uint32_t event_mask;// Accumulated events
+  uint32_t wd;         // Watch descriptor
+  char path[256];      // Path being watched
+  uint32_t mask;       // Event mask (IN_*)
+  uint32_t event_mask; // Accumulated events
 } inotify_watch_t;
 
 typedef struct {
-  uint32_t instance_id;  // Unique inotify instance ID
+  uint32_t instance_id; // Unique inotify instance ID
   inotify_watch_t watches[MAX_INOTIFY_WATCHES];
   uint32_t num_watches;
   uint64_t event_queue[256]; // Simple event queue
@@ -222,26 +222,18 @@ static uint32_t next_watch_id = 1;
 #define IN_DELETE_SELF 0x400
 #define IN_MOVE_SELF 0x800
 
+
+
 int alloc_fd(struct thread *t) {
-  klog_puts("[SYSCALL] alloc_fd: t=");
-  klog_uint64((uint64_t)t);
-  klog_puts(" tid=");
-  klog_uint64(t->tid);
-  klog_puts(" fds_array=");
-  klog_uint64((uint64_t)&t->fds[0]);
-  klog_puts(" fds[4]_addr=");
-  klog_uint64((uint64_t)&t->fds[4]);
-  klog_puts("\n");
   for (int i = 0; i < MAX_FDS; i++) {
     if (t->fds[i] == NULL) {
       klog_puts("[SYSCALL] alloc_fd: found empty fd=");
       klog_uint64(i);
-      klog_puts(" fds[4]=");
-      klog_uint64((uint64_t)t->fds[4]);
       klog_puts("\n");
       return i;
     }
   }
+  klog_puts("[SYSCALL] alloc_fd: EMFILE (all FDs full)\n");
   return -1; // ENFILE
 }
 
@@ -262,9 +254,9 @@ static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags,
   if (fd < 0)
     return (uint64_t)-24; // EMFILE
 
-  klog_puts("[SYSCALL] open: path=");
+  klog_puts("[SYSCALL] opening: \"");
   klog_puts(path);
-  klog_puts(" fd=");
+  klog_puts("\" fd=");
   klog_uint64(fd);
   klog_puts(" tid=");
   klog_uint64(t->tid);
@@ -273,9 +265,7 @@ static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags,
   vfs_node_t *base_dir = fs_root;
   if (path[0] != '/') {
     if (dirfd == AT_FDCWD) {
-      base_dir = vfs_resolve_path_at(fs_root, t->cwd_path);
-      if (!base_dir)
-        base_dir = fs_root; // Fallback
+      base_dir = t->cwd_node ? t->cwd_node : fs_root;
     } else {
       if (dirfd < 0 || dirfd >= MAX_FDS || !t->fds[dirfd])
         return (uint64_t)-9; // EBADF
@@ -457,7 +447,7 @@ open_done:
   vfs_open(node);
   t->fds[fd] = node;
   t->fd_offsets[fd] = 0;
-  
+
   // Store the full path for fchdir support
   if (path[0] == '/') {
     // Absolute path - use as-is
@@ -468,15 +458,17 @@ open_done:
     t->fd_paths[fd][0] = '\0';
     if (t->cwd_path[0] && strcmp(t->cwd_path, "/") != 0) {
       strncpy(t->fd_paths[fd], t->cwd_path, sizeof(t->fd_paths[fd]) - 1);
-      strncat(t->fd_paths[fd], "/", sizeof(t->fd_paths[fd]) - strlen(t->fd_paths[fd]) - 1);
-      strncat(t->fd_paths[fd], path, sizeof(t->fd_paths[fd]) - strlen(t->fd_paths[fd]) - 1);
+      strncat(t->fd_paths[fd], "/",
+              sizeof(t->fd_paths[fd]) - strlen(t->fd_paths[fd]) - 1);
+      strncat(t->fd_paths[fd], path,
+              sizeof(t->fd_paths[fd]) - strlen(t->fd_paths[fd]) - 1);
     } else {
       strcpy(t->fd_paths[fd], "/");
       strncat(t->fd_paths[fd], path, sizeof(t->fd_paths[fd]) - 2);
     }
     t->fd_paths[fd][sizeof(t->fd_paths[fd]) - 1] = '\0';
   }
-  
+
   klog_puts("[SYSCALL] open_done AFTER: fd=");
   klog_uint64(fd);
   klog_puts(" node=");
@@ -512,14 +504,18 @@ static uint64_t sys_dup2(uint64_t oldfd, uint64_t newfd, uint64_t a2,
   (void)a3;
   (void)a4;
   (void)a5;
-  klog_puts("[SYSCALL] dup2: oldfd=");
-  klog_uint64(oldfd);
-  klog_puts(" newfd=");
-  klog_uint64(newfd);
-  klog_puts("\n");
+
   struct thread *t = sched_get_current();
   if (!t || oldfd >= MAX_FDS || newfd >= MAX_FDS || !t->fds[oldfd])
     return (uint64_t)-9;
+
+  if (oldfd == newfd)
+    return newfd;
+
+  // If newfd is already open, close it first.
+  if (t->fds[newfd]) {
+    vfs_close(t->fds[newfd]);
+  }
 
   t->fds[newfd] = t->fds[oldfd];
   t->fd_offsets[newfd] = t->fd_offsets[oldfd];
@@ -556,15 +552,16 @@ static uint64_t sys_read(uint64_t fd, uint64_t buf, uint64_t count, uint64_t a3,
   (void)a5;
 
   struct thread *t = sched_get_current();
-  klog_puts("[SYSCALL] read ENTER tid=");
-  klog_uint64(t->tid);
-  klog_puts(" fd=");
-  klog_uint64(fd);
-  klog_puts(" count=");
-  klog_uint64(count);
-  klog_puts(" fds[0]=");
-  klog_uint64((uint64_t)(t ? t->fds[0] : 0));
-  klog_puts("\n");
+
+  if (t) {
+    klog_puts("[READ] tid=");
+    klog_uint64(t->tid);
+    klog_puts(" fd=");
+    klog_uint64(fd);
+    klog_puts(" count=");
+    klog_uint64(count);
+    klog_puts("\n");
+  }
 
   if (!is_user_ptr(buf) || !vmm_is_user_addr_range_valid(buf, count))
     return (uint64_t)-14; // EFAULT
@@ -578,6 +575,16 @@ static uint64_t sys_read(uint64_t fd, uint64_t buf, uint64_t count, uint64_t a3,
 
   if (bytes_read > 0) {
     t->fd_offsets[fd] += (uint32_t)bytes_read;
+  }
+
+  if (t) {
+    klog_puts("[READ] tid=");
+    klog_uint64(t->tid);
+    klog_puts(" fd=");
+    klog_uint64(fd);
+    klog_puts(" returned bytes=");
+    klog_uint64((uint64_t)(int64_t)bytes_read);
+    klog_puts("\n");
   }
 
   return (uint64_t)(int64_t)bytes_read;
@@ -601,6 +608,21 @@ static uint64_t sys_ftruncate(uint64_t fd, uint64_t length, uint64_t a2,
     return 0;
   }
   return (uint64_t)-1;
+}
+
+static uint64_t sys_flock(uint64_t fd, uint64_t operation, uint64_t a2,
+                          uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)fd;
+  (void)operation;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+
+  // TinyWL/wlroots uses flock() for its lockfiles in
+  // /tmp/wayland/wayland-N.lock For now, always return success to allow the
+  // compositor to start.
+  return 0;
 }
 
 // ── fd_write ─────────────────────────────────────────────────────────────────
@@ -630,6 +652,17 @@ static uint64_t sys_write(uint64_t fd, uint64_t buf, uint64_t count,
   (void)a4;
   (void)a5;
 
+  struct thread *t = sched_get_current();
+  if (t) {
+    klog_puts("[WRITE] tid=");
+    klog_uint64((uint64_t)t->tid);
+    klog_puts(" fd=");
+    klog_uint64(fd);
+    klog_puts(" count=");
+    klog_uint64(count);
+    klog_puts("\n");
+  }
+
   if (!is_user_ptr(buf) || !vmm_is_user_addr_range_valid(buf, count))
     return (uint64_t)-14; // EFAULT
 
@@ -650,6 +683,62 @@ static uint64_t sys_write(uint64_t fd, uint64_t buf, uint64_t count,
   return (uint64_t)r;
 }
 
+static uint64_t sys_sendfile(uint64_t out_fd, uint64_t in_fd,
+                             uint64_t offset_ptr, uint64_t count, uint64_t a4,
+                             uint64_t a5) {
+  (void)a4;
+  (void)a5;
+  struct thread *t = sched_get_current();
+  if (!t || out_fd >= MAX_FDS || in_fd >= MAX_FDS || !t->fds[out_fd] ||
+      !t->fds[in_fd])
+    return (uint64_t)-9; // EBADF
+
+  vfs_node_t *out_node = t->fds[out_fd];
+  vfs_node_t *in_node = t->fds[in_fd];
+
+  uint32_t offset;
+  if (offset_ptr) {
+    if (!vmm_is_user_addr_range_valid(offset_ptr, sizeof(uint64_t)))
+      return (uint64_t)-14; // EFAULT
+    offset = (uint32_t)(*(uint64_t *)offset_ptr);
+  } else {
+    offset = t->fd_offsets[in_fd];
+  }
+
+  uint8_t *buffer = kmalloc(4096);
+  if (!buffer)
+    return (uint64_t)-12; // ENOMEM
+
+  uint32_t total_sent = 0;
+  while (total_sent < count) {
+    uint32_t to_read =
+        (count - total_sent > 4096) ? 4096 : (uint32_t)(count - total_sent);
+    int32_t bytes_read =
+        (int32_t)vfs_read(in_node, offset + total_sent, to_read, buffer);
+    if (bytes_read <= 0)
+      break;
+
+    int32_t bytes_written = (int32_t)vfs_write(out_node, t->fd_offsets[out_fd],
+                                               (uint32_t)bytes_read, buffer);
+    if (bytes_written <= 0)
+      break;
+
+    t->fd_offsets[out_fd] += (uint32_t)bytes_written;
+    total_sent += (uint32_t)bytes_written;
+    if (bytes_written < bytes_read)
+      break;
+  }
+
+  kfree(buffer);
+  if (offset_ptr) {
+    *(uint64_t *)offset_ptr = (uint64_t)(offset + total_sent);
+  } else {
+    t->fd_offsets[in_fd] = offset + total_sent;
+  }
+
+  return (uint64_t)total_sent;
+}
+
 struct user_iovec {
   uint64_t iov_base;
   uint64_t iov_len;
@@ -668,7 +757,7 @@ static uint64_t sys_writev(uint64_t fd, uint64_t iov_u, uint64_t iovcnt,
   struct user_iovec *iov = (struct user_iovec *)iov_u;
 
   struct thread *t = sched_get_current();
-  if (t && t->tid == 13) {
+  if (t) {
     klog_puts("[SYSCALL] writev tid=13 fd=");
     klog_uint64(fd);
     klog_puts(" iovcnt=");
@@ -683,9 +772,21 @@ static uint64_t sys_writev(uint64_t fd, uint64_t iov_u, uint64_t iovcnt,
     uint64_t len = iov[i].iov_len;
     if (len == 0)
       continue;
+
+    // Log stderr output for debugging compositor hangs
+    if (fd == 2 && t) {
+      char log_buf[256];
+      size_t to_log = (len < 255) ? len : 255;
+      memcpy(log_buf, (const void *)base, to_log);
+      log_buf[to_log] = '\0';
+      klog_puts("[STDERR] ");
+      klog_puts(log_buf);
+      klog_puts("\n");
+    }
+
     int64_t w = fd_write((int)fd, (const void *)base, (size_t)len);
     if (w < 0) {
-      if (t && t->tid == 13) {
+      if (t) {
         klog_puts("[SYSCALL] writev tid=13 RETURN ERROR=");
         klog_uint64((uint64_t)(-w));
         klog_puts("\n");
@@ -696,7 +797,7 @@ static uint64_t sys_writev(uint64_t fd, uint64_t iov_u, uint64_t iovcnt,
     if ((size_t)w != len)
       break;
   }
-  if (t && t->tid == 13) {
+  if (t) {
     klog_puts("[SYSCALL] writev tid=13 RETURN=");
     klog_uint64(total);
     klog_puts("\n");
@@ -705,32 +806,49 @@ static uint64_t sys_writev(uint64_t fd, uint64_t iov_u, uint64_t iovcnt,
 }
 
 static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
-                          uint64_t a3, uint64_t a4, uint64_t a5) {
+                           uint64_t a3, uint64_t a4, uint64_t a5) {
   (void)a3;
   (void)a4;
   (void)a5;
 
-  /*
-    klog_puts("[SYSCALL] sys_ioctl fd=");
+  struct thread *t = sched_get_current();
+  if (t) {
+    klog_puts("[IOCTL] tid=");
+    klog_uint64(t->tid);
+    klog_puts(" fd=");
     klog_uint64(fd);
-    klog_puts(" request=");
-    klog_hex64(request);
-    klog_puts(" arg=");
-    klog_hex64(arg);
+    klog_puts(" request=0x");
+    klog_hex32(request);
+    klog_puts(" arg=0x");
+    klog_uint64(arg);
     klog_puts("\n");
-  */
+  }
+
+  // DEBUG: Enable logging for ioctl calls
+  klog_puts("[SYSCALL] sys_ioctl ENTER fd=");
+  klog_uint64(fd);
+  klog_puts(" request=0x");
+  klog_hex32((uint32_t)request);
+  klog_puts(" arg=0x");
+  klog_hex64(arg);
+  klog_puts("\n");
 
   // Most ioctls take pointers. A few take ints. However, no valid integer
   // argument or user pointer should ever be in the kernel/HHDM address range.
   if (arg > USER_ADDR_MAX)
     return (uint64_t)-14; // EFAULT
 
-  struct thread *t = sched_get_current();
   if (!t || fd >= MAX_FDS)
     return (uint64_t)-9; // EBADF
 
   if (fd < MAX_FDS && t->fds[fd]) {
     vfs_node_t *node = t->fds[fd];
+    klog_puts("[SYSCALL] ioctl: node name=");
+    klog_puts(node->name);
+    klog_puts(" has_ioctl=");
+    klog_uint64(node->ioctl ? 1 : 0);
+    klog_puts("\n");
+
     if (node->ioctl) {
       // Generic validation for Linux-encoded ioctls (bits 31:30 determine R/W)
       // IOC_WRITE (0x40000000) -> kernel reads from user
@@ -745,6 +863,10 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
       }
 
       uint64_t res = (uint64_t)node->ioctl(node, (uint32_t)request, arg);
+      klog_puts("[SYSCALL] ioctl: node handler returned 0x");
+      klog_hex64(res);
+      klog_puts("\n");
+
       if (res != (uint64_t)-25) {
         return res;
       }
@@ -859,6 +981,11 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
     return 0;
   }
   default:
+    klog_puts("[SYSCALL] ioctl: unhandled request 0x");
+    klog_hex32((uint32_t)request);
+    klog_puts(" on fd=");
+    klog_uint64(fd);
+    klog_puts(" -> ENOTTY\n");
     return (uint64_t)-25; // ENOTTY
   }
 }
@@ -899,8 +1026,31 @@ static uint64_t sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,
   (void)a5;
 
   struct thread *t = sched_get_current();
-  if (!t || fd >= MAX_FDS || !t->fds[fd])
+  klog_puts("[FCNTL] tid=");
+  if (t)
+    klog_uint64(t->tid);
+  klog_puts(" fd=");
+  klog_uint64(fd);
+  klog_puts(" cmd=");
+  klog_uint64(cmd);
+  klog_puts(" arg=");
+  klog_uint64(arg);
+  klog_puts("\n");
+
+  if (!t || fd >= MAX_FDS || !t->fds[fd]) {
+    klog_puts("[FCNTL] EBADF: fd=");
+    klog_uint64(fd);
+    klog_puts(" tid=");
+    if (t)
+      klog_uint64(t->tid);
+    klog_puts(" fds[fd]=");
+    if (t && fd < MAX_FDS)
+      klog_uint64((uint64_t)t->fds[fd]);
+    else
+      klog_puts("(invalid)");
+    klog_puts("\n");
     return (uint64_t)-9; // EBADF
+  }
 
   switch (cmd) {
   case F_DUPFD:
@@ -921,6 +1071,9 @@ static uint64_t sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,
         return (uint64_t)-24; // EMFILE
     }
     t->fds[newfd] = t->fds[fd];
+    t->fd_offsets[newfd] = t->fd_offsets[fd];
+    vfs_open(t->fds[newfd]);
+
     // For F_DUPFD_CLOEXEC, we'd set FD_CLOEXEC but we don't track per-FD flags
     // yet
     return (uint64_t)newfd;
@@ -1241,6 +1394,14 @@ static uint64_t sys_getdents64(uint64_t fd, uint64_t dirp, uint64_t count,
   if ((node->flags & FS_TYPE_MASK) != FS_DIRECTORY)
     return (uint64_t)-20; // ENOTDIR
 
+  klog_puts("[SYSCALL] getdents64 tid=");
+  klog_uint64(t->tid);
+  klog_puts(" fd=");
+  klog_uint64(fd);
+  klog_puts(" path=");
+  klog_puts(node->name);
+  klog_puts("\n");
+
   uint8_t *buf = (uint8_t *)dirp;
   if (!buf)
     return (uint64_t)-14; // EFAULT
@@ -1297,6 +1458,9 @@ static uint64_t sys_getdents64(uint64_t fd, uint64_t dirp, uint64_t count,
     }
 
     strcpy(entry->d_name, de->name);
+    klog_puts("[DIRENT] ");
+    klog_puts(de->name);
+    klog_puts("\n");
     written += entry_size;
     index++;
   }
@@ -1429,8 +1593,24 @@ static uint64_t sys_mkdir(uint64_t pathname, uint64_t mode, uint64_t a2,
   if (!path)
     return (uint64_t)-14; // EFAULT
 
+  // Strip trailing slashes
+  char clean_path[256];
+  size_t len = strlen(path);
+  if (len == 0 || len >= sizeof(clean_path))
+    return (uint64_t)-14;
+  strcpy(clean_path, path);
+  while (len > 1 && clean_path[len - 1] == '/') {
+    clean_path[len - 1] = '\0';
+    len--;
+  }
+
+  // Handle root directory
+  if (strcmp(clean_path, "/") == 0) {
+    return 0; // Already exists, success
+  }
+
   klog_puts("[MKDIR] path=");
-  klog_puts(path);
+  klog_puts(clean_path);
   klog_puts(" mode=");
   klog_uint64(mode);
   klog_puts("\n");
@@ -1438,29 +1618,26 @@ static uint64_t sys_mkdir(uint64_t pathname, uint64_t mode, uint64_t a2,
   // Split path into parent directory + new dir name
   char parent_path[256];
   char dir_name[128];
-  size_t len = strlen(path);
-  if (len == 0 || len >= 256)
-    return (uint64_t)-14;
 
   const char *slash = 0;
-  for (const char *p = path; *p; p++)
+  for (const char *p = clean_path; *p; p++)
     if (*p == '/')
       slash = p;
 
   vfs_node_t *parent = fs_root;
   if (slash) {
-    size_t parent_len = (size_t)(slash - path);
+    size_t parent_len = (size_t)(slash - clean_path);
     if (parent_len == 0) {
       parent = fs_root;
     } else {
       if (parent_len >= sizeof(parent_path))
         return (uint64_t)-14;
       for (size_t i = 0; i < parent_len; i++)
-        parent_path[i] = path[i];
+        parent_path[i] = clean_path[i];
       parent_path[parent_len] = '\0';
       parent = vfs_resolve_path(parent_path);
-      
-      // Parent yoksa recursive mkdir yap
+
+      // Recursive mkdir if parent doesn't exist
       if (!parent) {
         klog_puts("[MKDIR] Parent not found, creating recursively\n");
         sys_mkdir((uint64_t)parent_path, mode, 0, 0, 0, 0);
@@ -1472,14 +1649,20 @@ static uint64_t sys_mkdir(uint64_t pathname, uint64_t mode, uint64_t a2,
       return (uint64_t)-22; // EINVAL
     strcpy(dir_name, slash + 1);
   } else {
-    strcpy(dir_name, path);
+    strcpy(dir_name, clean_path);
   }
 
   if (!parent || (parent->flags & FS_TYPE_MASK) != FS_DIRECTORY)
     return (uint64_t)-20; // ENOTDIR
 
-  if (vfs_mkdir(parent, dir_name, (uint16_t)mode) != 0)
+  if (vfs_mkdir(parent, dir_name, (uint16_t)mode) != 0) {
+    // Check if it already exists as a directory to make it idempotent
+    vfs_node_t *existing = vfs_finddir(parent, dir_name);
+    if (existing && (existing->flags & FS_TYPE_MASK) == FS_DIRECTORY) {
+      return 0;
+    }
     return (uint64_t)-17; // EEXIST
+  }
 
   return 0;
 }
@@ -1733,6 +1916,9 @@ static uint32_t eventfd_read(vfs_node_t *node, uint32_t offset, uint32_t size,
   spinlock_acquire(&ctx->lock);
   if (ctx->counter == 0) {
     spinlock_release(&ctx->lock);
+    klog_puts("[EVENTFD] counter 0, EAGAIN node=");
+    klog_uint64((uint64_t)node);
+    klog_puts("\n");
     return (uint32_t)-11; // EAGAIN
   }
   uint64_t val;
@@ -1810,7 +1996,7 @@ static uint64_t sys_eventfd2(uint64_t initval, uint64_t flags, uint64_t a2,
   vfs_node_t *node = kmalloc(sizeof(vfs_node_t));
   if (!node)
     return (uint64_t)-12; // ENOMEM
-  memset(node, 0, sizeof(vfs_node_t));
+  vfs_node_init(node);
 
   eventfd_ctx_t *ctx = kmalloc(sizeof(eventfd_ctx_t));
   if (!ctx) {
@@ -1837,15 +2023,319 @@ static uint64_t sys_eventfd2(uint64_t initval, uint64_t flags, uint64_t a2,
   return fd;
 }
 
+// ── timerfd: timerfd_create/settime/gettime — syscalls 283/286/287 ───────────
+#define TFD_NONBLOCK 04000
+#define TFD_CLOEXEC 02000000
+
+typedef struct {
+  uint32_t clockid;
+  uint32_t flags;
+  uint64_t interval_sec;
+  uint64_t interval_nsec;
+  uint64_t expire_ms;   // Absolute expiry time in ms (from lapic_timer)
+  uint64_t expirations; // Number of expirations since last read
+  spinlock_t lock;
+  wait_queue_t wq;
+} timerfd_ctx_t;
+
+static uint32_t timerfd_read(vfs_node_t *node, uint32_t offset, uint32_t size,
+                             uint8_t *buffer) {
+  (void)offset;
+  if (size < 8)
+    return (uint32_t)-22;
+  timerfd_ctx_t *ctx = (timerfd_ctx_t *)node->device;
+  if (!ctx)
+    return (uint32_t)-22;
+
+  spinlock_acquire(&ctx->lock);
+
+  // Check if timer has expired
+  if (ctx->expire_ms > 0) {
+    extern uint64_t lapic_timer_get_ms(void);
+    uint64_t now = lapic_timer_get_ms();
+    if (now >= ctx->expire_ms) {
+      ctx->expirations++;
+      // Re-arm if interval is set
+      if (ctx->interval_sec || ctx->interval_nsec) {
+        uint64_t interval_ms =
+            ctx->interval_sec * 1000 + ctx->interval_nsec / 1000000;
+        if (interval_ms == 0)
+          interval_ms = 1;
+        ctx->expire_ms = now + interval_ms;
+      } else {
+        ctx->expire_ms = 0; // One-shot, disarm
+      }
+    }
+  }
+
+  if (ctx->expirations == 0) {
+    spinlock_release(&ctx->lock);
+    klog_puts("[TIMERFD] counter 0, EAGAIN node=");
+    klog_uint64((uint64_t)node);
+    klog_puts("\n");
+    return (uint32_t)-11; // EAGAIN
+  }
+
+  uint64_t val = ctx->expirations;
+  ctx->expirations = 0;
+  spinlock_release(&ctx->lock);
+
+  memcpy(buffer, &val, 8);
+  return 8;
+}
+
+static int timerfd_poll(vfs_node_t *node, int events) {
+  timerfd_ctx_t *ctx = (timerfd_ctx_t *)node->device;
+  if (!ctx)
+    return 0;
+
+  int revents = 0;
+  spinlock_acquire(&ctx->lock);
+
+  // Check expiry
+  if (ctx->expire_ms > 0) {
+    extern uint64_t lapic_timer_get_ms(void);
+    uint64_t now = lapic_timer_get_ms();
+    if (now >= ctx->expire_ms) {
+      ctx->expirations++;
+      if (ctx->interval_sec || ctx->interval_nsec) {
+        uint64_t interval_ms =
+            ctx->interval_sec * 1000 + ctx->interval_nsec / 1000000;
+        if (interval_ms == 0)
+          interval_ms = 1;
+        ctx->expire_ms = now + interval_ms;
+      } else {
+        ctx->expire_ms = 0;
+      }
+    }
+  }
+
+  if (ctx->expirations > 0)
+    revents |= POLLIN;
+  spinlock_release(&ctx->lock);
+  return revents & events;
+}
+
+static void timerfd_close(vfs_node_t *node) {
+  if (node && node->device)
+    kfree(node->device);
+  kfree(node);
+}
+
+static uint64_t sys_timerfd_create(uint64_t clockid, uint64_t flags,
+                                   uint64_t a2, uint64_t a3, uint64_t a4,
+                                   uint64_t a5) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  struct thread *t = sched_get_current();
+  if (!t)
+    return (uint64_t)-1;
+
+  int fd = alloc_fd(t);
+  if (fd < 0)
+    return (uint64_t)-24;
+
+  timerfd_ctx_t *ctx = kmalloc(sizeof(timerfd_ctx_t));
+  if (!ctx)
+    return (uint64_t)-12;
+  memset(ctx, 0, sizeof(timerfd_ctx_t));
+  ctx->clockid = (uint32_t)clockid;
+  ctx->flags = (uint32_t)flags;
+  spinlock_init(&ctx->lock);
+  wait_queue_init(&ctx->wq);
+
+  vfs_node_t *node = kmalloc(sizeof(vfs_node_t));
+  if (!node) {
+    kfree(ctx);
+    return (uint64_t)-12;
+  }
+  vfs_node_init(node);
+  node->flags = FS_FILE;
+  node->device = ctx;
+  node->read = timerfd_read;
+  node->poll = timerfd_poll;
+  node->close = timerfd_close;
+  node->wait_queue = &ctx->wq;
+
+  t->fds[fd] = node;
+  t->fd_offsets[fd] = 0;
+  return (uint64_t)fd;
+}
+
+struct itimerspec {
+  uint64_t it_interval_sec;
+  uint64_t it_interval_nsec;
+  uint64_t it_value_sec;
+  uint64_t it_value_nsec;
+};
+
+static uint64_t sys_timerfd_settime(uint64_t fd, uint64_t flags_arg,
+                                    uint64_t new_value_ptr,
+                                    uint64_t old_value_ptr, uint64_t a4,
+                                    uint64_t a5) {
+  (void)a4;
+  (void)a5;
+  struct thread *t = sched_get_current();
+  if (!t || fd >= MAX_FDS || !t->fds[fd])
+    return (uint64_t)-9;
+
+  vfs_node_t *node = t->fds[fd];
+  timerfd_ctx_t *ctx = (timerfd_ctx_t *)node->device;
+  if (!ctx)
+    return (uint64_t)-22;
+
+  if (old_value_ptr &&
+      vmm_is_user_addr_range_valid(old_value_ptr, sizeof(struct itimerspec))) {
+    struct itimerspec *old = (struct itimerspec *)old_value_ptr;
+    old->it_interval_sec = ctx->interval_sec;
+    old->it_interval_nsec = ctx->interval_nsec;
+    old->it_value_sec = 0;
+    old->it_value_nsec = 0;
+  }
+
+  if (!new_value_ptr ||
+      !vmm_is_user_addr_range_valid(new_value_ptr, sizeof(struct itimerspec)))
+    return (uint64_t)-14;
+
+  struct itimerspec *nv = (struct itimerspec *)new_value_ptr;
+
+  spinlock_acquire(&ctx->lock);
+  ctx->interval_sec = nv->it_interval_sec;
+  ctx->interval_nsec = nv->it_interval_nsec;
+  ctx->expirations = 0;
+
+  if (nv->it_value_sec == 0 && nv->it_value_nsec == 0) {
+    ctx->expire_ms = 0; // Disarm
+  } else {
+    extern uint64_t lapic_timer_get_ms(void);
+    uint64_t delay_ms = nv->it_value_sec * 1000 + nv->it_value_nsec / 1000000;
+    if (delay_ms == 0)
+      delay_ms = 1;
+    if (flags_arg & 1) {
+      // TFD_TIMER_ABSTIME — treat as absolute (just use delay as-is for now)
+      ctx->expire_ms = delay_ms;
+    } else {
+      ctx->expire_ms = lapic_timer_get_ms() + delay_ms;
+    }
+  }
+  spinlock_release(&ctx->lock);
+  return 0;
+}
+
+static uint64_t sys_timerfd_gettime(uint64_t fd, uint64_t curr_value_ptr,
+                                    uint64_t a2, uint64_t a3, uint64_t a4,
+                                    uint64_t a5) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  struct thread *t = sched_get_current();
+  if (!t || fd >= MAX_FDS || !t->fds[fd])
+    return (uint64_t)-9;
+
+  timerfd_ctx_t *ctx = (timerfd_ctx_t *)t->fds[fd]->device;
+  if (!ctx || !curr_value_ptr ||
+      !vmm_is_user_addr_range_valid(curr_value_ptr, sizeof(struct itimerspec)))
+    return (uint64_t)-14;
+
+  struct itimerspec *cv = (struct itimerspec *)curr_value_ptr;
+  cv->it_interval_sec = ctx->interval_sec;
+  cv->it_interval_nsec = ctx->interval_nsec;
+
+  if (ctx->expire_ms == 0) {
+    cv->it_value_sec = 0;
+    cv->it_value_nsec = 0;
+  } else {
+    extern uint64_t lapic_timer_get_ms(void);
+    uint64_t now = lapic_timer_get_ms();
+    if (now >= ctx->expire_ms) {
+      cv->it_value_sec = 0;
+      cv->it_value_nsec = 1; // Already expired
+    } else {
+      uint64_t remaining = ctx->expire_ms - now;
+      cv->it_value_sec = remaining / 1000;
+      cv->it_value_nsec = (remaining % 1000) * 1000000;
+    }
+  }
+  return 0;
+}
+
+typedef struct {
+  ramfs_file_t ramfs;
+  wait_queue_t wq;
+  spinlock_t lock;
+} pipe_ctx_t;
+
+static uint32_t pipe_read(vfs_node_t *node, uint32_t offset, uint32_t size,
+                          uint8_t *buffer) {
+  (void)offset;
+  pipe_ctx_t *ctx = (pipe_ctx_t *)node->device;
+  if (!ctx)
+    return 0;
+
+  spinlock_acquire(&ctx->lock);
+  if (node->impl >= node->length) {
+    spinlock_release(&ctx->lock);
+    return (uint32_t)-11; // EAGAIN
+  }
+
+  uint32_t ret = ramfs_read(node, node->impl, size, buffer);
+  if (ret > 0) {
+    node->impl += ret;
+    // Optimization: reset buffer if all data consumed
+    if (node->impl >= node->length) {
+      node->impl = 0;
+      node->length = 0;
+    }
+  }
+  spinlock_release(&ctx->lock);
+  return ret;
+}
+
+static uint32_t pipe_write(vfs_node_t *node, uint32_t offset, uint32_t size,
+                           uint8_t *buffer) {
+  (void)offset;
+  pipe_ctx_t *ctx = (pipe_ctx_t *)node->device;
+  if (!ctx)
+    return 0;
+
+  spinlock_acquire(&ctx->lock);
+  uint32_t ret = ramfs_write(node, node->length, size, buffer);
+  spinlock_release(&ctx->lock);
+
+  if (ret > 0) {
+    wait_queue_wake_all(&ctx->wq);
+  }
+  return ret;
+}
+
+static int pipe_poll(vfs_node_t *node, int events) {
+  pipe_ctx_t *ctx = (pipe_ctx_t *)node->device;
+  if (!ctx)
+    return 0;
+
+  int revents = 0;
+  spinlock_acquire(&ctx->lock);
+  if (node->length > node->impl) {
+    revents |= POLLIN;
+  }
+  revents |= POLLOUT; // Always ready to write in this simple impl
+  spinlock_release(&ctx->lock);
+
+  return revents & events;
+}
+
 static void pipe_close(vfs_node_t *node) {
   if (!node || !node->device)
     return;
-  ramfs_file_t *file = (ramfs_file_t *)node->device;
-  if (file->data) {
-    kfree(file->data);
-    file->data = NULL;
+  pipe_ctx_t *ctx = (pipe_ctx_t *)node->device;
+  // Last reference check performed by vfs_close calling this on refcount 0
+  if (ctx->ramfs.data) {
+    kfree(ctx->ramfs.data);
   }
-  kfree(file);
+  kfree(ctx);
   node->device = NULL;
 }
 
@@ -1877,37 +2367,43 @@ static uint64_t sys_pipe2(uint64_t pipefd_ptr, uint64_t flags, uint64_t a2,
     return (uint64_t)-24; // EMFILE
   }
 
-  // Build pipe buffer node directly in kernel heap (avoids ext2 create issues)
+  // Build pipe context
+  pipe_ctx_t *ctx = kmalloc(sizeof(pipe_ctx_t));
+  if (!ctx) {
+    t->fds[fd_read] = NULL;
+    t->fds[fd_write] = NULL;
+    return (uint64_t)-12; // ENOMEM
+  }
+  memset(ctx, 0, sizeof(pipe_ctx_t));
+  spinlock_init(&ctx->lock);
+  wait_queue_init(&ctx->wq);
+
+  // Build pipe buffer node
   vfs_node_t *pipe_node = kmalloc(sizeof(vfs_node_t));
   if (!pipe_node) {
+    kfree(ctx);
     t->fds[fd_read] = NULL;
-    return (uint64_t)-12; // ENOMEM
+    t->fds[fd_write] = NULL;
+    return (uint64_t)-12;
   }
   vfs_node_init(pipe_node);
 
-  ramfs_file_t *pipe_buf = kmalloc(sizeof(ramfs_file_t));
-  if (!pipe_buf) {
-    kfree(pipe_node);
-    t->fds[fd_read] = NULL;
-    return (uint64_t)-12;
-  }
-  pipe_buf->data = NULL;
-  pipe_buf->capacity = 0;
-
-  pipe_node->flags = FS_FILE;
-  pipe_node->device = pipe_buf;
+  pipe_node->flags = FS_PIPE; // Use proper type
+  pipe_node->device = ctx;
   pipe_node->length = 0;
-  pipe_node->read = ramfs_read;
-  pipe_node->write = ramfs_write;
+  pipe_node->impl = 0; // Use as read offset
+  pipe_node->read = pipe_read;
+  pipe_node->write = pipe_write;
+  pipe_node->poll = pipe_poll;
   pipe_node->close = pipe_close;
+  pipe_node->wait_queue = &ctx->wq;
 
-  // Both fds point to the same node; read offset and write offset tracked
-  // separately
+  // Both fds point to the same node
   vfs_open(pipe_node);
   vfs_open(pipe_node);
   t->fds[fd_read] = pipe_node;
   t->fds[fd_write] = pipe_node;
-  t->fd_offsets[fd_read] = 0;
+  t->fd_offsets[fd_read] = 0; // Legacy, ignored by pipe_read/write
   t->fd_offsets[fd_write] = 0;
 
   pipefd[0] = fd_read;
@@ -2598,6 +3094,15 @@ struct pollfd {
 static uint64_t do_poll(struct pollfd *fds, uint64_t nfds,
                         uint64_t timeout_ms) {
   struct thread *t = sched_get_current();
+  if (t) {
+    klog_puts("[POLL] ENTER tid=");
+    klog_uint64(t->tid);
+    klog_puts(" nfds=");
+    klog_uint64(nfds);
+    klog_puts(" timeout=");
+    klog_uint64(timeout_ms);
+    klog_puts("\n");
+  }
   if (!t)
     return (uint64_t)-1;
 
@@ -2691,6 +3196,13 @@ static uint64_t do_poll(struct pollfd *fds, uint64_t nfds,
         ready++;
       }
     }
+  }
+  if (t) {
+    klog_puts("[POLL] RETURN tid=");
+    klog_uint64(t->tid);
+    klog_puts(" ready=");
+    klog_uint64((uint64_t)ready);
+    klog_puts("\n");
   }
   return (uint64_t)ready;
 }
@@ -2859,8 +3371,8 @@ static uint64_t sys_select(uint64_t nfds, uint64_t readfds, uint64_t writefds,
 
 // fchdir(2) - syscall 81
 // Change current directory using file descriptor
-static uint64_t sys_fchdir(uint64_t fd, uint64_t a2, uint64_t a3,
-                           uint64_t a4, uint64_t a5, uint64_t a6) {
+static uint64_t sys_fchdir(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4,
+                           uint64_t a5, uint64_t a6) {
   (void)a2;
   (void)a3;
   (void)a4;
@@ -2886,13 +3398,13 @@ static uint64_t sys_fchdir(uint64_t fd, uint64_t a2, uint64_t a3,
   if (t->fd_paths[fd][0]) {
     strncpy(t->cwd_path, t->fd_paths[fd], sizeof(t->cwd_path) - 1);
     t->cwd_path[sizeof(t->cwd_path) - 1] = '\0';
-    
+
     klog_puts("[FCHDIR] Changed cwd to: ");
     klog_puts(t->cwd_path);
     klog_puts(" via fd=");
     klog_uint64(fd);
     klog_puts("\n");
-    
+
     return 0; // Success
   }
 
@@ -2930,13 +3442,13 @@ static uint64_t sys_statfs(uint64_t path_ptr, uint64_t buf_ptr, uint64_t a3,
   } *buf = (struct statfs_buf *)buf_ptr;
 
   // Basic stub implementation - return dummy values
-  buf->f_type = 0x61657673;    // "aev" in hex - custom filesystem type
-  buf->f_bsize = 4096;         // 4K block size
-  buf->f_blocks = 1024 * 256;  // ~1GB total
-  buf->f_bfree = 1024 * 128;   // ~512MB free
-  buf->f_bavail = 1024 * 128;  // ~512MB available to user
-  buf->f_files = 10000;        // max inodes
-  buf->f_ffree = 5000;         // free inodes
+  buf->f_type = 0x61657673;   // "aev" in hex - custom filesystem type
+  buf->f_bsize = 4096;        // 4K block size
+  buf->f_blocks = 1024 * 256; // ~1GB total
+  buf->f_bfree = 1024 * 128;  // ~512MB free
+  buf->f_bavail = 1024 * 128; // ~512MB available to user
+  buf->f_files = 10000;       // max inodes
+  buf->f_ffree = 5000;        // free inodes
   buf->f_fsid[0] = 1;
   buf->f_fsid[1] = 0;
   buf->f_namelen = 255;
@@ -2999,7 +3511,7 @@ static uint64_t sys_inotify_init(uint64_t a1, uint64_t a2, uint64_t a3,
   vfs_open(node);
   t->fds[fd] = node;
   t->fd_offsets[fd] = 0;
-  
+
   // Build fd_path string: "inotify" (instance ID is stored in node->impl)
   strcpy(t->fd_paths[fd], "inotify");
 
@@ -3121,7 +3633,12 @@ void syscall_register_io(void) {
   syscall_register(SYS_MKDIRAT, sys_mkdirat);
   syscall_register(SYS_UNLINKAT, sys_unlinkat);
   syscall_register(SYS_FTRUNCATE, sys_ftruncate);
+  syscall_register(SYS_FLOCK, sys_flock);
   syscall_register(SYS_FCNTL, sys_fcntl);
+  syscall_register(SYS_SENDFILE, sys_sendfile);
+  syscall_register(SYS_TIMERFD_CREATE, sys_timerfd_create);
+  syscall_register(SYS_TIMERFD_SETTIME, sys_timerfd_settime);
+  syscall_register(SYS_TIMERFD_GETTIME, sys_timerfd_gettime);
   syscall_register(SYS_STAT, sys_stat);
   syscall_register(SYS_FSTAT, sys_fstat);
   syscall_register(SYS_LSTAT, sys_lstat);

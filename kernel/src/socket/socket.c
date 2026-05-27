@@ -11,6 +11,7 @@
 #include "../sched/wait.h"
 #include "af_inet.h"
 #include "af_unix.h"
+#include "af_netlink.h"
 #include "socket_internal.h"
 #include <stdint.h>
 
@@ -165,8 +166,10 @@ void socket_wake(socket_t *sock) {
 
 socket_t *socket_create(int domain, int type, int protocol) {
   // Validate domain
-  if (domain != AF_UNIX && domain != AF_INET) {
-    klog_puts("[WARN] socket: unsupported domain\n");
+  if (domain != AF_UNIX && domain != AF_INET && domain != AF_NETLINK) {
+    klog_puts("[WARN] socket: unsupported domain ");
+    klog_uint64((uint64_t)domain);
+    klog_puts("\n");
     return NULL; // EAFNOSUPPORT
   }
 
@@ -175,8 +178,10 @@ socket_t *socket_create(int domain, int type, int protocol) {
 
   // Validate type
   if (base_type != SOCK_STREAM && base_type != SOCK_DGRAM &&
-      base_type != SOCK_SEQPACKET) {
-    klog_puts("[WARN] socket: unsupported type\n");
+      base_type != SOCK_RAW && base_type != SOCK_SEQPACKET) {
+    klog_puts("[WARN] socket: unsupported type ");
+    klog_uint64((uint64_t)base_type);
+    klog_puts("\n");
     return NULL; // EPROTONOSUPPORT
   }
 
@@ -382,6 +387,18 @@ ssize_t socket_recvfrom(socket_t *sock, void *buf, size_t len, int flags,
     return -95;
 
   return sock->ops->recvfrom(sock, buf, len, flags, src_addr, addrlen);
+}
+
+int socket_getsockname(socket_t *sock, struct sockaddr *addr, int *addrlen) {
+  if (!sock) return -9; // EBADF
+  if (!sock->ops || !sock->ops->getsockname) return -95; // EOPNOTSUPP
+  return sock->ops->getsockname(sock, addr, addrlen);
+}
+
+int socket_getpeername(socket_t *sock, struct sockaddr *addr, int *addrlen) {
+  if (!sock) return -9; // EBADF
+  if (!sock->ops || !sock->ops->getpeername) return -95; // EOPNOTSUPP
+  return sock->ops->getpeername(sock, addr, addrlen);
 }
 
 // ── Socketpair Creation
@@ -643,6 +660,7 @@ void socket_init(void) {
   // Register socket families
   af_unix_init();
   af_inet_init();
+  af_netlink_init();
 
   klog_puts("[OK] Socket subsystem initialized (max sockets: ");
   klog_uint64(SOCKET_MAX_COUNT);

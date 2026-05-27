@@ -144,6 +144,12 @@ typedef struct {
   uint32_t inodes_per_group; // Inodes per group
   uint32_t inode_size;       // Size of an inode on disk
   vfs_node_t *root_node;     // VFS node for the ext2 root directory
+  
+  // Simple block cache
+  struct {
+    uint32_t num;
+    uint8_t *data;
+  } cache[32];
 } ext2_mount_t;
 
 // ── Public API ──────────────────────────────────────────────────────────────

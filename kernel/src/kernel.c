@@ -474,12 +474,16 @@ mount_success:
   // Mount /dev and /tmp as in-memory filesystems
   ramfs_mount_at("/dev");
   ramfs_mount_at("/tmp");
+  
+  extern void sysfs_init(void);
+  sysfs_init();
 
   // Re-populate /dev in the new root
   block_repopulate_devices();
   fb_register_vfs();
   drm_init();
   drm_register_vfs();
+  fb_detect_drm_backend(); // Detect DRM after it's been registered
   mouse_register_vfs();
   random_register_vfs();
   procfs_init();
@@ -503,7 +507,6 @@ mount_fail:
   // Initialize networking and run stress tests BEFORE spawning init thread
   if (nic_is_present()) {
     net_init();
-
 
     // Run self-test as a background thread on any available CPU
     extern void af_inet_self_test(void);

@@ -1,4 +1,5 @@
 #include "vfs.h"
+#include "../console/klog.h"
 #include "../lib/string.h"
 #include "../mm/heap.h"
 
@@ -15,7 +16,22 @@ static vfs_mount_entry_t *vfs_mount_list = NULL;
 uint32_t vfs_read(vfs_node_t *node, uint32_t offset, uint32_t size,
                   uint8_t *buffer) {
   if (node && node->read) {
-    return node->read(node, offset, size, buffer);
+    uint32_t ret = node->read(node, offset, size, buffer);
+    /* if (ret == 0 && size > 0) {
+      klog_puts("[VFS] node->read returned 0 node=");
+      klog_uint64((uint64_t)node);
+      klog_puts(" name=");
+      klog_puts(node->name);
+      klog_puts("\n");
+    } */
+    return ret;
+  }
+  if (node && !node->read) {
+    klog_puts("[VFS] node->read is NULL node=");
+    klog_uint64((uint64_t)node);
+    klog_puts(" name=");
+    klog_puts(node->name);
+    klog_puts("\n");
   }
   return 0;
 }
@@ -313,6 +329,7 @@ void vfs_node_init(vfs_node_t *node) {
   memset(node, 0, sizeof(vfs_node_t));
   INIT_LIST_HEAD(&node->ep_watchers);
   spinlock_init(&node->ep_lock);
+  node->refcount = 1;
 }
 
 int vfs_mount(vfs_node_t *mountpoint, vfs_node_t *target) {

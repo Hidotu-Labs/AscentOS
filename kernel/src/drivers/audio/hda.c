@@ -35,8 +35,8 @@ static struct hda_bdl_entry *hda_vfs_bdl = NULL;
 static uint64_t hda_vfs_bdl_phys = 0;
 static uint8_t *hda_vfs_buf = NULL;
 static uint64_t hda_vfs_buf_phys = 0;
-#define HDA_VFS_BUF_SIZE  16384
-#define HDA_VFS_NUM_BDL   4
+#define HDA_VFS_BUF_SIZE 16384
+#define HDA_VFS_NUM_BDL 4
 #define HDA_VFS_TOTAL_SIZE (HDA_VFS_BUF_SIZE * HDA_VFS_NUM_BDL)
 
 // IOCTLs (Shared with AC97/OSS)
@@ -979,8 +979,8 @@ static uint32_t hda_vfs_write(struct vfs_node *node, uint32_t offset,
       hda_write16(sd_off + HDA_SD_FMT, hw_fmt);
 
       // Update codec widgets
-      hda_send_verb_immediate(hda_codec_addr, hda_dac_node,
-                              HDA_VERB_SET_FORMAT, hw_fmt);
+      hda_send_verb_immediate(hda_codec_addr, hda_dac_node, HDA_VERB_SET_FORMAT,
+                              hw_fmt);
       hda_send_verb_immediate(hda_codec_addr, hda_dac_node,
                               HDA_VERB_SET_STREAM_ID, (1 << 4));
       hda_send_verb_immediate(hda_codec_addr, hda_dac_node,

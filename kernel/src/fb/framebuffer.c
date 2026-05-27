@@ -3,6 +3,7 @@
 #include "../console/klog.h"
 #include "../drivers/input/keyboard.h"
 #include "../drivers/pty.h"
+#include "../font/font.h"
 #include "../fs/ramfs.h"
 #include "../fs/vfs.h"
 #include "../lib/string.h"
@@ -15,7 +16,6 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-
 // ── Device Node Registry ────────────────────────────────────────────────────
 // Keeps track of character device nodes so they persist across lookups
 #define MAX_DEVICES 32
@@ -27,6 +27,10 @@ typedef struct {
 
 static device_entry_t device_registry[MAX_DEVICES];
 static int device_count = 0;
+
+// ── Display Backend Selection ────────────────────────────────────────────────
+static fb_backend_t display_backend = FB_BACKEND_LIMINE; // Default fallback
+static bool drm_available = false;
 
 // Register a device node in the registry
 void fb_register_device_node(const char *name, vfs_node_t *node) {
@@ -78,6 +82,50 @@ vfs_node_t *fb_lookup_device(const char *name) {
   return NULL;
 }
 
+/**
+ * fb_try_drm_device() - Detect and attempt to use DRM for display
+ * Returns: true if DRM device is available and can be used, false otherwise
+ * Note: This should be called after /dev is mounted and populated
+ */
+static bool fb_try_drm_device(void) {
+  // Try to locate DRM device node at /dev/dri/card0
+  vfs_node_t *drm_device = vfs_resolve_path("/dev/dri/card0");
+  if (!drm_device) {
+    klog_puts("[FB] DRM device /dev/dri/card0 not found, using framebuffer "
+              "fallback\n");
+    return false;
+  }
+
+  klog_puts("[FB] DRM device detected at /dev/dri/card0\n");
+  return true;
+}
+
+fb_backend_t fb_get_backend(void) { return display_backend; }
+
+const char *fb_get_backend_name(void) {
+  switch (display_backend) {
+  case FB_BACKEND_DRM:
+    return "DRM";
+  case FB_BACKEND_LIMINE:
+  default:
+    return "Limine Framebuffer";
+  }
+}
+
+/**
+ * fb_detect_drm_backend() - Detect DRM after it's been registered
+ * Call this after drm_register_vfs() to switch to DRM if available
+ */
+void fb_detect_drm_backend(void) {
+  if (fb_try_drm_device()) {
+    display_backend = FB_BACKEND_DRM;
+    drm_available = true;
+    klog_puts("[FB] Display backend switched to: DRM\n");
+  } else {
+    klog_puts("[FB] DRM not available, keeping: Limine Framebuffer\n");
+  }
+}
+
 static struct limine_framebuffer fb_local;
 static struct limine_framebuffer *fb = NULL;
 static void *backbuffer = NULL;
@@ -114,10 +162,15 @@ void fb_init(struct limine_framebuffer *framebuffer) {
   if (!framebuffer)
     return;
 
+  // Initialize with Limine framebuffer as default
+  // DRM will be detected later in fb_register_vfs() after /dev is mounted
+  display_backend = FB_BACKEND_LIMINE;
+  drm_available = false;
+
   memcpy(&fb_local, framebuffer, sizeof(struct limine_framebuffer));
   fb = &fb_local;
 
-  klog_puts("[FB] Initializing Framebuffer:\n");
+  klog_puts("[FB] Initializing Framebuffer (early):\n");
   klog_puts("     Resolution: ");
   klog_uint64(fb->width);
   klog_puts("x");
@@ -931,6 +984,42 @@ static int tty0_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     console_pgid = (uint32_t)*pgid;
     return 0;
   }
+  case TIOCGWINSZ: {
+    struct winsize *ws = (struct winsize *)arg;
+    if (!ws)
+      return -14;
+    ws->ws_row = (unsigned short)(fb_get_height() / FONT_HEIGHT);
+    ws->ws_col = (unsigned short)(fb_get_width() / FONT_WIDTH);
+    ws->ws_xpixel = (unsigned short)fb_get_width();
+    ws->ws_ypixel = (unsigned short)fb_get_height();
+    return 0;
+  }
+  case TIOCSWINSZ: {
+    struct winsize *ws = (struct winsize *)arg;
+    if (!ws)
+      return -14;
+    // Window size is read-only in our implementation
+    // but return success to avoid breaking applications
+    return 0;
+  }
+  case TCGETS: {
+    struct termios *term = (struct termios *)arg;
+    if (!term)
+      return -14;
+    extern struct termios console_termios;
+    *term = console_termios;
+    return 0;
+  }
+  case TCSETS:
+  case TCSETSW:
+  case TCSETSF: {
+    const struct termios *term = (const struct termios *)arg;
+    if (!term)
+      return -14;
+    extern struct termios console_termios;
+    console_termios = *term;
+    return 0;
+  }
   default:
     return -25; // ENOTTY
   }
@@ -948,7 +1037,7 @@ void fb_register_vfs(void) {
 
   uint32_t fb_size = fb->height * fb->pitch;
 
-  // /dev/fb0 - Framebuffer device
+  // /dev/fb0 - Framebuffer device (always available as fallback)
   setup_chardev(dev_dir, "fb0", fb_vfs_read, fb_vfs_write, NULL, NULL, NULL,
                 fb_ioctl, fb_vfs_mmap, fb, fb_size);
 

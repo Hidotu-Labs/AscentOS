@@ -25,10 +25,15 @@ void syscall_register_raw(int num, syscall_raw_handler_t handler) {
 // ── Dispatcher (called from syscall_entry.asm) ──────────────────────────────
 void syscall_dispatcher(struct syscall_regs *regs) {
   struct thread *t = sched_get_current();
-  if (t && t->tid == 13) {
-    klog_puts("[SYSCALL] tid=13 syscall=");
+  if (t) {
+    /* klog_puts("[SYSCALL] tid=");
+    klog_uint64(t->tid);
+    klog_puts(" rax=");
     klog_uint64(regs->rax);
+    klog_puts(" rdi=");
+    klog_uint64(regs->rdi);
     klog_puts("\n");
+    */
   }
 
   if (regs->rax >= MAX_SYSCALL) {
@@ -59,8 +64,10 @@ void syscall_dispatcher(struct syscall_regs *regs) {
   regs->rax =
       handler(regs->rdi, regs->rsi, regs->rdx, regs->r10, regs->r8, regs->r9);
 
-  // Log syscall errors (negative return values), exclude EAGAIN (-11) and ENOENT (-2)
-  if ((int64_t)regs->rax < 0 && (int64_t)regs->rax != -11 && (int64_t)regs->rax != -2) {
+  // Log syscall errors (negative return values), exclude EAGAIN (-11) and
+  // ENOENT (-2)
+  if ((int64_t)regs->rax < 0 && (int64_t)regs->rax != -11 &&
+      (int64_t)regs->rax != -2) {
     klog_puts("[SYSCALL ERR] syscall ");
     klog_uint64(syscall_num);
     klog_puts(" returned error: ");

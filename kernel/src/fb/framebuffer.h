@@ -6,6 +6,12 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+// Display backend types
+typedef enum {
+  FB_BACKEND_LIMINE,  // Limine framebuffer (fallback)
+  FB_BACKEND_DRM,     // DRM device
+} fb_backend_t;
+
 #define FBIOGET_VSCREENINFO 0x4600
 #define FBIOPUT_VSCREENINFO 0x4601
 #define FBIOGET_FSCREENINFO 0x4602
@@ -93,5 +99,10 @@ void fb_mark_dirty(uint32_t x, uint32_t y, uint32_t w, uint32_t h);
 void fb_register_vfs(void);
 void fb_register_device_node(const char *name, vfs_node_t *node);
 vfs_node_t *fb_lookup_device(const char *name);
+
+// Backend selection and querying
+fb_backend_t fb_get_backend(void);
+const char *fb_get_backend_name(void);
+void fb_detect_drm_backend(void);  // Call this after DRM is registered
 
 #endif

@@ -138,6 +138,10 @@ void process_do_exit(uint64_t status) {
       struct cpu_info *cpu = cpu_get_current();
       __asm__ volatile("mov %0, %%cr3" ::"r"(cpu->kernel_cr3) : "memory");
     }
+    if (current->cwd_node) {
+      vfs_close(current->cwd_node);
+      current->cwd_node = NULL;
+    }
   }
 
   if (current && current->is_forked_child) {
@@ -269,6 +273,9 @@ static uint64_t sys_chdir(uint64_t path_ptr, uint64_t a1, uint64_t a2,
     return (uint64_t)-20; // ENOTDIR
 
   // If validation passes, update thread
+  if (current->cwd_node) vfs_close(current->cwd_node);
+  current->cwd_node = node; // vfs_resolve_path_at already opened it
+  
   strncpy(current->cwd_path, new_path, 255);
   current->cwd_path[255] = '\0';
 
@@ -614,6 +621,8 @@ uint64_t sys_fork(struct syscall_regs *regs) {
       spinlock_init(&child->mm->lock);
     }
     memcpy(child->cwd_path, parent->cwd_path, sizeof(child->cwd_path));
+    child->cwd_node = parent->cwd_node;
+    if (child->cwd_node) vfs_open(child->cwd_node);
     memcpy(child->signal_handlers, parent->signal_handlers,
            sizeof(child->signal_handlers));
     child->fs_base = parent->fs_base;
@@ -791,6 +800,8 @@ static uint64_t sys_clone(struct syscall_regs *regs) {
   // Shared state copies
   child->mm = child_mm;
   memcpy(child->cwd_path, parent->cwd_path, sizeof(child->cwd_path));
+  child->cwd_node = parent->cwd_node;
+  if (child->cwd_node) vfs_open(child->cwd_node);
   child->uid = parent->uid;
   child->gid = parent->gid;
   child->euid = parent->euid;

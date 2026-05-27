@@ -221,7 +221,7 @@ static bool do_elf_load(const char *path, uint64_t *pml4, uint64_t load_base,
           prot |= 0x4; // PF_X -> PROT_EXEC
 
         vma_add(&current_thread->mm->vmas, start_page, end_page, prot,
-                MAP_PRIVATE, -1, 0);
+                MAP_PRIVATE, -1, 0, NULL);
       }
 
       if (filesz > 0) {
@@ -318,7 +318,7 @@ bool elf_load(const char *path, uint64_t *pml4, elf_info_t *out_info) {
   // Page-align the brk base upward and set current brk.
   if (current_thread && current_thread->mm) {
     vma_add(&current_thread->mm->vmas, stack_bottom, stack_top, 0x3,
-            0x22 | MAP_GROWSDOWN, -1, 0);
+            0x22 | MAP_GROWSDOWN, -1, 0, NULL);
 
     current_thread->mm->brk_base =
         (current_thread->mm->brk_base + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);

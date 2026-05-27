@@ -1,7 +1,9 @@
-#include "drm.h"
+#include "../../../console/klog.h"
 #include "../../../mm/heap.h"
 #include "../../../lib/string.h"
-#include "../../../console/klog.h"
+#include "drm.h"
+
+extern struct drm_gem_object *drm_gem_find_by_handle(struct drm_device *dev, uint32_t handle);
 
 void drm_mode_object_init(struct drm_device *dev, struct drm_mode_object *obj, uint32_t type) {
     spinlock_acquire(&dev->lock);
@@ -58,6 +60,10 @@ void drm_kms_init(struct drm_device *dev) {
     // 1. Create a primary plane
     struct drm_plane *primary = drm_plane_create(dev, 0x1);
     
+    // 1a. Create a cursor plane
+    struct drm_plane *cursor = drm_plane_create(dev, 0x1);
+    (void)cursor;
+
     // 2. Create a CRTC and link to primary plane
     struct drm_crtc *crtc = drm_crtc_create(dev, primary);
 
@@ -77,4 +83,35 @@ void drm_kms_init(struct drm_device *dev) {
     klog_puts(") -> Connector(");
     klog_uint64(connector->base.id);
     klog_puts(")\n");
+}
+
+struct drm_framebuffer *drm_framebuffer_create(struct drm_device *dev, struct drm_mode_fb_cmd *cmd) {
+    struct drm_gem_object *gem_obj = drm_gem_find_by_handle(dev, cmd->handle);
+    if (!gem_obj) return NULL;
+
+    struct drm_framebuffer *fb = kmalloc(sizeof(struct drm_framebuffer));
+    if (!fb) return NULL;
+    memset(fb, 0, sizeof(struct drm_framebuffer));
+
+    fb->width = cmd->width;
+    fb->height = cmd->height;
+    fb->pitch = cmd->pitch;
+    fb->bpp = cmd->bpp;
+    fb->gem_obj = gem_obj;
+    gem_obj->refcount++;
+
+    drm_mode_object_init(dev, &fb->base, DRM_MODE_OBJECT_FB);
+    return fb;
+}
+
+void drm_framebuffer_free(struct drm_device *dev, struct drm_framebuffer *fb) {
+    spinlock_acquire(&dev->lock);
+    list_del(&fb->base.list);
+    spinlock_release(&dev->lock);
+
+    if (fb->gem_obj) {
+        fb->gem_obj->refcount--;
+        // If we had a real GEM system we would check for 0 here
+    }
+    kfree(fb);
 }

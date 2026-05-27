@@ -11,14 +11,33 @@ typedef int64_t ssize_t;
 
 // ── Address Families ─────────────────────────────────────────────────────────
 #define AF_UNSPEC 0
+// ── Socket Address Family Type ──────────────────────────────────────────────
+typedef uint16_t sa_family_t;
+
 #define AF_UNIX 1   // Unix domain sockets
 #define AF_INET 2   // Internet IP Protocol (future)
 #define AF_INET6 10 // Internet IP v6 (future)
+#define AF_NETLINK 16 // Netlink kernel interface
+#define NETLINK_ROUTE 0
+#define NETLINK_KOBJECT_UEVENT 15
+
+// ── Netlink Address Structure ───────────────────────────────────────────────
+struct sockaddr_nl {
+  sa_family_t nl_family;   // AF_NETLINK
+  unsigned short nl_pad;   // zero
+  uint32_t nl_pid;         // port ID
+  uint32_t nl_groups;      // multicast groups mask
+};
+
+#define SOL_NETLINK 270
+#define NETLINK_ADD_MEMBERSHIP 1
+#define NETLINK_DROP_MEMBERSHIP 2
 
 // ── Socket Types
 // ──────────────────────────────────────────────────────────────
 #define SOCK_STREAM 1    // Stream (connection-oriented)
 #define SOCK_DGRAM 2     // Datagram (connectionless)
+#define SOCK_RAW 3       // Raw socket
 #define SOCK_SEQPACKET 5 // Sequenced packet stream
 
 // ── Socket States
@@ -35,20 +54,29 @@ typedef int64_t ssize_t;
 // ── Socket Options
 // ────────────────────────────────────────────────────────────
 #define SO_REUSEADDR 2
-#define SO_KEEPALIVE 3
+#define SO_TYPE 3
+#define SO_ERROR 4
+#define SO_DONTROUTE 5
 #define SO_BROADCAST 6
 #define SO_SNDBUF 7
 #define SO_RCVBUF 8
-#define SO_RCVTIMEO 20
-#define SO_SNDTIMEO 21
-#define SO_ERROR 4
-#define SO_TYPE 3
-#define SO_DOMAIN 39
-#define SO_PROTOCOL 38
-#define SO_SNDBUFFORCE 32
-#define SO_RCVBUFFORCE 33
+#define SO_KEEPALIVE 9
+#define SO_OOBINLINE 10
+#define SO_NO_CHECK 11
+#define SO_PRIORITY 12
+#define SO_LINGER 13
+#define SO_BSDCOMPAT 14
+#define SO_REUSEPORT 15
 #define SO_PASSCRED 16
 #define SO_PEERCRED 17
+#define SO_RCVLOWAT 18
+#define SO_SNDLOWAT 19
+#define SO_RCVTIMEO 20
+#define SO_SNDTIMEO 21
+#define SO_RCVBUFFORCE 33
+#define SO_SNDBUFFORCE 32
+#define SO_DOMAIN 39
+#define SO_PROTOCOL 38
 #define SO_ACCEPTCONN 30
 
 // ── Socket Flags ─────────────────────────────────────────────────────────────
@@ -59,6 +87,7 @@ typedef int64_t ssize_t;
 #define MSG_OOB 0x0001
 #define MSG_PEEK 0x0002
 #define MSG_DONTROUTE 0x0004
+#define MSG_CTRUNC 0x0008
 #define MSG_TRUNC 0x0020
 #define MSG_DONTWAIT 0x0040
 #define MSG_EOR 0x0080
@@ -98,7 +127,7 @@ struct sock_ops;
 struct vfs_node;
 
 // ── Socket Address Family Type ──────────────────────────────────────────────
-typedef uint16_t sa_family_t;
+// (moved up)
 
 // ── IPv4 Address Structure ──────────────────────────────────────────────────
 struct in_addr {
@@ -127,6 +156,21 @@ struct sockaddr {
 
 // ── Unix Domain Socket Address
 // ────────────────────────────────────────────────
+struct iovec {
+  void *iov_base;
+  size_t iov_len;
+};
+
+struct msghdr {
+  void *msg_name;        // Source address (for recvmsg)
+  size_t msg_namelen;    // Address length
+  struct iovec *msg_iov; // Scatter/gather array
+  size_t msg_iovlen;     // Number of iovec elements
+  void *msg_control;     // Ancillary data
+  size_t msg_controllen; // Ancillary data length
+  int msg_flags;         // Flags on received message
+};
+
 struct sockaddr_un {
   sa_family_t sun_family;
   char sun_path[UNIX_PATH_MAX];
@@ -149,9 +193,13 @@ typedef struct sock_ops {
                     int *optlen);
   int (*setsockopt)(struct socket *sock, int level, int optname,
                     const void *optval, int optlen);
+  ssize_t (*sendmsg)(struct socket *sock, struct msghdr *msg, int flags);
+  ssize_t (*recvmsg)(struct socket *sock, struct msghdr *msg, int flags);
   int (*shutdown)(struct socket *sock, int how);
   int (*poll)(struct socket *sock, int events);
   int (*ioctl)(struct socket *sock, uint32_t request, uint64_t arg);
+  int (*getsockname)(struct socket *sock, struct sockaddr *addr, int *addrlen);
+  int (*getpeername)(struct socket *sock, struct sockaddr *addr, int *addrlen);
   void (*destroy)(struct socket *sock);
 } sock_ops_t;
 
@@ -221,9 +269,34 @@ typedef struct net_family {
 void sock_register_family(net_family_t *family);
 net_family_t *sock_lookup_family(int family);
 
-// ── Default Socket Buffer Sizes
-// ───────────────────────────────────────────────
+// ── Default Socket Buffer Sizes ───────────────────────────────────────────────
 #define SOCKET_DEFAULT_RCVBUF 65536
 #define SOCKET_DEFAULT_SNDBUF 65536
+
+// ── Ancillary Data Support ──────────────────────────────────────────────────
+#define SCM_RIGHTS 0x01
+
+struct cmsghdr {
+  size_t cmsg_len;   // Data byte count, including header
+  int cmsg_level;    // Originating protocol
+  int cmsg_type;     // Protocol-specific type
+};
+
+// Alignment macros for cmsg
+#define CMSG_ALIGN(len) (((len) + sizeof(size_t) - 1) & (size_t) ~(sizeof(size_t) - 1))
+#define CMSG_DATA(cmsg) ((unsigned char *)(cmsg) + CMSG_ALIGN(sizeof(struct cmsghdr)))
+#define CMSG_SPACE(len) (CMSG_ALIGN(sizeof(struct cmsghdr)) + CMSG_ALIGN(len))
+#define CMSG_LEN(len) (CMSG_ALIGN(sizeof(struct cmsghdr)) + (len))
+#define CMSG_FIRSTHDR(mhdr) \
+    ((size_t)(mhdr)->msg_controllen >= sizeof(struct cmsghdr) ? \
+     (struct cmsghdr *)(mhdr)->msg_control : \
+     (struct cmsghdr *)0)
+
+#define CMSG_NXTHDR(mhdr, cmsg) \
+    (((unsigned char *)(cmsg) + CMSG_ALIGN((cmsg)->cmsg_len) + \
+      sizeof(struct cmsghdr) > \
+      (unsigned char *)(mhdr)->msg_control + (mhdr)->msg_controllen) ? \
+     (struct cmsghdr *)0 : \
+     (struct cmsghdr *)((unsigned char *)(cmsg) + CMSG_ALIGN((cmsg)->cmsg_len)))
 
 #endif // SOCKET_H

@@ -316,87 +316,57 @@ static int unix_connect(socket_t *sock, struct sockaddr *addr, int addrlen) {
     return -111; // ECONNREFUSED
   }
 
-  // Check if filesystem socket was unlinked (node is NULL)
-  // Abstract sockets don't have a VFS node, so skip this check for them
-  if (!dusk->is_abstract && !dusk->parent->node) {
-    klog_puts("[WARN] unix_connect: listener was unlinked\n");
-    return -111; // ECONNREFUSED
+  // Create the server-side socket for this connection EARLY
+  socket_t *server_sock =
+      socket_create(sock->domain, sock->type, sock->protocol);
+  if (!server_sock) {
+    return -12; // ENOMEM
   }
+  unix_sock_t *server_usk = (unix_sock_t *)server_sock->sk;
 
-  // Lock the listener to add to its accept queue
+  // Establish the peer relationship IMMEDIATELY
+  usk->peer = server_usk;
+  server_usk->peer = usk;
+
+  // Update states
+  sock->state = SS_CONNECTED;
+  server_sock->state = SS_CONNECTED;
+
+  // Lock the listener to add the server socket to its accept queue
   spinlock_acquire(&dusk->parent->lock);
 
   if (dusk->accept_queue_len >= dusk->backlog) {
     spinlock_release(&dusk->parent->lock);
     klog_puts("[WARN] unix_connect: listener backlog full\n");
+    usk->peer = NULL;
+    server_usk->peer = NULL;
+    socket_put(server_sock);
     return -111; // ECONNREFUSED
   }
 
-  // Add ourselves to the accept queue
-  usk->accept_next = NULL;
+  // Add the server socket to the accept queue
+  server_usk->accept_next = NULL;
   if (dusk->accept_next == NULL) {
-    dusk->accept_next = usk;
+    dusk->accept_next = server_usk;
   } else {
     unix_sock_t *curr = dusk->accept_next;
     while (curr->accept_next) {
       curr = curr->accept_next;
     }
-    curr->accept_next = usk;
+    curr->accept_next = server_usk;
   }
   dusk->accept_queue_len++;
 
-  // Notify epoll watchers that listener has pending connection
-  // Check is_abstract FIRST - abstract sockets have a VFS node but need
-  // FD-based notification
+  // Notify listener
   if (dusk->is_abstract) {
-    // Abstract socket - notify by FD
-    klog_puts("[UNIX_CONNECT] notifying epoll for abstract socket fd=");
-    klog_uint64(dusk->parent->fd);
-    klog_puts("\n");
     epoll_notify_socket(dusk->parent->fd, POLLIN);
   } else if (dusk->parent->node) {
     epoll_notify_event(dusk->parent->node, POLLIN);
   }
-
-  // Update state - connection is queued
-  sock->state = SS_CONNECTING;
-  usk->listener = dusk;
-
-  // Wake up the listener (for accept)
-  wait_queue_wake_all(&dusk->wait);
+  wait_queue_wake_all(dusk->wait);
 
   spinlock_release(&dusk->parent->lock);
 
-  // For blocking sockets, wait for the connection to be accepted
-  if (!(sock->flags & SOCK_NONBLOCK)) {
-    // Wait until our state changes to SS_CONNECTED
-    while (sock->state == SS_CONNECTING) {
-      struct thread *current = sched_get_current();
-      wait_queue_entry_t entry;
-      entry.thread = current;
-      entry.next = NULL;
-
-      wait_queue_add(&usk->wait, &entry);
-      current->state = THREAD_BLOCKED;
-
-      // Re-check state while holding dusk->parent->lock OR just before
-      // yielding. But we don't hold any lock here currently. Wait, we need to
-      // hold dusk->parent->lock to check usk->listener and state safely?
-      // Actually at this point usk->wait is the wait queue where we expect the
-      // wakeup.
-
-      if (sock->state != SS_CONNECTING) {
-        current->state = THREAD_RUNNING;
-      } else {
-        sched_yield();
-      }
-
-      wait_queue_remove(&usk->wait, &entry);
-      current->state = THREAD_RUNNING;
-    }
-  }
-
-  // Return 0 - connection is established (or still connecting for non-blocking)
   return 0;
 }
 
@@ -421,7 +391,7 @@ static int unix_accept(socket_t *sock, socket_t **newsock) {
     entry.thread = current;
     entry.next = NULL;
 
-    wait_queue_add(&usk->wait, &entry);
+    wait_queue_add(usk->wait, &entry);
     current->state = THREAD_BLOCKED;
 
     // Check again while BLOCKED
@@ -434,56 +404,23 @@ static int unix_accept(socket_t *sock, socket_t **newsock) {
       spinlock_acquire(&sock->lock);
     }
 
-    wait_queue_remove(&usk->wait, &entry);
+    wait_queue_remove(usk->wait, &entry);
     current->state = THREAD_RUNNING;
   }
 
-  // Dequeue the first pending connection
-  unix_sock_t *client_usk = usk->accept_next;
-  usk->accept_next = client_usk->accept_next;
+  // Dequeue the already-created server socket
+  unix_sock_t *new_usk = usk->accept_next;
+  usk->accept_next = new_usk->accept_next;
   usk->accept_queue_len--;
 
   spinlock_release(&sock->lock);
 
-  // Create a NEW socket for the server-side of this connection
-  socket_t *new_sock = socket_create(sock->domain, sock->type, sock->protocol);
-  if (!new_sock) {
-    // If client was orphaned, free it
-    if (client_usk->orphaned) {
-      kfree(client_usk);
-    }
-    return -12;
-  }
-
-  unix_sock_t *new_usk = (unix_sock_t *)new_sock->sk;
-
-  // Handle orphaned connection (client closed before accept)
-  if (client_usk->orphaned) {
-    // Client already closed - create an accepted socket that immediately shows
-    // EOF
-    new_sock->state = SS_DISCONNECTING;
-    new_usk->peer = NULL;
-    new_usk->accepted_orphaned = true; // Signal POLLIN for EOF
-    kfree(client_usk);
-    *newsock = new_sock;
-    klog_puts("[OK] unix_accept: accepted orphaned connection (EOF)\n");
-    return 0;
-  }
-
-  // Establish the peer relationship
-  new_usk->peer = client_usk;
-  client_usk->peer = new_usk;
-
-  // Update states
-  new_sock->state = SS_CONNECTED;
-  client_usk->parent->state = SS_CONNECTED;
-
-  // Wake up the waiting client
-  wait_queue_wake_all(&client_usk->wait);
+  socket_t *new_sock = new_usk->parent;
+  new_usk->is_accepted = true;
 
   *newsock = new_sock;
 
-  klog_puts("[OK] unix_accept: connection established\n");
+  klog_puts("[OK] unix_accept: retrieved early-linked connection\n");
   return 0;
 }
 
@@ -512,7 +449,7 @@ static ssize_t unix_send(socket_t *sock, const void *buf, size_t len,
     entry.thread = current;
     entry.next = NULL;
 
-    wait_queue_add(&usk->wait, &entry);
+    wait_queue_add(usk->wait, &entry);
     current->state = THREAD_BLOCKED;
 
     // Re-check peer/state
@@ -522,7 +459,7 @@ static ssize_t unix_send(socket_t *sock, const void *buf, size_t len,
       sched_yield();
     }
 
-    wait_queue_remove(&usk->wait, &entry);
+    wait_queue_remove(usk->wait, &entry);
     current->state = THREAD_RUNNING;
   }
 
@@ -559,7 +496,7 @@ static ssize_t unix_send(socket_t *sock, const void *buf, size_t len,
       entry.thread = current;
       entry.next = NULL;
 
-      wait_queue_add(&peer->wait, &entry);
+      wait_queue_add(peer->wait, &entry);
       current->state = THREAD_BLOCKED;
 
       // Re-acquire peer lock (actually we already have it at this point?
@@ -577,7 +514,7 @@ static ssize_t unix_send(socket_t *sock, const void *buf, size_t len,
         spinlock_acquire(&peer->recv_lock);
       }
 
-      wait_queue_remove(&peer->wait, &entry);
+      wait_queue_remove(peer->wait, &entry);
       current->state = THREAD_RUNNING;
 
       if (sock->error)
@@ -599,7 +536,7 @@ static ssize_t unix_send(socket_t *sock, const void *buf, size_t len,
     spinlock_release(&peer->recv_lock);
 
     // Wake up peer (they might be blocked on recv)
-    wait_queue_wake_all(&peer->wait);
+    wait_queue_wake_all(peer->wait);
 
     // Also wake poll() waiters on the peer socket's VFS node
     if (peer->parent && peer->parent->wait_queue) {
@@ -668,7 +605,7 @@ static ssize_t unix_recv(socket_t *sock, void *buf, size_t len, int flags) {
       entry.thread = current;
       entry.next = NULL;
 
-      wait_queue_add(&usk->wait, &entry);
+      wait_queue_add(usk->wait, &entry);
       current->state = THREAD_BLOCKED;
 
       // Re-check availability while BLOCKED
@@ -686,7 +623,7 @@ static ssize_t unix_recv(socket_t *sock, void *buf, size_t len, int flags) {
         spinlock_acquire(&usk->recv_lock);
       }
 
-      wait_queue_remove(&usk->wait, &entry);
+      wait_queue_remove(usk->wait, &entry);
       current->state = THREAD_RUNNING;
 
       if (sock->error)
@@ -713,7 +650,7 @@ static ssize_t unix_recv(socket_t *sock, void *buf, size_t len, int flags) {
     if (sock->type == SOCK_DGRAM)
       break;
   }
-  wait_queue_wake_all(&usk->wait);
+  wait_queue_wake_all(usk->wait);
 
   // Notify peer that their send buffer has space (POLLOUT)
   if (usk->peer && usk->peer->parent && usk->peer->parent->node) {
@@ -1047,7 +984,7 @@ static int unix_shutdown(socket_t *sock, int how) {
     klog_puts("[OK] unix_shutdown: SHUT_WR\n");
     usk->write_shutdown = true;
     // Wake up peer so they can detect EOF
-    wait_queue_wake_all(&peer->wait);
+    wait_queue_wake_all(peer->wait);
     // Notify peer's epoll watchers that write side is closed (EPOLLRDHUP)
     if (peer->parent && peer->parent->node) {
       epoll_notify_event(peer->parent->node, EPOLLIN | EPOLLHUP | EPOLLRDHUP);
@@ -1058,7 +995,7 @@ static int unix_shutdown(socket_t *sock, int how) {
     klog_puts("[OK] unix_shutdown: SHUT_RDWR\n");
     usk->read_shutdown = true;
     usk->write_shutdown = true;
-    wait_queue_wake_all(&peer->wait);
+    wait_queue_wake_all(peer->wait);
     // Notify peer of full shutdown
     if (peer->parent && peer->parent->node) {
       epoll_notify_event(peer->parent->node, EPOLLIN | EPOLLHUP | EPOLLRDHUP);
@@ -1170,6 +1107,114 @@ static int unix_ioctl(socket_t *sock, uint32_t request, uint64_t arg) {
   }
 }
 
+static ssize_t unix_sendmsg(socket_t *sock, struct msghdr *msg, int flags) {
+  if (!sock || !msg)
+    return -22; // EINVAL
+  unix_sock_t *usk = (unix_sock_t *)sock->sk;
+  if (!usk)
+    return -22;
+
+  spinlock_acquire(&sock->lock);
+  unix_sock_t *peer = usk->peer;
+  if (!peer) {
+    spinlock_release(&sock->lock);
+    return -107; // ENOTCONN
+  }
+  socket_get(peer->parent); // Keep peer alive
+  spinlock_release(&sock->lock);
+
+  struct thread *current = sched_get_current();
+
+  // 1. Handle SCM_RIGHTS (FD passing)
+  struct cmsghdr *cmsg = CMSG_FIRSTHDR(msg);
+  while (cmsg) {
+    if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
+      int *fds = (int *)CMSG_DATA(cmsg);
+      int count = (cmsg->cmsg_len - CMSG_ALIGN(sizeof(struct cmsghdr))) / sizeof(int);
+
+      spinlock_acquire(&peer->parent->lock);
+      for (int i = 0; i < count && peer->scm_count < 16; i++) {
+        int fd = fds[i];
+        if (fd >= 0 && fd < MAX_FDS && current->fds[fd]) {
+          vfs_node_t *node = current->fds[fd];
+          vfs_open(node); // Increment refcount
+          peer->scm_nodes[peer->scm_count++] = node;
+        }
+      }
+      spinlock_release(&peer->parent->lock);
+    }
+    cmsg = CMSG_NXTHDR(msg, cmsg);
+  }
+
+  // 2. Handle data (iovec)
+  ssize_t total_sent = 0;
+  for (size_t i = 0; i < msg->msg_iovlen; i++) {
+    ssize_t ret =
+        unix_send(sock, msg->msg_iov[i].iov_base, msg->msg_iov[i].iov_len, flags);
+    if (ret < 0) {
+      socket_put(peer->parent);
+      return total_sent > 0 ? total_sent : ret;
+    }
+    total_sent += ret;
+  }
+
+  socket_put(peer->parent);
+  return total_sent;
+}
+
+static ssize_t unix_recvmsg(socket_t *sock, struct msghdr *msg, int flags) {
+  if (!sock || !msg)
+    return -22; // EINVAL
+  unix_sock_t *usk = (unix_sock_t *)sock->sk;
+  if (!usk)
+    return -22;
+
+  struct thread *current = sched_get_current();
+
+  // 1. Handle data (iovec)
+  ssize_t total_received = 0;
+  for (size_t i = 0; i < msg->msg_iovlen; i++) {
+    ssize_t ret =
+        unix_recv(sock, msg->msg_iov[i].iov_base, msg->msg_iov[i].iov_len, flags);
+    if (ret < 0) {
+      return total_received > 0 ? total_received : ret;
+    }
+    total_received += ret;
+  }
+
+  // 2. Handle SCM_RIGHTS (received FDs)
+  spinlock_acquire(&sock->lock);
+  if (usk->scm_count > 0 && msg->msg_control &&
+      msg->msg_controllen >= CMSG_SPACE(usk->scm_count * sizeof(int))) {
+    struct cmsghdr *cmsg = (struct cmsghdr *)msg->msg_control;
+    cmsg->cmsg_level = SOL_SOCKET;
+    cmsg->cmsg_type = SCM_RIGHTS;
+    cmsg->cmsg_len = CMSG_LEN(usk->scm_count * sizeof(int));
+
+    int *fds = (int *)CMSG_DATA(cmsg);
+    int actual_count = 0;
+    for (int i = 0; i < usk->scm_count; i++) {
+      vfs_node_t *node = usk->scm_nodes[i];
+      int new_fd = alloc_fd(current);
+      if (new_fd >= 0) {
+        current->fds[new_fd] = node;
+        // vfs_open was already called in sendmsg
+        fds[actual_count++] = new_fd;
+      } else {
+        vfs_close(node); // Drop reference if we can't give it to process
+      }
+      usk->scm_nodes[i] = NULL;
+    }
+    msg->msg_controllen = CMSG_SPACE(actual_count * sizeof(int));
+    usk->scm_count = 0;
+  } else if (usk->scm_count > 0) {
+    msg->msg_flags |= MSG_CTRUNC;
+  }
+  spinlock_release(&sock->lock);
+
+  return total_received;
+}
+
 static sock_ops_t unix_ops = {.bind = unix_bind,
                               .connect = unix_connect,
                               .listen = unix_listen,
@@ -1178,6 +1223,8 @@ static sock_ops_t unix_ops = {.bind = unix_bind,
                               .recv = unix_recv,
                               .sendto = unix_sendto,
                               .recvfrom = unix_recvfrom,
+                              .sendmsg = unix_sendmsg,
+                              .recvmsg = unix_recvmsg,
                               .getsockopt = unix_getsockopt,
                               .setsockopt = unix_setsockopt,
                               .shutdown = unix_shutdown,
@@ -1246,8 +1293,8 @@ int unix_create(socket_t *sock, int protocol) {
   usk->addr.sun_path[0] = '\0';
   usk->addr_len = 0;
 
-  // Initialize wait queue
-  wait_queue_init(&usk->wait);
+  // Use parent's wait queue for all blocking operations and poll()
+  usk->wait = (wait_queue_t *)sock->wait_queue;
 
   // Initialize list node
   INIT_LIST_HEAD(&usk->bind_node);
@@ -1335,6 +1382,19 @@ void unix_destroy(socket_t *sock) {
     usk->send_buf = NULL;
   }
 
+  // If listener, destroy all pending connections
+  if (usk->is_listener) {
+    unix_sock_t *curr = usk->accept_next;
+    while (curr) {
+      unix_sock_t *next = curr->accept_next;
+      // The pending socket was created in unix_connect but never accepted.
+      // We should destroy its parent socket.
+      socket_put(curr->parent);
+      curr = next;
+    }
+    usk->accept_next = NULL;
+  }
+
   // Notify peer and wake up any waiters
   if (usk->peer) {
     unix_sock_t *peer = usk->peer;
@@ -1347,7 +1407,7 @@ void unix_destroy(socket_t *sock) {
     }
     spinlock_release(&peer->parent->lock);
 
-    wait_queue_wake_all(&peer->wait);
+    wait_queue_wake_all(peer->wait);
 
     // Also wake poll() waiters on peer's VFS node
     if (peer->parent && peer->parent->wait_queue) {
@@ -1362,7 +1422,7 @@ void unix_destroy(socket_t *sock) {
   }
 
   // Wake up anyone waiting on our own queue (like senders)
-  wait_queue_wake_all(&usk->wait);
+  wait_queue_wake_all(usk->wait);
 
   // Also wake poll() waiters on our own VFS node
   if (sock->wait_queue) {

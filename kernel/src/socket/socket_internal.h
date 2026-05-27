@@ -34,7 +34,7 @@ typedef struct unix_sock {
   int accept_queue_len;       // Current accept queue length
 
   // Queues
-  wait_queue_t wait;             // Wait queue for blocking ops
+  wait_queue_t *wait;            // Points to parent->wait_queue
   struct unix_sock *accept_next; // Next in accept queue
 
   // Receive buffer (simple ring buffer for Phase 1)
@@ -64,6 +64,9 @@ typedef struct unix_sock {
   bool passcred;   // SO_PASSCRED - pass credentials in recvmsg
   int rcvtimeo_ms; // SO_RCVTIMEO - receive timeout in ms
   int sndtimeo_ms; // SO_SNDTIMEO - send timeout in ms
+
+  struct vfs_node *scm_nodes[16];   // Pending FDs to be received
+  int scm_count;                    // Number of pending nodes
 } unix_sock_t;
 
 // ── Socket Buffer (sk_buff-like structure)
@@ -88,6 +91,16 @@ typedef struct sk_buff_head {
   size_t len;
   spinlock_t lock;
 } sk_buff_head_t;
+
+// ── AF_NETLINK Socket Internal Structure
+// ──────────────────────────────────────────────
+typedef struct netlink_sock {
+  socket_t *parent;
+  int protocol;
+  uint32_t groups;
+  uintptr_t portid;
+  sk_buff_head_t recv_queue;
+} netlink_sock_t;
 
 // ── Internal Functions
 // ────────────────────────────────────────────────────────
@@ -119,6 +132,10 @@ bool skb_queue_empty(sk_buff_head_t *list);
 void socket_wait_queue_init(socket_t *sock);
 void socket_wait(socket_t *sock);
 void socket_wake(socket_t *sock);
+
+// Socket info operations
+int socket_getsockname(socket_t *sock, struct sockaddr *addr, int *addrlen);
+int socket_getpeername(socket_t *sock, struct sockaddr *addr, int *addrlen);
 
 // ── Socket File Operations
 // ───────────────────────────────────────────────────── These integrate sockets

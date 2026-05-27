@@ -239,15 +239,15 @@ int64_t sys_shmat(uint64_t shmid, uint64_t shmaddr, uint64_t shmflg,
     pmm_incref((void *)phys);
   }
 
-  // Register VMA as MAP_SHARED. We avoid MAP_ANONYMOUS because this is backed 
+  // Register VMA as MAP_SHARED. We avoid MAP_ANONYMOUS because this is backed
   // by an existing physical segment allocated in shmget.
   uint64_t prot = 0x1; // PROT_READ
   if (!(shmflg & SHM_RDONLY))
     prot |= 0x2; // PROT_WRITE
 
   if (t->mm) {
-    vma_add(&t->mm->vmas, vaddr, vaddr + aligned_size, prot,
-            MAP_SHARED, -1, 0);
+    vma_add(&t->mm->vmas, vaddr, vaddr + aligned_size, prot, MAP_SHARED, -1, 0,
+            NULL);
   }
 
   seg->nattch++;
@@ -288,7 +288,7 @@ int64_t sys_shmdt(uint64_t shmaddr, uint64_t a1, uint64_t a2, uint64_t a3,
   if (t->mm) {
     v = vma_find(&t->mm->vmas, shmaddr);
   }
-  
+
   if (!v || !(v->flags & MAP_SHARED))
     return -22; // EINVAL
 
@@ -409,17 +409,17 @@ int64_t sys_shmctl(uint64_t shmid, uint64_t cmd, uint64_t buf, uint64_t a3,
   if (cmd == IPC_STAT && buf != 0) {
     struct shmid_ds *ds = (struct shmid_ds *)buf;
     memset(ds, 0, sizeof(struct shmid_ds));
-    
+
     ds->shm_perm.__key = seg->key;
     ds->shm_perm.uid = 0;
     ds->shm_perm.gid = 0;
     ds->shm_perm.mode = seg->perm_mode;
-    
+
     ds->shm_segsz = PAGE_ALIGN_UP(seg->size);
     ds->shm_nattch = seg->nattch;
     ds->shm_cpid = seg->creator_pid;
     ds->shm_lpid = seg->last_pid;
-    
+
     spinlock_release(&shm_lock);
     return 0;
   }

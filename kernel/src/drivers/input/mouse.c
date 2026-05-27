@@ -28,12 +28,14 @@ static int mouse_wait(uint8_t type) {
   uint8_t status;
   if (type == 0) {
     while (!((status = inb(MOUSE_STATUS_PORT)) & 1) && timeout--) {
-      if (status == 0xFF) return -1;
+      if (status == 0xFF)
+        return -1;
       io_wait();
     }
   } else {
     while (((status = inb(MOUSE_STATUS_PORT)) & 2) && timeout--) {
-      if (status == 0xFF) return -1;
+      if (status == 0xFF)
+        return -1;
       io_wait();
     }
   }
@@ -161,13 +163,16 @@ void mouse_init(void) {
   klog_puts("[INFO] Initializing PS/2 Mouse...\n");
 
   // Enable the auxiliary mouse device
-  if (mouse_wait(1) != 0) return;
+  if (mouse_wait(1) != 0)
+    return;
   outb(MOUSE_COMMAND_PORT, 0xA8);
 
   // Enable interrupts
-  if (mouse_wait(1) != 0) return;
+  if (mouse_wait(1) != 0)
+    return;
   outb(MOUSE_COMMAND_PORT, 0x20); // Get Compaq Status Byte
-  if (mouse_wait(0) != 0) return;
+  if (mouse_wait(0) != 0)
+    return;
   uint8_t status = inb(MOUSE_DATA_PORT) | 2; // Set IRQ12 bit
   status &= ~0x20;                           // Clear "disable mouse" bit
 

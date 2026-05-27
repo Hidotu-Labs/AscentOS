@@ -1,9 +1,13 @@
 // ── Signal Syscalls: rt_sigaction, rt_sigprocmask ───────────────────────────
 #include "../console/klog.h"
+#include "../fs/vfs.h"
 #include "../lib/string.h"
 #include "../lock/spinlock.h"
+#include "../mm/heap.h"
 #include "../mm/vmm.h"
 #include "../sched/sched.h"
+#include "../sched/wait.h"
+#include "../socket/epoll.h"
 #include "syscall.h"
 #include <stdint.h>
 
@@ -242,6 +246,8 @@ void signal_deliver_syscall(struct syscall_regs *sregs) {
 }
 
 // ── Other stubs ──────────────────────────────────────────────────────────────
+// Forward declaration - defined after signalfd types below
+void signal_notify_thread(struct thread *t, int sig);
 
 static uint64_t sys_tgkill(uint64_t tgid, uint64_t tid, uint64_t sig,
                            uint64_t a3, uint64_t a4, uint64_t a5) {
@@ -265,7 +271,7 @@ static uint64_t sys_tgkill(uint64_t tgid, uint64_t tid, uint64_t sig,
     struct thread *current = sched_get_current();
     if (!current)
       return (uint64_t)-3; // ESRCH
-    
+
     // If tid matches current's tid, use current
     if (current->tid == (uint32_t)tid) {
       target = current;
@@ -278,6 +284,7 @@ static uint64_t sys_tgkill(uint64_t tgid, uint64_t tid, uint64_t sig,
   // Queue signal if we found target
   if (target && sig > 0 && sig <= 64) {
     target->pending_signals |= (1ULL << (sig - 1));
+    signal_notify_thread(target, (int)sig);
   }
 
   return 0;
@@ -325,11 +332,11 @@ static uint64_t sys_sigprocmask(uint64_t how, uint64_t set_ptr,
 void signal_send_pgid(uint32_t pgid, int sig) {
   if (sig <= 0 || sig > 64)
     return;
-  
+
   extern struct thread *global_thread_list;
   extern spinlock_t tid_lock;
   spinlock_acquire(&tid_lock);
-  
+
   struct thread *t = global_thread_list;
   while (t) {
     if (t->pgid == pgid) {
@@ -340,8 +347,8 @@ void signal_send_pgid(uint32_t pgid, int sig) {
   spinlock_release(&tid_lock);
 }
 
-static uint64_t sys_kill(uint64_t pid_val, uint64_t sig, uint64_t a2, uint64_t a3,
-                         uint64_t a4, uint64_t a5) {
+static uint64_t sys_kill(uint64_t pid_val, uint64_t sig, uint64_t a2,
+                         uint64_t a3, uint64_t a4, uint64_t a5) {
   (void)a2;
   (void)a3;
   (void)a4;
@@ -352,8 +359,9 @@ static uint64_t sys_kill(uint64_t pid_val, uint64_t sig, uint64_t a2, uint64_t a
 
   struct thread *current = sched_get_current();
   if (sig == 0) {
-    if (pid == 0 || pid == -1) return 0;
-    
+    if (pid == 0 || pid == -1)
+      return 0;
+
     bool found = false;
     extern struct thread *global_thread_list;
     extern spinlock_t tid_lock;
@@ -396,6 +404,188 @@ static uint64_t sys_kill(uint64_t pid_val, uint64_t sig, uint64_t a2, uint64_t a
   return 0;
 }
 
+typedef struct {
+  uint64_t mask;
+  wait_queue_t wq;
+} signalfd_ctx_t;
+
+struct signalfd_siginfo {
+  uint32_t ssi_signo;
+  int32_t ssi_errno;
+  int32_t ssi_code;
+  uint32_t ssi_pid;
+  uint32_t ssi_uid;
+  int32_t ssi_fd;
+  uint32_t ssi_tid;
+  uint32_t ssi_band;
+  uint32_t ssi_overrun;
+  uint32_t ssi_trapno;
+  int32_t ssi_status;
+  int32_t ssi_int;
+  uint64_t ssi_ptr;
+  uint64_t ssi_utime;
+  uint64_t ssi_stime;
+  uint64_t ssi_addr;
+  uint16_t ssi_addr_lsb;
+  uint8_t __pad[46];
+};
+
+static uint32_t signalfd_read(vfs_node_t *node, uint32_t offset, uint32_t size,
+                              uint8_t *buffer) {
+  (void)offset;
+  if (size < sizeof(struct signalfd_siginfo)) {
+    klog_puts("[SIGNALFD] size too small: ");
+    klog_uint64(size);
+    klog_puts(" node=");
+    klog_uint64((uint64_t)node);
+    klog_puts("\n");
+    return (uint32_t)-22; // EINVAL
+  }
+
+  signalfd_ctx_t *ctx = (signalfd_ctx_t *)node->device;
+  struct thread *t = sched_get_current();
+
+  while (1) {
+    uint64_t pending = t->pending_signals & ctx->mask;
+    if (pending) {
+      int sig = 0;
+      for (int i = 0; i < 64; i++) {
+        if (pending & (1ULL << i)) {
+          sig = i + 1;
+          break;
+        }
+      }
+      if (sig) {
+        // Consume the signal
+        t->pending_signals &= ~(1ULL << (sig - 1));
+
+        struct signalfd_siginfo info;
+        memset(&info, 0, sizeof(info));
+        info.ssi_signo = sig;
+        memcpy(buffer, &info, sizeof(info));
+        return sizeof(info);
+      }
+    }
+
+    // No signals, block if needed
+    // (In a real OS we'd check O_NONBLOCK, but for now we assume blocking)
+    wait_queue_entry_t entry = {.thread = t, .next = NULL};
+    wait_queue_add(&ctx->wq, &entry);
+    t->state = THREAD_BLOCKED;
+    sched_yield();
+    wait_queue_remove(&ctx->wq, &entry);
+  }
+}
+
+static int signalfd_poll(vfs_node_t *node, int events) {
+  signalfd_ctx_t *ctx = (signalfd_ctx_t *)node->device;
+  struct thread *t = sched_get_current();
+  int revents = 0;
+
+  if (t->pending_signals & ctx->mask)
+    revents |= POLLIN;
+
+  return revents & events;
+}
+
+static void signalfd_close(vfs_node_t *node) {
+  if (node->device) {
+    kfree(node->device);
+    node->device = NULL;
+  }
+}
+
+// signal_notify_thread must be defined AFTER signalfd_ctx_t and signalfd_read
+void signal_notify_thread(struct thread *t, int sig) {
+  if (!t)
+    return;
+
+  // Wake up thread if it's sleeping/blocked
+  if (t->state == THREAD_SLEEPING || t->state == THREAD_BLOCKED) {
+    t->state = THREAD_READY;
+  }
+
+  // Find all signalfds in this thread and wake them
+  for (int i = 0; i < MAX_FDS; i++) {
+    vfs_node_t *node = t->fds[i];
+    if (node && node->read == signalfd_read) {
+      signalfd_ctx_t *ctx = (signalfd_ctx_t *)node->device;
+      if (ctx && (ctx->mask & (1ULL << (sig - 1)))) {
+        // Wake up poll() and read() waiters
+        wait_queue_wake_all(&ctx->wq);
+        // Wake up epoll() waiters
+        epoll_notify_event(node, POLLIN);
+      }
+    }
+  }
+}
+
+static uint64_t sys_signalfd4(uint64_t fd, uint64_t mask_ptr, uint64_t sizemask,
+                              uint64_t flags, uint64_t a4, uint64_t a5) {
+  (void)a4;
+  (void)a5;
+  (void)sizemask;
+  (void)flags;
+
+  struct thread *t = sched_get_current();
+  if (!t)
+    return (uint64_t)-1;
+
+  uint64_t mask = 0;
+  if (mask_ptr && vmm_is_user_addr_range_valid(mask_ptr, 8))
+    mask = *(uint64_t *)mask_ptr;
+
+  // If fd != -1, update existing signalfd
+  if ((int64_t)fd >= 0 && fd < MAX_FDS && t->fds[fd]) {
+    vfs_node_t *node = t->fds[fd];
+    if (node->read == signalfd_read) {
+      signalfd_ctx_t *ctx = (signalfd_ctx_t *)node->device;
+      ctx->mask = mask;
+      return fd;
+    }
+  }
+
+  // Allocate a new fd
+  int new_fd = alloc_fd(t);
+  if (new_fd < 0)
+    return (uint64_t)-24; // EMFILE
+
+  signalfd_ctx_t *ctx = kmalloc(sizeof(signalfd_ctx_t));
+  if (!ctx)
+    return (uint64_t)-12;
+  ctx->mask = mask;
+  wait_queue_init(&ctx->wq);
+
+  vfs_node_t *node = kmalloc(sizeof(vfs_node_t));
+  if (!node) {
+    kfree(ctx);
+    return (uint64_t)-12; // ENOMEM
+  }
+  vfs_node_init(node);
+
+  node->flags = FS_CHARDEV; // Change to CHARDEV to avoid default POLLIN/OUT
+  node->mask = 0600;
+  node->length = 0;
+  node->device = ctx;
+  node->read = signalfd_read;
+  node->poll = signalfd_poll;
+  node->close = signalfd_close;
+  node->wait_queue = &ctx->wq;
+
+  t->fds[new_fd] = node;
+  t->fd_offsets[new_fd] = 0;
+
+  return (uint64_t)new_fd;
+}
+
+static uint64_t sys_signalfd(uint64_t fd, uint64_t mask_ptr, uint64_t sizemask,
+                             uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  return sys_signalfd4(fd, mask_ptr, sizemask, 0, 0, 0);
+}
+
 void syscall_register_signal(void) {
   syscall_register(SYS_RT_SIGACTION, sys_rt_sigaction);
   syscall_register(SYS_RT_SIGPROCMASK, sys_rt_sigprocmask);
@@ -404,4 +594,6 @@ void syscall_register_signal(void) {
   syscall_register(SYS_SIGALTSTACK, sys_sigaltstack);
   syscall_register(SYS_TGKILL, sys_tgkill);
   syscall_register(SYS_KILL, sys_kill);
+  syscall_register(SYS_SIGNALFD, sys_signalfd);
+  syscall_register(SYS_SIGNALFD4, sys_signalfd4);
 }

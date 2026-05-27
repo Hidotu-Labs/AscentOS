@@ -1021,12 +1021,13 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
 
       vma_remove(&current->mm->vmas, old_start, old_end);
       if (vma_add(&current->mm->vmas, new_start, old_end, prot, flags, fd,
-                  offset) != 0) {
+                  offset, NULL) != 0) {
         klog_puts("[VMM] Stack expansion failed (overlap?) for CR2=");
         klog_hex64(cr2);
         klog_puts("\n");
-        vma_add(&current->mm->vmas, old_start, old_end, prot, flags, fd,
-                offset);
+        // Re-add original VMA as fallback
+        vma_add(&current->mm->vmas, old_start, old_end, prot, flags, fd, offset,
+                NULL);
         vma = NULL;
       } else {
         // Node replaced, look it up again in the valid tree
@@ -1052,11 +1053,13 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
   int vma_fd = -1;
   uint64_t vma_offset = 0;
   uint64_t vma_start = 0;
+  void *vma_file_node = NULL;
   if (vma) {
     vma_prot = vma->prot;
     vma_fd = vma->fd;
     vma_offset = vma->offset;
     vma_start = vma->start;
+    vma_file_node = vma->file_node;
   }
   spinlock_release(&current->mm->lock);
 
@@ -1118,8 +1121,35 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
 
   // Zero the frame through HHDM
   uint64_t *frame_virt = (uint64_t *)PHYS_TO_VIRT((uint64_t)frame);
-  for (int i = 0; i < 512; i++)
-    frame_virt[i] = 0;
+
+  // If this is a file-backed mapping, read data from the filesystem node
+  if (vma_file_node) {
+    uint64_t page_offset = (cr2 & ~0xFFFULL) - vma_start;
+    uint32_t bytes_to_read = 4096;
+    // node->length is uint32_t in our VFS, but we should handle it
+    // Wait, check vfs_node_t length type. It is uint32_t.
+    vfs_node_t *node = (vfs_node_t *)vma_file_node;
+    if (vma_offset + page_offset >= node->length) {
+      // Past EOF, zero the rest
+      for (int i = 0; i < 512; i++)
+        frame_virt[i] = 0;
+    } else {
+      uint32_t avail = node->length - (uint32_t)(vma_offset + page_offset);
+      if (avail < 4096) {
+        bytes_to_read = avail;
+        // Zero the remainder of the page
+        memset(((uint8_t *)frame_virt) + bytes_to_read, 0,
+               4096 - bytes_to_read);
+      }
+      // Perform the VFS read
+      vfs_read(node, (uint32_t)(vma_offset + page_offset), bytes_to_read,
+               (uint8_t *)frame_virt);
+    }
+  } else {
+    // Anonymous mapping: zero-fill
+    for (int i = 0; i < 512; i++)
+      frame_virt[i] = 0;
+  }
 
   // Derive PTE flags from the VMA's protection bits
   uint64_t flags = dp_build_flags(vma_prot);

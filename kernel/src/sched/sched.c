@@ -60,6 +60,8 @@ void sched_init(void) {
     struct thread *idle_thread = kmalloc(sizeof(struct thread));
     memset(idle_thread, 0, sizeof(struct thread));
     idle_thread->cwd_path[0] = '/';
+    idle_thread->cwd_node = fs_root;
+    if (fs_root) vfs_open(fs_root);
     // Assign a proper TID to the idle thread (don't use 0)
     spinlock_acquire(&tid_lock);
     idle_thread->tid = next_tid++;
@@ -187,6 +189,13 @@ struct thread *sched_create_kernel_thread(void (*entry)(void),
 
   memset(t, 0, sizeof(struct thread));
   t->cwd_path[0] = '/';
+  t->cwd_node = fs_root;
+  struct thread *current = sched_get_current();
+  if (current) {
+    strcpy(t->cwd_path, current->cwd_path);
+    t->cwd_node = current->cwd_node;
+  }
+  if (t->cwd_node) vfs_open(t->cwd_node);
   t->umask = 0022;
   t->uid = t->gid = t->euid = t->egid = t->suid = t->sgid = 0;
 
@@ -206,7 +215,6 @@ struct thread *sched_create_kernel_thread(void (*entry)(void),
   global_thread_list = t;
 
   // Set parent and link into hierarchy
-  struct thread *current = sched_get_current();
   t->parent = current;
   if (current) {
     t->sibling_next = current->children;

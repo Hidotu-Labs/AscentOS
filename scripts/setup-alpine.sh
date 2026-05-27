@@ -179,9 +179,42 @@ install_apk "adwaita-icon-theme" "community"
 install_apk "iso-codes" "main"
 install_apk "wayland" "main"
 install_apk "wayland-libs-client" "main"
+install_apk "wayland-libs-server" "main"
 install_apk "wayland-libs-cursor" "main"
 install_apk "wayland-libs-egl" "main"
 install_apk "libxkbcommon" "main"
+install_apk "wlroots" "community"
+install_apk "wlroots-dev" "community"
+install_apk "wayland-protocols" "main"
+install_apk "wayland-dev" "main"
+install_apk "libinput" "community"
+install_apk "libinput-libs" "community"
+install_apk "libwacom" "community"
+install_apk "libevdev" "community"
+install_apk "mtdev" "community"
+install_apk "libxml2" "main"
+install_apk "libdisplay-info" "community"
+install_apk "eudev-libs" "main"
+install_apk "libdrm" "main"
+install_apk "pixman" "main"
+install_apk "libseat" "community"
+install_apk "libelogind" "community"
+install_apk "libcap2" "main"
+install_apk "libpciaccess" "main"
+install_apk "gcompat" "main"
+install_apk "libucontext" "main"
+install_apk "musl-obstack" "main"
+install_apk "libunwind" "main"
+install_apk "libva" "main"
+install_apk "xcb-util-wm" "community"
+install_apk "xcb-util-image" "community"
+install_apk "xcb-util-renderutil" "community"
+install_apk "xcb-util" "main"
+install_apk "seatd" "community"
+install_apk "libxshmfence" "main"
+
+install_apk "xkeyboard-config" "main"
+install_apk "font-dejavu" "main"
 
 
 # GTK2 Development headers (for host compilation)
@@ -223,6 +256,10 @@ install_apk "at-spi2-core-dev" "main"
 install_apk "libepoxy-dev" "main"
 install_apk "wayland-dev" "main"
 install_apk "libxkbcommon-dev" "main"
+install_apk "libxcb-dev" "main"
+install_apk "xcb-util-wm-dev" "community"
+install_apk "xcb-util-image-dev" "community"
+install_apk "xcb-util-renderutil-dev" "community"
 install_apk "mesa-dev" "main"
 install_apk "mesa" "main"
 
@@ -338,7 +375,28 @@ cat > "${ROOTFS_DIR}${LOADERS_DIR}/loaders.cache" <<EOF
 
 EOF
 
-# 4. Inject custom binaries
+# 4. Create weston.ini
+echo "[*] Creating /etc/weston.ini..."
+mkdir -p "${ROOTFS_DIR}/etc"
+cat > "${ROOTFS_DIR}/etc/weston.ini" <<EOF
+[core]
+backend=drm-backend.so
+xwayland=true
+
+[shell]
+panel-position=top
+locking=false
+
+[launcher]
+icon=/usr/share/icons/Adwaita/24x24/apps/utilities-terminal.png
+path=/usr/bin/weston-terminal
+
+[output]
+name=LVDS1
+mode=preferred
+EOF
+
+# 5. Inject custom binaries
 echo "[*] Injecting custom binaries into rootfs..."
 mkdir -p "${ROOTFS_DIR}/bin"
 if [ -f "${ROOT_DIR}/userland/gtk_test.elf" ]; then

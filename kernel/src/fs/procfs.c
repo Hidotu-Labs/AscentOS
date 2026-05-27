@@ -37,7 +37,8 @@ uint32_t procfs_meminfo_read(vfs_node_t *node, uint32_t offset, uint32_t size,
   uint64_t total_mem_val = pmm_get_total_memory();
   uint64_t usable_mem_val = pmm_get_usable_memory();
   uint64_t free_pages_val = (uint64_t)pmm_get_free_pages();
-  uint64_t free_mem_val = free_pages_val * 4096; // Use literal if PAGE_SIZE is causing issues
+  uint64_t free_mem_val =
+      free_pages_val * 4096; // Use literal if PAGE_SIZE is causing issues
 
   char num_buf[32];
 

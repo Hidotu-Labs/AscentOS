@@ -102,12 +102,19 @@ eventpoll_t *epoll_create(void) {
 
   epoll_table[idx] = ep;
 
+  klog_puts("[EPOLL] Created epoll instance=");
+  klog_uint64((uint64_t)ep);
+  klog_puts("\n");
+
+  epoll_get(ep);
   return ep;
 }
 
 void epoll_destroy(eventpoll_t *ep) {
-  if (!ep)
+  if (!ep) {
+    klog_puts("[WARN] epoll_destroy: NULL instance\n");
     return;
+  }
 
   spinlock_acquire(&ep->lock);
 
@@ -223,8 +230,12 @@ int epoll_ctl_add(eventpoll_t *ep, int fd, struct epoll_event *event) {
   if (!t)
     return -1;
 
-  if (fd >= MAX_FDS || !t->fds[fd])
+  if (fd >= MAX_FDS || !t->fds[fd]) {
+    klog_puts("[EPOLL_CTL_ADD] EBADF: fd=");
+    klog_uint64(fd);
+    klog_puts(" does not exist in process\n");
     return -9; // EBADF
+  }
 
   vfs_node_t *node = t->fds[fd];
 
@@ -245,8 +256,10 @@ int epoll_ctl_add(eventpoll_t *ep, int fd, struct epoll_event *event) {
 
   // Create epitem
   epitem_t *epi = epitem_alloc();
-  if (!epi)
+  if (!epi) {
+    klog_puts("[EPOLL_CTL_ADD] ENOMEM: failed to alloc epitem\n");
     return -12; // ENOMEM
+  }
 
   epi->fd = fd;
   epi->node = node;
@@ -282,6 +295,10 @@ int epoll_ctl_add(eventpoll_t *ep, int fd, struct epoll_event *event) {
     }
   }
 
+  klog_puts("[EPOLL_CTL_ADD] finished fd=");
+  klog_uint64(fd);
+  klog_puts("\n");
+
   return 0;
 }
 
@@ -314,6 +331,10 @@ int epoll_ctl_del(eventpoll_t *ep, int fd) {
 
   // Free epitem
   epitem_free(epi);
+
+  klog_puts("[EPOLL_CTL_DEL] finished fd=");
+  klog_uint64(fd);
+  klog_puts("\n");
 
   return 0;
 }
@@ -352,6 +373,10 @@ int epoll_ctl_mod(eventpoll_t *ep, int fd, struct epoll_event *event) {
     ep_add_to_ready_list(ep, epi);
   }
 
+  klog_puts("[EPOLL_CTL_MOD] finished fd=");
+  klog_uint64(fd);
+  klog_puts("\n");
+
   return 0;
 }
 
@@ -365,6 +390,14 @@ int epoll_wait_impl(eventpoll_t *ep, struct epoll_event *events, int maxevents,
 
   int returned = 0;
   struct thread *current = sched_get_current();
+
+  klog_puts("[EPOLL_WAIT] tid=");
+  klog_uint64(current->tid);
+  klog_puts(" epoll_fd=");
+  klog_uint64(ep->fd);
+  klog_puts(" timeout=");
+  klog_uint64((uint64_t)timeout_ms);
+  klog_puts("\n");
 
   // Add to wait queue once for the duration of the wait
   wait_queue_entry_t entry;
@@ -392,6 +425,13 @@ int epoll_wait_impl(eventpoll_t *ep, struct epoll_event *events, int maxevents,
         if (current_events) {
           events[returned].events = current_events;
           events[returned].data.u64 = epi->event.data.u64;
+          
+          klog_puts("[EPOLL_EVENT] returned fd=");
+          klog_uint64(epi->fd);
+          klog_puts(" events=0x");
+          klog_hex32(current_events);
+          klog_puts("\n");
+          
           returned++;
 
           // Handle edge-triggered mode
@@ -465,6 +505,10 @@ int epoll_wait_impl(eventpoll_t *ep, struct epoll_event *events, int maxevents,
   wait_queue_remove(&ep->wq, &entry);
   current->state = THREAD_RUNNING;
   current->wakeup_ticks = 0;
+
+  klog_puts("[EPOLL_WAIT] returned count=");
+  klog_uint64(returned);
+  klog_puts("\n");
 
   return returned;
 }

@@ -46,10 +46,33 @@ int ext2_read_block(ext2_mount_t *mnt, uint32_t block_num, void *buffer) {
     memset(buffer, 0, mnt->block_size);
     return 0;
   }
+
+  // Check cache
+  for (int i = 0; i < 32; i++) {
+    if (mnt->cache[i].data && mnt->cache[i].num == block_num) {
+      memcpy(buffer, mnt->cache[i].data, mnt->block_size);
+      return 0;
+    }
+  }
+
   uint64_t byte_offset = (uint64_t)block_num * mnt->block_size;
   uint64_t lba = byte_offset / 512;
   uint32_t sectors = mnt->block_size / 512;
-  return mnt->dev->read_sectors(mnt->dev, lba, sectors, buffer);
+  int err = mnt->dev->read_sectors(mnt->dev, lba, sectors, buffer);
+  if (err)
+    return err;
+
+  // Add to cache (simple round-robin replacement based on block_num)
+  int idx = block_num % 32;
+  if (!mnt->cache[idx].data) {
+    mnt->cache[idx].data = kmalloc(mnt->block_size);
+  }
+  if (mnt->cache[idx].data) {
+    mnt->cache[idx].num = block_num;
+    memcpy(mnt->cache[idx].data, buffer, mnt->block_size);
+  }
+
+  return 0;
 }
 
 // Write a single ext2 block from buffer.
@@ -57,6 +80,15 @@ int ext2_write_block(ext2_mount_t *mnt, uint32_t block_num,
                      const void *buffer) {
   if (block_num == 0)
     return -1;
+
+  // Update cache if present
+  for (int i = 0; i < 32; i++) {
+    if (mnt->cache[i].data && mnt->cache[i].num == block_num) {
+      memcpy(mnt->cache[i].data, buffer, mnt->block_size);
+      break;
+    }
+  }
+
   uint64_t byte_offset = (uint64_t)block_num * mnt->block_size;
   uint64_t lba = byte_offset / 512;
   uint32_t sectors = mnt->block_size / 512;

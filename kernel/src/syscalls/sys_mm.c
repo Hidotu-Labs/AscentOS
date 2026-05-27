@@ -216,7 +216,8 @@ uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot, uint64_t flags,
     if (current_thread && current_thread->mm) {
       spinlock_acquire(&current_thread->mm->lock);
       int vma_idx = vma_add(&current_thread->mm->vmas, result,
-                            result + aligned_len, prot, flags, (int)fd, offset);
+                            result + aligned_len, prot, flags, (int)fd, offset,
+                            node);
       spinlock_release(&current_thread->mm->lock);
       if (vma_idx < 0) {
         klog_puts("[MMAP] Warning: failed to register VMA for file mapping\n");
@@ -255,7 +256,7 @@ uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot, uint64_t flags,
   if (current_thread && current_thread->mm) {
     spinlock_acquire(&current_thread->mm->lock);
     int vma_idx = vma_add(&current_thread->mm->vmas, vaddr, vaddr + aligned_len,
-                          prot, flags, -1, 0);
+                          prot, flags, -1, 0, NULL);
 
     // Update the mmap bump pointer if we were using the old-style allocator
     // range
@@ -389,7 +390,7 @@ static uint64_t sys_brk(uint64_t addr, uint64_t a1, uint64_t a2, uint64_t a3,
 
     if (new_end > old_end) {
       vma_add(&current->mm->vmas, old_end, new_end, PROT_READ | PROT_WRITE,
-              MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+              MAP_PRIVATE | MAP_ANONYMOUS, -1, 0, NULL);
     }
 
     current->mm->brk_current = addr;
@@ -560,7 +561,7 @@ static uint64_t sys_mremap(uint64_t old_addr, uint64_t old_size,
     // Extend the VMA to cover the new range.
     vma_remove(&current->mm->vmas, old_addr, old_addr + aligned_old);
     vma_add(&current->mm->vmas, old_addr, old_addr + aligned_new, prot,
-            vma_flags, -1, 0);
+            vma_flags, -1, 0, NULL);
     spinlock_release(&current->mm->lock);
     return old_addr;
   }
@@ -613,7 +614,7 @@ static uint64_t sys_mremap(uint64_t old_addr, uint64_t old_size,
 
   // Register new VMA.
   vma_add(&current->mm->vmas, new_addr, new_addr + aligned_new, prot, vma_flags,
-          -1, 0);
+          -1, 0, NULL);
 
   current->mm->mmap_next_addr =
       MAX(current->mm->mmap_next_addr, new_addr + aligned_new);

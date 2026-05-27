@@ -29,7 +29,7 @@ void audio_dsp_init(void) {
   vfs_node_t *hda_node = fb_lookup_device("hda_audio");
   vfs_node_t *ac97_node = fb_lookup_device("ac97");
   vfs_node_t *sb16_node = fb_lookup_device("sb16");
-  
+
   hda_available = (hda_node != NULL);
   ac97_available = (ac97_node != NULL);
   sb16_available = (sb16_node != NULL);

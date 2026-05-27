@@ -21,6 +21,7 @@ struct vma {
   uint64_t flags;   // Mapping flags (MAP_SHARED, MAP_PRIVATE, MAP_ANONYMOUS)
   uint64_t offset;  // File offset (for file-backed mappings)
   int fd; // File descriptor (for file-backed mappings, -1 if anonymous)
+  void *file_node; // VFS node pointer (for demand paging)
 
   int height; // AVL Balance Height Tracker
   struct vma *left;
@@ -41,7 +42,7 @@ void vma_list_destroy(struct vma_list *list);
 
 // Add a new VMA region, returns 0 on success or -1 on overlap/OOM
 int vma_add(struct vma_list *list, uint64_t start, uint64_t end, uint64_t prot,
-            uint64_t flags, int fd, uint64_t offset);
+            uint64_t flags, int fd, uint64_t offset, void *file_node);
 
 // Remove a VMA region by address range (auto-splits and auto-unmaps Native
 // structures) Returns true if any region was removed/split

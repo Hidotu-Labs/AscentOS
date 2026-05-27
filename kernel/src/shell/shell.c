@@ -566,7 +566,7 @@ static void execute_command(char *cmd) {
     vma_list_init(&vmas);
     // Use Linux-style PROT_READ|PROT_WRITE (1|2) and MAP_PRIVATE|MAP_ANONYMOUS
     // (2|32)
-    vma_add(&vmas, vaddr, vaddr + 4096, 0x1 | 0x2, 0x02 | 0x20, -1, 0);
+    vma_add(&vmas, vaddr, vaddr + 4096, 0x1 | 0x2, 0x02 | 0x20, -1, 0, NULL);
 
     console_puts("Original page refcount: ");
     shell_print_uint64(pmm_get_ref(phys));
@@ -732,7 +732,7 @@ static void execute_command(char *cmd) {
     if (current && current->mm) {
       // Wire up dummy permissions map in active tree to prove it resolves
       if (vma_add(&current->mm->vmas, fault_vaddr, fault_vaddr + 4096, 0x3,
-                  0x22, -1, 0) != -1) {
+                  0x22, -1, 0, NULL) != -1) {
         volatile uint64_t *fault_ptr = (volatile uint64_t *)fault_vaddr;
 
         // -> CRASH INDUCED <-
@@ -1276,7 +1276,7 @@ static void execute_command(char *cmd) {
     console_puts("[1/3] Mass Boundary scaling (2000+ insertions)...\n");
     for (int i = 0; i < 2000; i++) {
       if (vma_add(&tester_list, 0x1000 * 2 * i, 0x1000 * (2 * i + 1), 0x3, 0x22,
-                  -1, 0) < 0) {
+                  -1, 0, NULL) < 0) {
         console_puts("  -> FAIL: Native AVL insert crashed out early!\n");
         vma_pass = 0;
         break;
@@ -1295,7 +1295,7 @@ static void execute_command(char *cmd) {
 
     // Test 2: Dense Overlap Avoidance
     console_puts("[2/3] Dense Interval Map Avoidance Check...\n");
-    if (vma_add(&tester_list, 0x1000 * 250, 0x1000 * 251, 0x3, 0x22, -1, 0) ==
+    if (vma_add(&tester_list, 0x1000 * 250, 0x1000 * 251, 0x3, 0x22, -1, 0, NULL) ==
         0) {
       console_puts("  -> FAIL: Interval search tree silently allowed overlap "
                    "injection!\n");

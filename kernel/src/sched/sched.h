@@ -121,6 +121,7 @@ struct thread {
   struct thread *global_next;  // Used to link all threads together
   struct thread *next;         // Used for runqueue / blocked queue
   char cwd_path[256];          // Current working directory
+  vfs_node_t *cwd_node;        // Current working directory VFS node
   struct mm_struct *mm;        // Shared memory management state
   uint64_t fs_base;            // User FS_BASE (TLS) — inherited across fork
   uint32_t uid;                // User ID
