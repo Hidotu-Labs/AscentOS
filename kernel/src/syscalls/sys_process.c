@@ -478,6 +478,20 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
   klog_uint64(actual_entry);
   klog_puts("\n");
 
+  // Store the basename of the executable as the thread's comm name
+  {
+    const char *base = path;
+    for (const char *p = path; *p; p++)
+      if (*p == '/')
+        base = p + 1;
+    int ci = 0;
+    while (base[ci] && ci < 15) {
+      current->comm[ci] = base[ci];
+      ci++;
+    }
+    current->comm[ci] = '\0';
+  }
+
   // Free the old address space (from fork) now that the new one is loaded.
   // We've already switched CR3, so this is safe.
   // Use the saved old_vmas to avoid freeing MAP_SHARED device pages.
@@ -817,6 +831,51 @@ static uint64_t sys_clone(struct syscall_regs *regs) {
   sched_enqueue_thread(child, cpu_get_current());
 
   return child->tid;
+}
+
+// ── sys_sysinfo ───────────────────────────────────────────────────────────
+struct sysinfo {
+  int64_t  uptime;
+  uint64_t loads[3];
+  uint64_t totalram;
+  uint64_t freeram;
+  uint64_t sharedram;
+  uint64_t bufferram;
+  uint64_t totalswap;
+  uint64_t freeswap;
+  uint16_t procs;
+  uint64_t totalhigh;
+  uint64_t freehigh;
+  uint32_t mem_unit;
+  char     _f[8]; // padding to 112 bytes (Linux ABI)
+} __attribute__((packed));
+
+static uint64_t sys_sysinfo(uint64_t info_ptr, uint64_t a1, uint64_t a2,
+                            uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a1;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  struct sysinfo *info = (struct sysinfo *)info_ptr;
+  if (!info)
+    return (uint64_t)-14; // EFAULT
+
+  info->uptime    = (int64_t)(lapic_timer_get_ms() / 1000);
+  info->loads[0]  = 0;
+  info->loads[1]  = 0;
+  info->loads[2]  = 0;
+  info->totalram  = pmm_get_total_memory();
+  info->freeram   = (uint64_t)pmm_get_free_pages() * PAGE_SIZE;
+  info->sharedram = 0;
+  info->bufferram = 0;
+  info->totalswap = 0;
+  info->freeswap  = 0;
+  info->procs     = sched_get_thread_count();
+  info->totalhigh = 0;
+  info->freehigh  = 0;
+  info->mem_unit  = 1;
+  return 0;
 }
 
 // ── sys_uname ─────────────────────────────────────────────────────────────
@@ -1240,6 +1299,7 @@ void syscall_register_process(void) {
   syscall_register(SYS_GETPID, sys_getpid);
   syscall_register(SYS_WAIT4, sys_wait4);
   syscall_register(SYS_UNAME, sys_uname);
+  syscall_register(SYS_SYSINFO, sys_sysinfo);
   syscall_register(SYS_UPTIME, sys_uptime);
   syscall_register(SYS_GETCWD, sys_getcwd);
   syscall_register(SYS_CHDIR, sys_chdir);

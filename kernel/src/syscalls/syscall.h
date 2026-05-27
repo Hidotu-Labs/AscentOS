@@ -88,6 +88,7 @@
 #define SYS_UMASK 95
 #define SYS_GETTIMEOFDAY 96
 #define SYS_GETRLIMIT 97
+#define SYS_SYSINFO 99
 #define SYS_GETUID 102
 #define SYS_GETGID 104
 #define SYS_SETUID 105

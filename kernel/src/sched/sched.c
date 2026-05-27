@@ -76,6 +76,7 @@ void sched_init(void) {
     idle_thread->time_slice = 100; // Large slice for idle
     idle_thread->runtime_total = 0;
     idle_thread->runtime_burst = 0;
+    strcpy(idle_thread->comm, "idle");
 
     // Idle threads don't really use user MM, but give them a stub to avoid NULL
     // derefs
@@ -188,6 +189,8 @@ struct thread *sched_create_kernel_thread(void (*entry)(void),
     return NULL;
 
   memset(t, 0, sizeof(struct thread));
+  // Default comm for kernel threads; overwritten by execve for user processes
+  strcpy(t->comm, "kthread");
   t->cwd_path[0] = '/';
   t->cwd_node = fs_root;
   struct thread *current = sched_get_current();
@@ -548,6 +551,8 @@ void sched_tick(struct registers *regs) {
   (void)regs;
   struct cpu_info *cpu = cpu_get_current();
   if (cpu->current_thread) {
+    // Account one tick (1 ms at LAPIC_TIMER_HZ=1000) of CPU time
+    cpu->current_thread->runtime_total++;
     sched_yield();
   }
 }
@@ -921,6 +926,22 @@ struct thread *sched_get_thread_by_tid(uint32_t tid) {
     curr = curr->global_next;
   }
   return NULL;
+}
+
+uint16_t sched_get_thread_count(void) {
+  spinlock_acquire(&tid_lock);
+  uint16_t count = 0;
+  struct thread *curr = global_thread_list;
+  while (curr) {
+    count++;
+    curr = curr->global_next;
+  }
+  spinlock_release(&tid_lock);
+  return count;
+}
+
+struct thread *sched_get_thread_list_head(void) {
+  return global_thread_list;
 }
 
 void sched_wakeup(struct thread *t) {

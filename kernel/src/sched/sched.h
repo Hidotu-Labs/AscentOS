@@ -152,8 +152,9 @@ struct thread {
   uint8_t priority;        // Current dynamic priority (0-31)
   uint8_t static_priority; // Base priority
   uint64_t time_slice;     // Remaining ticks in current quantum
-  uint64_t runtime_total;  // Total CPU time consumed
+  uint64_t runtime_total;  // Total CPU time consumed (in LAPIC ticks, 1 tick = 1ms)
   uint64_t runtime_burst;  // CPU time used in current quantum (for MLFQ)
+  char comm[16];           // Executable name (basename, max 15 chars + NUL)
 };
 
 void sched_init(void);
@@ -182,6 +183,13 @@ struct thread *sched_get_thread_by_tid(uint32_t tid);
 
 // Reap a zombie thread (remove from runqueue, free resources)
 void sched_reap_thread(struct thread *t);
+
+// Returns the total number of threads in the global thread list
+uint16_t sched_get_thread_count(void);
+
+// Returns the head of the global thread list (caller must hold no locks;
+// used by procfs for read-only enumeration under tid_lock)
+struct thread *sched_get_thread_list_head(void);
 
 // Reparent children to init
 void sched_reparent_children(struct thread *parent);

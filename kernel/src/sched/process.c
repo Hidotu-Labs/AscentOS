@@ -684,6 +684,23 @@ bool process_exec_argv(const char **argv) {
   klog_uint64(elf_info.entry);
   klog_puts(")\n");
 
+  // Store the basename of the executable as the thread's comm name
+  {
+    struct thread *ct = sched_get_current();
+    if (ct) {
+      const char *base = argv[0];
+      for (const char *p = argv[0]; *p; p++)
+        if (*p == '/')
+          base = p + 1;
+      int ci = 0;
+      while (base[ci] && ci < 15) {
+        ct->comm[ci] = base[ci];
+        ci++;
+      }
+      ct->comm[ci] = '\0';
+    }
+  }
+
   uint64_t user_rsp = process_build_initial_stack(
       ASCENTOS_USER_STACK_TOP, NULL, (const char **)argv, NULL, &elf_info);
   if (!user_rsp) {

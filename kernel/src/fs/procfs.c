@@ -356,6 +356,366 @@ uint32_t procfs_cmdline_read(vfs_node_t *node, uint32_t offset, uint32_t size,
   return size;
 }
 
+// ── Dynamic per-PID /proc/<pid>/ support ─────────────────────────────────
+//
+// Rather than pre-creating directories at boot (processes come and go), we
+// install custom readdir/finddir hooks on the procfs root that synthesise
+// PID entries on the fly by walking the live scheduler thread list.
+//
+// /proc/<pid>/stat   – the primary file ps(1) reads
+// /proc/<pid>/status – human-readable status (optional but helpful)
+// /proc/<pid>/cmdline – argv[0] of the process
+
+// ── Helpers ──────────────────────────────────────────────────────────────
+
+static void pid_u32_to_str(uint32_t val, char *buf) {
+  if (val == 0) {
+    buf[0] = '0';
+    buf[1] = '\0';
+    return;
+  }
+  char tmp[16];
+  int i = 0;
+  while (val > 0) {
+    tmp[i++] = (char)('0' + val % 10);
+    val /= 10;
+  }
+  int j = 0;
+  while (i > 0)
+    buf[j++] = tmp[--i];
+  buf[j] = '\0';
+}
+
+// Parse a decimal string; returns 0 if not a pure number.
+static uint32_t str_to_pid(const char *s) {
+  if (!s || !*s)
+    return 0;
+  uint32_t v = 0;
+  for (const char *p = s; *p; p++) {
+    if (*p < '0' || *p > '9')
+      return 0;
+    v = v * 10 + (uint32_t)(*p - '0');
+  }
+  return v;
+}
+
+// Map thread_state_t to the single-char Linux stat state.
+static char thread_state_char(thread_state_t s) {
+  switch (s) {
+  case THREAD_RUNNING:  return 'R';
+  case THREAD_READY:    return 'R';
+  case THREAD_BLOCKED:  return 'S';
+  case THREAD_SLEEPING: return 'S';
+  case THREAD_DEAD:     return 'Z';
+  case THREAD_ZOMBIE:   return 'Z';
+  default:              return 'S';
+  }
+}
+
+// ── /proc/<pid>/stat read ─────────────────────────────────────────────────
+//
+// Linux /proc/<pid>/stat format (fields 1-52, space-separated):
+//   pid (comm) state ppid pgrp session tty_nr ...
+// ps(1) needs fields 1-5 and 14 (utime) + 15 (stime) in USER_HZ jiffies.
+
+static uint32_t procfs_pid_stat_read(vfs_node_t *node, uint32_t offset,
+                                     uint32_t size, uint8_t *buffer) {
+  // The PID is stashed in node->impl
+  uint32_t pid = node->impl;
+  struct thread *t = sched_get_thread_by_tid(pid);
+  if (!t)
+    return 0;
+
+  char buf[512];
+  buf[0] = '\0';
+
+  char num[32];
+
+  // Field 1: pid
+  pid_u32_to_str(pid, num);
+  strcat(buf, num);
+  strcat(buf, " ");
+
+  // Field 2: comm (executable name in parens, max 15 chars)
+  strcat(buf, "(");
+  if (t->comm[0])
+    strcat(buf, t->comm);
+  else
+    strcat(buf, "unknown");
+  strcat(buf, ") ");
+
+  // Field 3: state
+  char sc[3] = {thread_state_char(t->state), ' ', '\0'};
+  strcat(buf, sc);
+
+  // Field 4: ppid
+  uint32_t ppid = t->parent ? t->parent->tid : 0;
+  pid_u32_to_str(ppid, num);
+  strcat(buf, num);
+  strcat(buf, " ");
+
+  // Field 5: pgrp
+  pid_u32_to_str(t->pgid, num);
+  strcat(buf, num);
+  strcat(buf, " ");
+
+  // Fields 6-13: stub zeros (session tty_nr tpgid flags minflt cminflt majflt cmajflt)
+  strcat(buf, "0 0 0 0 0 0 0 0 ");
+
+  // Field 14: utime (USER_HZ jiffies; LAPIC at 1000 Hz → divide by 10)
+  uint64_t jiffies = t->runtime_total / 10;
+  pid_u32_to_str((uint32_t)jiffies, num);
+  strcat(buf, num);
+  strcat(buf, " ");
+
+  // Field 15: stime (kernel time — stub 0, we don't separate user/kernel)
+  strcat(buf, "0 ");
+
+  // Fields 16-52: stub zeros
+  strcat(buf, "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+              "0 0 0 0 0 0 0\n");
+
+  uint32_t len = (uint32_t)strlen(buf);
+  node->length = len;
+  if (offset >= len)
+    return 0;
+  if (offset + size > len)
+    size = len - offset;
+  memcpy(buffer, buf + offset, size);
+  return size;
+}
+
+// ── /proc/<pid>/status read ───────────────────────────────────────────────
+
+static uint32_t procfs_pid_status_read(vfs_node_t *node, uint32_t offset,
+                                       uint32_t size, uint8_t *buffer) {
+  uint32_t pid = node->impl;
+  struct thread *t = sched_get_thread_by_tid(pid);
+  if (!t)
+    return 0;
+
+  char *buf = kmalloc(512);
+  if (!buf)
+    return 0;
+  buf[0] = '\0';
+
+  char num[32];
+
+  strcat(buf, "Name:\t");
+  if (t->comm[0])
+    strcat(buf, t->comm);
+  else
+    strcat(buf, "unknown");
+  strcat(buf, "\nState:\t");
+  char sc[2] = {thread_state_char(t->state), '\0'};
+  strcat(buf, sc);
+  strcat(buf, "\nPid:\t");
+  pid_u32_to_str(pid, num);
+  strcat(buf, num);
+  strcat(buf, "\nPPid:\t");
+  pid_u32_to_str(t->parent ? t->parent->tid : 0, num);
+  strcat(buf, num);
+  strcat(buf, "\nUid:\t");
+  pid_u32_to_str(t->uid, num);
+  strcat(buf, num);
+  strcat(buf, "\t");
+  pid_u32_to_str(t->euid, num);
+  strcat(buf, num);
+  strcat(buf, "\nGid:\t");
+  pid_u32_to_str(t->gid, num);
+  strcat(buf, num);
+  strcat(buf, "\t");
+  pid_u32_to_str(t->egid, num);
+  strcat(buf, num);
+  strcat(buf, "\n");
+
+  uint32_t len = (uint32_t)strlen(buf);
+  node->length = len;
+  if (offset >= len) {
+    kfree(buf);
+    return 0;
+  }
+  if (offset + size > len)
+    size = len - offset;
+  memcpy(buffer, buf + offset, size);
+  kfree(buf);
+  return size;
+}
+
+// ── /proc/<pid>/cmdline read ──────────────────────────────────────────────
+
+static uint32_t procfs_pid_cmdline_read(vfs_node_t *node, uint32_t offset,
+                                        uint32_t size, uint8_t *buffer) {
+  uint32_t pid = node->impl;
+  struct thread *t = sched_get_thread_by_tid(pid);
+  if (!t)
+    return 0;
+
+  // Return comm as argv[0] (NUL-terminated, as Linux does)
+  const char *cmd = t->comm[0] ? t->comm : "unknown";
+  uint32_t len = (uint32_t)strlen(cmd) + 1; // include NUL
+  node->length = len;
+  if (offset >= len)
+    return 0;
+  if (offset + size > len)
+    size = len - offset;
+  memcpy(buffer, cmd + offset, size);
+  return size;
+}
+
+// ── Synthesise a /proc/<pid>/ directory node on demand ───────────────────
+
+static vfs_node_t *make_pid_dir(uint32_t pid) {
+  vfs_node_t *dir = kmalloc(sizeof(vfs_node_t));
+  if (!dir)
+    return NULL;
+  vfs_node_init(dir);
+  pid_u32_to_str(pid, dir->name);
+  dir->flags = FS_DIRECTORY; // not FS_PERSISTENT — ephemeral
+  dir->mask  = 0555;
+  dir->inode = 0x10000 + pid;
+  ramfs_mount_on(dir);
+
+  // stat
+  vfs_node_t *stat_node = kmalloc(sizeof(vfs_node_t));
+  if (stat_node) {
+    vfs_node_init(stat_node);
+    strcpy(stat_node->name, "stat");
+    stat_node->flags  = FS_FILE;
+    stat_node->mask   = 0444;
+    stat_node->impl   = pid; // stash PID for the read callback
+    stat_node->length = 128;
+    stat_node->read   = procfs_pid_stat_read;
+    ramfs_mount_node(dir, stat_node);
+  }
+
+  // status
+  vfs_node_t *status_node = kmalloc(sizeof(vfs_node_t));
+  if (status_node) {
+    vfs_node_init(status_node);
+    strcpy(status_node->name, "status");
+    status_node->flags  = FS_FILE;
+    status_node->mask   = 0444;
+    status_node->impl   = pid;
+    status_node->length = 256;
+    status_node->read   = procfs_pid_status_read;
+    ramfs_mount_node(dir, status_node);
+  }
+
+  // cmdline
+  vfs_node_t *cmdline_node = kmalloc(sizeof(vfs_node_t));
+  if (cmdline_node) {
+    vfs_node_init(cmdline_node);
+    strcpy(cmdline_node->name, "cmdline");
+    cmdline_node->flags  = FS_FILE;
+    cmdline_node->mask   = 0444;
+    cmdline_node->impl   = pid;
+    cmdline_node->length = 256;
+    cmdline_node->read   = procfs_pid_cmdline_read;
+    ramfs_mount_node(dir, cmdline_node);
+  }
+
+  return dir;
+}
+
+// ── Number of static entries in the procfs root (excluding . and ..) ─────
+// These are the nodes added by procfs_init before we install our hooks:
+//   meminfo cpuinfo partitions mounts uptime stat heapinfo cmdline self  → 9
+#define PROCFS_STATIC_ENTRIES 9
+
+// ── Custom readdir for /proc ──────────────────────────────────────────────
+//
+// Index layout:
+//   0        → "."
+//   1        → ".."
+//   2..N+1   → static ramfs children (N = PROCFS_STATIC_ENTRIES)
+//   N+2 ..   → live PID entries (one per thread in global_thread_list)
+
+static struct dirent procfs_dent; // single static buffer (safe: no preemption
+                                  // between readdir calls in getdents64 loop)
+
+static struct dirent *procfs_root_readdir(vfs_node_t *node, uint32_t index) {
+  memset(&procfs_dent, 0, sizeof(procfs_dent));
+
+  if (index == 0) {
+    strcpy(procfs_dent.name, ".");
+    procfs_dent.ino = node->inode;
+    return &procfs_dent;
+  }
+  if (index == 1) {
+    strcpy(procfs_dent.name, "..");
+    procfs_dent.ino = node->inode;
+    return &procfs_dent;
+  }
+
+  // Static children (index 2 .. PROCFS_STATIC_ENTRIES+1)
+  uint32_t static_idx = index - 2;
+  if (static_idx < PROCFS_STATIC_ENTRIES) {
+    // Walk the ramfs child list
+    typedef struct child_node_s { vfs_node_t *node; struct child_node_s *next; } child_node_t;
+    typedef struct { child_node_t *children; } ramfs_dir_t;
+    ramfs_dir_t *rdir = (ramfs_dir_t *)node->device;
+    if (!rdir)
+      return NULL;
+    child_node_t *curr = rdir->children;
+    for (uint32_t i = 0; i < static_idx && curr; i++)
+      curr = curr->next;
+    if (!curr)
+      return NULL;
+    strcpy(procfs_dent.name, curr->node->name);
+    procfs_dent.ino = curr->node->inode;
+    return &procfs_dent;
+  }
+
+  // PID entries
+  uint32_t pid_idx = static_idx - PROCFS_STATIC_ENTRIES;
+  struct thread *t = sched_get_thread_list_head();
+  uint32_t i = 0;
+  while (t) {
+    if (i == pid_idx) {
+      pid_u32_to_str(t->tid, procfs_dent.name);
+      procfs_dent.ino = 0x10000 + t->tid;
+      return &procfs_dent;
+    }
+    i++;
+    t = t->global_next;
+  }
+
+  return NULL; // end of directory
+}
+
+// ── Custom finddir for /proc ──────────────────────────────────────────────
+
+static vfs_node_t *procfs_root_finddir(vfs_node_t *node, char *name) {
+  // First try the static ramfs children
+  typedef struct child_node_s { vfs_node_t *node; struct child_node_s *next; } child_node_t;
+  typedef struct { child_node_t *children; } ramfs_dir_t;
+  ramfs_dir_t *rdir = (ramfs_dir_t *)node->device;
+  if (rdir) {
+    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+      return node;
+    child_node_t *curr = rdir->children;
+    while (curr) {
+      if (strcmp(curr->node->name, name) == 0)
+        return curr->node;
+      curr = curr->next;
+    }
+  }
+
+  // Check if it's a numeric PID
+  uint32_t pid = str_to_pid(name);
+  if (pid == 0)
+    return NULL;
+
+  // Verify the thread actually exists
+  struct thread *t = sched_get_thread_by_tid(pid);
+  if (!t)
+    return NULL;
+
+  // Synthesise a fresh directory node for this PID
+  return make_pid_dir(pid);
+}
+
 void procfs_init(void) {
   if (!fs_root)
     return;
@@ -493,5 +853,10 @@ void procfs_init(void) {
         ramfs_mount_node(self_dir, self_cmdline);
       }
     }
+
+    // Install dynamic PID hooks on top of the ramfs root.
+    // These wrap the ramfs readdir/finddir to also expose live per-PID dirs.
+    procfs_root->readdir = procfs_root_readdir;
+    procfs_root->finddir = procfs_root_finddir;
   }
 }
