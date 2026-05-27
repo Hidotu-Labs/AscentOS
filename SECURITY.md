@@ -4,7 +4,7 @@
 
 | Version | Supported          | Known Issues                                           |
 | ------- | ------------------ | ------------------------------------------------------ |
-| 1.x     | :warning:          | PTY stopping, af_inet sockets unstable, 300KB mem leak |
+| 1.x     | :warning:          | PTY stopping, af_inet sockets unstable, 300KB mem leak, unix sockets unstable |
 | < 1.0   | :x:                | End of support                               |
 
 ## Known Issues
@@ -12,6 +12,7 @@
 ### Version 1.x
 - **PTY Stopping Issue**: PTY (pseudo-terminal) processes may stop unexpectedly under certain conditions. Workaround: restart the terminal session.
 - **AF_INET Sockets**: IPv4 socket operations are not fully stable. Some network operations may fail or hang.
+- **AF_UNIX Sockets**: Some socket operations are not fully stable. Some sockets may hang on sending or receiving data.
 - **Memory Leak**: Approximately 300KB memory leak detected during normal system operation.
 
 ## Reporting a Vulnerability
