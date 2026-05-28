@@ -208,7 +208,7 @@ int drm_ioctl_addfb2(struct drm_device *dev, uint64_t arg) {
     struct drm_mode_fb_cmd2 *cmd = (struct drm_mode_fb_cmd2 *)arg;
 
     struct drm_framebuffer *fb = drm_framebuffer_create_full(dev, cmd);
-    if (!fb) return -1;
+    if (!fb) return -22; /* EINVAL */
 
     cmd->fb_id = fb->base.id;
     return 0;

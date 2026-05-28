@@ -680,7 +680,7 @@ static void setup_chardev(
     int (*ioctl_fn)(struct vfs_node *, uint32_t, uint64_t),
     uint64_t (*mmap_fn)(struct vfs_node *, uint64_t, uint64_t, uint64_t,
                         uint64_t, uint64_t),
-    void *device, uint32_t length) {
+    void *device, uint32_t length, uint32_t rdev) {
 
   // Create virtual device node
   vfs_node_t *node = kmalloc(sizeof(vfs_node_t));
@@ -700,6 +700,7 @@ static void setup_chardev(
   node->poll = poll_fn;
   node->ioctl = ioctl_fn;
   node->mmap = mmap_fn;
+  node->inode = rdev;
 
   // Register in device registry for persistent lookups
   fb_register_device_node(name, node);
@@ -850,7 +851,7 @@ static int fb_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
 #define VT_ACTIVATE 0x5606
 #define VT_WAITACTIVE 0x5607
 #define VT_DISALLOCATE 0x5608
-#define KDGETMODE 0x4B33
+// Removed KDGETMODE redefinition
 #define KDSETMODE 0x4B3A
 #define KDGKBMODE 0x4B44
 #define KDSKBMODE 0x4B45
@@ -1020,6 +1021,20 @@ static int tty0_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     console_termios = *term;
     return 0;
   }
+  case TIOCGETD: {
+    int *ldisc = (int *)arg;
+    if (!ldisc)
+      return -14;
+    *ldisc = 0; // N_TTY
+    return 0;
+  }
+  case TIOCSETD: {
+    // Silently accept setting to N_TTY (0)
+    int ldisc = (int)arg;
+    if (ldisc != 0)
+      return -22; // EINVAL
+    return 0;
+  }
   default:
     return -25; // ENOTTY
   }
@@ -1039,63 +1054,64 @@ void fb_register_vfs(void) {
 
   // /dev/fb0 - Framebuffer device (always available as fallback)
   setup_chardev(dev_dir, "fb0", fb_vfs_read, fb_vfs_write, NULL, NULL, NULL,
-                fb_ioctl, fb_vfs_mmap, fb, fb_size);
+                fb_ioctl, fb_vfs_mmap, fb, fb_size, (29 << 8) | 0);
 
-  // /dev/console
+  // /dev/console (Major 5, Minor 1)
   setup_chardev(dev_dir, "console", console_vfs_read, console_vfs_write,
                 console_vfs_open, console_vfs_close, console_vfs_poll,
-                tty0_ioctl, NULL, NULL, 0);
+                tty0_ioctl, NULL, NULL, 0, (5 << 8) | 1);
 
-  // /dev/tty (alias to console for now)
+  // /dev/tty (Major 5, Minor 0)
   setup_chardev(dev_dir, "tty", console_vfs_read, console_vfs_write,
                 console_vfs_open, console_vfs_close, console_vfs_poll,
-                tty0_ioctl, NULL, NULL, 0);
+                tty0_ioctl, NULL, NULL, 0, (5 << 8) | 0);
 
   // /dev/stdin
   setup_chardev(dev_dir, "stdin", console_vfs_read, 0, console_vfs_open,
-                console_vfs_close, console_vfs_poll, 0, NULL, NULL, 0);
+                console_vfs_close, console_vfs_poll, 0, NULL, NULL, 0,
+                (0 << 8) | 0);
 
   // /dev/stdout
   setup_chardev(dev_dir, "stdout", 0, console_vfs_write, console_vfs_open,
-                console_vfs_close, NULL, 0, NULL, NULL, 0);
+                console_vfs_close, NULL, 0, NULL, NULL, 0, (0 << 8) | 1);
 
   // /dev/stderr
   setup_chardev(dev_dir, "stderr", 0, console_vfs_write, console_vfs_open,
-                console_vfs_close, NULL, 0, NULL, NULL, 0);
+                console_vfs_close, NULL, 0, NULL, NULL, 0, (0 << 8) | 2);
 
-  // /dev/null
+  // /dev/null (Major 1, Minor 3)
   setup_chardev(dev_dir, "null", null_vfs_read, null_vfs_write, NULL, NULL,
-                NULL, NULL, NULL, NULL, 0);
+                NULL, NULL, NULL, NULL, 0, (1 << 8) | 3);
 
-  // /dev/zero
+  // /dev/zero (Major 1, Minor 5)
   setup_chardev(dev_dir, "zero", zero_vfs_read, zero_vfs_write, NULL, NULL,
-                NULL, NULL, NULL, NULL, 0);
+                NULL, NULL, NULL, NULL, 0, (1 << 8) | 5);
 
-  // /dev/tty0 — virtual terminal device for Xfbdev/Xorg VT management
+  // /dev/tty0 — virtual terminal device (Major 4, Minor 0)
   setup_chardev(dev_dir, "tty0", console_vfs_read, console_vfs_write,
                 console_vfs_open, console_vfs_close, console_vfs_poll,
-                tty0_ioctl, NULL, NULL, 0);
+                tty0_ioctl, NULL, NULL, 0, (4 << 8) | 0);
 
-  // /dev/tty1-tty7 — individual virtual terminals (X server opens tty1)
+  // /dev/tty1-tty7 — individual virtual terminals (Major 4, Minor 1+)
   setup_chardev(dev_dir, "tty1", console_vfs_read, console_vfs_write,
                 console_vfs_open, console_vfs_close, console_vfs_poll,
-                tty0_ioctl, NULL, NULL, 0);
+                tty0_ioctl, NULL, NULL, 0, (4 << 8) | 1);
   setup_chardev(dev_dir, "tty2", console_vfs_read, console_vfs_write,
                 console_vfs_open, console_vfs_close, console_vfs_poll,
-                tty0_ioctl, NULL, NULL, 0);
+                tty0_ioctl, NULL, NULL, 0, (4 << 8) | 2);
   setup_chardev(dev_dir, "tty3", console_vfs_read, console_vfs_write,
                 console_vfs_open, console_vfs_close, console_vfs_poll,
-                tty0_ioctl, NULL, NULL, 0);
+                tty0_ioctl, NULL, NULL, 0, (4 << 8) | 3);
 
-  // /dev/apm_bios (Power management probes in X11)
+  // /dev/apm_bios
   setup_chardev(dev_dir, "apm_bios", zero_vfs_read, zero_vfs_write, NULL, NULL,
-                NULL, NULL, NULL, NULL, 0);
+                NULL, NULL, NULL, NULL, 0, (10 << 8) | 134);
 
   // /dev/misc/apm_bios
   vfs_node_t *misc_dir = vfs_finddir(dev_dir, "misc");
   if (misc_dir) {
     setup_chardev(misc_dir, "apm_bios", zero_vfs_read, zero_vfs_write, NULL,
-                  NULL, NULL, NULL, NULL, NULL, 0);
+                  NULL, NULL, NULL, NULL, NULL, 0, (10 << 8) | 134);
   }
 
   // Register PTY devices (/dev/ptmx and /dev/pts/N)

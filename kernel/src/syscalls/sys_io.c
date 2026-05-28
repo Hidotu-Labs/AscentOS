@@ -35,7 +35,12 @@ typedef struct {
 #define TCSETS 0x5402
 #define TCSETSW 0x5403
 #define TCSETSF 0x5404
+#define TIOCGPGRP 0x540F
+#define TIOCSPGRP 0x5410
 #define TIOCGWINSZ 0x5413
+#define TIOCSWINSZ 0x5414
+#define TIOCGETD 0x5424
+#define TIOCSETD 0x5423
 
 // VT (Virtual Terminal) ioctl constants
 #define VT_OPENQRY 0x5600
@@ -867,118 +872,167 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
       klog_hex64(res);
       klog_puts("\n");
 
-      if (res != (uint64_t)-25) {
+    if (res != (uint64_t)-25) {
+        klog_puts("[SYSCALL] ioctl: node handler return value bypasses switch\n");
         return res;
       }
     }
   }
 
+  uint64_t ret = 0;
   switch ((uint32_t)request) {
   case TIOCGWINSZ: {
     struct winsize *ws = (struct winsize *)arg;
-    if (!ws || !vmm_is_user_addr_range_valid(arg, sizeof(struct winsize)))
-      return (uint64_t)-14; // EFAULT
+    if (!ws || !vmm_is_user_addr_range_valid(arg, sizeof(struct winsize))) {
+      ret = (uint64_t)-14;
+      break;
+    }
     ws->ws_row = (unsigned short)(fb_get_height() / FONT_HEIGHT);
     ws->ws_col = (unsigned short)(fb_get_width() / FONT_WIDTH);
     ws->ws_xpixel = (unsigned short)fb_get_width();
     ws->ws_ypixel = (unsigned short)fb_get_height();
-
-    return 0;
+    ret = 0;
+    break;
   }
   case TCGETS: {
     struct termios *t = (struct termios *)arg;
-    if (!t || !vmm_is_user_addr_range_valid(arg, sizeof(struct termios)))
-      return -14;
+    if (!t || !vmm_is_user_addr_range_valid(arg, sizeof(struct termios))) {
+      ret = (uint64_t)-14;
+      break;
+    }
     extern struct termios console_termios;
     *t = console_termios;
-    return 0;
+    ret = 0;
+    break;
   }
   case TCSETS:
   case TCSETSW:
   case TCSETSF: {
     const struct termios *term = (const struct termios *)arg;
-    if (!term || !vmm_is_user_addr_range_valid(arg, sizeof(struct termios)))
-      return (uint64_t)-14;
+    if (!term || !vmm_is_user_addr_range_valid(arg, sizeof(struct termios))) {
+      ret = (uint64_t)-14;
+      break;
+    }
     console_termios = *term;
-    return 0;
+    ret = 0;
+    break;
   }
   case 0x5470: { // KBDSCANMODE_GET
     int *mode = (int *)arg;
-    if (!mode)
-      return (uint64_t)-14;
+    if (!mode) {
+      ret = (uint64_t)-14;
+      break;
+    }
     extern bool keyboard_is_scancode_mode(void);
     *mode = keyboard_is_scancode_mode() ? 1 : 0;
-    return 0;
+    ret = 0;
+    break;
   }
   case 0x5471: { // KBDSCANMODE_SET
     int mode = (int)arg;
     extern void keyboard_set_scancode_mode(bool enabled);
     keyboard_set_scancode_mode(mode != 0);
-    return 0;
+    ret = 0;
+    break;
   }
   case 0x5472: { // KBDSCANCODE_READ
     // Scancode event structure: {scancode(1), is_extended(1), is_release(1)}
     unsigned char *event = (unsigned char *)arg;
-    if (!event)
-      return (uint64_t)-14;
+    if (!event) {
+      ret = (uint64_t)-14;
+      break;
+    }
 
     extern bool keyboard_has_scancode(void);
     extern bool keyboard_get_scancode(void *event_ptr);
 
     if (keyboard_has_scancode()) {
       if (keyboard_get_scancode((void *)event)) {
-        return 1; // 1 scancode event read
+        ret = 1; // 1 scancode event read
+        break;
       }
     }
-    return 0; // No scancode available (would block in non-blocking mode)
+    ret = 0; // No scancode available (would block in non-blocking mode)
+    break;
   }
   // VT ioctl stubs for X11 server support
   case VT_OPENQRY: {
     int *vt = (int *)arg;
-    if (!vt)
-      return (uint64_t)-14;
+    if (!vt) {
+      ret = (uint64_t)-14;
+      break;
+    }
     *vt = 1;
-    return 0;
+    ret = 0;
+    break;
   }
   case VT_GETMODE: {
     struct vt_mode *vtm = (struct vt_mode *)arg;
-    if (!vtm)
-      return (uint64_t)-14;
+    if (!vtm) {
+      ret = (uint64_t)-14;
+      break;
+    }
     memset(vtm, 0, sizeof(struct vt_mode));
-    return 0;
+    ret = 0;
+    break;
   }
   case VT_SETMODE:
-    return 0;
+    ret = 0;
+    break;
   case VT_GETSTATE: {
     struct vt_stat *vts = (struct vt_stat *)arg;
-    if (!vts)
-      return (uint64_t)-14;
+    if (!vts) {
+      ret = (uint64_t)-14;
+      break;
+    }
     memset(vts, 0, sizeof(struct vt_stat));
     vts->v_active = 1;
     vts->v_state = 0x02;
-    return 0;
+    ret = 0;
+    break;
   }
   case VT_RELDISP:
   case VT_ACTIVATE:
   case VT_WAITACTIVE:
   case VT_DISALLOCATE:
-    return 0;
+    ret = 0;
+    break;
   case KDSETMODE:
   case KDSKBMODE:
-    return 0;
+    ret = 0;
+    break;
   case KDGETMODE: {
     int *mode = (int *)arg;
-    if (!mode)
-      return (uint64_t)-14;
+    if (!mode) {
+      ret = (uint64_t)-14;
+      break;
+    }
     *mode = KD_TEXT;
-    return 0;
+    ret = 0;
+    break;
   }
   case KDGKBMODE: {
     int *mode = (int *)arg;
-    if (!mode)
-      return (uint64_t)-14;
+    if (!mode) {
+      ret = (uint64_t)-14;
+      break;
+    }
     *mode = 0; // K_XLATE
-    return 0;
+    ret = 0;
+    break;
+  }
+  case 0x5451: // KDSIGACCEPT
+    ret = 0;
+    break;
+  case TIOCGETD: {
+    int *ldisc = (int *)arg;
+    if (!ldisc) {
+      ret = (uint64_t)-14;
+      break;
+    }
+    *ldisc = 0; // N_TTY
+    ret = 0;
+    break;
   }
   default:
     klog_puts("[SYSCALL] ioctl: unhandled request 0x");
@@ -986,8 +1040,14 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
     klog_puts(" on fd=");
     klog_uint64(fd);
     klog_puts(" -> ENOTTY\n");
-    return (uint64_t)-25; // ENOTTY
+    ret = (uint64_t)-25; // ENOTTY
+    break;
   }
+
+  klog_puts("[SYSCALL] sys_ioctl RETURN 0x");
+  klog_hex64(ret);
+  klog_puts("\n");
+  return ret;
 }
 
 static uint64_t sys_lseek(uint64_t fd, uint64_t offset, uint64_t whence,
@@ -1160,6 +1220,11 @@ static void fill_kstat(struct kstat *ks, vfs_node_t *node) {
   ks->st_gid = node->gid;
   ks->__pad0 = 0;
   ks->st_rdev = 0;
+  /* For character and block devices, inode holds makedev(major,minor) */
+  if ((node->flags & FS_TYPE_MASK) == FS_CHARDEV ||
+      (node->flags & FS_TYPE_MASK) == FS_BLOCKDEV) {
+    ks->st_rdev = (uint64_t)node->inode;
+  }
   ks->st_size = (int64_t)node->length;
   ks->st_blksize = 4096; // Reasonable default
   ks->st_blocks = ((int64_t)node->length + 511) / 512;
@@ -3773,4 +3838,12 @@ void syscall_register_io(void) {
   console_termios.c_lflag = 0x0000000b;
   console_termios.c_iflag = 0x00000100;
   console_termios.c_oflag = 0x00000005;
+  console_termios.c_cflag = 0x000000bf; // Typical default: CS8 | CREAD | HUPCL ...
+  for (int i = 0; i < NCCS; i++)
+    console_termios.c_cc[i] = 0;
+  console_termios.c_cc[0] = 0x03; // VINTR (Ctrl-C)
+  console_termios.c_cc[1] = 0x1C; // VQUIT
+  console_termios.c_cc[2] = 0x7F; // VERASE
+  console_termios.c_cc[3] = 0x15; // VKILL
+  console_termios.c_cc[4] = 0x04; // VEOF
 }

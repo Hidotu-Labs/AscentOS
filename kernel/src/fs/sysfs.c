@@ -38,13 +38,13 @@
 // onto the /sys directory node so the VFS redirects all lookups through it.
 // ─────────────────────────────────────────────────────────────────────────────
 
-#include "fs/vfs.h"
-#include "fs/ramfs.h"
 #include "fs/sysfs.h"
 #include "console/klog.h"
+#include "drivers/net/nic.h"
 #include "drivers/pci/pci.h"
 #include "drivers/storage/block.h"
-#include "drivers/net/nic.h"
+#include "fs/ramfs.h"
+#include "fs/vfs.h"
 #include "lib/string.h"
 #include "mm/heap.h"
 #include "smp/cpu.h"
@@ -61,22 +61,32 @@ static void u32_to_hex(uint32_t val, char *buf, int width) {
 }
 
 static void u64_to_dec(uint64_t val, char *buf) {
-  if (val == 0) { buf[0] = '0'; buf[1] = '\0'; return; }
-  char tmp[24]; int i = 0;
-  while (val > 0) { tmp[i++] = '0' + (val % 10); val /= 10; }
+  if (val == 0) {
+    buf[0] = '0';
+    buf[1] = '\0';
+    return;
+  }
+  char tmp[24];
+  int i = 0;
+  while (val > 0) {
+    tmp[i++] = '0' + (val % 10);
+    val /= 10;
+  }
   int j = 0;
-  while (i > 0) buf[j++] = tmp[--i];
+  while (i > 0)
+    buf[j++] = tmp[--i];
   buf[j] = '\0';
 }
 
 // Create a directory under parent and return the new node.
 static vfs_node_t *sysfs_mkdir(vfs_node_t *parent, const char *name) {
   vfs_node_t *dir = kmalloc(sizeof(vfs_node_t));
-  if (!dir) return NULL;
+  if (!dir)
+    return NULL;
   vfs_node_init(dir);
   strncpy(dir->name, name, 127);
   dir->flags = FS_DIRECTORY | FS_PERSISTENT;
-  dir->mask  = 0555;
+  dir->mask = 0555;
   ramfs_mount_on(dir);
   ramfs_mount_node(parent, dir);
   return dir;
@@ -84,10 +94,12 @@ static vfs_node_t *sysfs_mkdir(vfs_node_t *parent, const char *name) {
 
 // Symlink read callback — target stored in node->ptr (cast to char *)
 static int sysfs_readlink_cb(vfs_node_t *node, char *buf, uint32_t size) {
-  if (!node->ptr) return -1;
+  if (!node->ptr)
+    return -1;
   const char *target = (const char *)node->ptr;
   uint32_t len = (uint32_t)strlen(target);
-  if (len >= size) len = size - 1;
+  if (len >= size)
+    len = size - 1;
   memcpy(buf, target, len);
   buf[len] = '\0';
   return (int)len;
@@ -97,15 +109,17 @@ static int sysfs_readlink_cb(vfs_node_t *node, char *buf, uint32_t size) {
 static void sysfs_symlink(vfs_node_t *parent, const char *name,
                           const char *target) {
   vfs_node_t *sl = kmalloc(sizeof(vfs_node_t));
-  if (!sl) return;
+  if (!sl)
+    return;
   vfs_node_init(sl);
   strncpy(sl->name, name, 127);
-  sl->flags    = FS_SYMLINK | FS_PERSISTENT;
-  sl->mask     = 0777;
+  sl->flags = FS_SYMLINK | FS_PERSISTENT;
+  sl->mask = 0777;
   sl->readlink = sysfs_readlink_cb;
   // Store target string — allocate a copy
   char *tgt = kmalloc(strlen(target) + 1);
-  if (tgt) strcpy(tgt, target);
+  if (tgt)
+    strcpy(tgt, target);
   sl->ptr = (vfs_node_t *)tgt; // reuse ptr field for the string
   ramfs_mount_node(parent, sl);
 }
@@ -114,21 +128,28 @@ static void sysfs_symlink(vfs_node_t *parent, const char *name,
 static void sysfs_mkfile(vfs_node_t *parent, const char *name,
                          const char *content) {
   vfs_node_t *f = kmalloc(sizeof(vfs_node_t));
-  if (!f) return;
+  if (!f)
+    return;
   vfs_node_init(f);
   strncpy(f->name, name, 127);
   f->flags = FS_FILE | FS_PERSISTENT;
-  f->mask  = 0444;
+  f->mask = 0444;
 
   // Allocate a ramfs file backing store so read/write work
-  typedef struct { uint8_t *data; uint32_t capacity; } ramfs_file_t;
+  typedef struct {
+    uint8_t *data;
+    uint32_t capacity;
+  } ramfs_file_t;
   ramfs_file_t *rf = kmalloc(sizeof(ramfs_file_t));
-  if (!rf) { kfree(f); return; }
-  rf->data     = NULL;
+  if (!rf) {
+    kfree(f);
+    return;
+  }
+  rf->data = NULL;
   rf->capacity = 0;
   f->device = rf;
-  f->read   = ramfs_read;
-  f->write  = ramfs_write;
+  f->read = ramfs_read;
+  f->write = ramfs_write;
 
   ramfs_mount_node(parent, f);
 
@@ -142,45 +163,59 @@ static void sysfs_populate_pci(vfs_node_t *pci_devices_dir) {
   uint32_t count = pci_get_device_count();
   for (uint32_t i = 0; i < count; i++) {
     struct pci_device *dev = pci_get_device(i);
-    if (!dev) continue;
+    if (!dev)
+      continue;
 
     // Name: 0000:BB:SS.F
     char devname[16];
-    devname[0] = '0'; devname[1] = '0'; devname[2] = '0'; devname[3] = '0';
+    devname[0] = '0';
+    devname[1] = '0';
+    devname[2] = '0';
+    devname[3] = '0';
     devname[4] = ':';
     char tmp[4];
-    u32_to_hex(dev->bus,  tmp, 2); devname[5] = tmp[0]; devname[6] = tmp[1];
+    u32_to_hex(dev->bus, tmp, 2);
+    devname[5] = tmp[0];
+    devname[6] = tmp[1];
     devname[7] = ':';
-    u32_to_hex(dev->slot, tmp, 2); devname[8] = tmp[0]; devname[9] = tmp[1];
+    u32_to_hex(dev->slot, tmp, 2);
+    devname[8] = tmp[0];
+    devname[9] = tmp[1];
     devname[10] = '.';
     devname[11] = '0' + (dev->func & 7);
     devname[12] = '\0';
 
     vfs_node_t *ddir = sysfs_mkdir(pci_devices_dir, devname);
-    if (!ddir) continue;
+    if (!ddir)
+      continue;
 
     // vendor  (e.g. "0x8086\n")
     char vbuf[10];
-    vbuf[0] = '0'; vbuf[1] = 'x';
+    vbuf[0] = '0';
+    vbuf[1] = 'x';
     u32_to_hex(dev->vendor_id, vbuf + 2, 4);
-    vbuf[6] = '\n'; vbuf[7] = '\0';
+    vbuf[6] = '\n';
+    vbuf[7] = '\0';
     sysfs_mkfile(ddir, "vendor", vbuf);
 
     // device
     char dbuf[10];
-    dbuf[0] = '0'; dbuf[1] = 'x';
+    dbuf[0] = '0';
+    dbuf[1] = 'x';
     u32_to_hex(dev->device_id, dbuf + 2, 4);
-    dbuf[6] = '\n'; dbuf[7] = '\0';
+    dbuf[6] = '\n';
+    dbuf[7] = '\0';
     sysfs_mkfile(ddir, "device", dbuf);
 
     // class  (24-bit: class|subclass|progif as 0xCCSSPP)
     char cbuf[12];
-    cbuf[0] = '0'; cbuf[1] = 'x';
+    cbuf[0] = '0';
+    cbuf[1] = 'x';
     u32_to_hex(((uint32_t)dev->class_code << 16) |
-               ((uint32_t)dev->subclass   <<  8) |
-                (uint32_t)dev->prog_if,
+                   ((uint32_t)dev->subclass << 8) | (uint32_t)dev->prog_if,
                cbuf + 2, 6);
-    cbuf[8] = '\n'; cbuf[9] = '\0';
+    cbuf[8] = '\n';
+    cbuf[9] = '\0';
     sysfs_mkfile(ddir, "class", cbuf);
 
     // irq
@@ -216,22 +251,25 @@ static void sysfs_populate_block(vfs_node_t *block_class_dir) {
   int count = block_count();
   for (int i = 0; i < count; i++) {
     struct block_device *bd = block_get(i);
-    if (!bd) continue;
+    if (!bd)
+      continue;
 
     vfs_node_t *bdir = sysfs_mkdir(block_class_dir, bd->name);
-    if (!bdir) continue;
+    if (!bdir)
+      continue;
 
     // dev: major:minor  (8:N for SCSI/ATA)
     char devbuf[16];
-    devbuf[0] = '8'; devbuf[1] = ':';
+    devbuf[0] = '8';
+    devbuf[1] = ':';
     u64_to_dec(i, devbuf + 2);
     strcat(devbuf, "\n");
     sysfs_mkfile(bdir, "dev", devbuf);
 
     // size: total bytes
     char sbuf[32];
-    uint64_t bytes = (uint64_t)bd->total_sectors *
-                     (bd->sector_size ? bd->sector_size : 512);
+    uint64_t bytes =
+        (uint64_t)bd->total_sectors * (bd->sector_size ? bd->sector_size : 512);
     u64_to_dec(bytes, sbuf);
     strcat(sbuf, "\n");
     sysfs_mkfile(bdir, "size", sbuf);
@@ -243,10 +281,12 @@ static void sysfs_populate_block(vfs_node_t *block_class_dir) {
 // ── Net class population ──────────────────────────────────────────────────
 
 static void sysfs_populate_net(vfs_node_t *net_class_dir) {
-  if (!nic_is_present()) return;
+  if (!nic_is_present())
+    return;
 
   vfs_node_t *eth0 = sysfs_mkdir(net_class_dir, "eth0");
-  if (!eth0) return;
+  if (!eth0)
+    return;
 
   // MAC address
   const uint8_t *mac = nic_get_mac();
@@ -266,8 +306,8 @@ static void sysfs_populate_net(vfs_node_t *net_class_dir) {
   sysfs_mkfile(eth0, "address", macbuf);
 
   sysfs_mkfile(eth0, "operstate", nic_link_up() ? "up\n" : "down\n");
-  sysfs_mkfile(eth0, "type",      "1\n"); // ARPHRD_ETHER
-  sysfs_mkfile(eth0, "mtu",       "1500\n");
+  sysfs_mkfile(eth0, "type", "1\n"); // ARPHRD_ETHER
+  sysfs_mkfile(eth0, "mtu", "1500\n");
 }
 
 // ── CPU devices population ────────────────────────────────────────────────
@@ -279,7 +319,8 @@ static void sysfs_populate_cpus(vfs_node_t *cpu_dir) {
     strcpy(name, "cpu");
     u64_to_dec(i, name + 3);
     vfs_node_t *cdir = sysfs_mkdir(cpu_dir, name);
-    if (!cdir) continue;
+    if (!cdir)
+      continue;
     sysfs_mkfile(cdir, "online", "1\n");
   }
   // Also add a 'possible' and 'present' file at the cpu/ level
@@ -288,13 +329,14 @@ static void sysfs_populate_cpus(vfs_node_t *cpu_dir) {
   u64_to_dec(count - 1, cpumask + 2);
   strcat(cpumask, "\n");
   sysfs_mkfile(cpu_dir, "possible", cpumask);
-  sysfs_mkfile(cpu_dir, "present",  cpumask);
+  sysfs_mkfile(cpu_dir, "present", cpumask);
 }
 
 // ── Main init ─────────────────────────────────────────────────────────────
 
 void sysfs_init(void) {
-  if (!fs_root) return;
+  if (!fs_root)
+    return;
 
   // Find or create the /sys directory on the root filesystem
   vfs_node_t *sys_dir = vfs_finddir(fs_root, "sys");
@@ -309,16 +351,17 @@ void sysfs_init(void) {
 
   // Create a fresh ramfs root and mount it over /sys — same pattern as procfs
   vfs_node_t *sysfs_root = kmalloc(sizeof(vfs_node_t));
-  if (!sysfs_root) return;
+  if (!sysfs_root)
+    return;
   vfs_node_init(sysfs_root);
   strcpy(sysfs_root->name, "sys");
   ramfs_mount_on(sysfs_root);
   vfs_mount(sys_dir, sysfs_root);
 
   // ── /sys/bus/pci/devices ─────────────────────────────────────────────
-  vfs_node_t *bus_dir     = sysfs_mkdir(sysfs_root, "bus");
-  vfs_node_t *pci_dir     = sysfs_mkdir(bus_dir,    "pci");
-  vfs_node_t *pci_dev_dir = sysfs_mkdir(pci_dir,    "devices");
+  vfs_node_t *bus_dir = sysfs_mkdir(sysfs_root, "bus");
+  vfs_node_t *pci_dir = sysfs_mkdir(bus_dir, "pci");
+  vfs_node_t *pci_dev_dir = sysfs_mkdir(pci_dir, "devices");
   sysfs_populate_pci(pci_dev_dir);
 
   // ── /sys/class ───────────────────────────────────────────────────────
@@ -327,8 +370,8 @@ void sysfs_init(void) {
   // ── /sys/devices ─────────────────────────────────────────────────────
   // Must be created before class/drm so the symlink target dirs exist
   vfs_node_t *devices_dir = sysfs_mkdir(sysfs_root, "devices");
-  vfs_node_t *system_dir  = sysfs_mkdir(devices_dir, "system");
-  vfs_node_t *cpu_dir     = sysfs_mkdir(system_dir,  "cpu");
+  vfs_node_t *system_dir = sysfs_mkdir(devices_dir, "system");
+  vfs_node_t *cpu_dir = sysfs_mkdir(system_dir, "cpu");
   sysfs_populate_cpus(cpu_dir);
 
   // /sys/class/block
@@ -351,14 +394,21 @@ void sysfs_init(void) {
       struct pci_device *pd = pci_get_device(i);
       if (pd && pd->class_code == 0x03) {
         char tmp[4];
-        pci_addr[0]='0'; pci_addr[1]='0'; pci_addr[2]='0'; pci_addr[3]='0';
-        pci_addr[4]=':';
-        u32_to_hex(pd->bus,  tmp, 2); pci_addr[5]=tmp[0]; pci_addr[6]=tmp[1];
-        pci_addr[7]=':';
-        u32_to_hex(pd->slot, tmp, 2); pci_addr[8]=tmp[0]; pci_addr[9]=tmp[1];
-        pci_addr[10]='.';
-        pci_addr[11]='0'+(pd->func&7);
-        pci_addr[12]='\0';
+        pci_addr[0] = '0';
+        pci_addr[1] = '0';
+        pci_addr[2] = '0';
+        pci_addr[3] = '0';
+        pci_addr[4] = ':';
+        u32_to_hex(pd->bus, tmp, 2);
+        pci_addr[5] = tmp[0];
+        pci_addr[6] = tmp[1];
+        pci_addr[7] = ':';
+        u32_to_hex(pd->slot, tmp, 2);
+        pci_addr[8] = tmp[0];
+        pci_addr[9] = tmp[1];
+        pci_addr[10] = '.';
+        pci_addr[11] = '0' + (pd->func & 7);
+        pci_addr[12] = '\0';
         break;
       }
     }
@@ -378,7 +428,7 @@ void sysfs_init(void) {
     vfs_node_t *gpu_dev = sysfs_mkdir(pci_seg, pci_addr);
     vfs_node_t *drm_dev = sysfs_mkdir(gpu_dev, "drm");
     vfs_node_t *card0_dir = sysfs_mkdir(drm_dev, "card0");
-    sysfs_mkfile(card0_dir, "dev",    "226:0\n");
+    sysfs_mkfile(card0_dir, "dev", "226:0\n");
     sysfs_mkfile(card0_dir, "uevent",
                  "MAJOR=226\nMINOR=0\nDEVNAME=dri/card0\n"
                  "DEVTYPE=drm_minor\nSUBSYSTEM=drm\n");
@@ -386,7 +436,8 @@ void sysfs_init(void) {
     // Keep absolute — wlroots stats this but doesn't readlink it, so the
     // absolute path works fine with vfs_resolve_path_at.
     sysfs_symlink(card0_dir, "subsystem", "/sys/class/drm");
-    // Also add uevent files up the device tree (wlroots walks up looking for them)
+    // Also add uevent files up the device tree (wlroots walks up looking for
+    // them)
     sysfs_mkfile(drm_dev, "uevent", "SUBSYSTEM=drm\n");
     sysfs_mkfile(gpu_dev, "uevent",
                  "DRIVER=bochs-drm\nPCI_ID=1234:1111\nSUBSYSTEM=pci\n");
@@ -395,17 +446,57 @@ void sysfs_init(void) {
 
   // /sys/class/input/event0
   vfs_node_t *input_class = sysfs_mkdir(class_dir, "input");
-  vfs_node_t *event0_dir  = sysfs_mkdir(input_class, "event0");
+  vfs_node_t *event0_dir = sysfs_mkdir(input_class, "event0");
   sysfs_mkfile(event0_dir, "dev", "13:64\n");
 
   // ── /sys/dev/block  /sys/dev/char ────────────────────────────────────
   vfs_node_t *dev_dir = sysfs_mkdir(sysfs_root, "dev");
   sysfs_mkdir(dev_dir, "block");
   vfs_node_t *char_dir = sysfs_mkdir(dev_dir, "char");
-  // DRM char device
+  // DRM char device: /sys/dev/char/226:0/
   vfs_node_t *drm_char = sysfs_mkdir(char_dir, "226:0");
   sysfs_mkfile(drm_char, "uevent",
                "MAJOR=226\nMINOR=0\nDEVNAME=dri/card0\nDEVTYPE=drm_minor\n");
+  // drmGetDeviceNameFromFd2() reads /sys/dev/char/226:0/device/drm/<name>
+  // to discover the DRM device name.  Provide the symlink chain it expects:
+  //   /sys/dev/char/226:0/device  -> ../../devices/pci0000:00/<pci_addr>
+  //   /sys/dev/char/226:0/device/drm/card0  (directory entry)
+  {
+    // Find the GPU PCI address (same logic as above)
+    char pci_addr2[20] = "0000:00:01.0";
+    uint32_t pci_count2 = pci_get_device_count();
+    for (uint32_t i = 0; i < pci_count2; i++) {
+      struct pci_device *pd = pci_get_device(i);
+      if (pd && pd->class_code == 0x03) {
+        char tmp2[4];
+        pci_addr2[0] = '0';
+        pci_addr2[1] = '0';
+        pci_addr2[2] = '0';
+        pci_addr2[3] = '0';
+        pci_addr2[4] = ':';
+        u32_to_hex(pd->bus, tmp2, 2);
+        pci_addr2[5] = tmp2[0];
+        pci_addr2[6] = tmp2[1];
+        pci_addr2[7] = ':';
+        u32_to_hex(pd->slot, tmp2, 2);
+        pci_addr2[8] = tmp2[0];
+        pci_addr2[9] = tmp2[1];
+        pci_addr2[10] = '.';
+        pci_addr2[11] = '0' + (pd->func & 7);
+        pci_addr2[12] = '\0';
+        break;
+      }
+    }
+    // /sys/dev/char/226:0/device -> symlink to the PCI device directory
+    // Relative from /sys/dev/char/226:0/ : ../../../devices/pci0000:00/<addr>
+    char dev_target[128];
+    strcpy(dev_target, "../../../devices/pci0000:00/");
+    strcat(dev_target, pci_addr2);
+    sysfs_symlink(drm_char, "device", dev_target);
+
+    // /sys/dev/char/226:0/device is now a symlink that points to the PCI
+    // device directory. wlroots can follow this to find 'drm/card0'.
+  }
 
   // ── /sys/kernel ──────────────────────────────────────────────────────
   vfs_node_t *kernel_dir = sysfs_mkdir(sysfs_root, "kernel");

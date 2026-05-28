@@ -729,6 +729,9 @@ bool process_exec_argv(const char **argv) {
     current_thread->fd_offsets[0] = 0;
     current_thread->fd_offsets[1] = 0;
     current_thread->fd_offsets[2] = 0;
+    strcpy(current_thread->fd_paths[0], "/dev/console");
+    strcpy(current_thread->fd_paths[1], "/dev/console");
+    strcpy(current_thread->fd_paths[2], "/dev/console");
 
     for (int i = 3; i < MAX_FDS; i++) {
       current_thread->fds[i] = NULL;

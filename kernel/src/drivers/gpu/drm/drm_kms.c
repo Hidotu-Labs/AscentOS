@@ -22,8 +22,9 @@ struct drm_plane *drm_plane_create(struct drm_device *dev, uint32_t possible_crt
     
     plane->possible_crtcs = possible_crtcs;
     drm_mode_object_init(dev, &plane->base, DRM_MODE_OBJECT_PLANE);
-
+    
     /* Attach standard plane properties */
+    drm_obj_add_prop(&plane->base, DRM_PROP_ID_TYPE,    0); /* Default to Overlay */
     drm_obj_add_prop(&plane->base, DRM_PROP_ID_CRTC_ID, 0);
     drm_obj_add_prop(&plane->base, DRM_PROP_ID_FB_ID,   0);
     drm_obj_add_prop(&plane->base, DRM_PROP_ID_SRC_X,   0);
@@ -82,13 +83,17 @@ void drm_kms_init(struct drm_device *dev) {
     klog_puts("[DRM] Initializing KMS components...\n");
     // 1. Create a primary plane
     struct drm_plane *primary = drm_plane_create(dev, 0x1);
-    
-    // 1a. Create a cursor plane
-    struct drm_plane *cursor = drm_plane_create(dev, 0x1);
-    (void)cursor;
+    drm_obj_set_prop(&primary->base, DRM_PROP_ID_TYPE, DRM_PLANE_TYPE_PRIMARY);
 
     // 2. Create a CRTC and link to primary plane
     struct drm_crtc *crtc = drm_crtc_create(dev, primary);
+
+    // 1a. Create a cursor plane and link it to the CRTC
+    struct drm_plane *cursor = drm_plane_create(dev, 0x1);
+    if (cursor) {
+        drm_obj_set_prop(&cursor->base, DRM_PROP_ID_TYPE, DRM_PLANE_TYPE_CURSOR);
+        crtc->cursor = cursor;
+    }
 
     // 3. Create an encoder linked to CRTC 1
     struct drm_encoder *encoder = drm_encoder_create(dev, 1 /* bits */, 0x1);

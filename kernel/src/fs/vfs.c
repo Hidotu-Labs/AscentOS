@@ -256,6 +256,11 @@ vfs_node_t *vfs_resolve_path_at(vfs_node_t *dir, const char *path) {
 
     vfs_node_t *next = vfs_finddir(current, comp);
     if (!next) {
+      klog_puts("[VFS] component not found: ");
+      klog_puts(comp);
+      klog_puts(" in parent=");
+      klog_puts(current->name);
+      klog_puts("\n");
       if (current != fs_root && current != dir)
         if (!(current->flags & FS_PERSISTENT))
           kfree(current);
@@ -265,7 +270,11 @@ vfs_node_t *vfs_resolve_path_at(vfs_node_t *dir, const char *path) {
 
     // Handle symlinks
     if ((next->flags & FS_TYPE_MASK) == FS_SYMLINK) {
+      klog_puts("[VFS] encountered symlink: ");
+      klog_puts(comp);
+      klog_puts("\n");
       if (++symlink_depth > MAX_SYMLINK_DEPTH) {
+        klog_puts("[VFS] max symlink depth exceeded\n");
         kfree(next);
         if (current != fs_root && current != dir)
           if (!(current->flags & FS_PERSISTENT))
@@ -275,16 +284,21 @@ vfs_node_t *vfs_resolve_path_at(vfs_node_t *dir, const char *path) {
       }
 
       char link_target[256];
-      int len = vfs_readlink(next, link_target, 256);
+      int len = vfs_readlink(next, link_target, 255);
       kfree(next);
 
       if (len < 0) {
+        klog_puts("[VFS] readlink failed\n");
         if (current != fs_root && current != dir)
           if (!(current->flags & FS_PERSISTENT))
             kfree(current);
         kfree(path_buf);
         return 0;
       }
+      link_target[len] = '\0';
+      klog_puts("[VFS] symlink target: ");
+      klog_puts(link_target);
+      klog_puts("\n");
 
       // Construct new path: [link_target] + "/" + [remaining p]
       char *next_path = kmalloc(512);
@@ -295,11 +309,10 @@ vfs_node_t *vfs_resolve_path_at(vfs_node_t *dir, const char *path) {
         kfree(path_buf);
         return 0;
       }
-      strncpy(next_path, link_target, 511);
-      next_path[511] = '\0';
+      strcpy(next_path, link_target);
 
       if (*p) {
-        int cur_len = strlen(next_path);
+        int cur_len = (int)strlen(next_path);
         if (cur_len < 510) {
           if (next_path[cur_len - 1] != '/') {
             strcat(next_path, "/");
@@ -308,6 +321,9 @@ vfs_node_t *vfs_resolve_path_at(vfs_node_t *dir, const char *path) {
         }
       }
       next_path[511] = '\0';
+      klog_puts("[VFS] expanded path: ");
+      klog_puts(next_path);
+      klog_puts("\n");
 
       // Update path_buf and p
       strcpy(path_buf, next_path);

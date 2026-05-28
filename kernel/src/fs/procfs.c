@@ -1,3 +1,4 @@
+#include <stdint.h>
 #include "fs/procfs.h"
 #include "apic/lapic_timer.h"
 #include "drivers/storage/block.h"
@@ -760,6 +761,92 @@ static uint32_t procfs_pid_io_read(vfs_node_t *node, uint32_t offset,
   return size;
 }
 
+// ── /proc/<pid>/fd/ support ──────────────────────────────────────────────
+
+static int procfs_pid_fd_link_readlink(vfs_node_t *node, char *buf,
+                                       uint32_t size) {
+  uint32_t pid_fd = node->impl;
+  uint32_t pid = pid_fd >> 16;
+  uint32_t fd = pid_fd & 0xFFFF;
+
+  struct thread *t = sched_get_thread_by_tid(pid);
+  if (!t || fd >= MAX_FDS || !t->fds[fd])
+    return -2; // ENOENT
+
+  const char *path = t->fd_paths[fd];
+  if (path[0] == '\0') {
+    // Fallback if path not tracked (e.g. for some early-boot nodes)
+    path = t->fds[fd]->name;
+  }
+
+  uint32_t len = (uint32_t)strlen(path);
+  if (len > size)
+    len = size;
+  memcpy(buf, path, len);
+  return (int)len;
+}
+
+static vfs_node_t *procfs_pid_fd_finddir(vfs_node_t *node, char *name) {
+  uint32_t pid = node->impl;
+  if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+    return node;
+
+  uint32_t fd = str_to_pid(name);
+  if (fd == 0 && name[0] != '0')
+    return NULL;
+
+  struct thread *t = sched_get_thread_by_tid(pid);
+  if (!t || fd >= MAX_FDS || !t->fds[fd])
+    return NULL;
+
+  vfs_node_t *link = kmalloc(sizeof(vfs_node_t));
+  if (!link)
+    return NULL;
+  vfs_node_init(link);
+  strcpy(link->name, name);
+  link->flags = FS_SYMLINK;
+  link->mask = 0777;
+  link->impl = (pid << 16) | (fd & 0xFFFF);
+  link->readlink = procfs_pid_fd_link_readlink;
+  return link;
+}
+
+static struct dirent *procfs_pid_fd_readdir(vfs_node_t *node, uint32_t index) {
+  uint32_t pid = node->impl;
+  struct thread *t = sched_get_thread_by_tid(pid);
+  if (!t)
+    return NULL;
+
+  static struct dirent d;
+  memset(&d, 0, sizeof(d));
+
+  if (index == 0) {
+    strcpy(d.name, ".");
+    d.ino = node->inode;
+    return &d;
+  }
+  if (index == 1) {
+    strcpy(d.name, "..");
+    d.ino = node->inode;
+    return &d;
+  }
+
+  uint32_t fd_idx = index - 2;
+  uint32_t found_count = 0;
+  for (int i = 0; i < MAX_FDS; i++) {
+    if (t->fds[i]) {
+      if (found_count == fd_idx) {
+        pid_u32_to_str(i, d.name);
+        d.ino = (pid << 16) | i;
+        return &d;
+      }
+      found_count++;
+    }
+  }
+
+  return NULL;
+}
+
 // ── Synthesise a /proc/<pid>/ directory node on demand ───────────────────
 
 static vfs_node_t *make_pid_dir(uint32_t pid) {
@@ -838,13 +925,40 @@ static vfs_node_t *make_pid_dir(uint32_t pid) {
     ramfs_mount_node(dir, io_node);
   }
 
+  // fd directory
+  vfs_node_t *fd_dir = kmalloc(sizeof(vfs_node_t));
+  if (fd_dir) {
+    vfs_node_init(fd_dir);
+    strcpy(fd_dir->name, "fd");
+    fd_dir->flags = FS_DIRECTORY;
+    fd_dir->mask = 0555;
+    fd_dir->impl = pid;
+    fd_dir->readdir = procfs_pid_fd_readdir;
+    fd_dir->finddir = procfs_pid_fd_finddir;
+    ramfs_mount_node(dir, fd_dir);
+  }
+
   return dir;
 }
 
 // ── Number of static entries in the procfs root (excluding . and ..) ─────
 // These are the nodes added by procfs_init before we install our hooks:
-//   meminfo cpuinfo partitions mounts uptime stat heapinfo cmdline loadavg self → 10
-#define PROCFS_STATIC_ENTRIES 10
+//   meminfo cpuinfo partitions mounts uptime stat heapinfo cmdline loadavg → 9
+#define PROCFS_STATIC_ENTRIES 9
+
+static int procfs_self_readlink(vfs_node_t *node, char *buf, uint32_t size) {
+  (void)node;
+  struct thread *t = sched_get_current();
+  if (!t)
+    return -1;
+  char pid_str[16];
+  pid_u32_to_str(t->tid, pid_str);
+  uint32_t len = (uint32_t)strlen(pid_str);
+  if (len > size)
+    len = size;
+  memcpy(buf, pid_str, len);
+  return (int)len;
+}
 
 // ── Custom readdir for /proc ──────────────────────────────────────────────
 //
@@ -910,6 +1024,18 @@ static struct dirent *procfs_root_readdir(vfs_node_t *node, uint32_t index) {
 // ── Custom finddir for /proc ──────────────────────────────────────────────
 
 static vfs_node_t *procfs_root_finddir(vfs_node_t *node, char *name) {
+  if (strcmp(name, "self") == 0) {
+    vfs_node_t *self_link = kmalloc(sizeof(vfs_node_t));
+    if (!self_link)
+      return NULL;
+    vfs_node_init(self_link);
+    strcpy(self_link->name, "self");
+    self_link->flags = FS_SYMLINK;
+    self_link->mask = 0777;
+    self_link->readlink = procfs_self_readlink;
+    return self_link;
+  }
+
   // First try the static ramfs children
   typedef struct child_node_s { vfs_node_t *node; struct child_node_s *next; } child_node_t;
   typedef struct { child_node_t *children; } ramfs_dir_t;
@@ -1066,28 +1192,6 @@ void procfs_init(void) {
       cmdline_node->mask = 0444;
       cmdline_node->read = procfs_cmdline_read;
       ramfs_mount_node(procfs_root, cmdline_node);
-    }
-
-    // Add /proc/self directory
-    vfs_node_t *self_dir = kmalloc(sizeof(vfs_node_t));
-    if (self_dir) {
-      vfs_node_init(self_dir);
-      strncpy(self_dir->name, "self", 127);
-      self_dir->flags = FS_DIRECTORY | FS_PERSISTENT;
-      self_dir->mask = 0555;
-      ramfs_mount_on(self_dir); // Crucial: Initialize directory structure!
-      ramfs_mount_node(procfs_root, self_dir);
-
-      // Add /proc/self/cmdline
-      vfs_node_t *self_cmdline = kmalloc(sizeof(vfs_node_t));
-      if (self_cmdline) {
-        vfs_node_init(self_cmdline);
-        strncpy(self_cmdline->name, "cmdline", 127);
-        self_cmdline->flags = FS_FILE | FS_PERSISTENT;
-        self_cmdline->mask = 0444;
-        self_cmdline->read = procfs_cmdline_read;
-        ramfs_mount_node(self_dir, self_cmdline);
-      }
     }
 
     // Install dynamic PID hooks on top of the ramfs root.

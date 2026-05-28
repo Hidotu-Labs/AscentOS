@@ -66,8 +66,7 @@ void syscall_dispatcher(struct syscall_regs *regs) {
 
   // Log syscall errors (negative return values), exclude EAGAIN (-11) and
   // ENOENT (-2)
-  if ((int64_t)regs->rax < 0 && (int64_t)regs->rax != -11 &&
-      (int64_t)regs->rax != -2) {
+  if ((int64_t)regs->rax < 0) {
     klog_puts("[SYSCALL ERR] syscall ");
     klog_uint64(syscall_num);
     klog_puts(" returned error: ");

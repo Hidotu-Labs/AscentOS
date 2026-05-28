@@ -1,7 +1,7 @@
 #include "ramfs.h"
+#include "../console/klog.h"
 #include "../lib/string.h"
 #include "../mm/heap.h"
-#include "../console/klog.h"
 
 // ── Internal Structures ─────────────────────────────────────────────────────
 

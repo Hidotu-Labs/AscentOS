@@ -619,6 +619,8 @@ uint64_t sys_fork(struct syscall_regs *regs) {
       if (parent->fds[i]) {
         child->fds[i] = parent->fds[i];
         child->fd_offsets[i] = parent->fd_offsets[i];
+        memcpy(child->fd_paths[i], parent->fd_paths[i],
+               sizeof(child->fd_paths[i]));
         // Increment reference count for each inherited FD
         vfs_open(child->fds[i]);
       }
@@ -798,6 +800,8 @@ static uint64_t sys_clone(struct syscall_regs *regs) {
       if (parent->fds[i]) {
         child->fds[i] = parent->fds[i];
         child->fd_offsets[i] = parent->fd_offsets[i];
+        memcpy(child->fd_paths[i], parent->fd_paths[i],
+               sizeof(child->fd_paths[i]));
         vfs_open(child->fds[i]);
       }
     }
@@ -806,6 +810,8 @@ static uint64_t sys_clone(struct syscall_regs *regs) {
       if (parent->fds[i]) {
         child->fds[i] = parent->fds[i];
         child->fd_offsets[i] = parent->fd_offsets[i];
+        memcpy(child->fd_paths[i], parent->fd_paths[i],
+               sizeof(child->fd_paths[i]));
         vfs_open(child->fds[i]);
       }
     }

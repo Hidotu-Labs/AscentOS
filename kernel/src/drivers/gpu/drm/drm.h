@@ -40,11 +40,12 @@
 #define DRM_IOCTL_SET_CLIENT_CAP 0x4010640D
 #define DRM_IOCTL_MODE_GETPROPERTY 0xC04064AA
 #define DRM_IOCTL_MODE_GETPLANERESOURCES 0xC01064B5
-#define DRM_IOCTL_MODE_OBJ_GETPROPERTIES 0xC01064B9
-#define DRM_IOCTL_MODE_ATOMIC            0xC03C64BC
+#define DRM_IOCTL_MODE_OBJ_GETPROPERTIES 0xC02064B9
+#define DRM_IOCTL_MODE_ATOMIC            0xC03864BC
 #define DRM_IOCTL_MODE_CREATEPROPBLOB    0xC01064BD
 #define DRM_IOCTL_MODE_DESTROYPROPBLOB   0xC00464BE
 #define DRM_IOCTL_MODE_ADDFB2            0xC04464B8
+#define DRM_IOCTL_MODE_CREATE_LEASE      0xC01864C6
 
 #define DRM_CLIENT_CAP_UNIVERSAL_PLANES 2
 #define DRM_CLIENT_CAP_ATOMIC           3
@@ -320,7 +321,12 @@ struct drm_pending_event {
 #define DRM_PROP_ID_MODE_ID      12
 #define DRM_PROP_ID_DPMS         13
 #define DRM_PROP_ID_CONNECTOR_ID 14
-#define DRM_PROP_ID_MAX          15
+#define DRM_PROP_ID_TYPE         15
+#define DRM_PROP_ID_MAX          16
+
+#define DRM_PLANE_TYPE_OVERLAY 0
+#define DRM_PLANE_TYPE_PRIMARY 1
+#define DRM_PLANE_TYPE_CURSOR  2
 
 struct drm_property_def {
     uint32_t id;
@@ -445,6 +451,10 @@ struct drm_framebuffer_full {
 
 void drm_init(void);
 void drm_register_vfs(void);
+
+void drm_obj_add_prop(struct drm_mode_object *obj, uint32_t prop_id, uint64_t default_val);
+int drm_obj_set_prop(struct drm_mode_object *obj, uint32_t prop_id, uint64_t value);
+int drm_obj_get_prop(struct drm_mode_object *obj, uint32_t prop_id, uint64_t *out);
 
 // GEM internals
 struct drm_gem_object {

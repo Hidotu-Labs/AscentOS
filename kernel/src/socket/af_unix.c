@@ -1125,14 +1125,67 @@ static ssize_t unix_sendmsg(socket_t *sock, struct msghdr *msg, int flags) {
 
   struct thread *current = sched_get_current();
 
-  // 1. Handle SCM_RIGHTS (FD passing)
+  // Calculate total data size across all iovecs
+  size_t total_len = 0;
+  for (size_t i = 0; i < msg->msg_iovlen; i++)
+    total_len += msg->msg_iov[i].iov_len;
+
+  // Acquire peer's recv_lock once and hold it for the entire sendmsg:
+  // this makes SCM_RIGHTS + data delivery atomic — the receiver cannot
+  // wake up and call recvmsg until we release the lock and fire the wake.
+  spinlock_acquire(&peer->recv_lock);
+
+  // Wait until there is enough space for all data (or at least some)
+  while (total_len > 0) {
+    size_t head  = peer->recv_buf_head;
+    size_t tail  = peer->recv_buf_tail;
+    size_t size  = peer->recv_buf_size;
+    size_t space = (head - tail - 1 + size) % size;
+
+    if (space >= total_len)
+      break; // Enough room — proceed
+
+    if (space == 0) {
+      // Buffer full — block
+      spinlock_release(&peer->recv_lock);
+
+      if ((sock->flags & SOCK_NONBLOCK) || (flags & 0x40)) {
+        socket_put(peer->parent);
+        return -11; // EAGAIN
+      }
+
+      struct thread *ct = sched_get_current();
+      wait_queue_entry_t entry = { .thread = ct, .next = NULL };
+      wait_queue_add(peer->wait, &entry);
+      ct->state = THREAD_BLOCKED;
+      spinlock_release(&peer->recv_lock); // already released above, but be safe
+      sched_yield();
+      wait_queue_remove(peer->wait, &entry);
+      ct->state = THREAD_RUNNING;
+
+      spinlock_acquire(&peer->recv_lock);
+      continue;
+    }
+    // Partial space: for STREAM we can send what fits; break and write
+    break;
+  }
+
+  // 1. Store SCM_RIGHTS nodes atomically under peer->recv_lock.
+  //    We also need peer->parent->lock for scm_count — acquire it nested.
+  //    Since recv_lock is already held, acquire sock->lock of peer carefully.
+  //    Use peer->parent->lock (same as sock->lock of peer's socket).
+  //    To avoid deadlock: always acquire recv_lock before parent->lock.
+  spinlock_acquire(&peer->parent->lock);
+
   struct cmsghdr *cmsg = CMSG_FIRSTHDR(msg);
   while (cmsg) {
     if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
       int *fds = (int *)CMSG_DATA(cmsg);
-      int count = (cmsg->cmsg_len - CMSG_ALIGN(sizeof(struct cmsghdr))) / sizeof(int);
+      int count = (int)((cmsg->cmsg_len - CMSG_ALIGN(sizeof(struct cmsghdr))) / sizeof(int));
 
-      spinlock_acquire(&peer->parent->lock);
+      klog_puts("[SCM_SEND] storing in peer unix_sock=");
+      klog_uint64((uint64_t)(uintptr_t)peer);
+      klog_puts("\n");
       for (int i = 0; i < count && peer->scm_count < 16; i++) {
         int fd = fds[i];
         if (fd >= 0 && fd < MAX_FDS && current->fds[fd]) {
@@ -1148,22 +1201,47 @@ static ssize_t unix_sendmsg(socket_t *sock, struct msghdr *msg, int flags) {
           klog_puts("\n");
         }
       }
-      spinlock_release(&peer->parent->lock);
     }
     cmsg = CMSG_NXTHDR(msg, cmsg);
   }
 
-  // 2. Handle data (iovec)
+  spinlock_release(&peer->parent->lock);
+
+  // 2. Write all iovec data directly into peer's ring buffer (lock still held)
   ssize_t total_sent = 0;
   for (size_t i = 0; i < msg->msg_iovlen; i++) {
-    ssize_t ret =
-        unix_send(sock, msg->msg_iov[i].iov_base, msg->msg_iov[i].iov_len, flags);
-    if (ret < 0) {
-      socket_put(peer->parent);
-      return total_sent > 0 ? total_sent : ret;
+    const uint8_t *src = (const uint8_t *)msg->msg_iov[i].iov_base;
+    size_t len = msg->msg_iov[i].iov_len;
+    size_t sent = 0;
+
+    while (sent < len) {
+      size_t head  = peer->recv_buf_head;
+      size_t tail  = peer->recv_buf_tail;
+      size_t size  = peer->recv_buf_size;
+      size_t space = (head - tail - 1 + size) % size;
+
+      if (space == 0)
+        break; // No more room right now; return partial
+
+      size_t to_copy = (len - sent < space) ? len - sent : space;
+      for (size_t j = 0; j < to_copy; j++) {
+        peer->recv_buf[tail] = src[sent + j];
+        tail = (tail + 1) % size;
+      }
+      peer->recv_buf_tail = tail;
+      sent += to_copy;
     }
-    total_sent += ret;
+    total_sent += (ssize_t)sent;
   }
+
+  spinlock_release(&peer->recv_lock);
+
+  // 3. Wake receiver now that both SCM nodes and data are fully committed
+  wait_queue_wake_all(peer->wait);
+  if (peer->parent && peer->parent->wait_queue)
+    wait_queue_wake_all((wait_queue_t *)peer->parent->wait_queue);
+  if (peer->parent && peer->parent->node)
+    epoll_notify_event(peer->parent->node, EPOLLIN | EPOLLRDNORM);
 
   socket_put(peer->parent);
   return total_sent;
@@ -1178,55 +1256,135 @@ static ssize_t unix_recvmsg(socket_t *sock, struct msghdr *msg, int flags) {
 
   struct thread *current = sched_get_current();
 
-  // 1. Handle data (iovec)
-  ssize_t total_received = 0;
-  for (size_t i = 0; i < msg->msg_iovlen; i++) {
-    ssize_t ret =
-        unix_recv(sock, msg->msg_iov[i].iov_base, msg->msg_iov[i].iov_len, flags);
-    if (ret < 0) {
-      return total_received > 0 ? total_received : ret;
-    }
-    total_received += ret;
+  // Block until data is available (same logic as unix_recv but without
+  // consuming yet — we need to dequeue SCM nodes atomically with the data)
+  while (1) {
+    spinlock_acquire(&usk->recv_lock);
+    size_t head      = usk->recv_buf_head;
+    size_t tail      = usk->recv_buf_tail;
+    size_t size      = usk->recv_buf_size;
+    size_t available = (tail - head + size) % size;
+
+    if (available > 0)
+      break; // Data ready — keep recv_lock held and fall through
+
+    spinlock_release(&usk->recv_lock);
+
+    if (sock->state != SS_CONNECTED)
+      goto no_data; // EOF
+
+    if ((sock->flags & SOCK_NONBLOCK) || (flags & 0x40))
+      return -11; // EAGAIN
+
+    struct thread *ct = sched_get_current();
+    wait_queue_entry_t entry = { .thread = ct, .next = NULL };
+    wait_queue_add(usk->wait, &entry);
+    ct->state = THREAD_BLOCKED;
+    sched_yield();
+    wait_queue_remove(usk->wait, &entry);
+    ct->state = THREAD_RUNNING;
+
+    if (sock->error)
+      return -(int)sock->error;
   }
 
-  // 2. Handle SCM_RIGHTS (received FDs)
+  // recv_lock is held here — data is available.
+  // Also acquire sock->lock (parent lock) to atomically dequeue SCM nodes.
+  // Lock order: recv_lock → parent->lock (same order as sendmsg).
   spinlock_acquire(&sock->lock);
-  klog_puts("[SCM_RECV] scm_count=");
+
+  // 1. Dequeue SCM_RIGHTS nodes
+  klog_puts("[SCM_RECV] reading from unix_sock=");
+  klog_uint64((uint64_t)(uintptr_t)usk);
+  klog_puts(" scm_count=");
   klog_uint64((uint64_t)usk->scm_count);
   klog_puts(" msg_control=");
   klog_uint64((uint64_t)(uintptr_t)msg->msg_control);
   klog_puts(" msg_controllen=");
   klog_uint64((uint64_t)msg->msg_controllen);
   klog_puts("\n");
+
   if (usk->scm_count > 0 && msg->msg_control &&
-      msg->msg_controllen >= CMSG_SPACE(usk->scm_count * sizeof(int))) {
+      msg->msg_controllen >= CMSG_SPACE(sizeof(int))) {
     struct cmsghdr *cmsg = (struct cmsghdr *)msg->msg_control;
     cmsg->cmsg_level = SOL_SOCKET;
-    cmsg->cmsg_type = SCM_RIGHTS;
-    cmsg->cmsg_len = CMSG_LEN(usk->scm_count * sizeof(int));
+    cmsg->cmsg_type  = SCM_RIGHTS;
 
     int *fds = (int *)CMSG_DATA(cmsg);
     int actual_count = 0;
-    for (int i = 0; i < usk->scm_count; i++) {
+    int max_fds = (int)((msg->msg_controllen - CMSG_ALIGN(sizeof(struct cmsghdr))) / sizeof(int));
+    if (max_fds > usk->scm_count)
+      max_fds = usk->scm_count;
+
+    for (int i = 0; i < max_fds; i++) {
       vfs_node_t *node = usk->scm_nodes[i];
       int new_fd = alloc_fd(current);
       if (new_fd >= 0) {
         current->fds[new_fd] = node;
-        // vfs_open was already called in sendmsg
         fds[actual_count++] = new_fd;
       } else {
-        vfs_close(node); // Drop reference if we can't give it to process
+        vfs_close(node);
       }
       usk->scm_nodes[i] = NULL;
     }
+    // Shift any remaining nodes down (if we couldn't fit all)
+    int remaining = usk->scm_count - max_fds;
+    for (int i = 0; i < remaining; i++)
+      usk->scm_nodes[i] = usk->scm_nodes[max_fds + i];
+    usk->scm_count = remaining;
+
+    cmsg->cmsg_len = CMSG_LEN(actual_count * sizeof(int));
     msg->msg_controllen = CMSG_SPACE(actual_count * sizeof(int));
-    usk->scm_count = 0;
+
+    if (remaining > 0)
+      msg->msg_flags |= MSG_CTRUNC;
   } else if (usk->scm_count > 0) {
     msg->msg_flags |= MSG_CTRUNC;
+    msg->msg_controllen = 0;
+  } else {
+    msg->msg_controllen = 0;
   }
+
   spinlock_release(&sock->lock);
 
+  // 2. Read data from ring buffer (recv_lock still held from the wait loop)
+  ssize_t total_received = 0;
+  for (size_t i = 0; i < msg->msg_iovlen; i++) {
+    uint8_t *dest = (uint8_t *)msg->msg_iov[i].iov_base;
+    size_t   want = msg->msg_iov[i].iov_len;
+
+    size_t head      = usk->recv_buf_head;
+    size_t tail      = usk->recv_buf_tail;
+    size_t size      = usk->recv_buf_size;
+    size_t available = (tail - head + size) % size;
+
+    if (available == 0)
+      break; // No more data
+
+    size_t to_copy = (want < available) ? want : available;
+    for (size_t j = 0; j < to_copy; j++)
+      dest[j] = usk->recv_buf[(head + j) % size];
+
+    if (!(flags & 0x02)) // MSG_PEEK
+      usk->recv_buf_head = (head + to_copy) % size;
+
+    total_received += (ssize_t)to_copy;
+  }
+
+  spinlock_release(&usk->recv_lock);
+
+  // Wake peer (space freed in our recv buffer)
+  wait_queue_wake_all(usk->wait);
+  if (usk->peer && usk->peer->parent && usk->peer->parent->node)
+    epoll_notify_event(usk->peer->parent->node, EPOLLOUT | EPOLLWRNORM);
+
+  msg->msg_flags &= ~MSG_TRUNC; // Clear truncation flag for data (not set)
   return total_received;
+
+no_data:
+  msg->msg_controllen = 0;
+  msg->msg_flags = 0;
+  return 0;
 }
 
 static sock_ops_t unix_ops = {.bind = unix_bind,

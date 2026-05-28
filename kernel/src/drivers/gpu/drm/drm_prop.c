@@ -24,6 +24,8 @@ static const struct drm_property_def drm_prop_catalogue[] = {
     /* Connector properties */
     { DRM_PROP_ID_DPMS,         0,                                       "DPMS",         0, 3          },
     { DRM_PROP_ID_CONNECTOR_ID, DRM_PROP_FLAG_ATOMIC | DRM_PROP_FLAG_IMMUTABLE, "CONNECTOR_ID", 0, UINT32_MAX },
+    /* Plane type property */
+    { DRM_PROP_ID_TYPE,         DRM_PROP_TYPE_ENUM | DRM_PROP_FLAG_IMMUTABLE, "type",         0, 2          },
     /* Note: DRM_PROP_ID_CRTC_ID is shared between planes and connectors —
      * the same catalogue entry covers both (name "CRTC_ID", atomic flag). */
 };
@@ -127,7 +129,7 @@ int drm_ioctl_obj_getprops(struct drm_device *dev, uint64_t arg) {
     list_for_each_entry(iter, &dev->kms_objects, list) {
         if (iter->id == req->obj_id) { mobj = iter; break; }
     }
-    if (!mobj) { spinlock_release(&dev->lock); return -1; }
+    if (!mobj) { spinlock_release(&dev->lock); return -2; } /* ENOENT */
 
     uint32_t count = mobj->prop_count;
     if (req->props_ptr && req->count_props >= count) {
@@ -179,6 +181,20 @@ int drm_ioctl_getproperty(struct drm_device *dev, uint64_t arg) {
             vals[0] = def->min_val;
             vals[1] = def->max_val;
         }
+    } else if ((def->flags & 0x3f) == DRM_PROP_TYPE_ENUM) {
+        /* Special case for "type" enum labels that wlroots expects */
+        if (def->id == DRM_PROP_ID_TYPE) {
+            p->count_enum_blobs = 3;
+            if (p->enum_blob_ptr) {
+                struct { uint64_t value; char name[32]; } *enums = (void *)p->enum_blob_ptr;
+                enums[0].value = 0; strcpy(enums[0].name, "Overlay");
+                enums[1].value = 1; strcpy(enums[1].name, "Primary");
+                enums[2].value = 2; strcpy(enums[2].name, "Cursor");
+            }
+        } else {
+            p->count_enum_blobs = 0;
+        }
+        p->count_values = 0;
     } else {
         p->count_values = 0;
     }
@@ -201,7 +217,7 @@ static int atomic_apply_prop(struct drm_device *dev,
                              struct drm_mode_object *obj,
                              uint32_t prop_id, uint64_t value) {
     /* Validate the property exists in our catalogue */
-    if (!drm_prop_find_def(prop_id)) return -1;
+    if (!drm_prop_find_def(prop_id)) return -38; /* ENOSYS */
 
     switch (obj->type) {
     case DRM_MODE_OBJECT_PLANE: {
@@ -287,12 +303,12 @@ static int atomic_apply_prop(struct drm_device *dev,
             break;
         }
         default:
-            return -1;
+            return -38; /* ENOSYS */
         }
         break;
     }
     default:
-        return -1;
+        return -38; /* ENOSYS */
     }
 
     /* Persist the value in the object's property table */
@@ -311,7 +327,7 @@ int drm_ioctl_atomic(struct vfs_node *node, struct drm_file *file,
     uint32_t *prop_ids   = (uint32_t *)req->props_ptr;
     uint64_t *prop_vals  = (uint64_t *)req->prop_values_ptr;
 
-    if (!obj_ids || !prop_cnts || !prop_ids || !prop_vals) return -1;
+    if (!obj_ids || !prop_cnts || !prop_ids || !prop_vals) return -14; /* EFAULT */
 
     int test_only = (req->flags & DRM_MODE_ATOMIC_TEST_ONLY) != 0;
     int nonblock  = (req->flags & DRM_MODE_ATOMIC_NONBLOCK)  != 0;
