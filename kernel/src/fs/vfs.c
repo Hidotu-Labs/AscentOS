@@ -212,6 +212,13 @@ vfs_node_t *vfs_resolve_path_at(vfs_node_t *dir, const char *path) {
   int symlink_depth = 0;
   char *p = path_buf;
 
+  // Parent stack so ".." can walk up correctly even in ramfs nodes that
+  // return self for "..".  Depth of 32 is more than enough for any real path.
+#define VFS_PARENT_STACK_DEPTH 32
+  vfs_node_t *parent_stack[VFS_PARENT_STACK_DEPTH];
+  int stack_top = 0;
+  parent_stack[0] = current;
+
   // Initial skip of root slashes
   if (path_buf[0] == '/') {
     while (*p == '/')
@@ -233,6 +240,19 @@ vfs_node_t *vfs_resolve_path_at(vfs_node_t *dir, const char *path) {
       comp[i++] = *p++;
     }
     comp[i] = '\0';
+
+    // Handle ".." by popping the parent stack instead of asking the fs,
+    // because ramfs_finddir returns self for ".." (no parent pointer stored).
+    if (strcmp(comp, "..") == 0) {
+      if (stack_top > 0)
+        stack_top--;
+      current = parent_stack[stack_top];
+      continue;
+    }
+
+    // Handle "." — stay in place
+    if (strcmp(comp, ".") == 0)
+      continue;
 
     vfs_node_t *next = vfs_finddir(current, comp);
     if (!next) {
@@ -299,6 +319,9 @@ vfs_node_t *vfs_resolve_path_at(vfs_node_t *dir, const char *path) {
           if (!(current->flags & FS_PERSISTENT))
             kfree(current);
         current = fs_root;
+        // Reset parent stack to root for absolute symlink targets
+        stack_top = 0;
+        parent_stack[0] = fs_root;
         while (*p == '/')
           p++;
       }
@@ -313,6 +336,10 @@ vfs_node_t *vfs_resolve_path_at(vfs_node_t *dir, const char *path) {
       kfree(current);
     }
     current = next;
+    // Push onto parent stack
+    if (stack_top < VFS_PARENT_STACK_DEPTH - 1)
+      stack_top++;
+    parent_stack[stack_top] = current;
   }
 
   kfree(path_buf);

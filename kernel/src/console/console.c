@@ -16,7 +16,7 @@ static uint32_t console_history_row(uint32_t screen_row);
 static void console_process_escape_sequence(void);
 static void console_clear_line_from_cursor(void);
 static void draw_char_colored(uint32_t c, uint32_t col, uint32_t row,
-                              uint32_t fg, uint32_t bg);
+                              uint32_t fg, uint32_t bg, bool underline);
 static void draw_history_char(uint32_t col, uint32_t row);
 static void console_wipe_history_unlocked(void);
 
@@ -58,12 +58,51 @@ static uint32_t ansi_colors_bright[8] = {
 // ── Current SGR color state ──────────────────────────────────────────────────
 static uint32_t current_fg = FG_COLOR;
 static uint32_t current_bg = BG_COLOR;
+static bool attr_bold = false;
+static bool attr_underline = false;
 
 typedef struct {
   uint32_t c;
   uint32_t fg;
   uint32_t bg;
+  bool bold;
+  bool underline;
 } console_char_t;
+
+// ── 256-color palette helper ─────────────────────────────────────────────────
+// Returns the 32-bit RGB value for an xterm 256-color index.
+static uint32_t xterm256_color(int idx) {
+  if (idx >= 0 && idx <= 7)
+    return ansi_colors_normal[idx];
+  if (idx >= 8 && idx <= 15)
+    return ansi_colors_bright[idx - 8];
+  // 6×6×6 color cube: indices 16–231
+  if (idx >= 16 && idx <= 231) {
+    int i = idx - 16;
+    uint32_t b = i % 6;
+    uint32_t g = (i / 6) % 6;
+    uint32_t r = i / 36;
+    // Each component: 0→0, 1→95, 2→135, 3→175, 4→215, 5→255
+    static const uint8_t ramp[6] = {0, 95, 135, 175, 215, 255};
+    return ((uint32_t)ramp[r] << 16) | ((uint32_t)ramp[g] << 8) | ramp[b];
+  }
+  // Grayscale ramp: indices 232–255 → #080808 to #eeeeee in steps of 10
+  if (idx >= 232 && idx <= 255) {
+    uint8_t v = (uint8_t)(8 + (idx - 232) * 10);
+    return ((uint32_t)v << 16) | ((uint32_t)v << 8) | v;
+  }
+  return FG_COLOR;
+}
+
+// Returns the bold-brightened variant of a named ANSI color, or the color
+// unchanged if it isn't one of the 8 named normal colors.
+static uint32_t bold_color(uint32_t color) {
+  for (int i = 0; i < 8; i++) {
+    if (color == ansi_colors_normal[i])
+      return ansi_colors_bright[i];
+  }
+  return color;
+}
 
 #define HISTORY_MAX 1000
 #define COLS_MAX 512
@@ -103,7 +142,8 @@ static void console_redraw(void) {
       if (ch->c != 0) {
         const uint8_t *glyph = font_get_glyph(ch->c);
         for (uint32_t gy = 0; gy < FONT_HEIGHT; gy++) {
-          uint8_t bits = glyph[gy];
+          uint8_t bits = (ch->underline && gy >= FONT_HEIGHT - 2) ? 0xFF
+                                                                   : glyph[gy];
           for (uint32_t gx = 0; gx < FONT_WIDTH; gx++) {
             uint32_t color = (bits & (0x80 >> gx)) ? ch->fg : ch->bg;
             fb_put_pixel(px + gx, py + gy, color);
@@ -228,6 +268,8 @@ static void console_wipe_history_unlocked(void) {
   wrap_pending = false;
   current_fg = FG_COLOR;
   current_bg = BG_COLOR;
+  attr_bold = false;
+  attr_underline = false;
 }
 
 // ── SGR escape sequence handler ─────────────────────────────────────────────
@@ -475,6 +517,8 @@ static void console_process_escape_sequence(void) {
     if (param_count == 1 && params[0] == 0) {
       current_fg = FG_COLOR;
       current_bg = BG_COLOR;
+      attr_bold = false;
+      attr_underline = false;
       break;
     }
 
@@ -485,35 +529,56 @@ static void console_process_escape_sequence(void) {
         // Reset all attributes
         current_fg = FG_COLOR;
         current_bg = BG_COLOR;
+        attr_bold = false;
+        attr_underline = false;
       } else if (code == 1) {
-        // Bold — use bright variant of current fg if it is a named color.
-        // For simplicity we leave fg unchanged (still visible).
-      } else if (code == 22) {
-        // Normal intensity — no-op for now
+        // Bold — switch to bright variant of named colors
+        attr_bold = true;
+        current_fg = bold_color(current_fg);
+      } else if (code == 2) {
+        // Faint/dim — no-op (no dim palette)
+      } else if (code == 3) {
+        // Italic — no-op (bitmap font has no italic variant)
+      } else if (code == 4) {
+        // Underline
+        attr_underline = true;
+      } else if (code == 5 || code == 6) {
+        // Blink — no-op
       } else if (code == 7) {
         // Reverse video — swap fg and bg
         uint32_t tmp = current_fg;
         current_fg = current_bg;
         current_bg = tmp;
+      } else if (code == 22) {
+        // Normal intensity — turn off bold, revert to normal palette entry
+        if (attr_bold) {
+          attr_bold = false;
+          // Try to revert bright → normal for named colors
+          for (int i = 0; i < 8; i++) {
+            if (current_fg == ansi_colors_bright[i]) {
+              current_fg = ansi_colors_normal[i];
+              break;
+            }
+          }
+        }
+      } else if (code == 23) {
+        // Italic off — no-op
+      } else if (code == 24) {
+        // Underline off
+        attr_underline = false;
       } else if (code == 27) {
         // Reverse off — reset to defaults
         current_fg = FG_COLOR;
         current_bg = BG_COLOR;
       } else if (code >= 30 && code <= 37) {
-        current_fg = ansi_colors_normal[code - 30];
+        current_fg = attr_bold ? ansi_colors_bright[code - 30]
+                               : ansi_colors_normal[code - 30];
       } else if (code == 38) {
-        // 256-color or truecolor fg — consume extra params
+        // 256-color or truecolor fg
         if (pi + 1 < param_count && params[pi + 1] == 5 &&
             pi + 2 < param_count) {
-          // ESC[38;5;Nm — 256-color: map index to our palette for 0-15, else
-          // grey
-          int idx = params[pi + 2];
-          if (idx >= 0 && idx <= 7)
-            current_fg = ansi_colors_normal[idx];
-          else if (idx >= 8 && idx <= 15)
-            current_fg = ansi_colors_bright[idx - 8];
-          else
-            current_fg = FG_COLOR;
+          // ESC[38;5;Nm — 256-color
+          current_fg = xterm256_color(params[pi + 2]);
           pi += 2;
         } else if (pi + 1 < param_count && params[pi + 1] == 2 &&
                    pi + 4 < param_count) {
@@ -525,20 +590,14 @@ static void console_process_escape_sequence(void) {
           pi += 4;
         }
       } else if (code == 39) {
-        current_fg = FG_COLOR; // default fg
+        current_fg = attr_bold ? bold_color(FG_COLOR) : FG_COLOR;
       } else if (code >= 40 && code <= 47) {
         current_bg = ansi_colors_normal[code - 40];
       } else if (code == 48) {
         // 256-color or truecolor bg
         if (pi + 1 < param_count && params[pi + 1] == 5 &&
             pi + 2 < param_count) {
-          int idx = params[pi + 2];
-          if (idx >= 0 && idx <= 7)
-            current_bg = ansi_colors_normal[idx];
-          else if (idx >= 8 && idx <= 15)
-            current_bg = ansi_colors_bright[idx - 8];
-          else
-            current_bg = BG_COLOR;
+          current_bg = xterm256_color(params[pi + 2]);
           pi += 2;
         } else if (pi + 1 < param_count && params[pi + 1] == 2 &&
                    pi + 4 < param_count) {
@@ -549,7 +608,7 @@ static void console_process_escape_sequence(void) {
           pi += 4;
         }
       } else if (code == 49) {
-        current_bg = BG_COLOR; // default bg
+        current_bg = BG_COLOR;
       } else if (code >= 90 && code <= 97) {
         current_fg = ansi_colors_bright[code - 90];
       } else if (code >= 100 && code <= 107) {
@@ -573,14 +632,15 @@ static void console_process_escape_sequence(void) {
 // ── Character drawing helpers ────────────────────────────────────────────────
 
 static void draw_char_colored(uint32_t c, uint32_t col, uint32_t row,
-                              uint32_t fg, uint32_t bg) {
+                              uint32_t fg, uint32_t bg, bool underline) {
   const uint8_t *glyph = font_get_glyph(c);
   uint32_t px = col * FONT_WIDTH;
   uint32_t py = row * FONT_HEIGHT;
 
-  // Draw each scanline using batched rendering (8 pixels per call)
   for (uint32_t y = 0; y < FONT_HEIGHT; y++) {
-    fb_draw_glyph_scanline(px, py + y, glyph[y], fg, bg);
+    // Bottom two rows become the underline bar when underline is active
+    uint8_t bits = (underline && y >= FONT_HEIGHT - 2) ? 0xFF : glyph[y];
+    fb_draw_glyph_scanline(px, py + y, bits, fg, bg);
   }
 }
 
@@ -596,7 +656,7 @@ static void draw_history_char(uint32_t col, uint32_t row) {
     return;
   }
 
-  draw_char_colored(ch->c, col, row, ch->fg, ch->bg);
+  draw_char_colored(ch->c, col, row, ch->fg, ch->bg, ch->underline);
 }
 
 // ── Render a single decoded codepoint on the framebuffer console ─────────────
@@ -719,10 +779,13 @@ static void console_render_char(uint32_t cp) {
     history[row][cursor_x].c = cp;
     history[row][cursor_x].fg = current_fg;
     history[row][cursor_x].bg = current_bg;
+    history[row][cursor_x].bold = attr_bold;
+    history[row][cursor_x].underline = attr_underline;
   }
 
   if (view_scroll_offset == 0) {
-    draw_char_colored(cp, cursor_x, cursor_y, current_fg, current_bg);
+    draw_char_colored(cp, cursor_x, cursor_y, current_fg, current_bg,
+                      attr_underline);
   }
 
   cursor_x++;

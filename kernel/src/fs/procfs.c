@@ -1,6 +1,7 @@
 #include "fs/procfs.h"
 #include "apic/lapic_timer.h"
 #include "drivers/storage/block.h"
+#include "drivers/timer/rtc.h"
 #include "fs/ramfs.h"
 #include "fs/vfs.h"
 #include "lib/string.h"
@@ -34,7 +35,6 @@ uint32_t procfs_meminfo_read(vfs_node_t *node, uint32_t offset, uint32_t size,
   char buf[512];
   buf[0] = '\0';
 
-  uint64_t total_mem_val = pmm_get_total_memory();
   uint64_t usable_mem_val = pmm_get_usable_memory();
   uint64_t free_pages_val = (uint64_t)pmm_get_free_pages();
   uint64_t free_mem_val =
@@ -295,12 +295,50 @@ uint32_t procfs_uptime_read(vfs_node_t *node, uint32_t offset, uint32_t size,
 
 uint32_t procfs_stat_read(vfs_node_t *node, uint32_t offset, uint32_t size,
                           uint8_t *buffer) {
-  char *buf = kmalloc(1024);
+  char *buf = kmalloc(2048);
   if (!buf)
     return 0;
   buf[0] = '\0';
 
-  strcat(buf, "cpu  100 0 100 1000 0 0 0 0 0 0\n");
+  // cpu  user nice system idle iowait irq softirq steal guest guest_nice
+  // Distribute total uptime jiffies as idle across all CPUs.
+  uint64_t ms      = lapic_timer_get_ms();
+  uint64_t jiffies = ms / 10; // USER_HZ = 100
+  uint32_t ncpus   = cpu_get_count();
+  if (ncpus == 0) ncpus = 1;
+  char num[32];
+
+  // Aggregate cpu line: idle = jiffies * ncpus (sum across all CPUs)
+  strcat(buf, "cpu  0 0 0 ");
+  u64_to_str(jiffies * ncpus, num);
+  strcat(buf, num);
+  strcat(buf, " 0 0 0 0 0 0\n");
+
+  // Per-CPU lines
+  for (uint32_t i = 0; i < ncpus; i++) {
+    strcat(buf, "cpu");
+    u64_to_str(i, num);
+    strcat(buf, num);
+    strcat(buf, " 0 0 0 ");
+    u64_to_str(jiffies, num);
+    strcat(buf, num);
+    strcat(buf, " 0 0 0 0 0 0\n");
+  }
+
+  strcat(buf, "intr 0\n");
+  strcat(buf, "ctxt 0\n");
+
+  // btime: Unix timestamp of boot (seconds since epoch)
+  strcat(buf, "btime ");
+  u64_to_str(rtc_get_boot_timestamp(), num);
+  strcat(buf, num);
+  strcat(buf, "\n");
+
+  uint16_t nthreads = sched_get_thread_count();
+  strcat(buf, "processes ");
+  u64_to_str(nthreads, num);
+  strcat(buf, num);
+  strcat(buf, "\nprocs_running 1\nprocs_blocked 0\n");
 
   uint32_t len = strlen(buf);
   node->length = len;
@@ -309,11 +347,76 @@ uint32_t procfs_stat_read(vfs_node_t *node, uint32_t offset, uint32_t size,
     kfree(buf);
     return 0;
   }
-  if (offset + size > len) {
+  if (offset + size > len)
     size = len - offset;
-  }
   memcpy(buffer, buf + offset, size);
   kfree(buf);
+  return size;
+}
+
+// ── /proc/loadavg ─────────────────────────────────────────────────────────
+// Format: "load1 load5 load15 running/total last_pid\n"
+// htop parses this for the load average display.
+// We approximate load as (running_threads / ncpus) clamped to a reasonable
+// value, formatted as a fixed-point decimal (e.g. "0.42").
+static void fmt_load(uint64_t running, uint64_t total_cpus, char *out) {
+  // load = running / total_cpus, expressed as X.XX
+  if (total_cpus == 0) total_cpus = 1;
+  uint64_t integer = running / total_cpus;
+  uint64_t frac    = (running * 100 / total_cpus) % 100;
+  char tmp[8];
+  u64_to_str(integer, out);
+  strcat(out, ".");
+  if (frac < 10) strcat(out, "0");
+  u64_to_str(frac, tmp);
+  strcat(out, tmp);
+}
+
+uint32_t procfs_loadavg_read(vfs_node_t *node, uint32_t offset, uint32_t size,
+                             uint8_t *buffer) {
+  char buf[128];
+  buf[0] = '\0';
+
+  uint32_t ncpus    = cpu_get_count();
+  if (ncpus == 0) ncpus = 1;
+  uint16_t nthreads = sched_get_thread_count();
+
+  // Count running threads
+  uint32_t running = 0;
+  struct thread *t = sched_get_thread_list_head();
+  while (t) {
+    if (t->state == THREAD_RUNNING || t->state == THREAD_READY)
+      running++;
+    t = t->global_next;
+  }
+  if (running == 0) running = 1;
+
+  char load[16];
+  fmt_load(running, ncpus, load);
+
+  // load1 load5 load15 running/total last_pid
+  strcat(buf, load);
+  strcat(buf, " ");
+  strcat(buf, load);
+  strcat(buf, " ");
+  strcat(buf, load);
+  strcat(buf, " ");
+
+  char tmp[16];
+  u64_to_str(running, tmp);
+  strcat(buf, tmp);
+  strcat(buf, "/");
+  u64_to_str(nthreads, tmp);
+  strcat(buf, tmp);
+  strcat(buf, " 1\n");
+
+  uint32_t len = (uint32_t)strlen(buf);
+  node->length = len;
+  if (offset >= len)
+    return 0;
+  if (offset + size > len)
+    size = len - offset;
+  memcpy(buffer, buf + offset, size);
   return size;
 }
 
@@ -494,7 +597,7 @@ static uint32_t procfs_pid_status_read(vfs_node_t *node, uint32_t offset,
   if (!t)
     return 0;
 
-  char *buf = kmalloc(512);
+  char *buf = kmalloc(768);
   if (!buf)
     return 0;
   buf[0] = '\0';
@@ -509,6 +612,9 @@ static uint32_t procfs_pid_status_read(vfs_node_t *node, uint32_t offset,
   strcat(buf, "\nState:\t");
   char sc[2] = {thread_state_char(t->state), '\0'};
   strcat(buf, sc);
+  strcat(buf, "\nTgid:\t");
+  pid_u32_to_str(pid, num);
+  strcat(buf, num);
   strcat(buf, "\nPid:\t");
   pid_u32_to_str(pid, num);
   strcat(buf, num);
@@ -516,18 +622,35 @@ static uint32_t procfs_pid_status_read(vfs_node_t *node, uint32_t offset,
   pid_u32_to_str(t->parent ? t->parent->tid : 0, num);
   strcat(buf, num);
   strcat(buf, "\nUid:\t");
-  pid_u32_to_str(t->uid, num);
-  strcat(buf, num);
-  strcat(buf, "\t");
-  pid_u32_to_str(t->euid, num);
-  strcat(buf, num);
+  pid_u32_to_str(t->uid, num);  strcat(buf, num); strcat(buf, "\t");
+  pid_u32_to_str(t->euid, num); strcat(buf, num); strcat(buf, "\t");
+  pid_u32_to_str(t->suid, num); strcat(buf, num); strcat(buf, "\t");
+  pid_u32_to_str(t->uid, num);  strcat(buf, num);
   strcat(buf, "\nGid:\t");
-  pid_u32_to_str(t->gid, num);
-  strcat(buf, num);
-  strcat(buf, "\t");
-  pid_u32_to_str(t->egid, num);
-  strcat(buf, num);
-  strcat(buf, "\n");
+  pid_u32_to_str(t->gid, num);  strcat(buf, num); strcat(buf, "\t");
+  pid_u32_to_str(t->egid, num); strcat(buf, num); strcat(buf, "\t");
+  pid_u32_to_str(t->sgid, num); strcat(buf, num); strcat(buf, "\t");
+  pid_u32_to_str(t->gid, num);  strcat(buf, num);
+  strcat(buf, "\nThreads:\t1\n");
+
+  // Memory fields (kB) — htop reads VmSize and VmRSS
+  uint64_t virt_kb = 2048; // 2 MB default
+  uint64_t rss_kb  = 512;
+  if (t->mm) {
+    uint64_t virt_bytes = 0;
+    if (t->mm->brk_current > t->mm->brk_base)
+      virt_bytes += t->mm->brk_current - t->mm->brk_base;
+    if (virt_bytes < 2 * 1024 * 1024)
+      virt_bytes = 2 * 1024 * 1024;
+    virt_kb = virt_bytes / 1024;
+    rss_kb  = virt_kb / 4;
+    if (rss_kb < 512) rss_kb = 512;
+  }
+  strcat(buf, "VmSize:\t");
+  pid_u32_to_str((uint32_t)virt_kb, num); strcat(buf, num);
+  strcat(buf, " kB\nVmRSS:\t");
+  pid_u32_to_str((uint32_t)rss_kb, num);  strcat(buf, num);
+  strcat(buf, " kB\n");
 
   uint32_t len = (uint32_t)strlen(buf);
   node->length = len;
@@ -560,6 +683,80 @@ static uint32_t procfs_pid_cmdline_read(vfs_node_t *node, uint32_t offset,
   if (offset + size > len)
     size = len - offset;
   memcpy(buffer, cmd + offset, size);
+  return size;
+}
+
+// ── /proc/<pid>/statm read ────────────────────────────────────────────────
+// Format: "size resident shared text lib data dt\n"
+// All values in pages (4096 bytes). htop uses this for VIRT/RES columns.
+static uint32_t procfs_pid_statm_read(vfs_node_t *node, uint32_t offset,
+                                      uint32_t size, uint8_t *buffer) {
+  uint32_t pid = node->impl;
+  struct thread *t = sched_get_thread_by_tid(pid);
+  if (!t)
+    return 0;
+
+  char buf[64];
+  buf[0] = '\0';
+
+  // Estimate virtual size from mm->brk_current and mmap region
+  uint64_t virt_bytes = 0;
+  uint64_t res_bytes  = 0;
+  if (t->mm) {
+    // brk region
+    if (t->mm->brk_current > t->mm->brk_base)
+      virt_bytes += t->mm->brk_current - t->mm->brk_base;
+    // mmap region (rough: distance from mmap base to next alloc)
+    uint64_t mmap_used = 0x800000000000ULL - t->mm->mmap_next_addr;
+    if ((int64_t)mmap_used > 0)
+      virt_bytes += mmap_used;
+    // Resident: assume half of virtual as a rough estimate
+    res_bytes = virt_bytes / 2;
+  }
+  // Add a base for the stack + code (2 MB minimum so htop shows something)
+  if (virt_bytes < 2 * 1024 * 1024)
+    virt_bytes = 2 * 1024 * 1024;
+  if (res_bytes < 512 * 1024)
+    res_bytes = 512 * 1024;
+
+  uint64_t virt_pages = virt_bytes / 4096;
+  uint64_t res_pages  = res_bytes  / 4096;
+
+  char num[32];
+  // size resident shared text lib data dt
+  u64_to_str(virt_pages, num); strcat(buf, num); strcat(buf, " ");
+  u64_to_str(res_pages,  num); strcat(buf, num); strcat(buf, " ");
+  strcat(buf, "0 0 0 ");
+  u64_to_str(virt_pages, num); strcat(buf, num);
+  strcat(buf, " 0\n");
+
+  uint32_t len = (uint32_t)strlen(buf);
+  node->length = len;
+  if (offset >= len)
+    return 0;
+  if (offset + size > len)
+    size = len - offset;
+  memcpy(buffer, buf + offset, size);
+  return size;
+}
+
+// ── /proc/<pid>/io read ───────────────────────────────────────────────────
+// htop 3.x reads this for I/O accounting. Stub with zeros.
+static uint32_t procfs_pid_io_read(vfs_node_t *node, uint32_t offset,
+                                   uint32_t size, uint8_t *buffer) {
+  (void)node;
+  const char *io =
+    "rchar: 0\n"
+    "wchar: 0\n"
+    "syscr: 0\n"
+    "syscw: 0\n"
+    "read_bytes: 0\n"
+    "write_bytes: 0\n"
+    "cancelled_write_bytes: 0\n";
+  uint32_t len = (uint32_t)strlen(io);
+  if (offset >= len) return 0;
+  if (offset + size > len) size = len - offset;
+  memcpy(buffer, io + offset, size);
   return size;
 }
 
@@ -615,13 +812,39 @@ static vfs_node_t *make_pid_dir(uint32_t pid) {
     ramfs_mount_node(dir, cmdline_node);
   }
 
+  // statm — memory usage in pages (VIRT/RES for htop)
+  vfs_node_t *statm_node = kmalloc(sizeof(vfs_node_t));
+  if (statm_node) {
+    vfs_node_init(statm_node);
+    strcpy(statm_node->name, "statm");
+    statm_node->flags  = FS_FILE;
+    statm_node->mask   = 0444;
+    statm_node->impl   = pid;
+    statm_node->length = 64;
+    statm_node->read   = procfs_pid_statm_read;
+    ramfs_mount_node(dir, statm_node);
+  }
+
+  // io — I/O stats stub (htop 3.x tries to open this)
+  vfs_node_t *io_node = kmalloc(sizeof(vfs_node_t));
+  if (io_node) {
+    vfs_node_init(io_node);
+    strcpy(io_node->name, "io");
+    io_node->flags  = FS_FILE;
+    io_node->mask   = 0444;
+    io_node->impl   = pid;
+    io_node->length = 64;
+    io_node->read   = procfs_pid_io_read;
+    ramfs_mount_node(dir, io_node);
+  }
+
   return dir;
 }
 
 // ── Number of static entries in the procfs root (excluding . and ..) ─────
 // These are the nodes added by procfs_init before we install our hooks:
-//   meminfo cpuinfo partitions mounts uptime stat heapinfo cmdline self  → 9
-#define PROCFS_STATIC_ENTRIES 9
+//   meminfo cpuinfo partitions mounts uptime stat heapinfo cmdline loadavg self → 10
+#define PROCFS_STATIC_ENTRIES 10
 
 // ── Custom readdir for /proc ──────────────────────────────────────────────
 //
@@ -733,6 +956,8 @@ void procfs_init(void) {
     vfs_node_t *procfs_root = kmalloc(sizeof(vfs_node_t));
     vfs_node_init(procfs_root);
     strcpy(procfs_root->name, "proc");
+    procfs_root->flags = FS_DIRECTORY;
+    procfs_root->mask  = 0555;
     ramfs_mount_on(procfs_root);
 
     // Apply the mount: anyone looking up 'proc' will now get our virtual root
@@ -808,6 +1033,17 @@ void procfs_init(void) {
       static_node->mask = 0444;
       static_node->read = procfs_stat_read;
       ramfs_mount_node(procfs_root, static_node);
+    }
+
+    // Add /proc/loadavg
+    vfs_node_t *loadavg_node = kmalloc(sizeof(vfs_node_t));
+    if (loadavg_node) {
+      vfs_node_init(loadavg_node);
+      strncpy(loadavg_node->name, "loadavg", 127);
+      loadavg_node->flags = FS_FILE | FS_PERSISTENT;
+      loadavg_node->mask = 0444;
+      loadavg_node->read = procfs_loadavg_read;
+      ramfs_mount_node(procfs_root, loadavg_node);
     }
 
     // Add /proc/heapinfo

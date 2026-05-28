@@ -1230,16 +1230,39 @@ static uint64_t sys_stat(uint64_t path_ptr, uint64_t statbuf_ptr, uint64_t a2,
   return 0;
 }
 
-// ── sys_lstat: lstat(path, statbuf) - like stat but doesn't follow symlinks
-// For now we treat it the same as stat since we don't follow symlinks yet.
+// ── sys_lstat: lstat(path, statbuf) - like stat but doesn't follow final symlink
+static vfs_node_t *vfs_resolve_symlink_node(vfs_node_t *base, const char *path); // fwd decl
 static uint64_t sys_lstat(uint64_t path_ptr, uint64_t statbuf_ptr, uint64_t a2,
                           uint64_t a3, uint64_t a4, uint64_t a5) {
   (void)a2;
   (void)a3;
   (void)a4;
   (void)a5;
-  // For now, identical to stat (we don't follow symlinks)
-  return sys_stat(path_ptr, statbuf_ptr, a2, a3, a4, a5);
+  const char *path = (const char *)path_ptr;
+  struct kstat *ks = (struct kstat *)statbuf_ptr;
+
+  if (!path || !ks)
+    return (uint64_t)-14; // EFAULT
+  if (!is_user_ptr((uint64_t)ks))
+    return (uint64_t)-14; // EFAULT
+
+  struct thread *t = sched_get_current();
+  vfs_node_t *base = fs_root;
+  if (t && path[0] != '/' && t->cwd_path[0]) {
+    vfs_node_t *cwd = vfs_resolve_path_at(fs_root, t->cwd_path);
+    if (cwd)
+      base = cwd;
+  }
+
+  // Use the non-symlink-following resolver so we stat the symlink itself
+  vfs_node_t *node = vfs_resolve_symlink_node(base, path);
+  if (!node) {
+    // Fall back to regular stat (handles /dev/ paths etc.)
+    return sys_stat(path_ptr, statbuf_ptr, a2, a3, a4, a5);
+  }
+
+  fill_kstat(ks, node);
+  return 0;
 }
 
 // ── sys_fstat: fstat(fd, statbuf)
@@ -1804,7 +1827,7 @@ static uint64_t sys_unlinkat(uint64_t dirfd, uint64_t pathname, uint64_t flags,
   }
 
   if (!parent || (parent->flags & FS_TYPE_MASK) != FS_DIRECTORY)
-    return (uint64_t)-20; // ENOTDIR
+    return (uint64_t)-2; // ENOENT — parent not found, treat as file-not-found
 
   // Build full path for socket unbinding
   char full_path[256];
@@ -2564,7 +2587,10 @@ static uint64_t sys_fchownat(uint64_t dirfd, uint64_t pathname_ptr,
 }
 
 // ── sys_newfstatat: fstatat(dirfd, pathname, statbuf, flags) — syscall 262 ──
-#define AT_EMPTY_PATH 0x1000
+#define AT_SYMLINK_NOFOLLOW  0x0100  // Don't follow final symlink (like lstat)
+
+// Forward declaration — defined later in this file before sys_readlink
+static vfs_node_t *vfs_resolve_symlink_node(vfs_node_t *base, const char *path);
 
 static uint64_t sys_newfstatat(uint64_t dirfd, uint64_t pathname_ptr,
                                uint64_t statbuf_ptr, uint64_t flags,
@@ -2596,7 +2622,6 @@ static uint64_t sys_newfstatat(uint64_t dirfd, uint64_t pathname_ptr,
   vfs_node_t *base_dir = fs_root;
   if (path[0] != '/') {
     if ((int)dirfd == AT_FDCWD) {
-      // Use thread CWD
       if (t->cwd_path[0]) {
         base_dir = vfs_resolve_path_at(fs_root, t->cwd_path);
         if (!base_dir)
@@ -2613,16 +2638,20 @@ static uint64_t sys_newfstatat(uint64_t dirfd, uint64_t pathname_ptr,
 
   vfs_node_t *node = NULL;
 
-  // Check device registry for /dev/ paths
+  // Check device registry for /dev/ paths (always follow for device nodes)
   if (strncmp(path, "/dev/", 5) == 0) {
     node = fb_lookup_device((char *)path + 5);
   }
 
   if (!node) {
-    node = vfs_resolve_path_at(base_dir, path);
-    if (!node) {
-      return (uint64_t)-2; // ENOENT
+    if (flags & AT_SYMLINK_NOFOLLOW) {
+      // Don't follow the final symlink component — return the symlink itself
+      node = vfs_resolve_symlink_node(base_dir, path);
+    } else {
+      node = vfs_resolve_path_at(base_dir, path);
     }
+    if (!node)
+      return (uint64_t)-2; // ENOENT
   }
 
   fill_kstat(ks, node);
@@ -2897,6 +2926,55 @@ static uint64_t sys_rename(uint64_t oldpath_ptr, uint64_t newpath_ptr,
   return (uint64_t)-18; // EXDEV
 }
 
+// ── vfs_resolve_symlink_node: resolve path WITHOUT following the final symlink
+// This is needed by readlink() and lstat() — they must return/stat the symlink
+// node itself, not the target it points to.
+// All intermediate components ARE followed (as on Linux).
+static vfs_node_t *vfs_resolve_symlink_node(vfs_node_t *base,
+                                            const char *path) {
+  if (!path || !path[0])
+    return NULL;
+
+  // Split into parent path + last component
+  // Find the last '/' in the path
+  const char *last_slash = NULL;
+  for (const char *p = path; *p; p++) {
+    if (*p == '/')
+      last_slash = p;
+  }
+
+  vfs_node_t *parent;
+  const char *last_comp;
+
+  if (!last_slash) {
+    // No slash — last component is the whole path, parent is base/cwd
+    parent = base ? base : fs_root;
+    last_comp = path;
+  } else if (last_slash == path) {
+    // Path like "/foo" — parent is root
+    parent = fs_root;
+    last_comp = last_slash + 1;
+  } else {
+    // Path like "/a/b/c" — resolve "/a/b" (follows symlinks), then finddir "c"
+    size_t parent_len = (size_t)(last_slash - path);
+    char parent_path[512];
+    if (parent_len >= sizeof(parent_path))
+      return NULL;
+    memcpy(parent_path, path, parent_len);
+    parent_path[parent_len] = '\0';
+    parent = vfs_resolve_path_at(base ? base : fs_root, parent_path);
+    if (!parent)
+      return NULL;
+    last_comp = last_slash + 1;
+  }
+
+  if (!last_comp || !last_comp[0])
+    return parent; // Trailing slash — return the directory itself
+
+  // Use vfs_finddir which returns the raw node without following symlinks
+  return vfs_finddir(parent, (char *)last_comp);
+}
+
 // ── sys_readlink: readlink(pathname, buf, bufsiz) — syscall 89 ───────────────
 static uint64_t sys_readlink(uint64_t pathname_ptr, uint64_t buf_ptr,
                              uint64_t bufsiz, uint64_t a3, uint64_t a4,
@@ -2913,7 +2991,6 @@ static uint64_t sys_readlink(uint64_t pathname_ptr, uint64_t buf_ptr,
 
   // Special case: /proc/self/exe — TCC and other tools read this
   if (strcmp(path, "/proc/self/exe") == 0) {
-    // We don't track per-thread executable paths yet, so return a generic path
     const char *exe_path = "/init";
     size_t len = strlen(exe_path);
     if (len > bufsiz)
@@ -2922,16 +2999,19 @@ static uint64_t sys_readlink(uint64_t pathname_ptr, uint64_t buf_ptr,
     return len; // readlink returns bytes written, NOT null-terminated
   }
 
-  // Resolve the symlink node
+  // Resolve the symlink node WITHOUT following the final component.
+  // vfs_resolve_path_at() follows all symlinks, so we must split the path
+  // ourselves: resolve the parent directory (following symlinks), then
+  // vfs_finddir() the last component to get the raw symlink node.
   struct thread *t = sched_get_current();
   vfs_node_t *base = fs_root;
   if (t && path[0] != '/' && t->cwd_path[0]) {
-    base = vfs_resolve_path_at(fs_root, t->cwd_path);
-    if (!base)
-      base = fs_root;
+    vfs_node_t *cwd = vfs_resolve_path_at(fs_root, t->cwd_path);
+    if (cwd)
+      base = cwd;
   }
 
-  vfs_node_t *node = vfs_resolve_path_at(base, path);
+  vfs_node_t *node = vfs_resolve_symlink_node(base, path);
   if (!node)
     return (uint64_t)-2; // ENOENT
 
@@ -2942,6 +3022,18 @@ static uint64_t sys_readlink(uint64_t pathname_ptr, uint64_t buf_ptr,
   int ret = vfs_readlink(node, buf, (uint32_t)bufsiz);
   if (ret < 0)
     return (uint64_t)-22; // EINVAL
+
+  klog_puts("[READLINK] ");
+  klog_puts(path);
+  klog_puts(" -> ");
+  // buf is not null-terminated by readlink contract, but ret bytes are valid
+  // Log safely
+  char log_tmp[256];
+  size_t log_len = (size_t)ret < 255 ? (size_t)ret : 255;
+  memcpy(log_tmp, buf, log_len);
+  log_tmp[log_len] = '\0';
+  klog_puts(log_tmp);
+  klog_puts("\n");
 
   return (uint64_t)ret;
 }

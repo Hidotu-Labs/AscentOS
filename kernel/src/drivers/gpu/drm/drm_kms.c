@@ -4,11 +4,13 @@
 #include "drm.h"
 
 extern struct drm_gem_object *drm_gem_find_by_handle(struct drm_device *dev, uint32_t handle);
+extern void drm_obj_add_prop(struct drm_mode_object *obj, uint32_t prop_id, uint64_t default_val);
 
 void drm_mode_object_init(struct drm_device *dev, struct drm_mode_object *obj, uint32_t type) {
     spinlock_acquire(&dev->lock);
     obj->id = dev->next_kms_id++;
     obj->type = type;
+    obj->prop_count = 0;
     list_add_tail(&obj->list, &dev->kms_objects);
     spinlock_release(&dev->lock);
 }
@@ -20,6 +22,18 @@ struct drm_plane *drm_plane_create(struct drm_device *dev, uint32_t possible_crt
     
     plane->possible_crtcs = possible_crtcs;
     drm_mode_object_init(dev, &plane->base, DRM_MODE_OBJECT_PLANE);
+
+    /* Attach standard plane properties */
+    drm_obj_add_prop(&plane->base, DRM_PROP_ID_CRTC_ID, 0);
+    drm_obj_add_prop(&plane->base, DRM_PROP_ID_FB_ID,   0);
+    drm_obj_add_prop(&plane->base, DRM_PROP_ID_SRC_X,   0);
+    drm_obj_add_prop(&plane->base, DRM_PROP_ID_SRC_Y,   0);
+    drm_obj_add_prop(&plane->base, DRM_PROP_ID_SRC_W,   0);
+    drm_obj_add_prop(&plane->base, DRM_PROP_ID_SRC_H,   0);
+    drm_obj_add_prop(&plane->base, DRM_PROP_ID_CRTC_X,  0);
+    drm_obj_add_prop(&plane->base, DRM_PROP_ID_CRTC_Y,  0);
+    drm_obj_add_prop(&plane->base, DRM_PROP_ID_CRTC_W,  0);
+    drm_obj_add_prop(&plane->base, DRM_PROP_ID_CRTC_H,  0);
     return plane;
 }
 
@@ -30,6 +44,10 @@ struct drm_crtc *drm_crtc_create(struct drm_device *dev, struct drm_plane *prima
 
     crtc->primary = primary;
     drm_mode_object_init(dev, &crtc->base, DRM_MODE_OBJECT_CRTC);
+
+    /* Attach standard CRTC properties */
+    drm_obj_add_prop(&crtc->base, DRM_PROP_ID_ACTIVE,  0);
+    drm_obj_add_prop(&crtc->base, DRM_PROP_ID_MODE_ID, 0);
     return crtc;
 }
 
@@ -52,6 +70,11 @@ struct drm_connector *drm_connector_create(struct drm_device *dev, uint32_t type
     conn->connector_type = type;
     conn->connection_status = 1; // Connected
     drm_mode_object_init(dev, &conn->base, DRM_MODE_OBJECT_CONNECTOR);
+
+    /* Attach standard connector properties */
+    drm_obj_add_prop(&conn->base, DRM_PROP_ID_DPMS,         0);
+    drm_obj_add_prop(&conn->base, DRM_PROP_ID_CONNECTOR_ID, conn->base.id);
+    drm_obj_add_prop(&conn->base, DRM_PROP_ID_CRTC_ID,      0); /* set by atomic */
     return conn;
 }
 

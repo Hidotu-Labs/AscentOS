@@ -483,11 +483,9 @@ int socket_alloc_fd(socket_t *sock) {
   t->fds[fd] = node;
   t->fd_offsets[fd] = 0;
 
-  // This will call socket_vfs_open() which increments sock->refcount
-  vfs_open(node);
-
-  // Release the initial creation reference, as the VFS node now owns it
-  socket_put(sock);
+  // node->refcount starts at 1 (from vfs_node_init), representing the fd
+  // table's reference.  sock->refcount starts at 1 (from socket_create),
+  // representing the VFS node's reference.  No extra get/put needed here.
 
   return fd;
 }
@@ -525,21 +523,13 @@ int socket_close_fd(int fd) {
   if ((node->flags & FS_TYPE_MASK) != FS_SOCKET)
     return -22; // EINVAL
 
-  socket_t *sock = (socket_t *)node->device;
-
   // Clear FD
   t->fds[fd] = NULL;
   t->fd_offsets[fd] = 0;
 
-  // Release socket reference through VFS close
-  if (node) {
-    vfs_close(node);
-  }
-
-  // Release the initial reference from socket_create()
-  if (sock) {
-    socket_put(sock);
-  }
+  // vfs_close drops the fd-table reference (refcount 1→0), which triggers
+  // socket_vfs_close → socket_put → socket_destroy when refcount hits 0.
+  vfs_close(node);
 
   return 0;
 }

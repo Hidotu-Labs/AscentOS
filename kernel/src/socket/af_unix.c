@@ -1139,6 +1139,13 @@ static ssize_t unix_sendmsg(socket_t *sock, struct msghdr *msg, int flags) {
           vfs_node_t *node = current->fds[fd];
           vfs_open(node); // Increment refcount
           peer->scm_nodes[peer->scm_count++] = node;
+          klog_puts("[SCM_SEND] queued fd=");
+          klog_uint64((uint64_t)fd);
+          klog_puts(" node=");
+          klog_puts(node->name);
+          klog_puts(" to peer scm_count=");
+          klog_uint64((uint64_t)peer->scm_count);
+          klog_puts("\n");
         }
       }
       spinlock_release(&peer->parent->lock);
@@ -1184,6 +1191,13 @@ static ssize_t unix_recvmsg(socket_t *sock, struct msghdr *msg, int flags) {
 
   // 2. Handle SCM_RIGHTS (received FDs)
   spinlock_acquire(&sock->lock);
+  klog_puts("[SCM_RECV] scm_count=");
+  klog_uint64((uint64_t)usk->scm_count);
+  klog_puts(" msg_control=");
+  klog_uint64((uint64_t)(uintptr_t)msg->msg_control);
+  klog_puts(" msg_controllen=");
+  klog_uint64((uint64_t)msg->msg_controllen);
+  klog_puts("\n");
   if (usk->scm_count > 0 && msg->msg_control &&
       msg->msg_controllen >= CMSG_SPACE(usk->scm_count * sizeof(int))) {
     struct cmsghdr *cmsg = (struct cmsghdr *)msg->msg_control;
