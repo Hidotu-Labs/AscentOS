@@ -3,24 +3,6 @@
 #include "../lib/string.h"
 #include "../mm/heap.h"
 
-// ── Internal Structures ─────────────────────────────────────────────────────
-
-typedef struct child_node {
-  vfs_node_t *node;
-  struct child_node *next;
-} child_node_t;
-
-// For files, device points to this
-typedef struct {
-  uint8_t *data;
-  uint32_t capacity;
-} ramfs_file_t;
-
-// For directories, device points to this
-typedef struct {
-  child_node_t *children;
-} ramfs_dir_t;
-
 static uint32_t next_inode = 1;
 
 static int ramfs_chmod(vfs_node_t *node, uint16_t permission);
@@ -63,7 +45,7 @@ uint32_t ramfs_write(vfs_node_t *node, uint32_t offset, uint32_t size,
       return 0; // OOM
 
     if (file->data) {
-      memcpy(new_data, file->data, node->length);
+      memcpy(new_data, file->data, file->capacity);
       kfree(file->data);
     }
     file->data = new_data;
@@ -78,7 +60,7 @@ uint32_t ramfs_write(vfs_node_t *node, uint32_t offset, uint32_t size,
   return size;
 }
 
-static int ramfs_truncate(vfs_node_t *node, uint32_t new_len) {
+int ramfs_truncate(vfs_node_t *node, uint32_t new_len) {
   if (!node || node->flags != FS_FILE || !node->device)
     return -1;
 
@@ -99,7 +81,7 @@ static int ramfs_truncate(vfs_node_t *node, uint32_t new_len) {
     if (!new_data)
       return -1; // ENOMEM
     if (file->data) {
-      memcpy(new_data, file->data, node->length);
+      memcpy(new_data, file->data, file->capacity);
       kfree(file->data);
     }
     if (new_len > node->length)
@@ -111,6 +93,38 @@ static int ramfs_truncate(vfs_node_t *node, uint32_t new_len) {
   }
 
   node->length = new_len;
+  return 0;
+}
+
+int ramfs_fallocate(vfs_node_t *node, int mode, uint32_t offset, uint32_t len) {
+  if (!node || (node->flags & FS_TYPE_MASK) != FS_FILE || !node->device)
+    return -1;
+
+  ramfs_file_t *file = (ramfs_file_t *)node->device;
+  uint32_t needed = offset + len;
+
+  if (needed > file->capacity) {
+    uint8_t *new_data = kmalloc(needed);
+    if (!new_data)
+      return -1;
+    if (file->data) {
+      memcpy(new_data, file->data, node->length);
+      kfree(file->data);
+    }
+    // Zero initialize new capacity range
+    if (needed > node->length)
+      memset(new_data + node->length, 0, needed - node->length);
+    file->data = new_data;
+    file->capacity = needed;
+  }
+
+  // mode 1 is FALLOC_FL_KEEP_SIZE
+  if (!(mode & 0x01)) {
+    if (needed > node->length) {
+      node->length = needed;
+    }
+  }
+
   return 0;
 }
 
@@ -213,6 +227,7 @@ static vfs_node_t *ramfs_make_node(char *name, uint16_t perm, uint32_t type) {
     n->read = ramfs_read;
     n->write = ramfs_write;
     n->truncate = ramfs_truncate;
+    n->fallocate = ramfs_fallocate;
   }
 
   n->chmod = ramfs_chmod;

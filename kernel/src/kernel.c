@@ -416,7 +416,6 @@ void kmain_high_half(void) {
 
   // Initialize shared memory subsystem
   shm_init();
-  evdev_init();
 
   pci_init();
   usb_init();
@@ -474,9 +473,42 @@ mount_success:
   // Mount /dev and /tmp as in-memory filesystems
   ramfs_mount_at("/dev");
   ramfs_mount_at("/tmp");
-  
+  ramfs_mount_at("/run");
+
+  vfs_node_t *tmp_node = vfs_resolve_path("/tmp");
+  if (tmp_node) {
+    vfs_mkdir(tmp_node, "wayland", 0777);
+  }
+
+  vfs_node_t *run_node = vfs_resolve_path("/run");
+  if (run_node) {
+    vfs_mkdir(run_node, "udev", 0755);
+    vfs_node_t *udev_node = vfs_resolve_path("/run/udev");
+    if (udev_node) {
+      vfs_mkdir(udev_node, "data", 0755);
+      vfs_node_t *data_node = vfs_resolve_path("/run/udev/data");
+      if (data_node) {
+        if (vfs_create(data_node, "c13:64", 0644) == 0) {
+          vfs_node_t *kbd_node = vfs_finddir(data_node, "c13:64");
+          if (kbd_node) {
+            const char *kbd_data = "E:ID_INPUT=1\nE:ID_INPUT_KEYBOARD=1\n";
+            vfs_write(kbd_node, 0, strlen(kbd_data), (uint8_t *)kbd_data);
+          }
+        }
+        if (vfs_create(data_node, "c13:65", 0644) == 0) {
+          vfs_node_t *mse_node = vfs_finddir(data_node, "c13:65");
+          if (mse_node) {
+            const char *mse_data = "E:ID_INPUT=1\nE:ID_INPUT_MOUSE=1\n";
+            vfs_write(mse_node, 0, strlen(mse_data), (uint8_t *)mse_data);
+          }
+        }
+      }
+    }
+  }
+
   extern void sysfs_init(void);
   sysfs_init();
+  evdev_init();
 
   // Re-populate /dev in the new root
   block_repopulate_devices();

@@ -18,5 +18,6 @@ void af_netlink_init(void);
  * @return 0 on success, negative error code on failure
  */
 int netlink_create(socket_t *sock, int protocol);
+void netlink_broadcast(int protocol, uint32_t group, const void *data, size_t len);
 
 #endif // AF_NETLINK_H

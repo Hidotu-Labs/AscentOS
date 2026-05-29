@@ -11,6 +11,7 @@
 #include "../fs/vfs.h"
 #include "../lib/string.h"
 #include "../mm/heap.h"
+#include "../mm/pmm.h"
 #include "../mm/vmm.h"
 #include "../net/net.h"
 #include "../sched/sched.h"
@@ -25,11 +26,6 @@
 static inline bool is_user_ptr(uint64_t addr) {
   return addr != 0 && addr <= USER_ADDR_MAX;
 }
-
-typedef struct {
-  uint8_t *data;
-  uint32_t capacity;
-} ramfs_file_t;
 
 #define TCGETS 0x5401
 #define TCSETS 0x5402
@@ -226,8 +222,6 @@ static uint32_t next_watch_id = 1;
 #define IN_DELETE 0x200
 #define IN_DELETE_SELF 0x400
 #define IN_MOVE_SELF 0x800
-
-
 
 int alloc_fd(struct thread *t) {
   for (int i = 0; i < MAX_FDS; i++) {
@@ -615,6 +609,45 @@ static uint64_t sys_ftruncate(uint64_t fd, uint64_t length, uint64_t a2,
   return (uint64_t)-1;
 }
 
+static uint64_t sys_fallocate(uint64_t fd, uint64_t mode, uint64_t offset,
+                              uint64_t len, uint64_t a4, uint64_t a5) {
+  (void)a4;
+  (void)a5;
+  struct thread *t = sched_get_current();
+  if (!t || fd >= MAX_FDS || !t->fds[fd])
+    return (uint64_t)-9; // EBADF
+
+  vfs_node_t *node = t->fds[fd];
+  if (!node)
+    return (uint64_t)-9; // EBADF
+
+  if ((node->flags & FS_TYPE_MASK) != FS_FILE)
+    return (uint64_t)-22; // EINVAL (not a regular file)
+
+  klog_puts("[SYSCALL] fallocate: fd=");
+  klog_uint64(fd);
+  klog_puts(" mode=");
+  klog_uint64(mode);
+  klog_puts(" offset=");
+  klog_uint64(offset);
+  klog_puts(" len=");
+  klog_uint64(len);
+  klog_puts("\n");
+
+  int ret = vfs_fallocate(node, (int)mode, (uint32_t)offset, (uint32_t)len);
+  klog_puts("[SYSCALL] fallocate: result=");
+  klog_uint64((uint64_t)(int64_t)ret);
+  klog_puts("\n");
+
+  if (ret != 0) {
+    if (ret == -1)
+      return (uint64_t)-1; // EPERM or generic
+    return (uint64_t)ret;
+  }
+
+  return 0;
+}
+
 static uint64_t sys_flock(uint64_t fd, uint64_t operation, uint64_t a2,
                           uint64_t a3, uint64_t a4, uint64_t a5) {
   (void)fd;
@@ -763,7 +796,9 @@ static uint64_t sys_writev(uint64_t fd, uint64_t iov_u, uint64_t iovcnt,
 
   struct thread *t = sched_get_current();
   if (t) {
-    klog_puts("[SYSCALL] writev tid=13 fd=");
+    klog_puts("[SYSCALL] writev tid=");
+    klog_uint64(t->tid);
+    klog_puts(" fd=");
     klog_uint64(fd);
     klog_puts(" iovcnt=");
     klog_uint64(iovcnt);
@@ -792,7 +827,9 @@ static uint64_t sys_writev(uint64_t fd, uint64_t iov_u, uint64_t iovcnt,
     int64_t w = fd_write((int)fd, (const void *)base, (size_t)len);
     if (w < 0) {
       if (t) {
-        klog_puts("[SYSCALL] writev tid=13 RETURN ERROR=");
+        klog_puts("[SYSCALL] writev tid=");
+        klog_uint64(t->tid);
+        klog_puts(" RETURN ERROR=");
         klog_uint64((uint64_t)(-w));
         klog_puts("\n");
       }
@@ -803,7 +840,9 @@ static uint64_t sys_writev(uint64_t fd, uint64_t iov_u, uint64_t iovcnt,
       break;
   }
   if (t) {
-    klog_puts("[SYSCALL] writev tid=13 RETURN=");
+    klog_puts("[SYSCALL] writev tid=");
+    klog_uint64(t->tid);
+    klog_puts(" RETURN=");
     klog_uint64(total);
     klog_puts("\n");
   }
@@ -811,7 +850,7 @@ static uint64_t sys_writev(uint64_t fd, uint64_t iov_u, uint64_t iovcnt,
 }
 
 static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
-                           uint64_t a3, uint64_t a4, uint64_t a5) {
+                          uint64_t a3, uint64_t a4, uint64_t a5) {
   (void)a3;
   (void)a4;
   (void)a5;
@@ -872,8 +911,9 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
       klog_hex64(res);
       klog_puts("\n");
 
-    if (res != (uint64_t)-25) {
-        klog_puts("[SYSCALL] ioctl: node handler return value bypasses switch\n");
+      if (res != (uint64_t)-25) {
+        klog_puts(
+            "[SYSCALL] ioctl: node handler return value bypasses switch\n");
         return res;
       }
     }
@@ -1158,6 +1198,9 @@ static uint64_t sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,
         flags |= O_NONBLOCK;
       }
     }
+    if (node->flags & FS_NONBLOCK) {
+      flags |= O_NONBLOCK;
+    }
     return flags;
   }
   case F_SETFL: {
@@ -1172,6 +1215,12 @@ static uint64_t sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,
         }
       }
     }
+    // Also track in VFS node for char devs etc
+    if (arg & O_NONBLOCK) {
+      node->flags |= FS_NONBLOCK;
+    } else {
+      node->flags &= ~FS_NONBLOCK;
+    }
     return 0;
   }
   case F_SETOWN: {
@@ -1179,7 +1228,24 @@ static uint64_t sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,
     (void)arg;
     return 0;
   }
+  case 1033: { // F_ADD_SEALS
+    // For now, only support seals on files (matches memfd nodes)
+    vfs_node_t *node = t->fds[fd];
+    if ((node->flags & FS_TYPE_MASK) != FS_FILE)
+      return (uint64_t)-22; // EINVAL
+    node->impl |= (uint32_t)arg;
+    return 0;
+  }
+  case 1034: { // F_GET_SEALS
+    vfs_node_t *node = t->fds[fd];
+    if ((node->flags & FS_TYPE_MASK) != FS_FILE)
+      return (uint64_t)-22; // EINVAL
+    return (uint64_t)node->impl;
+  }
   default:
+    klog_puts("[SYSCALL] sys_fcntl: unhandled cmd=");
+    klog_uint64(cmd);
+    klog_puts("\n");
     return (uint64_t)-22; // EINVAL
   }
 }
@@ -1295,8 +1361,10 @@ static uint64_t sys_stat(uint64_t path_ptr, uint64_t statbuf_ptr, uint64_t a2,
   return 0;
 }
 
-// ── sys_lstat: lstat(path, statbuf) - like stat but doesn't follow final symlink
-static vfs_node_t *vfs_resolve_symlink_node(vfs_node_t *base, const char *path); // fwd decl
+// ── sys_lstat: lstat(path, statbuf) - like stat but doesn't follow final
+// symlink
+static vfs_node_t *vfs_resolve_symlink_node(vfs_node_t *base,
+                                            const char *path); // fwd decl
 static uint64_t sys_lstat(uint64_t path_ptr, uint64_t statbuf_ptr, uint64_t a2,
                           uint64_t a3, uint64_t a4, uint64_t a5) {
   (void)a2;
@@ -2652,7 +2720,7 @@ static uint64_t sys_fchownat(uint64_t dirfd, uint64_t pathname_ptr,
 }
 
 // ── sys_newfstatat: fstatat(dirfd, pathname, statbuf, flags) — syscall 262 ──
-#define AT_SYMLINK_NOFOLLOW  0x0100  // Don't follow final symlink (like lstat)
+#define AT_SYMLINK_NOFOLLOW 0x0100 // Don't follow final symlink (like lstat)
 
 // Forward declaration — defined later in this file before sys_readlink
 static vfs_node_t *vfs_resolve_symlink_node(vfs_node_t *base, const char *path);
@@ -3242,289 +3310,7 @@ static uint64_t sys_link(uint64_t oldpath_ptr, uint64_t newpath_ptr,
   return 0;
 }
 
-struct pollfd {
-  int fd;
-  short events;
-  short revents;
-};
 
-static uint64_t do_poll(struct pollfd *fds, uint64_t nfds,
-                        uint64_t timeout_ms) {
-  struct thread *t = sched_get_current();
-  if (t) {
-    klog_puts("[POLL] ENTER tid=");
-    klog_uint64(t->tid);
-    klog_puts(" nfds=");
-    klog_uint64(nfds);
-    klog_puts(" timeout=");
-    klog_uint64(timeout_ms);
-    klog_puts("\n");
-  }
-  if (!t)
-    return (uint64_t)-1;
-
-  int ready = 0;
-  for (uint64_t i = 0; i < nfds; i++) {
-    int fd = fds[i].fd;
-    if (fd < 0) {
-      fds[i].revents = 0;
-      continue;
-    }
-    if (fd >= MAX_FDS || !t->fds[fd]) {
-      fds[i].revents = POLLNVAL;
-      ready++;
-      continue;
-    }
-    int ret = vfs_poll(t->fds[fd], fds[i].events);
-    if (ret < 0) {
-      fds[i].revents = POLLNVAL;
-      ready++;
-    } else if (ret > 0) {
-      fds[i].revents = (short)ret;
-      ready++;
-    } else {
-      fds[i].revents = 0;
-    }
-  }
-
-  if (ready == 0 && timeout_ms != 0) {
-    // Create wait queue entries for each fd we're polling
-    // Each fd needs its own entry to avoid list corruption
-    wait_queue_entry_t entries[128]; // Max 128 fds per poll
-    int entry_fds[128];              // Track which fd each entry belongs to
-    int entry_count = 0;
-
-    // Add to all fd wait queues so we get woken when any has events
-    for (uint64_t i = 0; i < nfds && entry_count < 128; i++) {
-      int fd = fds[i].fd;
-      if (fd >= 0 && fd < MAX_FDS && t->fds[fd] && t->fds[fd]->wait_queue) {
-        entries[entry_count].thread = t;
-        entries[entry_count].next = NULL;
-        entry_fds[entry_count] = fd;
-        wait_queue_add((wait_queue_t *)t->fds[fd]->wait_queue,
-                       &entries[entry_count]);
-        entry_count++;
-      }
-    }
-
-    // Set up timeout if specified
-    if (timeout_ms != (uint64_t)-1) {
-      t->wakeup_ticks = lapic_timer_get_ticks() + timeout_ms;
-    } else {
-      t->wakeup_ticks = 0; // No timeout
-    }
-
-    // Set state to BLOCKED BEFORE the final check to avoid lost wakeups
-    t->state = THREAD_BLOCKED;
-
-    // Final check for ready fds after setting state
-    for (uint64_t i = 0; i < nfds; i++) {
-      int fd = fds[i].fd;
-      if (fd >= 0 && fd < MAX_FDS && t->fds[fd]) {
-        if (vfs_poll(t->fds[fd], fds[i].events) > 0) {
-          t->state = THREAD_READY;
-          ready = 1; // Mark as ready so we don't block
-          break;
-        }
-      }
-    }
-
-    // Only yield if we're still blocked
-    if (t->state == THREAD_BLOCKED) {
-      sched_yield();
-    }
-
-    // Remove from all wait queues
-    for (int i = 0; i < entry_count; i++) {
-      int fd = entry_fds[i];
-      if (fd >= 0 && fd < MAX_FDS && t->fds[fd] && t->fds[fd]->wait_queue) {
-        wait_queue_remove((wait_queue_t *)t->fds[fd]->wait_queue, &entries[i]);
-      }
-    }
-
-    // Re-poll to get actual events
-    for (uint64_t i = 0; i < nfds; i++) {
-      int fd = fds[i].fd;
-      if (fd < 0 || fd >= MAX_FDS || !t->fds[fd])
-        continue;
-      int ret = vfs_poll(t->fds[fd], fds[i].events);
-      if (ret > 0) {
-        fds[i].revents = (short)ret;
-        ready++;
-      }
-    }
-  }
-  if (t) {
-    klog_puts("[POLL] RETURN tid=");
-    klog_uint64(t->tid);
-    klog_puts(" ready=");
-    klog_uint64((uint64_t)ready);
-    klog_puts("\n");
-  }
-  return (uint64_t)ready;
-}
-
-static uint64_t sys_poll(uint64_t fds_ptr, uint64_t nfds, uint64_t timeout_ms,
-                         uint64_t a3, uint64_t a4, uint64_t a5) {
-  (void)a3;
-  (void)a4;
-  (void)a5;
-
-  struct thread *t = sched_get_current();
-  if (nfds == 0) {
-    if (timeout_ms > 0 && timeout_ms != (uint64_t)-1) {
-      t->state = THREAD_SLEEPING;
-      uint64_t wait = (timeout_ms == (uint64_t)-1) ? 10 : timeout_ms;
-      if (wait == 0)
-        wait = 1;
-      t->wakeup_ticks = lapic_timer_get_ticks() + wait;
-      sched_yield();
-    }
-    return 0;
-  }
-  if (!is_user_ptr(fds_ptr) ||
-      !vmm_is_user_addr_range_valid(fds_ptr, nfds * sizeof(struct pollfd)))
-    return (uint64_t)-14;
-
-  return do_poll((struct pollfd *)fds_ptr, nfds, timeout_ms);
-}
-
-static uint64_t sys_ppoll(uint64_t fds_ptr, uint64_t nfds, uint64_t timeout_ptr,
-                          uint64_t sigmask, uint64_t sigsetsize, uint64_t a5) {
-  (void)sigmask;
-  (void)sigsetsize;
-  (void)a5;
-
-  uint64_t timeout_ms = (uint64_t)-1;
-  if (timeout_ptr && is_user_ptr(timeout_ptr)) {
-    struct {
-      int64_t tv_sec;
-      int64_t tv_nsec;
-    } *ts = (void *)timeout_ptr;
-    if (!vmm_is_user_addr_range_valid(timeout_ptr, 16))
-      return (uint64_t)-14;
-    timeout_ms = (uint64_t)(ts->tv_sec * 1000 + ts->tv_nsec / 1000000);
-  }
-
-  return sys_poll(fds_ptr, nfds, timeout_ms, 0, 0, 0);
-}
-
-static uint64_t do_pselect6(uint64_t nfds, uint64_t readfds, uint64_t writefds,
-                            uint64_t exceptfds, uint64_t timeout_ms) {
-  size_t set_size = (nfds + 7) / 8;
-  struct pollfd pfds[128];
-  uint64_t p_count = 0;
-  for (int fd = 0; fd < (int)nfds && p_count < 128; fd++) {
-    short events = 0;
-    if (readfds && (((uint64_t *)readfds)[fd / 64] & (1ULL << (fd % 64))))
-      events |= 0x0001;
-    if (writefds && (((uint64_t *)writefds)[fd / 64] & (1ULL << (fd % 64))))
-      events |= 0x0004;
-    if (events) {
-      pfds[p_count].fd = fd;
-      pfds[p_count].events = events;
-      pfds[p_count].revents = 0;
-      p_count++;
-    }
-  }
-
-  if (p_count == 0) {
-    if (timeout_ms != (uint64_t)-1 && timeout_ms > 0) {
-      struct thread *t = sched_get_current();
-      t->state = THREAD_SLEEPING;
-      uint64_t wait = (timeout_ms == (uint64_t)-1) ? 10 : timeout_ms;
-      if (wait == 0)
-        wait = 1;
-      t->wakeup_ticks = lapic_timer_get_ticks() + wait;
-      sched_yield();
-    }
-    if (readfds)
-      memset((void *)readfds, 0, set_size);
-    if (writefds)
-      memset((void *)writefds, 0, set_size);
-    if (exceptfds)
-      memset((void *)exceptfds, 0, set_size);
-    return 0;
-  }
-
-  uint64_t ready = do_poll(pfds, p_count, timeout_ms);
-  if ((int64_t)ready < 0)
-    return ready;
-
-  if (readfds)
-    memset((void *)readfds, 0, set_size);
-  if (writefds)
-    memset((void *)writefds, 0, set_size);
-  if (exceptfds)
-    memset((void *)exceptfds, 0, set_size);
-
-  uint64_t res_count = 0;
-  for (uint64_t i = 0; i < p_count; i++) {
-    if (pfds[i].revents == 0)
-      continue;
-    int fd = pfds[i].fd;
-    if (pfds[i].revents & (0x0001 | 0x0010 | 0x0008)) {
-      if (readfds)
-        ((uint64_t *)readfds)[fd / 64] |= (1ULL << (fd % 64));
-      res_count++;
-    }
-    if (pfds[i].revents & 0x0004) {
-      if (writefds)
-        ((uint64_t *)writefds)[fd / 64] |= (1ULL << (fd % 64));
-      res_count++;
-    }
-  }
-  return res_count;
-}
-
-static uint64_t sys_pselect6(uint64_t nfds, uint64_t readfds, uint64_t writefds,
-                             uint64_t exceptfds, uint64_t timeout,
-                             uint64_t sigmask) {
-  (void)sigmask;
-  if (nfds > 1024)
-    return (uint64_t)-22;
-  size_t set_size = (nfds + 7) / 8;
-  if (readfds && (!is_user_ptr(readfds) ||
-                  !vmm_is_user_addr_range_valid(readfds, set_size)))
-    return (uint64_t)-14;
-  if (writefds && (!is_user_ptr(writefds) ||
-                   !vmm_is_user_addr_range_valid(writefds, set_size)))
-    return (uint64_t)-14;
-  if (exceptfds && (!is_user_ptr(exceptfds) ||
-                    !vmm_is_user_addr_range_valid(exceptfds, set_size)))
-    return (uint64_t)-14;
-
-  uint64_t timeout_ms = (uint64_t)-1;
-  if (timeout && is_user_ptr(timeout)) {
-    if (!vmm_is_user_addr_range_valid(timeout, 16))
-      return (uint64_t)-14;
-    struct {
-      int64_t tv_sec;
-      int64_t tv_nsec;
-    } *ts = (void *)timeout;
-    timeout_ms = (uint64_t)(ts->tv_sec * 1000 + ts->tv_nsec / 1000000);
-  }
-
-  return do_pselect6(nfds, readfds, writefds, exceptfds, timeout_ms);
-}
-
-static uint64_t sys_select(uint64_t nfds, uint64_t readfds, uint64_t writefds,
-                           uint64_t exceptfds, uint64_t timeout, uint64_t a5) {
-  (void)a5;
-  uint64_t timeout_ms = (uint64_t)-1;
-
-  if (timeout && is_user_ptr(timeout)) {
-    struct {
-      int64_t tv_sec;
-      int64_t tv_usec;
-    } *tv = (void *)timeout;
-    if (!vmm_is_user_addr_range_valid(timeout, 16))
-      return (uint64_t)-14;
-    timeout_ms = (uint64_t)(tv->tv_sec * 1000 + tv->tv_usec / 1000);
-  }
-
-  return do_pselect6(nfds, readfds, writefds, exceptfds, timeout_ms);
-}
 
 // fchdir(2) - syscall 81
 // Change current directory using file descriptor
@@ -3775,6 +3561,198 @@ static uint64_t sys_inotify_add_watch(uint64_t fd, uint64_t pathname,
   return watch->wd;
 }
 
+// ── memfd mmap handler ──────────────────────────────────────────────────────
+// Maps the ramfs backing buffer directly into user address space.
+// This is essential for Wayland SHM buffer sharing between compositor and
+// clients.
+//
+// IMPORTANT: The backing buffer MUST be page-aligned for mmap to work
+// correctly.  kmalloc() returns heap pointers that are typically NOT
+// page-aligned.  When we compute  phys = kva - hhdm  and then mask with
+// ~0xFFF, we lose the within-page offset, causing userspace to see the
+// wrong data (e.g. XKB keymap strings appear as garbage).
+//
+// Fix: if the existing backing buffer is not page-aligned, reallocate it
+// using pmm_alloc_pages() which always returns page-aligned physical
+// memory, copy the data, and update the ramfs_file_t to point to the new
+// buffer.
+static uint64_t memfd_mmap(vfs_node_t *node, uint64_t addr, uint64_t length,
+                           uint64_t prot, uint64_t flags, uint64_t offset) {
+  (void)flags;
+  if (!node || !node->device)
+    return (uint64_t)-1;
+
+  ramfs_file_t *file = (ramfs_file_t *)node->device;
+  uint64_t hhdm = pmm_get_hhdm_offset();
+
+  // Ensure the file is large enough
+  uint64_t needed = offset + length;
+  if (needed > file->capacity || !file->data) {
+    // Round up to page size for the new capacity
+    uint32_t new_cap = (uint32_t)needed;
+    if (new_cap < 4096)
+      new_cap = 4096;
+    // Round up to full pages
+    new_cap = (new_cap + 0xFFF) & ~0xFFFU;
+
+    size_t page_count = new_cap / PAGE_SIZE;
+    void *phys = pmm_alloc_pages(page_count);
+    if (!phys)
+      return (uint64_t)-12; // ENOMEM
+    uint8_t *new_data = (uint8_t *)((uint64_t)phys + hhdm);
+
+    // Zero-initialize
+    memset(new_data, 0, new_cap);
+
+    if (file->data && node->length > 0) {
+      memcpy(new_data, file->data, node->length);
+      kfree(file->data);
+    }
+    file->data = new_data;
+    file->capacity = new_cap;
+  }
+
+  // If existing buffer is not page-aligned, reallocate to page-aligned memory
+  if ((uint64_t)file->data & 0xFFF) {
+    uint32_t new_cap = file->capacity;
+    // Round up to full pages
+    new_cap = (new_cap + 0xFFF) & ~0xFFFU;
+    if (new_cap < 4096)
+      new_cap = 4096;
+
+    size_t page_count = new_cap / PAGE_SIZE;
+    void *phys = pmm_alloc_pages(page_count);
+    if (!phys)
+      return (uint64_t)-12; // ENOMEM
+    uint8_t *new_data = (uint8_t *)((uint64_t)phys + hhdm);
+
+    memset(new_data, 0, new_cap);
+    if (file->data && node->length > 0) {
+      uint32_t copy_len = node->length < file->capacity ? node->length : file->capacity;
+      memcpy(new_data, file->data, copy_len);
+      kfree(file->data);
+    }
+    file->data = new_data;
+    file->capacity = new_cap;
+  }
+
+  if ((uint32_t)needed > node->length)
+    node->length = (uint32_t)needed;
+
+  // Map the backing pages into userspace
+  struct thread *t = sched_get_current();
+  if (!t)
+    return (uint64_t)-1;
+
+  uint64_t *pml4 = vmm_get_active_pml4();
+  uint64_t vaddr = addr;
+  if (vaddr == 0) {
+    vaddr = mm_alloc_mmap_region(length);
+    if (vaddr == 0)
+      return (uint64_t)-12;
+  }
+
+  uint64_t page_flags = PAGE_FLAG_PRESENT | PAGE_FLAG_USER;
+  if (prot & 0x2) // PROT_WRITE
+    page_flags |= PAGE_FLAG_RW;
+  if (!(prot & 0x4)) // !PROT_EXEC
+    page_flags |= PAGE_FLAG_NX;
+
+  for (uint64_t off = 0; off < length; off += 0x1000) {
+    uint64_t data_off = offset + off;
+    if (data_off >= file->capacity)
+      break;
+
+    // file->data is now guaranteed page-aligned, so this is safe
+    uint64_t kva = (uint64_t)(file->data + data_off);
+    uint64_t phys = kva - hhdm;
+    vmm_map_page(pml4, vaddr + off, phys, page_flags);
+  }
+
+  klog_puts("[MEMFD_MMAP] mapped ");
+  klog_uint64(length);
+  klog_puts(" bytes at ");
+  klog_uint64(vaddr);
+  klog_puts("\n");
+
+  return vaddr;
+}
+
+// ── sys_memfd_create (syscall 319) ──────────────────────────────────────────
+// Creates an anonymous file in memory and returns a file descriptor.
+// Used by Wayland for SHM buffer sharing between compositor and clients.
+#define MFD_CLOEXEC 0x0001U
+#define MFD_ALLOW_SEALING 0x0002U
+
+static uint64_t sys_memfd_create(uint64_t name_ptr, uint64_t flags_arg,
+                                 uint64_t a2, uint64_t a3, uint64_t a4,
+                                 uint64_t a5) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+
+  struct thread *t = sched_get_current();
+  if (!t)
+    return (uint64_t)-1;
+
+  int fd = alloc_fd(t);
+  if (fd < 0)
+    return (uint64_t)-24; // EMFILE
+
+  // Build a name for the memfd (optional, for debugging)
+  char node_name[128];
+  if (name_ptr && is_user_ptr(name_ptr)) {
+    const char *uname = (const char *)name_ptr;
+    strncpy(node_name, "memfd:", 7);
+    strncat(node_name, uname, sizeof(node_name) - 8);
+    node_name[sizeof(node_name) - 1] = '\0';
+  } else {
+    strcpy(node_name, "memfd:(anonymous)");
+  }
+
+  // Create an anonymous ramfs file node (not attached to any directory)
+  vfs_node_t *node = kmalloc(sizeof(vfs_node_t));
+  if (!node)
+    return (uint64_t)-12; // ENOMEM
+
+  vfs_node_init(node);
+  strncpy(node->name, node_name, 127);
+  node->name[127] = '\0';
+  node->flags = FS_FILE;
+  node->mask = 0600;
+  node->length = 0;
+
+  // Allocate the ramfs backing store
+  ramfs_file_t *rfile = kmalloc(sizeof(ramfs_file_t));
+  if (!rfile) {
+    kfree(node);
+    return (uint64_t)-12;
+  }
+  rfile->data = NULL;
+  rfile->capacity = 0;
+
+  node->device = rfile;
+  node->read = ramfs_read;
+  node->write = ramfs_write;
+  node->truncate = ramfs_truncate;
+  node->fallocate = ramfs_fallocate;
+  node->mmap = memfd_mmap;
+
+  vfs_open(node);
+  t->fds[fd] = node;
+  t->fd_offsets[fd] = 0;
+  strcpy(t->fd_paths[fd], node_name);
+
+  klog_puts("[MEMFD_CREATE] name=\"");
+  klog_puts(node_name);
+  klog_puts("\" fd=");
+  klog_uint64(fd);
+  klog_puts("\n");
+
+  return (uint64_t)fd;
+}
+
 void syscall_register_io(void) {
   syscall_register(SYS_READ, sys_read);
   syscall_register(SYS_WRITE, sys_write);
@@ -3783,13 +3761,13 @@ void syscall_register_io(void) {
   syscall_register(SYS_IOCTL, sys_ioctl);
   syscall_register(SYS_OPEN, sys_open);
   syscall_register(SYS_CLOSE, sys_close);
-  syscall_register(SYS_POLL, sys_poll);
-  syscall_register(SYS_PPOLL, sys_ppoll);
+
   syscall_register(SYS_LSEEK, sys_lseek);
   syscall_register(SYS_MKDIR, sys_mkdir);
   syscall_register(SYS_MKDIRAT, sys_mkdirat);
   syscall_register(SYS_UNLINKAT, sys_unlinkat);
   syscall_register(SYS_FTRUNCATE, sys_ftruncate);
+  syscall_register(SYS_FALLOCATE, sys_fallocate);
   syscall_register(SYS_FLOCK, sys_flock);
   syscall_register(SYS_FCNTL, sys_fcntl);
   syscall_register(SYS_SENDFILE, sys_sendfile);
@@ -3801,8 +3779,7 @@ void syscall_register_io(void) {
   syscall_register(SYS_LSTAT, sys_lstat);
   syscall_register(SYS_GETDENTS64, sys_getdents64);
   syscall_register(SYS_GETDENTS, sys_getdents);
-  syscall_register(SYS_PSELECT6, sys_pselect6);
-  syscall_register(SYS_SELECT, sys_select);
+
   syscall_register(SYS_PIPE, sys_pipe);
   syscall_register(SYS_PIPE2, sys_pipe2);
   syscall_register(SYS_EVENTFD2, sys_eventfd2);
@@ -3834,11 +3811,13 @@ void syscall_register_io(void) {
   syscall_register(SYS_INOTIFY_INIT, sys_inotify_init);
   syscall_register(SYS_INOTIFY_INIT1, sys_inotify_init1);
   syscall_register(SYS_INOTIFY_ADD_WATCH, sys_inotify_add_watch);
+  syscall_register(SYS_MEMFD_CREATE, sys_memfd_create);
 
   console_termios.c_lflag = 0x0000000b;
   console_termios.c_iflag = 0x00000100;
   console_termios.c_oflag = 0x00000005;
-  console_termios.c_cflag = 0x000000bf; // Typical default: CS8 | CREAD | HUPCL ...
+  console_termios.c_cflag =
+      0x000000bf; // Typical default: CS8 | CREAD | HUPCL ...
   for (int i = 0; i < NCCS; i++)
     console_termios.c_cc[i] = 0;
   console_termios.c_cc[0] = 0x03; // VINTR (Ctrl-C)

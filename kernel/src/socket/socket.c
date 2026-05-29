@@ -410,8 +410,12 @@ int socket_create_pair(int domain, int type, int protocol, socket_t *sv[2]) {
     return -EAFNOSUPPORT;
   }
 
+  // Extract base type
+  int base_type = type & ~SOCK_NONBLOCK & ~SOCK_CLOEXEC;
+
   // Validate type
-  if (type != SOCK_STREAM && type != SOCK_DGRAM && type != SOCK_SEQPACKET) {
+  if (base_type != SOCK_STREAM && base_type != SOCK_DGRAM &&
+      base_type != SOCK_SEQPACKET) {
     return -EPROTONOSUPPORT;
   }
 

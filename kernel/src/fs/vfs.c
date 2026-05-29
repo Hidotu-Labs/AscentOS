@@ -184,6 +184,13 @@ int vfs_truncate(vfs_node_t *node, uint32_t size) {
   return -1;
 }
 
+int vfs_fallocate(vfs_node_t *node, int mode, uint32_t offset, uint32_t len) {
+  if (node && node->fallocate) {
+    return node->fallocate(node, mode, offset, len);
+  }
+  return -1;
+}
+
 int vfs_poll(vfs_node_t *node, int events) {
   if (node && node->poll) {
     return node->poll(node, events);
@@ -275,7 +282,8 @@ vfs_node_t *vfs_resolve_path_at(vfs_node_t *dir, const char *path) {
       klog_puts("\n");
       if (++symlink_depth > MAX_SYMLINK_DEPTH) {
         klog_puts("[VFS] max symlink depth exceeded\n");
-        kfree(next);
+        if (!(next->flags & FS_PERSISTENT))
+          kfree(next);
         if (current != fs_root && current != dir)
           if (!(current->flags & FS_PERSISTENT))
             kfree(current);
@@ -283,9 +291,10 @@ vfs_node_t *vfs_resolve_path_at(vfs_node_t *dir, const char *path) {
         return 0;
       }
 
-      char link_target[256];
-      int len = vfs_readlink(next, link_target, 255);
-      kfree(next);
+      char link_target[512];
+      int len = vfs_readlink(next, link_target, 511);
+      if (!(next->flags & FS_PERSISTENT))
+        kfree(next);
 
       if (len < 0) {
         klog_puts("[VFS] readlink failed\n");
@@ -314,8 +323,15 @@ vfs_node_t *vfs_resolve_path_at(vfs_node_t *dir, const char *path) {
       if (*p) {
         int cur_len = (int)strlen(next_path);
         if (cur_len < 510) {
-          if (next_path[cur_len - 1] != '/') {
+          // If neither has a slash, add one. If both have a slash, skip one.
+          bool target_ends_in_slash =
+              (cur_len > 0 && next_path[cur_len - 1] == '/');
+          bool p_starts_with_slash = (*p == '/');
+
+          if (!target_ends_in_slash && !p_starts_with_slash) {
             strcat(next_path, "/");
+          } else if (target_ends_in_slash && p_starts_with_slash) {
+            p++; // Skip leading slash in p to avoid double slash
           }
           strncat(next_path, p, 511 - strlen(next_path));
         }

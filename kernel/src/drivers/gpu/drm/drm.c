@@ -87,7 +87,91 @@ static void drm_close(struct vfs_node *node) {
   /* node itself is freed by vfs_close since it's non-persistent */
 }
 
-/* ── Main ioctl dispatcher ───────────────────────────────────────────────── */
+/* ── Display Commit (Software Blit) ─────────────────────────────────────── */
+static void drm_commit(struct drm_device *dev) {
+  if (!dev)
+    return;
+  spinlock_acquire(&dev->lock);
+  struct drm_mode_object *obj;
+  list_for_each_entry(obj, &dev->kms_objects, list) {
+    if (obj->type == DRM_MODE_OBJECT_CRTC) {
+      struct drm_crtc *crtc = (struct drm_crtc *)obj;
+      if (crtc->fb && crtc->fb->gem_obj && crtc->fb->gem_obj->virt_addr) {
+        void *hw_fb = fb_get_base();
+        if (hw_fb) {
+          uint32_t width = fb_get_width();
+          uint32_t height = fb_get_height();
+          uint32_t hw_pitch = fb_get_pitch();
+          uint32_t sw_pitch = crtc->fb->pitch;
+
+          if (hw_pitch == sw_pitch) {
+            klog_puts("[DRM] Blit: fast copy, size=");
+            klog_uint64((size_t)height * hw_pitch);
+            klog_puts("\n");
+
+            /* Check if the first few pixels are non-zero to see if anything is
+             * being rendered */
+            uint32_t *pixels = (uint32_t *)crtc->fb->gem_obj->virt_addr;
+            bool all_zero = true;
+            for (int i = 0; i < 16; i++) {
+              if (pixels[i] != 0) {
+                all_zero = false;
+                break;
+              }
+            }
+            if (all_zero) {
+              klog_puts("[DRM] Warning: first 16 pixels are zero\n");
+            } else {
+              klog_puts("[DRM] Info: first pixels are non-zero: ");
+              klog_hex32(pixels[0]);
+              klog_puts("\n");
+            }
+
+            memcpy(hw_fb, crtc->fb->gem_obj->virt_addr,
+                   (size_t)height * hw_pitch);
+          } else {
+            uint32_t copy_len = width * 4;
+            if (copy_len > hw_pitch)
+              copy_len = hw_pitch;
+            if (copy_len > sw_pitch)
+              copy_len = sw_pitch;
+
+            klog_puts("[DRM] Blit: line copy (pitch mismatch), lines=");
+            klog_uint64(height);
+            klog_puts("\n");
+
+            /* Check if the first few pixels are non-zero to see if anything is
+             * being rendered */
+            uint32_t *pixels = (uint32_t *)crtc->fb->gem_obj->virt_addr;
+            bool all_zero = true;
+            for (int i = 0; i < 16; i++) {
+              if (pixels[i] != 0) {
+                all_zero = false;
+                break;
+              }
+            }
+            if (all_zero) {
+              klog_puts("[DRM] Warning: first 16 pixels are zero\n");
+            } else {
+              klog_puts("[DRM] Info: first pixels are non-zero: ");
+              klog_hex32(pixels[0]);
+              klog_puts("\n");
+            }
+
+            for (uint32_t y = 0; y < height; y++) {
+              memcpy((uint8_t *)hw_fb + y * hw_pitch,
+                     (uint8_t *)crtc->fb->gem_obj->virt_addr + y * sw_pitch,
+                     copy_len);
+            }
+          }
+        }
+      }
+    }
+  }
+  spinlock_release(&dev->lock);
+}
+
+/* ── Per-client open / close ─────────────────────────────────────────────── */
 
 static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
   struct drm_file *file = node_to_file(node);
@@ -138,24 +222,24 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     klog_hex64(cap->capability);
     klog_puts("\n");
     switch (cap->capability) {
-    case 1:
+    case DRM_CAP_DUMB_BUFFER:
       cap->value = 1;
-      break; /* DUMB_BUFFER */
-    case 2:
+      break;
+    case DRM_CAP_VBLANK_HIGH_CRTC:
       cap->value = 1;
-      break; /* VBLANK_HIGH_CRTC */
-    case 4:
+      break;
+    case DRM_CAP_DUMB_PREFER_SHADOW:
       cap->value = 1;
-      break; /* DUMB_PREFER_SHADOW */
-    case 5:
+      break;
+    case DRM_CAP_PRIME:
       cap->value = 3;
-      break; /* DRM_PRIME (IMPORT | EXPORT) */
-    case 6:
+      break; /* (IMPORT | EXPORT) */
+    case DRM_CAP_TIMESTAMP_MONOTONIC:
       cap->value = 1;
-      break; /* TIMESTAMP_MONOTONIC */
-    case 7:
+      break;
+    case DRM_CAP_ASYNC_PAGE_FLIP:
       cap->value = 1;
-      break; /* ASYNC_PAGE_FLIP */
+      break;
     case 0x12:
       cap->value = 1;
       break; /* CRTC_IN_VBLANK_EVENT */
@@ -168,15 +252,18 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     case 0x15:
       cap->value = 1;
       break; /* DRM_CAP_PAGE_FLIP_TARGET (stub) */
-    case 0x10:
+    case DRM_CAP_ADDFB2_MODIFIERS:
       cap->value = 1;
-      break; /* ADDFB2_MODIFIERS */
-    case 0x8:
+      break;
+    case DRM_CAP_CURSOR_WIDTH:
       cap->value = 64;
-      break; /* CURSOR_WIDTH */
-    case 0x9:
+      break;
+    case DRM_CAP_CURSOR_HEIGHT:
       cap->value = 64;
-      break; /* CURSOR_HEIGHT */
+      break;
+    case DRM_CAP_ATOMIC:
+      cap->value = 1;
+      break;
     case 0x11:
       cap->value = 0;
       break; /* DRM_CAP_LESSOR (not supported) */
@@ -191,6 +278,11 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
   }
   case 0x4010640D: /* DRM_IOCTL_SET_CLIENT_CAP */ {
     struct drm_set_client_cap *cap = (struct drm_set_client_cap *)arg;
+    klog_puts("[DRM] SET_CLIENT_CAP cap=");
+    klog_uint64(cap->capability);
+    klog_puts(" val=");
+    klog_uint64(cap->value);
+    klog_puts("\n");
     if (cap->capability == DRM_CLIENT_CAP_UNIVERSAL_PLANES && cap->value)
       file->client_caps |= (1 << 1);
     else if (cap->capability == DRM_CLIENT_CAP_ATOMIC && cap->value)
@@ -205,17 +297,17 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     return 0;
   case 0x40046411: /* DRM_IOCTL_AUTH_MAGIC */
     return 0;
-  case 0xC0046402: /* DRM_IOCTL_GET_MAGIC */ {
+  case 0x80046402: /* DRM_IOCTL_GET_MAGIC */ {
     uint32_t *magic = (uint32_t *)arg;
     *magic = 0x1234; /* dummy magic */
     return 0;
   }
   case 0x80086406: /* DRM_IOCTL_GET_STATS */
     klog_puts("[DRM] GET_STATS -> ENOSYS\n");
-    return -38;    /* ENOSYS */
+    return -38; /* ENOSYS */
   case DRM_IOCTL_MODE_CREATE_LEASE:
     klog_puts("[DRM] MODE_CREATE_LEASE -> EINVAL\n");
-    return -22;    /* EINVAL: Leasing not supported on this driver version */
+    return -22; /* EINVAL: Leasing not supported on this driver version */
 
   /* ── Per-client GEM ──────────────────────────────────────────────── */
   case DRM_IOCTL_GEM_CREATE: {
@@ -355,9 +447,14 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     c->y = 0;
     c->gamma_size = 0;
     c->mode_valid = 1;
-    c->mode.clock = 60000;
     c->mode.hdisplay = fb_get_width();
+    c->mode.hsync_start = c->mode.hdisplay + 8;
+    c->mode.hsync_end = c->mode.hdisplay + 16;
+    c->mode.htotal = c->mode.hdisplay + 32;
     c->mode.vdisplay = fb_get_height();
+    c->mode.vsync_start = c->mode.vdisplay + 4;
+    c->mode.vsync_end = c->mode.vdisplay + 8;
+    c->mode.vtotal = c->mode.vdisplay + 12;
     c->mode.vrefresh = 60;
     strcpy(c->mode.name, "Native");
     spinlock_release(&dev->lock);
@@ -421,7 +518,13 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
       struct drm_mode_modeinfo *m = (struct drm_mode_modeinfo *)c->modes_ptr;
       m->clock = 60000;
       m->hdisplay = fb_get_width();
+      m->hsync_start = m->hdisplay + 8;
+      m->hsync_end = m->hdisplay + 16;
+      m->htotal = m->hdisplay + 32;
       m->vdisplay = fb_get_height();
+      m->vsync_start = m->vdisplay + 4;
+      m->vsync_end = m->vdisplay + 8;
+      m->vtotal = m->vdisplay + 12;
       m->vrefresh = 60;
       m->flags = 0;
       m->type = 0x48; /* DRM_MODE_TYPE_DRIVER | PREFERRED */
@@ -485,6 +588,7 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     if (fb_obj && fb_obj->type == DRM_MODE_OBJECT_FB)
       crtc->fb = (struct drm_framebuffer *)fb_obj;
     spinlock_release(&dev->lock);
+    drm_commit(dev);
     return 0;
   }
   case DRM_IOCTL_MODE_PAGE_FLIP: {
@@ -506,20 +610,34 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
       ev.base.length = sizeof(ev);
       ev.user_data = flip->user_data;
       spinlock_release(&dev->lock);
+      drm_commit(dev);
       drm_file_send_event(file, &ev, node);
       return 0;
     }
     spinlock_release(&dev->lock);
+    drm_commit(dev);
     return 0;
   }
 
   /* ── Atomic modesetting ──────────────────────────────────────────── */
-  case DRM_IOCTL_MODE_ATOMIC:
-    return drm_ioctl_atomic(node, file, dev, arg);
+  case DRM_IOCTL_MODE_ATOMIC: {
+    int ret = drm_ioctl_atomic(node, file, dev, arg);
+    if (ret == 0 &&
+        !(((struct drm_mode_atomic *)arg)->flags & DRM_MODE_ATOMIC_TEST_ONLY)) {
+      klog_puts("[DRM] ATOMIC commit triggering drm_commit\n");
+      drm_commit(dev);
+    }
+    return ret;
+  }
   case DRM_IOCTL_MODE_OBJ_GETPROPERTIES:
     return drm_ioctl_obj_getprops(dev, arg);
-  case 0xC04064AA: /* DRM_IOCTL_MODE_GETPROPERTY */
+  case DRM_IOCTL_MODE_GETPROPERTY:
     return drm_ioctl_getproperty(dev, arg);
+  case DRM_IOCTL_MODE_SETPROPERTY:
+    return 0; /* stub */
+  case DRM_IOCTL_MODE_DIRTYFB:
+    drm_commit(dev);
+    return 0;
   case DRM_IOCTL_MODE_CREATEPROPBLOB: {
     struct drm_mode_create_blob *b = (struct drm_mode_create_blob *)arg;
     if (!b->data || !b->length)

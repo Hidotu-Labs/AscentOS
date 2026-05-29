@@ -8,5 +8,5 @@ rm -f $XDG_RUNTIME_DIR/wayland-0*
 seatd -u root &
 sleep 1
 
-# Launch TinyWL with Pixman renderer for stability
-WLR_RENDERER=pixman LD_PRELOAD=/lib/libgcompat.so.0 tinywl
+# Launch Weston
+LD_PRELOAD=/lib/libgcompat.so.0 weston --backend=drm-backend.so --renderer=pixman -c /etc/weston.ini

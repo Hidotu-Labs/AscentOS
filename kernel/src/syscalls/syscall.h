@@ -140,6 +140,7 @@
 #define SYS_EPOLL_PWAIT 281
 #define SYS_SIGNALFD 282
 #define SYS_TIMERFD_CREATE 283
+#define SYS_FALLOCATE 285
 #define SYS_TIMERFD_SETTIME 286
 #define SYS_TIMERFD_GETTIME 287
 #define SYS_SIGNALFD4 289
@@ -149,6 +150,7 @@
 #define SYS_INOTIFY_INIT1 294
 #define SYS_PRLIMIT64 302
 #define SYS_GETRANDOM 318
+#define SYS_MEMFD_CREATE 319
 #define SYS_MEMBARRIER 324
 #define SYS_STATX 332
 #define SYS_UPTIME 399
@@ -211,6 +213,7 @@ void signal_deliver_syscall(struct syscall_regs *regs);
 void syscall_register_media(void);
 void syscall_register_socket(void);
 void syscall_register_epoll(void);
+void syscall_register_poll(void);
 void syscall_register_shm(void);
 void syscall_register_futex(void);
 

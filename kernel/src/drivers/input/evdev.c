@@ -16,6 +16,7 @@
 #include "../../console/klog.h"
 #include "../../drivers/timer/rtc.h"
 #include "../../fb/framebuffer.h"
+#include "../../fs/ramfs.h"
 #include "../../fs/vfs.h"
 #include "../../lib/string.h"
 #include "../../lock/spinlock.h"
@@ -108,6 +109,13 @@ static uint32_t evdev_vfs_read(struct vfs_node *node, uint32_t offset,
       return copied * sizeof(struct input_event);
     }
 
+    // No data available
+    if (node->flags & FS_NONBLOCK) {
+      spinlock_release(&dev->lock);
+      kfree(entry);
+      return (uint32_t)-11; // -EAGAIN
+    }
+
     // No data, must block.
     wait_queue_add(&dev->wait, entry);
     t->state = THREAD_BLOCKED;
@@ -158,7 +166,7 @@ static int evdev_vfs_ioctl(struct vfs_node *node, uint32_t request,
   // Decode the ioctl command
   // EVIOCGVERSION = 0x80044501
   if (request == 0x80044501) {
-    int *version = (int *)arg;
+    uint32_t *version = (uint32_t *)arg;
     if (!version)
       return -14;
     *version = 0x010001; // Linux input driver version 1.0.1
@@ -174,9 +182,9 @@ static int evdev_vfs_ioctl(struct vfs_node *node, uint32_t request,
     return 0;
   }
 
-  // EVIOCGRAB = 0x40044590
-  if (request == 0x40044590) {
-    // Accept grab/ungrab but do nothing (single-user OS)
+  // EVIOCGRAB = 0x40044590, EVIOCREVOKE = 0x40044591, EVIOCSCLOCKID = 0x400445A0
+  if (request == 0x40044590 || request == 0x40044591 || request == 0x400445A0) {
+    // Accept grab/ungrab/revoke/clockid but do nothing (single-user OS)
     return 0;
   }
 
@@ -207,6 +215,69 @@ static int evdev_vfs_ioctl(struct vfs_node *node, uint32_t request,
     memcpy(buf, dev->phys, phys_len);
     buf[phys_len] = '\0';
     return (int)phys_len;
+  }
+
+  // EVIOCGUNIQ(len)
+  if ((request & 0xC000FFFF) == 0x80004508) {
+    char *buf = (char *)arg;
+    if (!buf)
+      return -14;
+    uint32_t len = (request >> 16) & 0x3FFF;
+    if (len > 0)
+      buf[0] = '\0';
+    return 0;
+  }
+
+  // EVIOCGPROP(len)
+  if ((request & 0xC000FFFF) == 0x80004509) {
+    uint8_t *buf = (uint8_t *)arg;
+    if (!buf)
+      return -14;
+    uint32_t len = (request >> 16) & 0x3FFF;
+    memset(buf, 0, len);
+    return 0;
+  }
+
+  // EVIOCGKEY(len) = 0x80xx4518
+  // EVIOCGLED(len) = 0x80xx4519
+  // EVIOCGSW(len)  = 0x80xx451b
+  if ((request & 0xC000FFFF) == 0x80004518 ||
+      (request & 0xC000FFFF) == 0x80004519 ||
+      (request & 0xC000FFFF) == 0x8000451b) {
+    uint8_t *buf = (uint8_t *)arg;
+    if (!buf)
+      return -14;
+    uint32_t len = (request >> 16) & 0x3FFF;
+    memset(buf, 0, len); // All keys/LEDs/switches are 'off' initially
+    return 0;
+  }
+  
+  // EVIOCGABS(abs) = 0x80184540 + abs
+  if ((request & 0xC000FFC0) == 0x80004540) {
+    struct input_absinfo *abs = (struct input_absinfo *)arg;
+    if (!abs) return -14;
+    memset(abs, 0, sizeof(struct input_absinfo));
+    // For mouse, we don't really have absolute axes, but let's report something
+    // reasonable if asked for ABS_X/ABS_Y
+    uint8_t axis = request & 0x3F;
+    if (axis == ABS_X || axis == ABS_Y) {
+        abs->minimum = 0;
+        abs->maximum = 32767;
+        abs->resolution = 1;
+    }
+    return 0;
+  }
+
+  // EVIOCGREP = 0x80084503, EVIOCSREP = 0x40084503
+  if (request == 0x80084503 || request == 0x40084503) {
+      if (request == 0x80084503) {
+          uint32_t *rep = (uint32_t *)arg;
+          if (rep) {
+              rep[0] = 250; // delay
+              rep[1] = 33;  // period
+          }
+      }
+      return 0;
   }
 
   // EVIOCGBIT(ev, len) — 0x80004520 | (ev << 8) | (len << 16)
@@ -269,15 +340,15 @@ static int evdev_vfs_ioctl(struct vfs_node *node, uint32_t request,
       return 0;
     }
 
-    if (ev_type == EV_REL) {
+    if (ev_type == EV_ABS) {
       if (dev->type == EVDEV_MOUSE) {
-        set_bit(buf, REL_X);
-        set_bit(buf, REL_Y);
+        set_bit(buf, ABS_X);
+        set_bit(buf, ABS_Y);
       }
       return 0;
     }
 
-    // Other event types (including EV_ABS): return zero-filled
+    // Other event types: return zero-filled
     return 0;
   }
 
@@ -307,7 +378,7 @@ static int evdev_vfs_ioctl(struct vfs_node *node, uint32_t request,
   }
 
   klog_puts("[EVDEV] unknown ioctl 0x");
-  klog_uint64(request);
+  klog_hex32(request);
   klog_puts("\n");
   return -25; // ENOTTY
 }
@@ -340,16 +411,23 @@ uint16_t evdev_ps2_to_keycode(uint8_t scancode, bool is_extended) {
 }
 
 // ── Create a VFS node for an evdev device ───────────────────────────────────
-static void evdev_create_node(evdev_device_t *dev, const char *node_name) {
+static void evdev_create_node(evdev_device_t *dev, const char *node_name, vfs_node_t *input_dir) {
   vfs_node_t *node = kmalloc(sizeof(vfs_node_t));
   if (!node)
     return;
 
   vfs_node_init(node);
   strcpy(node->name, node_name);
-  node->flags = FS_CHARDEV;
+  node->flags = FS_CHARDEV | FS_PERSISTENT | FS_NONBLOCK;
   node->mask = 0666;
   node->device = dev;
+
+  // Set device number (major 13, minor 64+) for libinput/seatd discovery
+  if (strcmp(node_name, "event0") == 0) {
+    node->inode = (13 << 8) | 64;
+  } else if (strcmp(node_name, "event1") == 0) {
+    node->inode = (13 << 8) | 65;
+  }
   node->read = evdev_vfs_read;
   node->poll = evdev_vfs_poll;
   node->ioctl = evdev_vfs_ioctl;
@@ -357,27 +435,48 @@ static void evdev_create_node(evdev_device_t *dev, const char *node_name) {
 
   dev->vfs_node = node;
 
-  // Register in the device registry so open("/dev/input/eventN") works
-  // We register with the full sub-path that do_sys_open strips "/dev/" from
+  // 1. Register in the framebuffer device registry for syscall bypass
   char reg_name[64];
-  // Register as "input/eventN"
   strcpy(reg_name, "input/");
   strcat(reg_name, node_name);
   fb_register_device_node(reg_name, node);
-
-  // Also register the flat name (e.g. "event0") for simpler access
   fb_register_device_node(node_name, node);
+
+  // 2. Mount in the real VFS tree
+  if (input_dir) {
+    ramfs_mount_node(input_dir, node);
+  }
 
   // If this is the mouse (event1), add standard aliases for X11
   if (strcmp(node_name, "event1") == 0) {
     fb_register_device_node("input/mice", node);
     fb_register_device_node("psaux", node);
     fb_register_device_node("mouse", node);
+    
+    if (input_dir) {
+       vfs_node_t *mice = kmalloc(sizeof(vfs_node_t));
+       if (mice) {
+         vfs_node_init(mice);
+         memcpy(mice, node, sizeof(vfs_node_t));
+         strcpy(mice->name, "mice");
+         ramfs_mount_node(input_dir, mice);
+       }
+    }
   }
 }
 
 // ── Initialization ──────────────────────────────────────────────────────────
 void evdev_init(void) {
+  // Ensure /dev/input exist
+  vfs_node_t *input_dir = NULL;
+  vfs_node_t *dev_dir = vfs_resolve_path("/dev");
+  if (dev_dir) {
+    if (dev_dir->mkdir) {
+        dev_dir->mkdir(dev_dir, "input", 0755);
+    }
+    input_dir = vfs_resolve_path("/dev/input");
+  }
+
   // ── Keyboard device (event0) ────────────────────────────────────────────
   memset(&kbd_evdev, 0, sizeof(kbd_evdev));
   kbd_evdev.type = EVDEV_KEYBOARD;
@@ -390,7 +489,7 @@ void evdev_init(void) {
   wait_queue_init(&kbd_evdev.wait);
   spinlock_init(&kbd_evdev.lock);
 
-  evdev_create_node(&kbd_evdev, "event0");
+  evdev_create_node(&kbd_evdev, "event0", input_dir);
 
   // ── Mouse device (event1) ──────────────────────────────────────────────
   memset(&mouse_evdev, 0, sizeof(mouse_evdev));
@@ -404,7 +503,7 @@ void evdev_init(void) {
   wait_queue_init(&mouse_evdev.wait);
   spinlock_init(&mouse_evdev.lock);
 
-  evdev_create_node(&mouse_evdev, "event1");
+  evdev_create_node(&mouse_evdev, "event1", input_dir);
 
   klog_puts(
       "[OK] evdev input subsystem initialized (event0=kbd, event1=mouse)\n");

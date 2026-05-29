@@ -100,6 +100,7 @@ typedef struct netlink_sock {
   uint32_t groups;
   uintptr_t portid;
   sk_buff_head_t recv_queue;
+  struct list_head list;
 } netlink_sock_t;
 
 // ── Internal Functions

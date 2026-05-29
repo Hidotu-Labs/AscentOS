@@ -88,6 +88,7 @@ void syscall_init(void) {
   syscall_register_signal();
   syscall_register_socket();
   syscall_register_epoll();
+  syscall_register_poll();
   syscall_register_shm();
   syscall_register_futex();
 

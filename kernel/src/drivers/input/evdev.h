@@ -174,10 +174,13 @@ struct input_event {
 #define EVIOCGID 0x80084502                          // get device ID
 #define EVIOCGNAME(len) (0x80004506 | ((len) << 16)) // get device name
 #define EVIOCGPHYS(len) (0x80004507 | ((len) << 16)) // get physical location
+#define EVIOCGUNIQ(len) (0x80004508 | ((len) << 16)) // get unique identifier
+#define EVIOCGPROP(len) (0x80004509 | ((len) << 16)) // get device properties
 #define EVIOCGBIT(ev, len)                                                     \
   (0x80004520 | ((ev) << 8) | ((len) << 16)) // get event bits
 #define EVIOCGABS(abs) (0x80184540 | (abs))  // get abs info
 #define EVIOCGRAB 0x40044590                 // grab/release device
+#define EVIOCREVOKE 0x40044591               // revoke access to device
 
 // Linux input_id structure
 struct input_id {

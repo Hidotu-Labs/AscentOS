@@ -49,6 +49,9 @@
 #include "mm/heap.h"
 #include "smp/cpu.h"
 
+// GPU device path for netlink uevents
+char sysfs_gpu_devpath[128] = "/devices/pci0000:00/0000:00:01.0/drm/card0";
+
 // ── Helpers ───────────────────────────────────────────────────────────────
 
 static void u32_to_hex(uint32_t val, char *buf, int width) {
@@ -136,10 +139,6 @@ static void sysfs_mkfile(vfs_node_t *parent, const char *name,
   f->mask = 0444;
 
   // Allocate a ramfs file backing store so read/write work
-  typedef struct {
-    uint8_t *data;
-    uint32_t capacity;
-  } ramfs_file_t;
   ramfs_file_t *rf = kmalloc(sizeof(ramfs_file_t));
   if (!rf) {
     kfree(f);
@@ -433,34 +432,100 @@ void sysfs_init(void) {
                  "MAJOR=226\nMINOR=0\nDEVNAME=dri/card0\n"
                  "DEVTYPE=drm_minor\nSUBSYSTEM=drm\n");
     // subsystem symlink inside card0 → points back to /sys/class/drm
-    // Keep absolute — wlroots stats this but doesn't readlink it, so the
-    // absolute path works fine with vfs_resolve_path_at.
-    sysfs_symlink(card0_dir, "subsystem", "/sys/class/drm");
+    // wlroots walks up the tree using this to identify the subsystem.
+    // Relative from /sys/devices/pci0000:00/<addr>/drm/card0/ to
+    // /sys/class/drm/
+    sysfs_symlink(card0_dir, "subsystem", "../../../../../class/drm");
+    sysfs_symlink(card0_dir, "device", "../..");
     // Also add uevent files up the device tree (wlroots walks up looking for
     // them)
     sysfs_mkfile(drm_dev, "uevent", "SUBSYSTEM=drm\n");
     sysfs_mkfile(gpu_dev, "uevent",
                  "DRIVER=bochs-drm\nPCI_ID=1234:1111\nSUBSYSTEM=pci\n");
     sysfs_mkfile(pci_seg, "uevent", "SUBSYSTEM=pci\n");
+
+    // Store GPU DEVPATH for netlink fake uevents
+    strcpy(sysfs_gpu_devpath, "/devices/pci0000:00/");
+    strcat(sysfs_gpu_devpath, pci_addr);
+    strcat(sysfs_gpu_devpath, "/drm/card0");
+
+    // Add devices/ directory under drm_class so that
+    // /sys/subsystem/drm/devices/ enumeration finds card0
+    vfs_node_t *drm_devices_dir = sysfs_mkdir(drm_class, "devices");
+    if (drm_devices_dir) {
+      // Relative from /sys/class/drm/devices/ → /sys/devices/pci0000:00/...
+      // wlroots does readlink() then resolves relative to symlink parent
+      char card0_rel[128];
+      strcpy(card0_rel, "../../../devices/pci0000:00/");
+      strcat(card0_rel, pci_addr);
+      strcat(card0_rel, "/drm/card0");
+      sysfs_symlink(drm_devices_dir, "card0", card0_rel);
+    }
   }
 
-  // /sys/class/input/event0
-  vfs_node_t *input_class = sysfs_mkdir(class_dir, "input");
-  vfs_node_t *event0_dir = sysfs_mkdir(input_class, "event0");
+  // /sys/devices/virtual/input/input0/event0
+  vfs_node_t *virtual_dir = sysfs_mkdir(devices_dir, "virtual");
+  sysfs_mkfile(virtual_dir, "uevent", "SUBSYSTEM=virtual\n");
+  sysfs_symlink(virtual_dir, "subsystem", "../../class");
+  vfs_node_t *virtual_input_dir = sysfs_mkdir(virtual_dir, "input");
+  sysfs_mkfile(virtual_input_dir, "uevent", "SUBSYSTEM=input\nID_INPUT=1\n");
+  sysfs_symlink(virtual_input_dir, "subsystem", "../../../class/input");
+  vfs_node_t *input0_dir = sysfs_mkdir(virtual_input_dir, "input0");
+  vfs_node_t *event0_dir = sysfs_mkdir(input0_dir, "event0");
+
   sysfs_mkfile(event0_dir, "dev", "13:64\n");
+  sysfs_mkfile(event0_dir, "uevent",
+               "MAJOR=13\nMINOR=64\nDEVNAME=input/event0\n"
+               "SUBSYSTEM=input\nID_INPUT=1\nID_INPUT_KEYBOARD=1\n"
+               "ID_BUS=isa\n"
+               "PRODUCT=3/1/1/ab41\n"
+               "ID_SERIAL=ascentos_kbd\nNAME=\"AscentOS Keyboard\"\n");
+  sysfs_mkfile(input0_dir, "uevent",
+               "SUBSYSTEM=input\nID_INPUT=1\nID_INPUT_KEYBOARD=1\n"
+               "NAME=\"AscentOS Keyboard\"\n"
+               "PRODUCT=3/1/1/ab41\n");
+  sysfs_symlink(input0_dir, "subsystem", "../../../../class/input");
+  sysfs_symlink(event0_dir, "subsystem", "../../../../../class/input");
+  sysfs_symlink(event0_dir, "device", "..");
+
+  // /sys/class/input/event0 symlink
+  vfs_node_t *input_class = sysfs_mkdir(class_dir, "input");
+  sysfs_symlink(input_class, "event0",
+                "../../devices/virtual/input/input0/event0");
+
+  // /sys/devices/virtual/input/input1/event1
+  vfs_node_t *input1_dir = sysfs_mkdir(virtual_input_dir, "input1");
+  vfs_node_t *event1_dir = sysfs_mkdir(input1_dir, "event1");
+
+  sysfs_mkfile(event1_dir, "dev", "13:65\n");
+  sysfs_mkfile(event1_dir, "uevent",
+               "MAJOR=13\nMINOR=65\nDEVNAME=input/event1\n"
+               "SUBSYSTEM=input\nID_INPUT=1\nID_INPUT_MOUSE=1\n"
+               "ID_SERIAL=ascentos_mouse\nNAME=\"AscentOS Mouse\"\n");
+  sysfs_mkfile(input1_dir, "uevent",
+               "SUBSYSTEM=input\nID_INPUT=1\nID_INPUT_MOUSE=1\n"
+               "NAME=\"AscentOS Mouse\"\n"
+               "PRODUCT=3/1/1/ab42\n");
+  sysfs_symlink(input1_dir, "subsystem", "../../../../class/input");
+  sysfs_symlink(event1_dir, "subsystem", "../../../../../class/input");
+  sysfs_symlink(event1_dir, "device", "..");
+
+  // /sys/class/input/event1 symlink
+  sysfs_symlink(input_class, "event1",
+                "../../devices/virtual/input/input1/event1");
+
+  // Add devices/ directory under input_class so that
+  // /sys/subsystem/input/devices/ enumeration finds input devices
+  vfs_node_t *input_devices_dir = sysfs_mkdir(input_class, "devices");
+  if (input_devices_dir) {
+    sysfs_symlink(input_devices_dir, "event0", "../event0");
+    sysfs_symlink(input_devices_dir, "event1", "../event1");
+  }
 
   // ── /sys/dev/block  /sys/dev/char ────────────────────────────────────
   vfs_node_t *dev_dir = sysfs_mkdir(sysfs_root, "dev");
   sysfs_mkdir(dev_dir, "block");
   vfs_node_t *char_dir = sysfs_mkdir(dev_dir, "char");
-  // DRM char device: /sys/dev/char/226:0/
-  vfs_node_t *drm_char = sysfs_mkdir(char_dir, "226:0");
-  sysfs_mkfile(drm_char, "uevent",
-               "MAJOR=226\nMINOR=0\nDEVNAME=dri/card0\nDEVTYPE=drm_minor\n");
-  // drmGetDeviceNameFromFd2() reads /sys/dev/char/226:0/device/drm/<name>
-  // to discover the DRM device name.  Provide the symlink chain it expects:
-  //   /sys/dev/char/226:0/device  -> ../../devices/pci0000:00/<pci_addr>
-  //   /sys/dev/char/226:0/device/drm/card0  (directory entry)
   {
     // Find the GPU PCI address (same logic as above)
     char pci_addr2[20] = "0000:00:01.0";
@@ -487,15 +552,35 @@ void sysfs_init(void) {
         break;
       }
     }
-    // /sys/dev/char/226:0/device -> symlink to the PCI device directory
-    // Relative from /sys/dev/char/226:0/ : ../../../devices/pci0000:00/<addr>
+    // /sys/dev/char/226:0 -> symlink to the PCI device directory
+    // Relative from /sys/dev/char/226:0/ :
+    // ../../devices/pci0000:00/<addr>/drm/card0
     char dev_target[128];
-    strcpy(dev_target, "../../../devices/pci0000:00/");
+    strcpy(dev_target, "../../devices/pci0000:00/");
     strcat(dev_target, pci_addr2);
-    sysfs_symlink(drm_char, "device", dev_target);
+    strcat(dev_target, "/drm/card0");
+    sysfs_symlink(char_dir, "226:0", dev_target);
+  }
 
-    // /sys/dev/char/226:0/device is now a symlink that points to the PCI
-    // device directory. wlroots can follow this to find 'drm/card0'.
+  // Input char devices: /sys/dev/char/13:64 -> symlink to virtual device
+  // Relative from /sys/dev/char/13:64 :
+  // ../../devices/virtual/input/input0/event0
+  sysfs_symlink(char_dir, "13:64", "../../devices/virtual/input/input0/event0");
+
+  // Input char devices: /sys/dev/char/13:65 -> symlink to virtual device
+  // Relative from /sys/dev/char/13:65 :
+  // ../../devices/virtual/input/input1/event1
+  sysfs_symlink(char_dir, "13:65", "../../devices/virtual/input/input1/event1");
+
+  // ── /sys/subsystem ──────────────────────────────────────────────────
+  // libinput and others expect this to exist for device discovery.
+  // Modern Linux has /sys/subsystem/ where entries are symlinks to bus or
+  // class.
+  vfs_node_t *subsystem_dir = sysfs_mkdir(sysfs_root, "subsystem");
+  if (subsystem_dir) {
+    sysfs_symlink(subsystem_dir, "pci", "../bus/pci");
+    sysfs_symlink(subsystem_dir, "input", "../class/input");
+    sysfs_symlink(subsystem_dir, "drm", "../class/drm");
   }
 
   // ── /sys/kernel ──────────────────────────────────────────────────────
@@ -505,6 +590,44 @@ void sysfs_init(void) {
   // ── /sys/power ───────────────────────────────────────────────────────
   vfs_node_t *power_dir = sysfs_mkdir(sysfs_root, "power");
   sysfs_mkfile(power_dir, "state", "mem\n");
+
+  // ── /run/udev/data population ───────────────────────────────────────
+  // libinput often falls back to the udev database if uevent is insufficient.
+  // We ensure /run/udev/data is present and populated with required flags.
+  vfs_node_t *run_dir = vfs_resolve_path("/run");
+  if (!run_dir) {
+    // If /run doesn't exist, create it in root.
+    if (fs_root && fs_root->mkdir) {
+      fs_root->mkdir(fs_root, "run", 0755);
+      run_dir = vfs_resolve_path("/run");
+    }
+  }
+
+  if (run_dir) {
+    vfs_node_t *udev_dir = vfs_finddir(run_dir, "udev");
+    if (!udev_dir)
+      udev_dir = sysfs_mkdir(run_dir, "udev");
+
+    vfs_node_t *data_dir = vfs_finddir(udev_dir, "data");
+    if (!data_dir)
+      data_dir = sysfs_mkdir(udev_dir, "data");
+
+    if (data_dir) {
+      sysfs_mkfile(data_dir, "+input:input0",
+                   "I:1\n"
+                   "E:ID_INPUT=1\n"
+                   "E:ID_INPUT_KEYBOARD=1\n"
+                   "E:NAME=\"AscentOS Keyboard\"\n");
+      sysfs_mkfile(data_dir, "+input:input1",
+                   "I:2\n"
+                   "E:ID_INPUT=1\n"
+                   "E:ID_INPUT_MOUSE=1\n"
+                   "E:NAME=\"AscentOS Mouse\"\n");
+      sysfs_mkfile(data_dir, "+input:input",
+                   "E:SUBSYSTEM=input\n"
+                   "E:ID_INPUT=1\n");
+    }
+  }
 
   klog_puts("[OK] SysFS initialized at /sys\n");
 }

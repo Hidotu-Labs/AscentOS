@@ -42,6 +42,10 @@ struct drm_file *drm_file_alloc(struct drm_device *dev) {
     wait_queue_init(&file->event_wq);
 
     spinlock_acquire(&dev->lock);
+    if (list_empty(&dev->file_list)) {
+        file->is_master = 1;
+        klog_puts("[DRM] First client granted Master status\n");
+    }
     list_add_tail(&file->list, &dev->file_list);
     spinlock_release(&dev->lock);
 

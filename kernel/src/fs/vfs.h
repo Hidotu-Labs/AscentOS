@@ -17,6 +17,7 @@
 #define FS_MOUNTPOINT 0x08
 #define FS_EPOLL 0x09
 #define FS_PERSISTENT 0x10
+#define FS_NONBLOCK 0x20
 #define FS_TYPE_MASK 0x0F
 
 // Poll Events
@@ -58,6 +59,8 @@ typedef uint64_t (*mmap_type_t)(struct vfs_node *, uint64_t addr,
                                 uint64_t length, uint64_t prot, uint64_t flags,
                                 uint64_t offset);
 typedef int (*poll_type_t)(struct vfs_node *, int events);
+typedef int (*fallocate_type_t)(struct vfs_node *, int mode, uint32_t offset,
+                                uint32_t len);
 
 typedef struct vfs_node {
   char name[128];
@@ -95,7 +98,8 @@ typedef struct vfs_node {
   mmap_type_t mmap;   // Device-specific mmap handler
   poll_type_t poll;   // Device-specific poll handler
   ioctl_type_t ioctl; // Device-specific ioctl handler
-  void *wait_queue;   // Pointer to wait_queue_t for poll() wakeups
+  fallocate_type_t fallocate;
+  void *wait_queue; // Pointer to wait_queue_t for poll() wakeups
 
   struct list_head ep_watchers; // List of epitem_t watching this node
   spinlock_t ep_lock;           // Lock for ep_watchers
@@ -127,6 +131,7 @@ int vfs_rename(vfs_node_t *node, char *old_name, char *new_name);
 int vfs_chmod(vfs_node_t *node, uint16_t permission);
 int vfs_chown(vfs_node_t *node, uint32_t uid, uint32_t gid);
 int vfs_truncate(vfs_node_t *node, uint32_t size);
+int vfs_fallocate(vfs_node_t *node, int mode, uint32_t offset, uint32_t len);
 int vfs_mknod(vfs_node_t *node, char *name, uint16_t permission, uint32_t flags,
               void *device);
 int vfs_poll(vfs_node_t *node, int events);

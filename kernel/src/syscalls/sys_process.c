@@ -273,9 +273,10 @@ static uint64_t sys_chdir(uint64_t path_ptr, uint64_t a1, uint64_t a2,
     return (uint64_t)-20; // ENOTDIR
 
   // If validation passes, update thread
-  if (current->cwd_node) vfs_close(current->cwd_node);
+  if (current->cwd_node)
+    vfs_close(current->cwd_node);
   current->cwd_node = node; // vfs_resolve_path_at already opened it
-  
+
   strncpy(current->cwd_path, new_path, 255);
   current->cwd_path[255] = '\0';
 
@@ -638,7 +639,8 @@ uint64_t sys_fork(struct syscall_regs *regs) {
     }
     memcpy(child->cwd_path, parent->cwd_path, sizeof(child->cwd_path));
     child->cwd_node = parent->cwd_node;
-    if (child->cwd_node) vfs_open(child->cwd_node);
+    if (child->cwd_node)
+      vfs_open(child->cwd_node);
     memcpy(child->signal_handlers, parent->signal_handlers,
            sizeof(child->signal_handlers));
     child->fs_base = parent->fs_base;
@@ -821,7 +823,8 @@ static uint64_t sys_clone(struct syscall_regs *regs) {
   child->mm = child_mm;
   memcpy(child->cwd_path, parent->cwd_path, sizeof(child->cwd_path));
   child->cwd_node = parent->cwd_node;
-  if (child->cwd_node) vfs_open(child->cwd_node);
+  if (child->cwd_node)
+    vfs_open(child->cwd_node);
   child->uid = parent->uid;
   child->gid = parent->gid;
   child->euid = parent->euid;
@@ -841,7 +844,7 @@ static uint64_t sys_clone(struct syscall_regs *regs) {
 
 // ── sys_sysinfo ───────────────────────────────────────────────────────────
 struct sysinfo {
-  int64_t  uptime;
+  int64_t uptime;
   uint64_t loads[3];
   uint64_t totalram;
   uint64_t freeram;
@@ -853,7 +856,7 @@ struct sysinfo {
   uint64_t totalhigh;
   uint64_t freehigh;
   uint32_t mem_unit;
-  char     _f[8]; // padding to 112 bytes (Linux ABI)
+  char _f[8]; // padding to 112 bytes (Linux ABI)
 } __attribute__((packed));
 
 static uint64_t sys_sysinfo(uint64_t info_ptr, uint64_t a1, uint64_t a2,
@@ -867,20 +870,20 @@ static uint64_t sys_sysinfo(uint64_t info_ptr, uint64_t a1, uint64_t a2,
   if (!info)
     return (uint64_t)-14; // EFAULT
 
-  info->uptime    = (int64_t)(lapic_timer_get_ms() / 1000);
-  info->loads[0]  = 0;
-  info->loads[1]  = 0;
-  info->loads[2]  = 0;
-  info->totalram  = pmm_get_total_memory();
-  info->freeram   = (uint64_t)pmm_get_free_pages() * PAGE_SIZE;
+  info->uptime = (int64_t)(lapic_timer_get_ms() / 1000);
+  info->loads[0] = 0;
+  info->loads[1] = 0;
+  info->loads[2] = 0;
+  info->totalram = pmm_get_total_memory();
+  info->freeram = (uint64_t)pmm_get_free_pages() * PAGE_SIZE;
   info->sharedram = 0;
   info->bufferram = 0;
   info->totalswap = 0;
-  info->freeswap  = 0;
-  info->procs     = sched_get_thread_count();
+  info->freeswap = 0;
+  info->procs = sched_get_thread_count();
   info->totalhigh = 0;
-  info->freehigh  = 0;
-  info->mem_unit  = 1;
+  info->freehigh = 0;
+  info->mem_unit = 1;
   return 0;
 }
 
