@@ -17,7 +17,9 @@ struct dns_header {
 
 void format_dns_name(unsigned char* dns, unsigned char* host) {
     int lock = 0 , i;
-    strcat((char*)host,".");
+    size_t hlen = strlen((char*)host);
+    host[hlen] = '.';
+    host[hlen + 1] = '\0';
     for(i = 0 ; i < (int)strlen((char*)host) ; i++) {
         if(host[i]=='.') {
             *dns++ = i-lock;
@@ -63,7 +65,9 @@ int main(int argc, char *argv[]) {
     dns->arcount = 0;
 
     unsigned char *qname = &buf[sizeof(struct dns_header)];
-    char *hostname_copy = strdup(hostname);
+    char *hostname_copy = malloc(strlen(hostname) + 2); /* +1 for '.' appended in format_dns_name, +1 for '\0' */
+    if (!hostname_copy) { perror("malloc"); close(sock); return 1; }
+    memcpy(hostname_copy, hostname, strlen(hostname) + 1);
     format_dns_name(qname, (unsigned char*)hostname_copy);
 
     unsigned char *qtype = qname + strlen((char*)qname) + 1;
