@@ -93,7 +93,8 @@ typedef struct epitem {
 // ──────────────────────────────────────────────────────────
 typedef struct eventpoll {
   int fd;                      // FD of this epoll instance
-  
+  struct vfs_node *vfs_node;   // VFS node for this epoll fd (for nested epoll)
+
   // Watched FDs - simple array for O(1) lookup
   epitem_t *items[EPOLL_MAX_WATCHED];
   int item_count;

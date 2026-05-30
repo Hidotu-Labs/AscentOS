@@ -22,11 +22,9 @@ void ipv4_handle_packet(const uint8_t *data, uint16_t len) {
 
   ipv4_header_t *hdr = (ipv4_header_t *)data;
 
-  // Check version (IPv4 = 4)
   if ((hdr->version_ihl >> 4) != 4)
     return;
 
-  // Check header length (at least 20 bytes, i.e., IHL >= 5)
   uint8_t ihl = (hdr->version_ihl & 0x0F) * 4;
   if (len < ihl)
     return;
@@ -36,6 +34,7 @@ void ipv4_handle_packet(const uint8_t *data, uint16_t len) {
   ((ipv4_header_t *)hdr)->checksum = 0;
   uint16_t computed = calculate_checksum(hdr, ihl);
   if (computed != received_checksum) {
+    hdr->checksum = received_checksum;
     return;
   }
   hdr->checksum = received_checksum;
@@ -59,11 +58,14 @@ void ipv4_handle_packet(const uint8_t *data, uint16_t len) {
     udp_handle_packet(payload, payload_len, ntohl(hdr->src_ip), dst_ip);
     break;
   case PROTO_TCP:
+    klog_puts("[IPV4] TCP RX from ");
+    klog_uint64(ntohl(hdr->src_ip));
+    klog_puts(" len=");
+    klog_uint64(payload_len);
+    klog_puts("\n");
     tcp_handle_packet(payload, payload_len, ntohl(hdr->src_ip), dst_ip);
     break;
   default:
-
-    // Ignore protocols we don't handle
     break;
   }
 }

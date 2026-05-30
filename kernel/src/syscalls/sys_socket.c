@@ -7,6 +7,7 @@
 #include "../mm/heap.h"
 #include "../sched/sched.h"
 #include "../socket/af_inet.h"
+#include "../socket/af_inet6.h"
 #include "../socket/socket.h"
 #include "../socket/socket_internal.h"
 #include "syscall.h"
@@ -35,7 +36,7 @@ static uint64_t sys_socket(uint64_t domain, uint64_t type, uint64_t protocol,
   if (!sock) {
     // Determine error - extract base type for comparison
     int base = typ & ~SOCK_NONBLOCK & ~SOCK_CLOEXEC;
-    if (dom != AF_UNIX && dom != AF_INET && dom != AF_NETLINK)
+    if (dom != AF_UNIX && dom != AF_INET && dom != AF_INET6 && dom != AF_NETLINK)
       return (uint64_t)-EAFNOSUPPORT;
     if (base != SOCK_STREAM && base != SOCK_DGRAM &&
         base != SOCK_RAW && base != SOCK_SEQPACKET)
@@ -334,6 +335,9 @@ static uint64_t sys_accept(uint64_t sockfd, uint64_t addr_ptr,
       memcpy(addr, &sin, copy_len);
       *addrlen = sizeof(sin);
     }
+  } else if (newsock->domain == AF_INET6) {
+    if (sock->ops && sock->ops->getpeername && addr && addrlen)
+      sock->ops->getpeername(newsock, addr, addrlen);
   }
 
   klog_puts("[ACCEPT] tid=");
@@ -504,18 +508,47 @@ static uint64_t sys_recvmsg(uint64_t sockfd, uint64_t msg_ptr, uint64_t flags,
 
   struct msghdr *msg = (struct msghdr *)msg_ptr;
 
-  // Validate iovec array
-  if (!is_user_ptr((uint64_t)msg->msg_iov)) {
+  klog_puts("[RECVMSG] tid=");
+  {
+    struct thread *_t = sched_get_current();
+    klog_uint64(_t ? (uint64_t)_t->tid : 0);
+  }
+  klog_puts(" fd=");
+  klog_uint64((uint64_t)fd);
+  klog_puts(" iovlen=");
+  klog_uint64((uint64_t)msg->msg_iovlen);
+  klog_puts(" controllen=");
+  klog_uint64((uint64_t)msg->msg_controllen);
+  klog_puts("\n");
+
+  // Validate iovec array (only if iovlen > 0)
+  if (msg->msg_iovlen > 0 && !is_user_ptr((uint64_t)msg->msg_iov)) {
     return (uint64_t)-14; // EFAULT
   }
 
   // Use family-specific recvmsg if available
   if (sock->ops && sock->ops->recvmsg) {
-    return (uint64_t)sock->ops->recvmsg(sock, msg, (int)flags);
+    ssize_t r = sock->ops->recvmsg(sock, msg, (int)flags);
+    klog_puts("[RECVMSG] fd=");
+    klog_uint64((uint64_t)fd);
+    klog_puts(" ret=");
+    klog_uint64((uint64_t)r);
+    klog_puts("\n");
+    return (uint64_t)r;
   }
 
   // Fallback to simple recv into iovec array
   ssize_t total_received = 0;
+
+  /* For AF_INET UDP, we need to fill msg_name with the source address.
+   * Pull the first iovec as the data buffer and use recvfrom. */
+  struct sockaddr *src_addr = NULL;
+  int src_addrlen = 0;
+  if (msg->msg_name && msg->msg_namelen > 0 && is_user_ptr((uint64_t)msg->msg_name)) {
+    src_addr = (struct sockaddr *)msg->msg_name;
+    src_addrlen = (int)msg->msg_namelen;
+  }
+
   for (size_t i = 0; i < msg->msg_iovlen; i++) {
     struct iovec *iov = &msg->msg_iov[i];
 
@@ -527,7 +560,18 @@ static uint64_t sys_recvmsg(uint64_t sockfd, uint64_t msg_ptr, uint64_t flags,
       continue;
     }
 
-    ssize_t ret = socket_recv(sock, iov->iov_base, iov->iov_len, (int)flags);
+    ssize_t ret;
+    if (i == 0 && src_addr) {
+      /* First buffer: use recvfrom to capture source address */
+      ret = socket_recvfrom(sock, iov->iov_base, iov->iov_len,
+                            (int)flags | (sock->flags & SOCK_NONBLOCK ? MSG_DONTWAIT : 0),
+                            src_addr, &src_addrlen);
+      if (ret >= 0)
+        msg->msg_namelen = (uint32_t)src_addrlen;
+    } else {
+      ret = socket_recv(sock, iov->iov_base, iov->iov_len, (int)flags);
+    }
+
     if (ret < 0) {
       if (total_received > 0) {
         return (uint64_t)total_received;
@@ -543,8 +587,8 @@ static uint64_t sys_recvmsg(uint64_t sockfd, uint64_t msg_ptr, uint64_t flags,
     }
   }
 
-  // Update msghdr fields for user space (stub behavior for non-msg sockets)
-  msg->msg_namelen = 0;
+  // Update msghdr fields for user space
+  // msg_namelen already updated above if src_addr was filled
   msg->msg_controllen = 0;
   msg->msg_flags = 0;
 
@@ -682,8 +726,8 @@ static uint64_t sys_setsockopt(uint64_t sockfd, uint64_t level,
 
   const void *optval = (const void *)optval_ptr;
 
-  // Validate optlen
-  if (optlen < sizeof(int)) {
+  // Validate optlen — must be at least 1 byte (timeval, int, etc.)
+  if (optlen < 1) {
     return (uint64_t)-22; // EINVAL
   }
 
@@ -716,9 +760,61 @@ static uint64_t sys_setsockopt(uint64_t sockfd, uint64_t level,
       return 0;
     case SO_KEEPALIVE:
     case SO_BROADCAST:
+    case SO_RCVTIMEO:
+    case SO_SNDTIMEO:
+    case SO_LINGER:
       return 0; // Stub success
     default:
       break;
+    }
+  }
+
+  // IPPROTO_TCP options (level=6)
+  if ((int)level == 6 /* IPPROTO_TCP */) {
+    switch ((int)optname) {
+    case 1:  // TCP_NODELAY
+    case 2:  // TCP_MAXSEG
+    case 3:  // TCP_CORK
+    case 4:  // TCP_KEEPIDLE
+    case 5:  // TCP_KEEPINTVL
+    case 6:  // TCP_KEEPCNT
+    case 7:  // TCP_SYNCNT
+    case 8:  // TCP_LINGER2
+    case 9:  // TCP_DEFER_ACCEPT
+    case 10: // TCP_WINDOW_CLAMP
+    case 11: // TCP_INFO
+    case 12: // TCP_QUICKACK
+    case 23: // TCP_FASTOPEN
+    case 24: // TCP_TIMESTAMP
+    case 25: // TCP_NOTSENT_LOWAT
+    case 26: // TCP_CC_INFO
+    case 27: // TCP_SAVE_SYN
+    case 28: // TCP_SAVED_SYN
+      return 0; // Stub success
+    default:
+      return 0; // Accept all unknown TCP options silently
+    }
+  }
+
+  // IPPROTO_IP options (level=0)
+  if ((int)level == 0 /* IPPROTO_IP */) {
+    switch ((int)optname) {
+    case 1:  // IP_TOS
+    case 2:  // IP_TTL
+    case 3:  // IP_HDRINCL
+    case 4:  // IP_OPTIONS
+    case 9:  // IP_ROUTER_ALERT
+    case 10: // IP_RECVOPTS
+    case 11: // IP_RETOPTS
+    case 12: // IP_PKTINFO
+    case 14: // IP_MTU_DISCOVER
+    case 15: // IP_RECVERR
+    case 16: // IP_RECVTTL
+    case 17: // IP_RECVTOS
+    case 35: // IP_FREEBIND
+      return 0; // Stub success
+    default:
+      return 0; // Accept all unknown IP options silently
     }
   }
 
@@ -738,7 +834,8 @@ static uint64_t sys_setsockopt(uint64_t sockfd, uint64_t level,
     }
   }
 
-  return (uint64_t)-92; // ENOPROTOOPT
+  // Unknown level/option — stub success to avoid breaking applications
+  return 0;
 }
 
 // ── Syscall: getsockname(int sockfd, struct sockaddr *addr, ...)

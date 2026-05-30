@@ -37,6 +37,8 @@ ssize_t inet_sendto(socket_t *sock, const void *buf, size_t len, int flags,
                     struct sockaddr *dest_addr, int addrlen);
 ssize_t inet_recvfrom(socket_t *sock, void *buf, size_t len, int flags,
                       struct sockaddr *src_addr, int *addrlen);
+int inet_getsockname(socket_t *sock, struct sockaddr *addr, int *addrlen);
+int inet_getpeername(socket_t *sock, struct sockaddr *addr, int *addrlen);
 void inet_destroy(socket_t *sock);
 
 #endif // AF_INET_H

@@ -6,6 +6,7 @@
 // ── EtherType values (in host byte order — convert with htons before wire) ──
 #define ETHERTYPE_IPV4  0x0800
 #define ETHERTYPE_ARP   0x0806
+#define ETHERTYPE_IPV6  0x86DD
 
 // ── Ethernet frame header (14 bytes) ────────────────────────────────────────
 typedef struct __attribute__((packed)) {

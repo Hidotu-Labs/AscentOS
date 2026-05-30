@@ -3310,8 +3310,6 @@ static uint64_t sys_link(uint64_t oldpath_ptr, uint64_t newpath_ptr,
   return 0;
 }
 
-
-
 // fchdir(2) - syscall 81
 // Change current directory using file descriptor
 static uint64_t sys_fchdir(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4,
@@ -3628,7 +3626,8 @@ static uint64_t memfd_mmap(vfs_node_t *node, uint64_t addr, uint64_t length,
 
     memset(new_data, 0, new_cap);
     if (file->data && node->length > 0) {
-      uint32_t copy_len = node->length < file->capacity ? node->length : file->capacity;
+      uint32_t copy_len =
+          node->length < file->capacity ? node->length : file->capacity;
       memcpy(new_data, file->data, copy_len);
       kfree(file->data);
     }

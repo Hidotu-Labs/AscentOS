@@ -99,6 +99,7 @@ typedef struct netlink_sock {
   int protocol;
   uint32_t groups;
   uintptr_t portid;
+  bool passcred;            // SO_PASSCRED — attach SCM_CREDENTIALS in recvmsg
   sk_buff_head_t recv_queue;
   struct list_head list;
 } netlink_sock_t;

@@ -13,6 +13,7 @@
 // EVIOCGBIT, EVIOCGABS).
 
 #include "drivers/input/evdev.h"
+#include "../../apic/lapic_timer.h"
 #include "../../console/klog.h"
 #include "../../drivers/timer/rtc.h"
 #include "../../fb/framebuffer.h"

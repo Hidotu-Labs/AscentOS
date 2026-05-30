@@ -65,8 +65,9 @@ void syscall_dispatcher(struct syscall_regs *regs) {
       handler(regs->rdi, regs->rsi, regs->rdx, regs->r10, regs->r8, regs->r9);
 
   // Log syscall errors (negative return values), exclude EAGAIN (-11) and
-  // ENOENT (-2)
-  if ((int64_t)regs->rax < 0) {
+  // ENOENT (-2) to reduce noise.
+  if ((int64_t)regs->rax < 0 && (int64_t)regs->rax != -11 &&
+      (int64_t)regs->rax != -2) {
     klog_puts("[SYSCALL ERR] syscall ");
     klog_uint64(syscall_num);
     klog_puts(" returned error: ");

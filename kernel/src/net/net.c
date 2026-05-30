@@ -10,6 +10,7 @@
 #include "net/arp.h"
 #include "net/dhcp.h"
 #include "net/ethernet.h"
+#include "net/ipv6.h"
 #include "net/netif.h"
 #include "net/tcp.h"
 #include "net/udp.h"
@@ -62,7 +63,7 @@ void net_rx_enqueue(const uint8_t *data, uint16_t len) {
 }
 
 bool net_poll(void) {
-  nic_poll();
+  bool got = nic_poll();
 
   spinlock_acquire(&net_rx_lock);
   if (rx_tail == rx_head) {
@@ -117,6 +118,9 @@ void net_init(void) {
     console_puts("[DHCP] Falling back to static IP 10.0.2.15.\n");
     netif_configure(IP4(10, 0, 2, 15), IP4(10, 0, 2, 2), IP4(255, 255, 255, 0));
   }
+
+  // Initialize IPv6 (link-local address from MAC)
+  ipv6_init();
 
   console_puts("[OK] Network stack initialized.\n");
 }

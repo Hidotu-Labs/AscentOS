@@ -1,7 +1,7 @@
 #include "net/tcp.h"
+#include "apic/lapic_timer.h"
 #include "console/console.h"
 #include "console/klog.h"
-#include "drivers/timer/pit.h"
 #include "lib/string.h"
 #include "mm/heap.h"
 #include "net/byteorder.h"
@@ -23,7 +23,7 @@ static inline uint32_t tcp_generate_isn(void) {
 
 static tcp_socket_t sockets[MAX_TCP_SOCKETS];
 static uint16_t next_local_port = 45000;
-static bool tcp_debug_logging = false; // Set to true for verbose logging
+static bool tcp_debug_logging = true; // TCP RX/TX logging
 
 static void tcp_print_ip(uint32_t ip) {
   klog_uint64((ip >> 24) & 0xFF);
@@ -47,33 +47,37 @@ static uint16_t tcp_calculate_checksum(uint32_t src_ip, uint32_t dst_ip,
                                        uint16_t tcp_len) {
   uint32_t sum = 0;
 
-  // Pseudo Header
-  uint32_t sip = htonl(src_ip);
-  uint32_t dip = htonl(dst_ip);
-  const uint16_t *sip16 = (const uint16_t *)&sip;
-  const uint16_t *dip16 = (const uint16_t *)&dip;
+  /*
+   * src_ip and dst_ip are in host byte order. Convert to network byte order
+   * and sum as raw uint16_t words (same approach as checksum.h / IPv4).
+   * On little-endian x86, summing network-order bytes as little-endian
+   * uint16_t is endian-neutral for the Internet checksum algorithm.
+   */
+  uint32_t sip_n = htonl(src_ip);
+  uint32_t dip_n = htonl(dst_ip);
+  const uint16_t *sip_w = (const uint16_t *)&sip_n;
+  const uint16_t *dip_w = (const uint16_t *)&dip_n;
+  sum += sip_w[0];
+  sum += sip_w[1];
+  sum += dip_w[0];
+  sum += dip_w[1];
 
-  sum += (uint16_t)sip16[0];
-  sum += (uint16_t)sip16[1];
-  sum += (uint16_t)dip16[0];
-  sum += (uint16_t)dip16[1];
+  /* Protocol and TCP length in network byte order */
+  sum += htons(PROTO_TCP);
+  sum += htons(tcp_len);
 
-  sum += (uint16_t)htons(PROTO_TCP);
-  sum += (uint16_t)htons(tcp_len);
-
-  // TCP Segment
-  const uint16_t *buf = (const uint16_t *)tcp_segment;
-  int len = tcp_len;
-  while (len > 1) {
-    sum += (uint32_t)*buf++;
-    len -= 2;
+  /* Sum the TCP segment as raw uint16_t words */
+  const uint16_t *p = (const uint16_t *)tcp_segment;
+  uint16_t remaining = tcp_len;
+  while (remaining > 1) {
+    sum += *p++;
+    remaining -= 2;
+  }
+  if (remaining > 0) {
+    sum += *(const uint8_t *)p; /* last odd byte, zero-padded */
   }
 
-  if (len > 0) {
-    sum += (uint32_t)*(const uint8_t *)buf;
-  }
-
-  // Fold 32-bit sum to 16-bit
+  /* Fold 32-bit sum to 16-bit */
   while (sum >> 16) {
     sum = (sum & 0xFFFF) + (sum >> 16);
   }
@@ -94,7 +98,7 @@ static void tcp_send_segment(tcp_socket_t *sock, uint8_t flags,
   hdr->ack_num = (flags & TCP_FLAG_ACK) ? htonl(sock->ack_num) : 0;
   hdr->data_offset = (sizeof(tcp_header_t) / 4) << 4; // Length in 32-bit words
   hdr->flags = flags;
-  hdr->window = htons(8192); // Basic window
+  hdr->window = htons(65535); // Full window
   hdr->checksum = 0;
   hdr->urgent_ptr = 0;
 
@@ -112,8 +116,6 @@ static void tcp_send_segment(tcp_socket_t *sock, uint8_t flags,
     klog_hex32(flags);
     klog_puts(" seq=");
     klog_uint64(sock->seq_num);
-    klog_puts(" csum=0x");
-    klog_hex32(hdr->checksum);
     klog_puts("\n");
   }
 
@@ -192,9 +194,8 @@ int tcp_connect(uint32_t ip, uint16_t port, tcp_recv_cb_t on_recv) {
     wait_queue_add(&sock->wait_queue, wq_entry);
   }
 
-  uint64_t start_ticks = pit_get_ticks();
-  uint64_t last_retransmit = start_ticks;
-  uint32_t poll_count = 0;
+  uint64_t start_ms = lapic_timer_get_ms();
+  uint64_t last_retransmit = start_ms;
 
   // Check if loopback already established the connection synchronously
   if (sock->state == TCP_STATE_ESTABLISHED) {
@@ -208,31 +209,35 @@ int tcp_connect(uint32_t ip, uint16_t port, tcp_recv_cb_t on_recv) {
   tcp_send_segment(sock, TCP_FLAG_SYN, NULL, 0);
 
   while (sock->state == TCP_STATE_SYN_SENT && sock->valid) {
-    if (sock->state == TCP_STATE_ESTABLISHED || sock->state == TCP_STATE_CLOSED)
+    uint64_t now = lapic_timer_get_ms();
+
+    if (now - start_ms > 10000) // 10 second timeout
       break;
 
-    uint64_t now = pit_get_ticks();
-
-    if (now - start_ticks > 1500) { // 1.5 seconds timeout
-      break;
-    }
-
-    if (now - last_retransmit > 150) { // retransmit every 150ms
+    if (now - last_retransmit > 1000) { // retransmit every 1s
       tcp_send_segment(sock, TCP_FLAG_SYN, NULL, 0);
       last_retransmit = now;
     }
 
-    // Yield to let other threads (and the network thread) run
+    // Drain the full RX queue — required since there are no RX interrupts
+    while (net_poll())
+      ;
     sched_yield();
+
+    // Re-check after draining
+    if (sock->state == TCP_STATE_ESTABLISHED || sock->state == TCP_STATE_CLOSED)
+      break;
   }
+
   if (wq_entry) {
     wait_queue_remove(&sock->wait_queue, wq_entry);
     kfree(wq_entry);
   }
 
   if (sock->state != TCP_STATE_ESTABLISHED) {
+    bool was_rst = (sock->state == TCP_STATE_CLOSED);
     sock->valid = false;
-    return -1;
+    return was_rst ? -111 : -110; // -ECONNREFUSED or -ETIMEDOUT
   }
 
   return sock_id;
@@ -256,17 +261,16 @@ int tcp_send(int sock_id, const void *data, uint16_t len) {
     wait_queue_add(&sock->wait_queue, wq_entry);
   }
 
-  uint64_t start_ticks = pit_get_ticks();
-  uint64_t last_retransmit = start_ticks;
-  uint32_t poll_count = 0;
+  uint64_t start_ms = lapic_timer_get_ms();
+  uint64_t last_retransmit = start_ms;
 
   tcp_send_segment(sock, TCP_FLAG_ACK | TCP_FLAG_PSH, data, len);
 
   while (sock->seq_num != start_seq + len &&
          sock->state == TCP_STATE_ESTABLISHED && sock->valid) {
-    uint64_t now = pit_get_ticks();
+    uint64_t now = lapic_timer_get_ms();
 
-    if (now - start_ticks > 2000) { // 2 sec timeout
+    if (now - start_ms > 2000) { // 2 sec timeout
       break;
     }
 
@@ -275,6 +279,9 @@ int tcp_send(int sock_id, const void *data, uint16_t len) {
       last_retransmit = now;
     }
 
+    // Drain the full RX queue — required since there are no RX interrupts
+    while (net_poll())
+      ;
     sched_yield();
   }
 
@@ -309,13 +316,13 @@ void tcp_close(int sock_id) {
       wait_queue_add(&sock->wait_queue, wq_entry);
     }
 
-    uint64_t start_ticks = pit_get_ticks();
-    uint64_t last_retransmit = start_ticks;
+    uint64_t start_ms = lapic_timer_get_ms();
+    uint64_t last_retransmit = start_ms;
 
     while (sock->state != TCP_STATE_CLOSED && sock->valid) {
-      uint64_t now = pit_get_ticks();
+      uint64_t now = lapic_timer_get_ms();
 
-      if (now - start_ticks > 1500) {
+      if (now - start_ms > 1500) {
         break;
       }
 
@@ -326,14 +333,10 @@ void tcp_close(int sock_id) {
         last_retransmit = now;
       }
 
-      if (current && sock->state != TCP_STATE_CLOSED) {
-        current->state = THREAD_BLOCKED;
-        current->wakeup_ticks = now + 10;
-        sched_yield();
-      } else if (!current) {
-        for (volatile int d = 0; d < 10000; d++)
-          ;
-      }
+      // Drain the full RX queue — required since there are no RX interrupts
+      while (net_poll())
+        ;
+      sched_yield();
     }
 
     if (current && wq_entry) {

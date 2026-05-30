@@ -349,6 +349,10 @@ disk.img: assets/test.wav assets/test.bmp assets/test.tar assets/room.png userla
 		echo "HOME=/root" >> /tmp/bashrc; \
 		echo "TERM=vt100" >> /tmp/bashrc; \
 		echo "export TERM" >> /tmp/bashrc; \
+		echo "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt" >> /tmp/bashrc; \
+		echo "SSL_CERT_DIR=/etc/ssl/certs" >> /tmp/bashrc; \
+		echo "CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt" >> /tmp/bashrc; \
+		echo "export SSL_CERT_FILE SSL_CERT_DIR CURL_CA_BUNDLE" >> /tmp/bashrc; \
 		debugfs -w -R "mkdir etc" ./part.img >/dev/null 2>&1 || true; \
 		echo "nameserver 10.0.2.3" > /tmp/resolv.conf; \
 		echo "127.0.0.1 localhost" > /tmp/hosts; \
@@ -358,6 +362,8 @@ disk.img: assets/test.wav assets/test.bmp assets/test.tar assets/room.png userla
 		debugfs -w -R "write /tmp/hosts etc/hosts" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "mkdir etc/ssl" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "mkdir etc/ssl/certs" ./part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "rm etc/ssl/certs/ca-certificates.crt" ./part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write build/alpine/rootfs/etc/ssl/certs/ca-certificates.crt etc/ssl/certs/ca-certificates.crt" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "rm etc/passwd" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "write /tmp/passwd etc/passwd" ./part.img >/dev/null 2>&1 || true; \
 		echo "NAME=\"AscentOS\"" > /tmp/os-release; \

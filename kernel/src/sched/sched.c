@@ -61,7 +61,8 @@ void sched_init(void) {
     memset(idle_thread, 0, sizeof(struct thread));
     idle_thread->cwd_path[0] = '/';
     idle_thread->cwd_node = fs_root;
-    if (fs_root) vfs_open(fs_root);
+    if (fs_root)
+      vfs_open(fs_root);
     // Assign a proper TID to the idle thread (don't use 0)
     spinlock_acquire(&tid_lock);
     idle_thread->tid = next_tid++;
@@ -198,7 +199,8 @@ struct thread *sched_create_kernel_thread(void (*entry)(void),
     strcpy(t->cwd_path, current->cwd_path);
     t->cwd_node = current->cwd_node;
   }
-  if (t->cwd_node) vfs_open(t->cwd_node);
+  if (t->cwd_node)
+    vfs_open(t->cwd_node);
   t->umask = 0022;
   t->uid = t->gid = t->euid = t->egid = t->suid = t->sgid = 0;
 
@@ -940,9 +942,7 @@ uint16_t sched_get_thread_count(void) {
   return count;
 }
 
-struct thread *sched_get_thread_list_head(void) {
-  return global_thread_list;
-}
+struct thread *sched_get_thread_list_head(void) { return global_thread_list; }
 
 void sched_wakeup(struct thread *t) {
   if (!t)

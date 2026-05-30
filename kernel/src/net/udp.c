@@ -80,11 +80,11 @@ void udp_handle_packet(const uint8_t *data, uint16_t len, uint32_t src_ip,
   if (len < udp_len)
     return; // Truncated packet
 
-  klog_puts("[UDP] RX from ");
+  klog_puts("[UDP] RX src=");
   klog_uint64(src_ip);
   klog_puts(":");
   klog_uint64(src_port);
-  klog_puts(" to ");
+  klog_puts(" dst=");
   klog_uint64(dst_ip);
   klog_puts(":");
   klog_uint64(dst_port);
@@ -96,15 +96,20 @@ void udp_handle_packet(const uint8_t *data, uint16_t len, uint32_t src_ip,
   // Find a listening socket
   for (int i = 0; i < MAX_UDP_SOCKETS; i++) {
     if (sockets[i].valid && sockets[i].local_port == dst_port) {
+      klog_puts("[UDP] dispatching to slot ");
+      klog_uint64(i);
+      klog_puts("\n");
       if (sockets[i].callback) {
-        sockets[i].callback(sockets[i].local_port, payload, payload_len, src_ip,
-                            src_port);
+        sockets[i].callback(sockets[i].local_port, payload, payload_len,
+                            src_ip, src_port);
       }
       return;
     }
   }
 
-  // No listener bound, just drop silently
+  klog_puts("[UDP] no listener for dst_port=");
+  klog_uint64(dst_port);
+  klog_puts("\n");
 }
 
 int udp_send_packet(uint32_t dst_ip, uint16_t src_port, uint16_t dst_port,

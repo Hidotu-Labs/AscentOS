@@ -4,8 +4,8 @@
 #include "../fs/vfs.h"
 #include "../lib/string.h"
 #include "../mm/vmm.h"
+#include "../net/net.h"
 #include "../sched/sched.h"
-#include "../sched/wait.h"
 #include "syscall.h"
 #include <stdint.h>
 
@@ -20,6 +20,31 @@ struct pollfd {
   short events;
   short revents;
 };
+
+/* Check all fds for readiness, return count of ready fds. */
+static int poll_check_fds(struct pollfd *fds, uint64_t nfds, struct thread *t) {
+  int ready = 0;
+  for (uint64_t i = 0; i < nfds; i++) {
+    int fd = fds[i].fd;
+    fds[i].revents = 0;
+    if (fd < 0)
+      continue;
+    if (fd >= MAX_FDS || !t->fds[fd]) {
+      fds[i].revents = POLLNVAL;
+      ready++;
+      continue;
+    }
+    int ret = vfs_poll(t->fds[fd], fds[i].events);
+    if (ret < 0) {
+      fds[i].revents = POLLNVAL;
+      ready++;
+    } else if (ret > 0) {
+      fds[i].revents = (short)ret;
+      ready++;
+    }
+  }
+  return ready;
+}
 
 static uint64_t do_poll(struct pollfd *fds, uint64_t nfds,
                         uint64_t timeout_ms) {
@@ -36,97 +61,43 @@ static uint64_t do_poll(struct pollfd *fds, uint64_t nfds,
   if (!t)
     return (uint64_t)-1;
 
-  int ready = 0;
-  for (uint64_t i = 0; i < nfds; i++) {
-    int fd = fds[i].fd;
-    if (fd < 0) {
-      fds[i].revents = 0;
-      continue;
-    }
-    if (fd >= MAX_FDS || !t->fds[fd]) {
-      fds[i].revents = POLLNVAL;
-      ready++;
-      continue;
-    }
-    int ret = vfs_poll(t->fds[fd], fds[i].events);
-    if (ret < 0) {
-      fds[i].revents = POLLNVAL;
-      ready++;
-    } else if (ret > 0) {
-      fds[i].revents = (short)ret;
-      ready++;
-    } else {
-      fds[i].revents = 0;
-    }
+  /* Fast path: check immediately. */
+  int ready = poll_check_fds(fds, nfds, t);
+  if (ready > 0 || timeout_ms == 0)
+    goto done;
+
+  /*
+   * Slow path: the NIC is poll-driven (no RX interrupts), so we cannot
+   * simply block the thread and wait for a wakeup — nobody would drain
+   * the NIC's RX ring while we sleep.  Instead, spin-poll the network
+   * stack and re-check the fds on every iteration, yielding to the
+   * scheduler between iterations so other threads can run.
+   *
+   * We honour the timeout by comparing against the LAPIC timer.
+   */
+  uint64_t deadline = (timeout_ms != (uint64_t)-1)
+                          ? lapic_timer_get_ticks() + timeout_ms
+                          : (uint64_t)-1;
+
+  while (1) {
+    /* Drive the NIC — this enqueues any waiting RX frames and dispatches
+     * them through the full network stack, which may call socket_wake()
+     * and fill socket receive queues. */
+    net_poll();
+
+    ready = poll_check_fds(fds, nfds, t);
+    if (ready > 0)
+      break;
+
+    /* Check timeout. */
+    if (deadline != (uint64_t)-1 && lapic_timer_get_ticks() >= deadline)
+      break;
+
+    /* Yield so other runnable threads get CPU time. */
+    sched_yield();
   }
 
-  if (ready == 0 && timeout_ms != 0) {
-    // Create wait queue entries for each fd we're polling
-    // Each fd needs its own entry to avoid list corruption
-    wait_queue_entry_t entries[128]; // Max 128 fds per poll
-    int entry_fds[128];              // Track which fd each entry belongs to
-    int entry_count = 0;
-
-    // Add to all fd wait queues so we get woken when any has events
-    for (uint64_t i = 0; i < nfds && entry_count < 128; i++) {
-      int fd = fds[i].fd;
-      if (fd >= 0 && fd < MAX_FDS && t->fds[fd] && t->fds[fd]->wait_queue) {
-        entries[entry_count].thread = t;
-        entries[entry_count].next = NULL;
-        entry_fds[entry_count] = fd;
-        wait_queue_add((wait_queue_t *)t->fds[fd]->wait_queue,
-                       &entries[entry_count]);
-        entry_count++;
-      }
-    }
-
-    // Set up timeout if specified
-    if (timeout_ms != (uint64_t)-1) {
-      t->wakeup_ticks = lapic_timer_get_ticks() + timeout_ms;
-    } else {
-      t->wakeup_ticks = 0; // No timeout
-    }
-
-    // Set state to BLOCKED BEFORE the final check to avoid lost wakeups
-    t->state = THREAD_BLOCKED;
-
-    // Final check for ready fds after setting state
-    for (uint64_t i = 0; i < nfds; i++) {
-      int fd = fds[i].fd;
-      if (fd >= 0 && fd < MAX_FDS && t->fds[fd]) {
-        if (vfs_poll(t->fds[fd], fds[i].events) > 0) {
-          t->state = THREAD_READY;
-          ready = 1; // Mark as ready so we don't block
-          break;
-        }
-      }
-    }
-
-    // Only yield if we're still blocked
-    if (t->state == THREAD_BLOCKED) {
-      sched_yield();
-    }
-
-    // Remove from all wait queues
-    for (int i = 0; i < entry_count; i++) {
-      int fd = entry_fds[i];
-      if (fd >= 0 && fd < MAX_FDS && t->fds[fd] && t->fds[fd]->wait_queue) {
-        wait_queue_remove((wait_queue_t *)t->fds[fd]->wait_queue, &entries[i]);
-      }
-    }
-
-    // Re-poll to get actual events
-    for (uint64_t i = 0; i < nfds; i++) {
-      int fd = fds[i].fd;
-      if (fd < 0 || fd >= MAX_FDS || !t->fds[fd])
-        continue;
-      int ret = vfs_poll(t->fds[fd], fds[i].events);
-      if (ret > 0) {
-        fds[i].revents = (short)ret;
-        ready++;
-      }
-    }
-  }
+done:
   if (t) {
     klog_puts("[POLL] RETURN tid=");
     klog_uint64(t->tid);

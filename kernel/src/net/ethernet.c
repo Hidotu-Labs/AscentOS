@@ -7,6 +7,7 @@
 #include "net/netif.h"
 #include "net/arp.h"
 #include "net/ipv4.h"
+#include "net/ipv6.h"
 #include "net/byteorder.h"
 #include "drivers/net/nic.h"
 #include "console/console.h"
@@ -66,10 +67,6 @@ void eth_handle_frame(const uint8_t *data, uint16_t len) {
     const uint8_t *payload = data + ETH_HEADER_LEN;
     uint16_t payload_len = len - ETH_HEADER_LEN;
 
-    // klog_puts("[ETH] Got frame type 0x");
-    // klog_uint64(ethertype);
-    // klog_putchar('\n');
-
     switch (ethertype) {
     case ETHERTYPE_ARP:
         arp_handle_packet(payload, payload_len);
@@ -77,6 +74,10 @@ void eth_handle_frame(const uint8_t *data, uint16_t len) {
 
     case ETHERTYPE_IPV4:
         ipv4_handle_packet(payload, payload_len);
+        break;
+
+    case ETHERTYPE_IPV6:
+        ipv6_handle_packet_with_mac(payload, payload_len, hdr->src);
         break;
 
     default:

@@ -1130,6 +1130,14 @@ static ssize_t unix_sendmsg(socket_t *sock, struct msghdr *msg, int flags) {
   for (size_t i = 0; i < msg->msg_iovlen; i++)
     total_len += msg->msg_iov[i].iov_len;
 
+  klog_puts("[UNIX_SEND] tid=");
+  klog_uint64(current ? (uint64_t)current->tid : 0);
+  klog_puts(" -> peer=");
+  klog_uint64((uint64_t)(uintptr_t)peer);
+  klog_puts(" len=");
+  klog_uint64((uint64_t)total_len);
+  klog_puts("\n");
+
   // Acquire peer's recv_lock once and hold it for the entire sendmsg:
   // this makes SCM_RIGHTS + data delivery atomic — the receiver cannot
   // wake up and call recvmsg until we release the lock and fire the wake.
@@ -1137,9 +1145,9 @@ static ssize_t unix_sendmsg(socket_t *sock, struct msghdr *msg, int flags) {
 
   // Wait until there is enough space for all data (or at least some)
   while (total_len > 0) {
-    size_t head  = peer->recv_buf_head;
-    size_t tail  = peer->recv_buf_tail;
-    size_t size  = peer->recv_buf_size;
+    size_t head = peer->recv_buf_head;
+    size_t tail = peer->recv_buf_tail;
+    size_t size = peer->recv_buf_size;
     size_t space = (head - tail - 1 + size) % size;
 
     if (space >= total_len)
@@ -1155,7 +1163,7 @@ static ssize_t unix_sendmsg(socket_t *sock, struct msghdr *msg, int flags) {
       }
 
       struct thread *ct = sched_get_current();
-      wait_queue_entry_t entry = { .thread = ct, .next = NULL };
+      wait_queue_entry_t entry = {.thread = ct, .next = NULL};
       wait_queue_add(peer->wait, &entry);
       ct->state = THREAD_BLOCKED;
       spinlock_release(&peer->recv_lock); // already released above, but be safe
@@ -1181,7 +1189,8 @@ static ssize_t unix_sendmsg(socket_t *sock, struct msghdr *msg, int flags) {
   while (cmsg) {
     if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
       int *fds = (int *)CMSG_DATA(cmsg);
-      int count = (int)((cmsg->cmsg_len - CMSG_ALIGN(sizeof(struct cmsghdr))) / sizeof(int));
+      int count = (int)((cmsg->cmsg_len - CMSG_ALIGN(sizeof(struct cmsghdr))) /
+                        sizeof(int));
 
       klog_puts("[SCM_SEND] storing in peer unix_sock=");
       klog_uint64((uint64_t)(uintptr_t)peer);
@@ -1215,9 +1224,9 @@ static ssize_t unix_sendmsg(socket_t *sock, struct msghdr *msg, int flags) {
     size_t sent = 0;
 
     while (sent < len) {
-      size_t head  = peer->recv_buf_head;
-      size_t tail  = peer->recv_buf_tail;
-      size_t size  = peer->recv_buf_size;
+      size_t head = peer->recv_buf_head;
+      size_t tail = peer->recv_buf_tail;
+      size_t size = peer->recv_buf_size;
       size_t space = (head - tail - 1 + size) % size;
 
       if (space == 0)
@@ -1260,9 +1269,9 @@ static ssize_t unix_recvmsg(socket_t *sock, struct msghdr *msg, int flags) {
   // consuming yet — we need to dequeue SCM nodes atomically with the data)
   while (1) {
     spinlock_acquire(&usk->recv_lock);
-    size_t head      = usk->recv_buf_head;
-    size_t tail      = usk->recv_buf_tail;
-    size_t size      = usk->recv_buf_size;
+    size_t head = usk->recv_buf_head;
+    size_t tail = usk->recv_buf_tail;
+    size_t size = usk->recv_buf_size;
     size_t available = (tail - head + size) % size;
 
     if (available > 0)
@@ -1277,7 +1286,7 @@ static ssize_t unix_recvmsg(socket_t *sock, struct msghdr *msg, int flags) {
       return -11; // EAGAIN
 
     struct thread *ct = sched_get_current();
-    wait_queue_entry_t entry = { .thread = ct, .next = NULL };
+    wait_queue_entry_t entry = {.thread = ct, .next = NULL};
     wait_queue_add(usk->wait, &entry);
     ct->state = THREAD_BLOCKED;
     sched_yield();
@@ -1308,11 +1317,13 @@ static ssize_t unix_recvmsg(socket_t *sock, struct msghdr *msg, int flags) {
       msg->msg_controllen >= CMSG_SPACE(sizeof(int))) {
     struct cmsghdr *cmsg = (struct cmsghdr *)msg->msg_control;
     cmsg->cmsg_level = SOL_SOCKET;
-    cmsg->cmsg_type  = SCM_RIGHTS;
+    cmsg->cmsg_type = SCM_RIGHTS;
 
     int *fds = (int *)CMSG_DATA(cmsg);
     int actual_count = 0;
-    int max_fds = (int)((msg->msg_controllen - CMSG_ALIGN(sizeof(struct cmsghdr))) / sizeof(int));
+    int max_fds =
+        (int)((msg->msg_controllen - CMSG_ALIGN(sizeof(struct cmsghdr))) /
+              sizeof(int));
     if (max_fds > usk->scm_count)
       max_fds = usk->scm_count;
 
@@ -1351,11 +1362,11 @@ static ssize_t unix_recvmsg(socket_t *sock, struct msghdr *msg, int flags) {
   ssize_t total_received = 0;
   for (size_t i = 0; i < msg->msg_iovlen; i++) {
     uint8_t *dest = (uint8_t *)msg->msg_iov[i].iov_base;
-    size_t   want = msg->msg_iov[i].iov_len;
+    size_t want = msg->msg_iov[i].iov_len;
 
-    size_t head      = usk->recv_buf_head;
-    size_t tail      = usk->recv_buf_tail;
-    size_t size      = usk->recv_buf_size;
+    size_t head = usk->recv_buf_head;
+    size_t tail = usk->recv_buf_tail;
+    size_t size = usk->recv_buf_size;
     size_t available = (tail - head + size) % size;
 
     if (available == 0)

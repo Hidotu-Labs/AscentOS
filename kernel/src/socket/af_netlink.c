@@ -221,8 +221,12 @@ static int netlink_setsockopt(socket_t *sock, int level, int optname,
     switch (optname) {
     case SO_PASSCRED:
       klog_puts("[NETLINK] setsockopt: SO_PASSCRED\n");
-      return 0; // Stub success
-    case 26:    // SO_ATTACH_FILTER
+      if (optlen >= (int)sizeof(int))
+        nsk->passcred = (*(const int *)optval != 0);
+      else
+        nsk->passcred = true;
+      return 0;
+    case 26: // SO_ATTACH_FILTER
       klog_puts("[NETLINK] setsockopt: SO_ATTACH_FILTER\n");
       return 0; // Stub success
     case 2:     // SO_REUSEADDR
@@ -320,9 +324,20 @@ static ssize_t netlink_send(socket_t *sock, const void *buf, size_t len,
   return netlink_sendto(sock, buf, len, flags, NULL, 0);
 }
 
+// SCM_CREDENTIALS type used by SO_PASSCRED
+#define SCM_CREDENTIALS 0x02
+
+struct ucred_nl {
+  int pid;
+  int uid;
+  int gid;
+};
+
 static ssize_t netlink_recvmsg(socket_t *sock, struct msghdr *msg, int flags) {
   if (!msg || msg->msg_iovlen == 0)
     return -22;
+
+  netlink_sock_t *nsk = (netlink_sock_t *)sock->sk;
 
   // For now, only support single iovec
   struct iovec *iov = &msg->msg_iov[0];
@@ -330,7 +345,27 @@ static ssize_t netlink_recvmsg(socket_t *sock, struct msghdr *msg, int flags) {
                                  (struct sockaddr *)msg->msg_name,
                                  (int *)&msg->msg_namelen);
 
-  msg->msg_controllen = 0;
+  // Populate SCM_CREDENTIALS ancillary data when SO_PASSCRED is set.
+  // libudev validates ucred.pid == 0 (kernel sender) and silently drops
+  // messages that lack credentials, so this is required for Weston to
+  // consume the uevent payloads pushed at bind time.
+  if (ret > 0 && nsk && nsk->passcred && msg->msg_control &&
+      msg->msg_controllen >= CMSG_SPACE(sizeof(struct ucred_nl))) {
+    struct cmsghdr *cmsg = (struct cmsghdr *)msg->msg_control;
+    cmsg->cmsg_len = CMSG_LEN(sizeof(struct ucred_nl));
+    cmsg->cmsg_level = SOL_SOCKET;
+    cmsg->cmsg_type = SCM_CREDENTIALS;
+
+    struct ucred_nl *cred = (struct ucred_nl *)CMSG_DATA(cmsg);
+    cred->pid = 0; // 0 = from kernel
+    cred->uid = 0;
+    cred->gid = 0;
+
+    msg->msg_controllen = CMSG_SPACE(sizeof(struct ucred_nl));
+  } else {
+    msg->msg_controllen = 0;
+  }
+
   msg->msg_flags = 0;
   return ret;
 }
@@ -407,6 +442,7 @@ int netlink_create(socket_t *sock, int protocol) {
     return -12; // ENOMEM
 
   memset(nsk, 0, sizeof(netlink_sock_t));
+  nsk->parent = sock; // back-pointer so netlink_broadcast can wake the socket
   nsk->protocol = protocol;
   spinlock_init(&nsk->recv_queue.lock);
   nsk->recv_queue.head = NULL;

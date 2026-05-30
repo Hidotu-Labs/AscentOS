@@ -47,8 +47,6 @@ static void epoll_table_free(int idx) {
   spinlock_release(&epoll_table_lock);
 }
 
-
-
 // ── Epoll Item Management
 // ───────────────────────────────────────────────────────
 
@@ -93,6 +91,7 @@ eventpoll_t *epoll_create(void) {
 
   // Initialize
   ep->fd = -1;
+  ep->vfs_node = NULL;
   ep->item_count = 0;
   INIT_LIST_HEAD(&ep->rdllist);
   ep->rdllist_count = 0;
@@ -188,7 +187,25 @@ static void ep_add_to_ready_list(eventpoll_t *ep, epitem_t *epi) {
     ep->rdllist_count++;
   }
 
+  // Wake up waiters while still holding ep->lock.
+  // This closes the race: epoll_wait_impl sets THREAD_BLOCKED while holding
+  // ep->lock, so if we wake here (also under ep->lock) we are guaranteed to
+  // see the correct blocked state and the thread won't miss the wakeup.
+  if (epi->exclusive) {
+    wait_queue_wake_one(&ep->wq);
+  } else {
+    wait_queue_wake_all(&ep->wq);
+  }
+
   spinlock_release(&ep->lock);
+
+  // Propagate to any outer epoll instances watching this epoll fd.
+  // This is required for nested epoll (epoll-in-epoll) to work: when this
+  // epoll's ready list becomes non-empty, any outer epoll that has registered
+  // this epoll's VFS node must be woken up.
+  if (ep->vfs_node) {
+    epoll_notify_event(ep->vfs_node, EPOLLIN);
+  }
 }
 
 // ── Helper: Remove item from ready list
@@ -220,6 +237,8 @@ int epoll_ctl_add(eventpoll_t *ep, int fd, struct epoll_event *event) {
   klog_uint64(fd);
   klog_puts(" epoll_fd=");
   klog_uint64(ep->fd);
+  klog_puts(" events=0x");
+  klog_hex32(event->events);
   klog_puts("\n");
 
   if (fd < 0 || fd >= EPOLL_MAX_WATCHED)
@@ -238,6 +257,14 @@ int epoll_ctl_add(eventpoll_t *ep, int fd, struct epoll_event *event) {
   }
 
   vfs_node_t *node = t->fds[fd];
+
+  klog_puts("[EPOLL_CTL_ADD] fd=");
+  klog_uint64(fd);
+  klog_puts(" node=");
+  klog_puts(node->name[0] ? node->name : "?");
+  klog_puts(" flags=0x");
+  klog_hex32(node->flags);
+  klog_puts("\n");
 
   // Check if already registered for the same node
   if (ep->items[fd]) {
@@ -286,13 +313,14 @@ int epoll_ctl_add(eventpoll_t *ep, int fd, struct epoll_event *event) {
   list_add_tail(&epi->ep_node_link, &node->ep_watchers);
   spinlock_release(&node->ep_lock);
 
-  // Check for immediate events (level-triggered)
-  if (!(event->events & EPOLLET)) {
-    uint32_t events = ep_check_events(epi);
-    if (events) {
-      epi->last_events = events;
-      ep_add_to_ready_list(ep, epi);
-    }
+  // Check for immediate events. For level-triggered mode this is the normal
+  // path. For edge-triggered mode, Linux also fires an initial synthetic edge
+  // on EPOLL_CTL_ADD if the fd already has data — without this, any data
+  // queued before the fd was added to epoll would be silently lost.
+  uint32_t cur_events = ep_check_events(epi);
+  if (cur_events) {
+    epi->last_events = cur_events;
+    ep_add_to_ready_list(ep, epi);
   }
 
   klog_puts("[EPOLL_CTL_ADD] finished fd=");
@@ -417,21 +445,21 @@ int epoll_wait_impl(eventpoll_t *ep, struct epoll_event *events, int maxevents,
 
         epitem_t *epi = list_entry(pos, epitem_t, rdllink);
 
-        // Get current events - this may call VFS poll which could take other locks
-        // Normally we should be careful about lock ordering, but ep->lock is
-        // likely safe as it's a leaf structure's lock.
+        // Get current events - this may call VFS poll which could take other
+        // locks Normally we should be careful about lock ordering, but ep->lock
+        // is likely safe as it's a leaf structure's lock.
         uint32_t current_events = ep_check_events(epi);
 
         if (current_events) {
           events[returned].events = current_events;
           events[returned].data.u64 = epi->event.data.u64;
-          
+
           klog_puts("[EPOLL_EVENT] returned fd=");
           klog_uint64(epi->fd);
           klog_puts(" events=0x");
           klog_hex32(current_events);
           klog_puts("\n");
-          
+
           returned++;
 
           // Handle edge-triggered mode
@@ -474,9 +502,11 @@ int epoll_wait_impl(eventpoll_t *ep, struct epoll_event *events, int maxevents,
       break;
     }
 
-    // Set state to BLOCKED while holding the lock.
-    // This ensures that any concurrent epoll_notify_event will see the thread as
-    // ready-to-be-woken when it tries to take the same lock.
+    // Set state to BLOCKED while still holding ep->lock.
+    // This closes the race window: if a notification arrives now, it will
+    // call ep_add_to_ready_list (which acquires ep->lock and will block
+    // until we release it below), then call wait_queue_wake_all which will
+    // see THREAD_BLOCKED and properly call sched_wakeup().
     current->state = THREAD_BLOCKED;
 
     // Set up timeout if specified
@@ -486,19 +516,63 @@ int epoll_wait_impl(eventpoll_t *ep, struct epoll_event *events, int maxevents,
       current->wakeup_ticks = 0;
     }
 
+    // Re-check the ready list one more time before yielding.
+    // A notification may have added items to the ready list between our
+    // first check and setting THREAD_BLOCKED above.  If so, cancel the
+    // block and loop back to collect the events.
+    if (!list_empty(&ep->rdllist)) {
+      current->state = THREAD_RUNNING;
+      current->wakeup_ticks = 0;
+      spinlock_release(&ep->lock);
+      continue;
+    }
+
     spinlock_release(&ep->lock);
 
     // Yield control
     sched_yield();
 
+    // After waking up, reset state to RUNNING.
+    // NOTE: Do this BEFORE re-acquiring ep->lock so the lock acquisition
+    // itself doesn't race with another notification.
+    current->state = THREAD_RUNNING;
+
     // After waking up, check if it was due to a timeout
     if (timeout_ms > 0 && timeout_ms != -1) {
-      if (lapic_timer_get_ticks() >= current->wakeup_ticks && current->wakeup_ticks != 0) {
+      if (lapic_timer_get_ticks() >= current->wakeup_ticks &&
+          current->wakeup_ticks != 0) {
+        current->wakeup_ticks = 0;
         break; // Return whatever we found (likely 0)
       }
     }
 
-    // If we were woken up, loop back and check the ready list again
+    // Missed-wakeup recovery: scan all watched items for events.
+    // Race: a notification may fire between sched_yield() returning and
+    // THREAD_BLOCKED being set in the next loop iteration.  sched_wakeup()
+    // sees THREAD_RUNNING and skips the wakeup, leaving data in the queue
+    // with no new notification.  Re-polling every watched item here catches
+    // that case.  ep_check_events calls vfs_poll which may acquire other
+    // locks, so we poll outside ep->lock, then add under ep->lock.
+    for (int _i = 0; _i < EPOLL_MAX_WATCHED; _i++) {
+      epitem_t *_epi = ep->items[_i];
+      if (!_epi || _epi->on_ready_list)
+        continue;
+      if (_epi->oneshot && _epi->oneshot_disabled)
+        continue;
+      uint32_t _ev = ep_check_events(_epi);
+      if (_ev) {
+        spinlock_acquire(&ep->lock);
+        if (!_epi->on_ready_list) {
+          _epi->last_events = _ev;
+          list_add_tail(&_epi->rdllink, &ep->rdllist);
+          _epi->on_ready_list = true;
+          ep->rdllist_count++;
+        }
+        spinlock_release(&ep->lock);
+      }
+    }
+
+    // Loop back and collect any events found above or via normal notification.
   }
 
   // Always remove from wait queue before returning
@@ -545,6 +619,7 @@ int epoll_alloc_fd(eventpoll_t *ep) {
   node->poll = epoll_vfs_poll;
 
   ep->fd = fd;
+  ep->vfs_node = node; // Store for nested epoll propagation
   t->fds[fd] = node;
   t->fd_offsets[fd] = 0;
 
@@ -682,11 +757,6 @@ void epoll_notify_event(struct vfs_node *node, uint32_t events) {
   if (node->ep_watchers.next == NULL)
     return;
 
-  // Track if we've woken an exclusive waiter for THIS node.
-  // EPOLLEXCLUSIVE prevents thundering herd: only one exclusive waiter
-  // per event source should be woken. Non-exclusive waiters are unaffected.
-  bool exclusive_woken = false;
-
   spinlock_acquire(&node->ep_lock);
   struct list_head *pos, *n;
   list_for_each_safe(pos, n, &node->ep_watchers) {
@@ -702,21 +772,10 @@ void epoll_notify_event(struct vfs_node *node, uint32_t events) {
     if (!mask)
       continue;
 
-    // Add to ready list
+    // ep_add_to_ready_list now handles both adding to the ready list AND
+    // waking up waiters atomically under ep->lock, eliminating the
+    // missed-wakeup race.
     ep_add_to_ready_list(ep, epi);
-
-    // Wake up waiters
-    if (epi->exclusive) {
-      // EPOLLEXCLUSIVE: only wake one thread across all exclusive waiters
-      // to prevent thundering herd. Skip if we already woke one.
-      if (!exclusive_woken) {
-        wait_queue_wake_one(&ep->wq);
-        exclusive_woken = true;
-      }
-    } else {
-      // Non-exclusive: always wake all threads waiting on this epoll
-      wait_queue_wake_all(&ep->wq);
-    }
   }
   spinlock_release(&node->ep_lock);
 }
@@ -751,18 +810,9 @@ void epoll_notify_socket(int fd, uint32_t events) {
         events & (epi->registered_events | EPOLLERR | EPOLLHUP | EPOLLRDHUP);
 
     if (mask) {
-      // Add to ready list
+      // ep_add_to_ready_list handles both adding to the ready list AND
+      // waking up waiters atomically under ep->lock.
       ep_add_to_ready_list(ep, epi);
-
-      // Wake up waiters - EPOLLEXCLUSIVE only affects THIS epoll instance,
-      // not others. Each epoll instance should be woken independently.
-      if (epi->exclusive) {
-        // For exclusive mode, only wake one thread waiting on this epoll
-        wait_queue_wake_one(&ep->wq);
-      } else {
-        // Non-exclusive: wake all threads waiting on this epoll
-        wait_queue_wake_all(&ep->wq);
-      }
     }
   }
 }

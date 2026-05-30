@@ -164,36 +164,33 @@ static void rtl8139_irq_handler(struct registers *regs) {
   if (status == 0)
     return; // Spurious
 
+  // Acknowledge immediately so we don't re-enter
+  outw(nic_iobase + RTL_ISR, status);
+
   if (status & INT_ROK) {
     // Process received packets from the ring buffer
     while (!(inb(nic_iobase + RTL_CR) & CR_BUFE)) {
-      // RTL8139 RX packet header: [status:16][length:16][data...]
-      uint32_t offset = rx_cur_offset;
+      uint32_t offset = rx_cur_offset % RX_BUF_SIZE;
       uint16_t rx_status = *(uint16_t *)(rx_buffer + offset);
-      (void)rx_status; // Hardware status bits
       uint16_t rx_length = *(uint16_t *)(rx_buffer + offset + 2);
 
-      if (rx_length == 0 || rx_length > 1536) {
-        // Bogus packet, reset
+      // Validate: ROK bit must be set, length must be sane
+      if (!(rx_status & 0x0001) || rx_length < 8 || rx_length > 1536) {
         stat_rx_errors++;
+        rx_cur_offset = inw(nic_iobase + RTL_CBR) % RX_BUF_SIZE;
+        outw(nic_iobase + RTL_CAPR, (uint16_t)(rx_cur_offset - 16));
         break;
       }
 
-      // Packet data starts at offset + 4 (after the 4-byte header)
-      // The length includes the 4-byte CRC — subtract it for the payload
       uint16_t pkt_len = rx_length - 4; // Strip CRC
       if (pkt_len > 0 && pkt_len <= ETH_FRAME_MAX) {
         net_rx_enqueue(rx_buffer + offset + 4, pkt_len);
       }
       stat_rx_packets++;
 
-      // Advance the read offset: header(4) + data(rx_length), aligned to 4
-      // bytes
+      // Advance read pointer: 4-byte header + rx_length, aligned to 4 bytes
       rx_cur_offset = (offset + rx_length + 4 + 3) & ~3u;
-      rx_cur_offset %= RX_BUF_SIZE;
-
-      // Update hardware CAPR (must be offset - 16 due to hardware quirk)
-      outw(nic_iobase + RTL_CAPR, (uint16_t)(rx_cur_offset - 16));
+      outw(nic_iobase + RTL_CAPR, (uint16_t)((rx_cur_offset - 16) & 0xFFFF));
     }
   }
 
@@ -211,13 +208,9 @@ static void rtl8139_irq_handler(struct registers *regs) {
 
   if (status & INT_RXOVW) {
     stat_rx_errors++;
-    // After overflow, reset CAPR to CBR
     rx_cur_offset = inw(nic_iobase + RTL_CBR) % RX_BUF_SIZE;
     outw(nic_iobase + RTL_CAPR, (uint16_t)(rx_cur_offset - 16));
   }
-
-  // Acknowledge all handled interrupts
-  outw(nic_iobase + RTL_ISR, status);
 }
 
 // ── Public API ──────────────────────────────────────────────────────────────
@@ -416,42 +409,58 @@ bool rtl8139_poll(void) {
   if (!nic_present)
     return false;
 
-  // Check if the NIC has pending interrupt status bits that weren't
-  // delivered via the IOAPIC (missed IRQ, masking, or timing issue).
+  // Check the RX ring directly — don't rely on ISR bits which may have
+  // already been cleared by the IRQ handler.
+  bool found = false;
+
+  while (!(inb(nic_iobase + RTL_CR) & CR_BUFE)) {
+    uint32_t offset = rx_cur_offset % RX_BUF_SIZE;
+
+    // RTL8139 RX packet header: [status:16][length:16][data...]
+    uint16_t rx_status = *(uint16_t *)(rx_buffer + offset);
+    uint16_t rx_length = *(uint16_t *)(rx_buffer + offset + 2);
+
+    // Validate: ROK bit must be set, length must be sane
+    if (!(rx_status & 0x0001) || rx_length < 8 || rx_length > 1536) {
+      stat_rx_errors++;
+      // Resync to hardware's current position
+      rx_cur_offset = inw(nic_iobase + RTL_CBR) % RX_BUF_SIZE;
+      outw(nic_iobase + RTL_CAPR, (uint16_t)(rx_cur_offset - 16));
+      break;
+    }
+
+    // Packet data starts at offset+4; length includes 4-byte CRC
+    uint16_t pkt_len = rx_length - 4;
+    if (pkt_len > 0 && pkt_len <= ETH_FRAME_MAX) {
+      net_rx_enqueue(rx_buffer + offset + 4, pkt_len);
+      found = true;
+    }
+    stat_rx_packets++;
+
+    // Advance read pointer: 4-byte header + rx_length bytes, aligned to 4
+    rx_cur_offset = (offset + rx_length + 4 + 3) & ~3u;
+
+    // Update hardware CAPR (hardware quirk: must write offset - 16)
+    uint16_t capr = (uint16_t)((rx_cur_offset - 16) & 0xFFFF);
+    outw(nic_iobase + RTL_CAPR, capr);
+
+    // Acknowledge ROK so the hardware knows we consumed this packet
+    outw(nic_iobase + RTL_ISR, INT_ROK);
+  }
+
+  // Also drain any non-RX status bits (TX OK, errors) to keep ISR clean
   uint16_t status = inw(nic_iobase + RTL_ISR);
-  if (status == 0)
-    return false;
-
-  // Process RX packets from the ring buffer
-  if (status & INT_ROK) {
-    while (!(inb(nic_iobase + RTL_CR) & CR_BUFE)) {
-      uint32_t offset = rx_cur_offset;
-      uint16_t rx_status = *(uint16_t *)(rx_buffer + offset);
-      (void)rx_status;
-      uint16_t rx_length = *(uint16_t *)(rx_buffer + offset + 2);
-
-      if (rx_length == 0 || rx_length > 1536) {
-        stat_rx_errors++;
-        break;
-      }
-
-      uint16_t pkt_len = rx_length - 4;
-      if (pkt_len > 0 && pkt_len <= ETH_FRAME_MAX) {
-        net_rx_enqueue(rx_buffer + offset + 4, pkt_len);
-      }
-      stat_rx_packets++;
-
-      rx_cur_offset = (offset + rx_length + 4 + 3) & ~3u;
-      rx_cur_offset %= RX_BUF_SIZE;
+  if (status & ~INT_ROK) {
+    if (status & INT_TOK)  stat_tx_packets++;
+    if (status & INT_RER)  stat_rx_errors++;
+    if (status & INT_TER)  stat_tx_errors++;
+    if (status & INT_RXOVW) {
+      stat_rx_errors++;
+      rx_cur_offset = inw(nic_iobase + RTL_CBR) % RX_BUF_SIZE;
       outw(nic_iobase + RTL_CAPR, (uint16_t)(rx_cur_offset - 16));
     }
+    outw(nic_iobase + RTL_ISR, status & ~INT_ROK);
   }
 
-  if (status & INT_TOK) {
-    stat_tx_packets++;
-  }
-
-  // Clear all handled status bits
-  outw(nic_iobase + RTL_ISR, status);
-  return true;
+  return found;
 }

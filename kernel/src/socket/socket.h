@@ -142,6 +142,20 @@ struct sockaddr_in {
   char sin_zero[8];
 };
 
+// ── IPv6 Address Structure ──────────────────────────────────────────────────
+struct in6_addr {
+  uint8_t s6_addr[16];
+};
+
+// ── IPv6 Socket Address structure ───────────────────────────────────────────
+struct sockaddr_in6 {
+  sa_family_t     sin6_family;
+  uint16_t        sin6_port;
+  uint32_t        sin6_flowinfo;
+  struct in6_addr sin6_addr;
+  uint32_t        sin6_scope_id;
+};
+
 // ── IP Protocols ─────────────────────────────────────────────────────────────
 #define IPPROTO_IP 0
 #define IPPROTO_ICMP 1
@@ -162,13 +176,14 @@ struct iovec {
 };
 
 struct msghdr {
-  void *msg_name;        // Source address (for recvmsg)
-  size_t msg_namelen;    // Address length
-  struct iovec *msg_iov; // Scatter/gather array
-  size_t msg_iovlen;     // Number of iovec elements
-  void *msg_control;     // Ancillary data
-  size_t msg_controllen; // Ancillary data length
-  int msg_flags;         // Flags on received message
+  void *msg_name;           // Source address (for recvmsg)
+  uint32_t msg_namelen;     // Address length (socklen_t — 4 bytes, matches Linux ABI)
+  uint32_t _pad;            // Implicit ABI padding to align msg_iov to 8 bytes
+  struct iovec *msg_iov;    // Scatter/gather array
+  size_t msg_iovlen;        // Number of iovec elements
+  void *msg_control;        // Ancillary data
+  size_t msg_controllen;    // Ancillary data length
+  int msg_flags;            // Flags on received message
 };
 
 struct sockaddr_un {

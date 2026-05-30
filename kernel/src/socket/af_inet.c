@@ -1,6 +1,6 @@
 #include "af_inet.h"
+#include "../apic/lapic_timer.h"
 #include "../console/klog.h"
-#include "../drivers/timer/pit.h"
 #include "../fs/vfs.h"
 #include "../lib/string.h"
 #include "../mm/heap.h"
@@ -97,8 +97,18 @@ static void udp_data_callback(uint16_t local_port, const uint8_t *data,
     }
   }
 
-  if (!inet)
+  if (!inet) {
+    klog_puts("[UDP_CB] no inet_sock for port=");
+    klog_uint64(local_port);
+    klog_puts("\n");
     return;
+  }
+
+  klog_puts("[UDP_CB] queuing ");
+  klog_uint64(len);
+  klog_puts(" bytes for port=");
+  klog_uint64(local_port);
+  klog_puts("\n");
 
   sk_buff_t *skb = alloc_skb(len);
   if (skb) {
@@ -128,6 +138,8 @@ static sock_ops_t inet_stream_ops = {
     .shutdown = NULL,
     .poll = inet_poll,
     .ioctl = NULL,
+    .getsockname = inet_getsockname,
+    .getpeername = inet_getpeername,
     .destroy = inet_destroy,
 };
 
@@ -145,6 +157,8 @@ static sock_ops_t inet_dgram_ops = {
     .shutdown = NULL,
     .poll = inet_poll,
     .ioctl = NULL,
+    .getsockname = inet_getsockname,
+    .getpeername = inet_getpeername,
     .destroy = inet_destroy,
 };
 
@@ -186,6 +200,13 @@ int inet_bind(socket_t *sock, struct sockaddr *addr, int addrlen) {
   inet_sock_t *inet = (inet_sock_t *)sock->sk;
   memcpy(&inet->local_addr, sin, sizeof(struct sockaddr_in));
 
+  /* Fill in local IP from netif if not specified */
+  if (inet->local_addr.sin_addr.s_addr == 0) {
+    netif_t *nif = netif_get();
+    if (nif)
+      inet->local_addr.sin_addr.s_addr = htonl(nif->ip);
+  }
+
   if (sock->type == SOCK_DGRAM) {
     uint16_t port = ntohs(sin->sin_port);
     int bound_port = udp_bind(port, udp_data_callback);
@@ -195,10 +216,17 @@ int inet_bind(socket_t *sock, struct sockaddr *addr, int addrlen) {
     inet->udp_port = (uint16_t)bound_port;
     inet->local_addr.sin_port = htons(inet->udp_port);
 
+    klog_puts("[INET_BIND] UDP assigned port=");
+    klog_uint64(inet->udp_port);
+    klog_puts("\n");
+
     // Register in map
     for (int i = 0; i < MAX_UDP_SOCKETS; i++) {
       if (!udp_inet_map[i]) {
         udp_inet_map[i] = inet;
+        klog_puts("[INET_BIND] registered in udp_inet_map[");
+        klog_uint64(i);
+        klog_puts("]\n");
         break;
       }
     }
@@ -218,12 +246,34 @@ int inet_connect(socket_t *sock, struct sockaddr *addr, int addrlen) {
   uint32_t ip = ntohl(sin->sin_addr.s_addr);
   uint16_t port = ntohs(sin->sin_port);
 
+  /* UDP connect: just record the remote address, no handshake. */
+  if (sock->type == SOCK_DGRAM) {
+    inet->remote_addr = *sin;
+    /* Auto-bind to an ephemeral port if not already bound */
+    if (inet->udp_port == 0) {
+      int bound = udp_bind(0, udp_data_callback);
+      if (bound < 0)
+        return -98; // EADDRINUSE
+      inet->udp_port = (uint16_t)bound;
+      inet->local_addr.sin_port = htons(inet->udp_port);
+      for (int i = 0; i < MAX_UDP_SOCKETS; i++) {
+        if (!udp_inet_map[i]) {
+          udp_inet_map[i] = inet;
+          break;
+        }
+      }
+    }
+    sock->state = SS_CONNECTED;
+    return 0;
+  }
+
   sock->state = SS_CONNECTING;
 
   int sock_id = tcp_connect(ip, port, tcp_data_callback);
   if (sock_id < 0) {
     sock->state = SS_UNCONNECTED;
-    return -111; // ECONNREFUSED
+    // tcp_connect returns -ECONNREFUSED (-111) on RST, -ETIMEDOUT (-110) on timeout
+    return sock_id;
   }
 
   inet->tcp_sock_id = sock_id;
@@ -267,13 +317,15 @@ int inet_accept(socket_t *sock, socket_t **newsock) {
     return -22;
 
   int new_tcp_id = -1;
-  uint64_t start = pit_get_ticks();
 
   while ((new_tcp_id = tcp_accept(inet->tcp_sock_id)) < 0) {
     if (sock->flags & SOCK_NONBLOCK)
       return -11;
 
-    socket_wait(sock);
+    // Drain the full RX queue — required since there are no RX interrupts
+    while (net_poll())
+      ;
+    sched_yield();
   }
 
   socket_t *new_sock = socket_create(AF_INET, SOCK_STREAM, 0);
@@ -317,11 +369,16 @@ int inet_poll(socket_t *sock, int events) {
   }
 
   if (events & POLLOUT) {
-    if (sock->state == SS_CONNECTED)
+    if (sock->type == SOCK_DGRAM) {
+      /* UDP sockets are always writable (sendto doesn't require SS_CONNECTED) */
       revents |= POLLOUT;
+    } else if (sock->state == SS_CONNECTED) {
+      revents |= POLLOUT;
+    }
   }
 
-  if (sock->state == SS_UNCONNECTED && inet->tcp_sock_id != -1) {
+  if (sock->type == SOCK_STREAM && sock->state == SS_UNCONNECTED &&
+      inet->tcp_sock_id != -1) {
     revents |= POLLHUP;
   }
 
@@ -362,18 +419,27 @@ ssize_t inet_sendto(socket_t *sock, const void *buf, size_t len, int flags,
   if (sock->type == SOCK_STREAM)
     return inet_send(sock, buf, len, flags);
 
-  if (!dest_addr || addrlen < (int)sizeof(struct sockaddr_in))
-    return -22;
+  uint32_t dest_ip;
+  uint16_t dest_port;
 
-  struct sockaddr_in *sin = (struct sockaddr_in *)dest_addr;
-  uint32_t dest_ip = ntohl(sin->sin_addr.s_addr);
-  uint16_t dest_port = ntohs(sin->sin_port);
+  if (!dest_addr || addrlen < (int)sizeof(struct sockaddr_in)) {
+    /* No destination given — use connected address (POSIX: sendto on a
+     * connected UDP socket with NULL dest is equivalent to send). */
+    if (sock->state != SS_CONNECTED)
+      return -22; // EINVAL: not connected and no dest given
+    dest_ip   = ntohl(inet->remote_addr.sin_addr.s_addr);
+    dest_port = ntohs(inet->remote_addr.sin_port);
+  } else {
+    struct sockaddr_in *sin = (struct sockaddr_in *)dest_addr;
+    dest_ip   = ntohl(sin->sin_addr.s_addr);
+    dest_port = ntohs(sin->sin_port);
+  }
 
   // If not bound, bind to an ephemeral port
   if (inet->udp_port == 0) {
     int port = udp_bind(0, udp_data_callback);
     if (port < 0)
-      return -105; // ENOBUFS?
+      return -105; // ENOBUFS
     inet->udp_port = (uint16_t)port;
     inet->local_addr.sin_port = htons(inet->udp_port);
 
@@ -395,18 +461,22 @@ ssize_t inet_sendto(socket_t *sock, const void *buf, size_t len, int flags,
 
 ssize_t inet_recvfrom(socket_t *sock, void *buf, size_t len, int flags,
                       struct sockaddr *src_addr, int *addrlen) {
-  (void)flags;
   inet_sock_t *inet = (inet_sock_t *)sock->sk;
+
+  /* Non-blocking if socket is O_NONBLOCK or MSG_DONTWAIT was passed */
+  bool nonblock = (sock->flags & SOCK_NONBLOCK) || (flags & MSG_DONTWAIT);
 
   while (skb_queue_empty(&inet->receive_queue)) {
     if (sock->type == SOCK_STREAM && sock->state != SS_CONNECTED &&
         sock->state != SS_CONNECTING)
       return 0;
 
-    if (sock->flags & SOCK_NONBLOCK)
-      return -11;
+    if (nonblock)
+      return -11; /* EAGAIN */
 
-    socket_wait(sock);
+    /* NIC is poll-driven: drive the network stack instead of blocking. */
+    net_poll();
+    sched_yield();
   }
 
   sk_buff_t *skb = skb_dequeue(&inet->receive_queue);
@@ -437,6 +507,43 @@ ssize_t inet_recvfrom(socket_t *sock, void *buf, size_t len, int flags,
 
   free_skb(skb);
   return (ssize_t)copy_len;
+}
+
+int inet_getsockname(socket_t *sock, struct sockaddr *addr, int *addrlen) {
+  if (!addr || !addrlen)
+    return -22; // EINVAL
+  inet_sock_t *inet = (inet_sock_t *)sock->sk;
+  struct sockaddr_in sin;
+  memset(&sin, 0, sizeof(sin));
+  sin.sin_family = AF_INET;
+
+  if (sock->type == SOCK_DGRAM) {
+    /* For UDP, report the bound port (may be ephemeral). */
+    sin.sin_port = htons(inet->udp_port);
+    sin.sin_addr.s_addr = inet->local_addr.sin_addr.s_addr;
+  } else {
+    sin.sin_port = inet->local_addr.sin_port;
+    sin.sin_addr.s_addr = inet->local_addr.sin_addr.s_addr;
+  }
+
+  int copy = *addrlen < (int)sizeof(sin) ? *addrlen : (int)sizeof(sin);
+  memcpy(addr, &sin, copy);
+  *addrlen = sizeof(sin);
+  return 0;
+}
+
+int inet_getpeername(socket_t *sock, struct sockaddr *addr, int *addrlen) {
+  if (!addr || !addrlen)
+    return -22; // EINVAL
+  if (sock->state != SS_CONNECTED)
+    return -107; // ENOTCONN
+  inet_sock_t *inet = (inet_sock_t *)sock->sk;
+  int copy = *addrlen < (int)sizeof(inet->remote_addr)
+                 ? *addrlen
+                 : (int)sizeof(inet->remote_addr);
+  memcpy(addr, &inet->remote_addr, copy);
+  *addrlen = sizeof(inet->remote_addr);
+  return 0;
 }
 
 void inet_destroy(socket_t *sock) {
@@ -608,13 +715,14 @@ void af_inet_self_test(void) {
   sched_create_kernel_thread(stress_client_thread, cpu_get_bsp(), true);
 
   // Wait for the stress test to complete (with timeout)
-  uint64_t test_start = pit_get_ticks();
+  uint64_t test_start = lapic_timer_get_ms();
   while (!stress_done) {
-    if (pit_get_ticks() - test_start > 30000) { // 30 second timeout
+    if (lapic_timer_get_ms() - test_start > 30000) { // 30 second timeout
       klog_puts("\n[FAIL] AF_INET Phase 2 Stress Test TIMED OUT\n");
       return;
     }
-    net_poll();
+    while (net_poll())
+      ;
     sched_yield();
   }
 

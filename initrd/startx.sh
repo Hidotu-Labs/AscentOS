@@ -19,6 +19,7 @@ echo "X server hazır, uygulamalar başlatılıyor..."
 
 # DISPLAY ortam değişkenini ayarla
 export DISPLAY=:0
+export HOME=/root
 
 # IceWM configuration setup
 export HOME=/root
@@ -64,19 +65,24 @@ elif command -v xclock >/dev/null 2>&1; then
 fi
 
 sleep 2
-export PATH=/usr/bin:/usr/local/bin:/bin:$PATH
+export PATH=/opt/coreutils/bin:/opt/bash/bin:/bin:/usr/local/bin:/usr/bin:/opt/tcc/bin:$PATH
 export LD_LIBRARY_PATH=/usr/lib:/lib:/usr/local/lib:$LD_LIBRARY_PATH
 
 # st (suckless terminal from Alpine)
+# Set PS1/PATH in environment so bash picks them up even without rcfile
+export PATH=/opt/coreutils/bin:/opt/bash/bin:/bin:/usr/local/bin:/usr/bin:/opt/tcc/bin
+export BASH_ENV=/root/.bashrc
+ST_SHELL="/bin/bash"
+ST_RCFILE="/root/.bashrc"
 if [ -x /usr/bin/st ]; then
     echo "st (Alpine) başlatılıyor..."
-    /usr/bin/st &
+    /usr/bin/st -T "st" -e "$ST_SHELL" --noprofile --rcfile "$ST_RCFILE" &
 elif [ -x /bin/st ]; then
     echo "st başlatılıyor..."
-    /bin/st &
+    /bin/st -T "st" -e "$ST_SHELL" --noprofile --rcfile "$ST_RCFILE" &
 elif command -v st >/dev/null 2>&1; then
     echo "st (sistem yolu ile) başlatılıyor..."
-    st &
+    st -T "st" -e "$ST_SHELL" --noprofile --rcfile "$ST_RCFILE" &
 else
     echo "Uyarı: st (Alpine) bulunamadı!"
 fi
