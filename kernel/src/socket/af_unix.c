@@ -545,7 +545,15 @@ static ssize_t unix_send(socket_t *sock, const void *buf, size_t len,
 
     // Notify epoll watchers on peer socket that data is available
     if (peer->parent && peer->parent->node) {
+      klog_puts("[UNIX_SEND_NOTIFY] peer_node=");
+      klog_uint64((uint64_t)peer->parent->node);
+      klog_puts("\n");
       epoll_notify_event(peer->parent->node, EPOLLIN | EPOLLRDNORM);
+    } else if (peer->parent) {
+      klog_puts("[UNIX_SEND_NOTIFY] node NULL, fallback notify_socket fd=");
+      klog_uint64((uint64_t)peer->parent->fd);
+      klog_puts("\n");
+      epoll_notify_socket(peer->parent->fd, EPOLLIN);
     }
   }
 
@@ -1249,8 +1257,18 @@ static ssize_t unix_sendmsg(socket_t *sock, struct msghdr *msg, int flags) {
   wait_queue_wake_all(peer->wait);
   if (peer->parent && peer->parent->wait_queue)
     wait_queue_wake_all((wait_queue_t *)peer->parent->wait_queue);
-  if (peer->parent && peer->parent->node)
+  if (peer->parent && peer->parent->node) {
+    klog_puts("[UNIX_SENDMSG_NOTIFY] peer_node=");
+    klog_uint64((uint64_t)peer->parent->node);
+    klog_puts("\n");
     epoll_notify_event(peer->parent->node, EPOLLIN | EPOLLRDNORM);
+  } else {
+    klog_puts("[UNIX_SENDMSG_NOTIFY] peer->parent->node is NULL, using notify_socket fd=");
+    klog_uint64((uint64_t)(peer->parent ? peer->parent->fd : -1));
+    klog_puts("\n");
+    if (peer->parent)
+      epoll_notify_socket(peer->parent->fd, EPOLLIN);
+  }
 
   socket_put(peer->parent);
   return total_sent;

@@ -2110,6 +2110,9 @@ static uint32_t eventfd_write(vfs_node_t *node, uint32_t offset, uint32_t size,
   spinlock_release(&ctx->lock);
 
   wait_queue_wake_all(&ctx->wq);
+  /* Notify any epoll instances watching this eventfd */
+  extern void epoll_notify_event(struct vfs_node *node, uint32_t events);
+  epoll_notify_event(node, 0x0001 /* EPOLLIN */);
   return 8;
 }
 
@@ -2131,8 +2134,9 @@ static int eventfd_poll(vfs_node_t *node, int events) {
 static void eventfd_close(vfs_node_t *node) {
   if (node && node->device) {
     kfree(node->device);
+    node->device = NULL;
   }
-  kfree(node);
+  /* node itself is freed by vfs_close — do NOT kfree(node) here */
 }
 
 static uint64_t sys_eventfd2(uint64_t initval, uint64_t flags, uint64_t a2,
@@ -2192,7 +2196,69 @@ typedef struct {
   uint64_t expirations; // Number of expirations since last read
   spinlock_t lock;
   wait_queue_t wq;
+  struct vfs_node *node; // Back-pointer for epoll notification
 } timerfd_ctx_t;
+
+/* ── Global timerfd registry — scanned every LAPIC tick ─────────────────── */
+#define TIMERFD_MAX 64
+static timerfd_ctx_t *timerfd_table[TIMERFD_MAX];
+static spinlock_t timerfd_table_lock = SPINLOCK_INIT;
+
+static void timerfd_register(timerfd_ctx_t *ctx) {
+  spinlock_acquire(&timerfd_table_lock);
+  for (int i = 0; i < TIMERFD_MAX; i++) {
+    if (!timerfd_table[i]) { timerfd_table[i] = ctx; break; }
+  }
+  spinlock_release(&timerfd_table_lock);
+}
+
+static void timerfd_unregister(timerfd_ctx_t *ctx) {
+  spinlock_acquire(&timerfd_table_lock);
+  for (int i = 0; i < TIMERFD_MAX; i++) {
+    if (timerfd_table[i] == ctx) { timerfd_table[i] = NULL; break; }
+  }
+  spinlock_release(&timerfd_table_lock);
+}
+
+/*
+ * Called from lapic_timer_handler every tick (1 ms).
+ * Checks all armed timerfds and fires epoll_notify_event when they expire.
+ */
+void timerfd_tick(void) {
+  extern uint64_t lapic_timer_get_ms(void);
+  extern void epoll_notify_event(struct vfs_node *node, uint32_t events);
+  uint64_t now = lapic_timer_get_ms();
+
+  /* Try-acquire: if locked, skip this tick rather than spin in IRQ context */
+  if (!spinlock_try_acquire(&timerfd_table_lock))
+    return;
+
+  for (int i = 0; i < TIMERFD_MAX; i++) {
+    timerfd_ctx_t *ctx = timerfd_table[i];
+    if (!ctx || ctx->expire_ms == 0) continue;
+
+    if (now >= ctx->expire_ms) {
+      /* Try-acquire ctx lock; skip if contended */
+      if (!spinlock_try_acquire(&ctx->lock)) continue;
+
+      ctx->expirations++;
+      if (ctx->interval_sec || ctx->interval_nsec) {
+        uint64_t iv = ctx->interval_sec * 1000 + ctx->interval_nsec / 1000000;
+        if (iv == 0) iv = 1;
+        ctx->expire_ms = now + iv;
+      } else {
+        ctx->expire_ms = 0;
+      }
+      spinlock_release(&ctx->lock);
+
+      if (ctx->node) {
+        epoll_notify_event(ctx->node, 0x0001 /* EPOLLIN */);
+        wait_queue_wake_all(&ctx->wq);
+      }
+    }
+  }
+  spinlock_release(&timerfd_table_lock);
+}
 
 static uint32_t timerfd_read(vfs_node_t *node, uint32_t offset, uint32_t size,
                              uint8_t *buffer) {
@@ -2204,25 +2270,6 @@ static uint32_t timerfd_read(vfs_node_t *node, uint32_t offset, uint32_t size,
     return (uint32_t)-22;
 
   spinlock_acquire(&ctx->lock);
-
-  // Check if timer has expired
-  if (ctx->expire_ms > 0) {
-    extern uint64_t lapic_timer_get_ms(void);
-    uint64_t now = lapic_timer_get_ms();
-    if (now >= ctx->expire_ms) {
-      ctx->expirations++;
-      // Re-arm if interval is set
-      if (ctx->interval_sec || ctx->interval_nsec) {
-        uint64_t interval_ms =
-            ctx->interval_sec * 1000 + ctx->interval_nsec / 1000000;
-        if (interval_ms == 0)
-          interval_ms = 1;
-        ctx->expire_ms = now + interval_ms;
-      } else {
-        ctx->expire_ms = 0; // One-shot, disarm
-      }
-    }
-  }
 
   if (ctx->expirations == 0) {
     spinlock_release(&ctx->lock);
@@ -2247,25 +2294,6 @@ static int timerfd_poll(vfs_node_t *node, int events) {
 
   int revents = 0;
   spinlock_acquire(&ctx->lock);
-
-  // Check expiry
-  if (ctx->expire_ms > 0) {
-    extern uint64_t lapic_timer_get_ms(void);
-    uint64_t now = lapic_timer_get_ms();
-    if (now >= ctx->expire_ms) {
-      ctx->expirations++;
-      if (ctx->interval_sec || ctx->interval_nsec) {
-        uint64_t interval_ms =
-            ctx->interval_sec * 1000 + ctx->interval_nsec / 1000000;
-        if (interval_ms == 0)
-          interval_ms = 1;
-        ctx->expire_ms = now + interval_ms;
-      } else {
-        ctx->expire_ms = 0;
-      }
-    }
-  }
-
   if (ctx->expirations > 0)
     revents |= POLLIN;
   spinlock_release(&ctx->lock);
@@ -2273,9 +2301,14 @@ static int timerfd_poll(vfs_node_t *node, int events) {
 }
 
 static void timerfd_close(vfs_node_t *node) {
-  if (node && node->device)
-    kfree(node->device);
-  kfree(node);
+  if (node && node->device) {
+    timerfd_ctx_t *ctx = (timerfd_ctx_t *)node->device;
+    timerfd_unregister(ctx);
+    ctx->node = NULL; /* prevent use-after-free in timerfd_tick */
+    kfree(ctx);
+    node->device = NULL;
+  }
+  /* node itself is freed by vfs_close — do NOT kfree(node) here */
 }
 
 static uint64_t sys_timerfd_create(uint64_t clockid, uint64_t flags,
@@ -2314,6 +2347,10 @@ static uint64_t sys_timerfd_create(uint64_t clockid, uint64_t flags,
   node->poll = timerfd_poll;
   node->close = timerfd_close;
   node->wait_queue = &ctx->wq;
+
+  /* Back-pointer so timerfd_tick can call epoll_notify_event */
+  ctx->node = node;
+  timerfd_register(ctx);
 
   t->fds[fd] = node;
   t->fd_offsets[fd] = 0;
@@ -2463,6 +2500,9 @@ static uint32_t pipe_write(vfs_node_t *node, uint32_t offset, uint32_t size,
 
   if (ret > 0) {
     wait_queue_wake_all(&ctx->wq);
+    /* Notify any epoll instances watching this pipe */
+    extern void epoll_notify_event(struct vfs_node *node, uint32_t events);
+    epoll_notify_event(node, 0x0001 /* EPOLLIN */);
   }
   return ret;
 }

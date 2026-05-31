@@ -127,6 +127,7 @@ ssize_t unix_socket_recv(socket_t *sock, void *buf, size_t len, int flags);
 sk_buff_t *alloc_skb(size_t size);
 void free_skb(sk_buff_t *skb);
 void skb_queue_tail(sk_buff_head_t *list, sk_buff_t *skb);
+void skb_queue_head(sk_buff_head_t *list, sk_buff_t *skb);
 sk_buff_t *skb_dequeue(sk_buff_head_t *list);
 bool skb_queue_empty(sk_buff_head_t *list);
 

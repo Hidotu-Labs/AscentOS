@@ -32,6 +32,9 @@ void lapic_timer_handler(struct registers *regs) {
     struct cpu_info *cpu = cpu_get_current();
     if (cpu && cpu->status == CPU_STATUS_BSP) {
         lapic_timer_ticks++;
+        /* Fire any expired timerfd instances */
+        extern void timerfd_tick(void);
+        timerfd_tick();
     }
 
     // Send EOI BEFORE context switch. This is a special case - normally

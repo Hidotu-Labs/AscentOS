@@ -1,18 +1,4 @@
-/*
- * drm_file.c — Per-client DRM file context + GEM PRIME / DMA-buf
- *
- * Each open() of /dev/dri/card0 allocates a drm_file that owns:
- *   - A private GEM handle namespace (local handle → global gem object)
- *   - A private event queue (FLIP_COMPLETE events go to the right client)
- *   - Per-client capability flags (ATOMIC, UNIVERSAL_PLANES)
- *   - Master status
- *
- * PRIME works by exporting a GEM object as a regular file descriptor.
- * We implement this by creating a small anonymous VFS node ("prime_buf")
- * whose device pointer is the gem object.  The fd is allocated in the
- * calling thread's fd table.  FD_TO_HANDLE imports it back by reading
- * the gem pointer from the prime node and registering a new local handle.
- */
+
 
 #include "drm.h"
 #include "../../../console/klog.h"

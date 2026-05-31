@@ -264,6 +264,8 @@ int epoll_ctl_add(eventpoll_t *ep, int fd, struct epoll_event *event) {
   klog_puts(node->name[0] ? node->name : "?");
   klog_puts(" flags=0x");
   klog_hex32(node->flags);
+  klog_puts(" node_ptr=");
+  klog_uint64((uint64_t)node);
   klog_puts("\n");
 
   // Check if already registered for the same node
@@ -509,9 +511,14 @@ int epoll_wait_impl(eventpoll_t *ep, struct epoll_event *events, int maxevents,
     // see THREAD_BLOCKED and properly call sched_wakeup().
     current->state = THREAD_BLOCKED;
 
-    // Set up timeout if specified
+    // Set up timeout if specified.
+    // Save the absolute deadline in a local variable — the scheduler clears
+    // wakeup_ticks to 0 when it wakes the thread, so we cannot rely on it
+    // after sched_yield() returns.
+    uint64_t deadline_ticks = 0;
     if (timeout_ms > 0 && timeout_ms != -1) {
-      current->wakeup_ticks = lapic_timer_get_ticks() + (uint64_t)timeout_ms;
+      deadline_ticks = lapic_timer_get_ticks() + (uint64_t)timeout_ms;
+      current->wakeup_ticks = deadline_ticks;
     } else {
       current->wakeup_ticks = 0;
     }
@@ -539,8 +546,7 @@ int epoll_wait_impl(eventpoll_t *ep, struct epoll_event *events, int maxevents,
 
     // After waking up, check if it was due to a timeout
     if (timeout_ms > 0 && timeout_ms != -1) {
-      if (lapic_timer_get_ticks() >= current->wakeup_ticks &&
-          current->wakeup_ticks != 0) {
+      if (deadline_ticks != 0 && lapic_timer_get_ticks() >= deadline_ticks) {
         current->wakeup_ticks = 0;
         break; // Return whatever we found (likely 0)
       }
@@ -757,6 +763,16 @@ void epoll_notify_event(struct vfs_node *node, uint32_t events) {
   if (node->ep_watchers.next == NULL)
     return;
 
+  klog_puts("[EPOLL_NOTIFY] node=");
+  klog_uint64((uint64_t)node);
+  klog_puts(" events=0x");
+  klog_hex32(events);
+  klog_puts(" watchers_next=");
+  klog_uint64((uint64_t)node->ep_watchers.next);
+  klog_puts(" self=");
+  klog_uint64((uint64_t)&node->ep_watchers);
+  klog_puts("\n");
+
   spinlock_acquire(&node->ep_lock);
   struct list_head *pos, *n;
   list_for_each_safe(pos, n, &node->ep_watchers) {
@@ -776,6 +792,11 @@ void epoll_notify_event(struct vfs_node *node, uint32_t events) {
     // waking up waiters atomically under ep->lock, eliminating the
     // missed-wakeup race.
     ep_add_to_ready_list(ep, epi);
+
+    // EPOLLEXCLUSIVE: stop after waking the first matching watcher so only
+    // one epoll instance is woken per event (prevents thundering herd).
+    if (epi->exclusive)
+      break;
   }
   spinlock_release(&node->ep_lock);
 }

@@ -586,12 +586,30 @@ static uint64_t sys_signalfd(uint64_t fd, uint64_t mask_ptr, uint64_t sizemask,
   return sys_signalfd4(fd, mask_ptr, sizemask, 0, 0, 0);
 }
 
+static uint64_t sys_tkill(uint64_t tid, uint64_t sig,
+                          uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a2; (void)a3; (void)a4; (void)a5;
+  if (sig > 64) return (uint64_t)-22;
+  if (sig == 0) return 0;
+
+  struct thread *target = sched_get_thread_by_tid((uint32_t)tid);
+  if (!target) {
+    /* Fallback: deliver to current thread (single-threaded process) */
+    target = sched_get_current();
+    if (!target) return (uint64_t)-3; /* ESRCH */
+  }
+  target->pending_signals |= (1ULL << (sig - 1));
+  signal_notify_thread(target, (int)sig);
+  return 0;
+}
+
 void syscall_register_signal(void) {
   syscall_register(SYS_RT_SIGACTION, sys_rt_sigaction);
   syscall_register(SYS_RT_SIGPROCMASK, sys_rt_sigprocmask);
   syscall_register(SYS_SIGPROCMASK, sys_sigprocmask);
   syscall_register_raw(SYS_RT_SIGRETURN, sys_rt_sigreturn);
   syscall_register(SYS_SIGALTSTACK, sys_sigaltstack);
+  syscall_register(SYS_TKILL,  sys_tkill);
   syscall_register(SYS_TGKILL, sys_tgkill);
   syscall_register(SYS_KILL, sys_kill);
   syscall_register(SYS_SIGNALFD, sys_signalfd);

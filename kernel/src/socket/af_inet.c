@@ -474,8 +474,10 @@ ssize_t inet_recvfrom(socket_t *sock, void *buf, size_t len, int flags,
     if (nonblock)
       return -11; /* EAGAIN */
 
-    /* NIC is poll-driven: drive the network stack instead of blocking. */
-    net_poll();
+    /* NIC is poll-driven: drain all pending RX frames before re-checking
+     * the receive queue, so multi-segment TLS records are fully assembled. */
+    while (net_poll())
+      ;
     sched_yield();
   }
 
@@ -501,7 +503,9 @@ ssize_t inet_recvfrom(socket_t *sock, void *buf, size_t len, int flags,
     if (rest) {
       memcpy(rest->data, skb->data + copy_len, remain);
       rest->len = remain;
-      skb_queue_tail(&inet->receive_queue, rest);
+      /* Put the remainder back at the HEAD so subsequent reads see
+       * the correct byte stream order, not after later segments. */
+      skb_queue_head(&inet->receive_queue, rest);
     }
   }
 

@@ -107,6 +107,18 @@ void skb_queue_tail(sk_buff_head_t *list, sk_buff_t *skb) {
   spinlock_release(&list->lock);
 }
 
+void skb_queue_head(sk_buff_head_t *list, sk_buff_t *skb) {
+  spinlock_acquire(&list->lock);
+
+  skb->next = list->head;
+  list->head = skb;
+  if (!list->tail)
+    list->tail = skb;
+  list->len++;
+
+  spinlock_release(&list->lock);
+}
+
 sk_buff_t *skb_dequeue(sk_buff_head_t *list) {
   spinlock_acquire(&list->lock);
 

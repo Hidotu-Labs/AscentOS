@@ -114,7 +114,8 @@
 #define SYS_PRCTL 157
 #define SYS_ARCH_PRCTL 158
 #define SYS_SIGPROCMASK 186
-#define SYS_TGKILL 200
+#define SYS_TKILL       200   /* tkill(tid, sig) — used by musl raise() */
+#define SYS_TGKILL      234   /* tgkill(tgid, tid, sig) */
 #define SYS_FUTEX 202
 #define SYS_EPOLL_CREATE 213
 #define SYS_GETDENTS64 217

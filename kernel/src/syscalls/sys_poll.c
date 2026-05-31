@@ -80,10 +80,12 @@ static uint64_t do_poll(struct pollfd *fds, uint64_t nfds,
                           : (uint64_t)-1;
 
   while (1) {
-    /* Drive the NIC — this enqueues any waiting RX frames and dispatches
-     * them through the full network stack, which may call socket_wake()
-     * and fill socket receive queues. */
-    net_poll();
+    /* Drive the NIC — drain ALL pending RX frames before checking fds.
+     * net_poll() processes one ring entry per call; loop until the ring
+     * is empty so that multi-segment TLS records are fully reassembled
+     * before we test socket readiness. */
+    while (net_poll())
+      ;
 
     ready = poll_check_fds(fds, nfds, t);
     if (ready > 0)
