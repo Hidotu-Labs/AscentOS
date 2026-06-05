@@ -6,12 +6,12 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-// ── FAT32 Constants ──────────────────────────────────────────────────────────
+// FAT32 Constants
 
 #define FAT32_EOF_MARKER 0x0FFFFFF8 // End of chain marker
 #define FAT32_BAD_MARKER 0x0FFFFFF7 // Bad cluster marker
 
-// ── FAT32 Boot Parameter Block (BPB) ─────────────────────────────────────────
+// FAT32 Boot Parameter Block (BPB)
 
 typedef struct __attribute__((packed)) {
   uint8_t jmp_boot[3];       // Jump instruction
@@ -31,7 +31,7 @@ typedef struct __attribute__((packed)) {
   uint32_t total_sectors_32;  // Total sectors (if total_sectors_16 is 0)
 } fat32_bpb_t;
 
-// ── FAT32 Extended BIOS Parameter Block (EBPB) ───────────────────────────────
+// FAT32 Extended BIOS Parameter Block (EBPB)
 
 typedef struct __attribute__((packed)) {
   uint32_t fat_size_32;        // Sectors per FAT
@@ -49,8 +49,7 @@ typedef struct __attribute__((packed)) {
   uint8_t fs_type[8];          // "FAT32   "
 } fat32_ebpb_t;
 
-// ── Complete FAT32 Boot Sector
-// ────────────────────────────────────────────────
+// Complete FAT32 Boot Sector
 
 typedef struct __attribute__((packed)) {
   fat32_bpb_t bpb;
@@ -59,8 +58,7 @@ typedef struct __attribute__((packed)) {
   uint16_t signature;     // Boot signature (0xAA55)
 } fat32_boot_sector_t;
 
-// ── FAT32 Short Filename Directory Entry (SFN)
-// ────────────────────────────────
+// FAT32 Short Filename Directory Entry (SFN)
 
 #define FAT32_ATTR_READ_ONLY 0x01
 #define FAT32_ATTR_HIDDEN 0x02
@@ -85,7 +83,7 @@ typedef struct __attribute__((packed)) {
   uint32_t file_size;        // File size in bytes
 } fat32_dir_entry_t;
 
-// ── FAT32 Long Filename Directory Entry (LFN) ────────────────────────────────
+// FAT32 Long Filename Directory Entry (LFN)
 
 #define FAT32_LFN_LAST_ENTRY 0x40 // Last LFN entry in sequence
 
@@ -100,7 +98,7 @@ typedef struct __attribute__((packed)) {
   uint16_t name3[2]; // Last 2 characters
 } fat32_lfn_entry_t;
 
-// ── FAT32 FSINFO Structure ───────────────────────────────────────────────────
+// FAT32 FSINFO Structure
 
 typedef struct __attribute__((packed)) {
   uint32_t lead_signature;   // 0x41615252
@@ -112,8 +110,7 @@ typedef struct __attribute__((packed)) {
   uint32_t trail_signature;  // 0xAA550000
 } fat32_fsinfo_t;
 
-// ── FAT32 Special Cluster Values
-// ──────────────────────────────────────────────
+// FAT32 Special Cluster Values
 
 #define FAT32_FREE_CLUSTER 0x00000000
 #define FAT32_RESERVED_CLUSTER 0x0FFFFFF0
@@ -123,8 +120,7 @@ typedef struct __attribute__((packed)) {
 #define FAT32_IS_EOF(c) ((c) >= FAT32_EOF_CLUSTER_MIN)
 #define FAT32_IS_VALID(c) ((c) >= 2 && (c) < FAT32_EOF_CLUSTER_MIN)
 
-// ── FAT32 Mount Context
-// ───────────────────────────────────────────────────────
+// FAT32 Mount Context
 
 typedef struct {
   struct block_device *dev;     // Underlying block device
@@ -141,7 +137,7 @@ typedef struct {
   vfs_node_t *root_node;        // VFS node for root directory
 } fat32_mount_t;
 
-// ── Public API ───────────────────────────────────────────────────────────────
+// Public API
 
 // Mount a FAT32 filesystem from the given block device onto the given VFS node.
 // Returns 0 on success, -1 on failure.

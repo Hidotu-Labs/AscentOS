@@ -1,4 +1,4 @@
-// ── Poll/Select Syscalls: poll, ppoll, select, pselect6 ─────────────────────
+// Poll/Select Syscalls: poll, ppoll, select, pselect6
 #include "../apic/lapic_timer.h"
 #include "../console/klog.h"
 #include "../fs/vfs.h"
@@ -272,7 +272,7 @@ static uint64_t sys_select(uint64_t nfds, uint64_t readfds, uint64_t writefds,
   return do_pselect6(nfds, readfds, writefds, exceptfds, timeout_ms);
 }
 
-// ── Register poll/select syscalls ───────────────────────────────────────────
+// Register poll/select syscalls
 void syscall_register_poll(void) {
   syscall_register(SYS_POLL, sys_poll);
   syscall_register(SYS_PPOLL, sys_ppoll);

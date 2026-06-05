@@ -1,4 +1,4 @@
-// ── Shared Memory Syscalls ───────────────────────────────────────────────────
+// Shared Memory Syscalls
 // Implementation of System V Shared Memory (shmget, shmat, shmdt, shmctl)
 //
 // Each SHM segment owns a set of physical pages that can be mapped into
@@ -21,7 +21,7 @@
 #define PAGE_ALIGN_UP(x) (((x) + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1))
 #define MAX_SHM_PAGES (SHM_MAX_SIZE / PAGE_SIZE)
 
-// ── Per-segment descriptor ──────────────────────────────────────────────────
+// Per-segment descriptor
 
 struct shm_segment {
   bool active;          // Slot in use
@@ -37,7 +37,7 @@ struct shm_segment {
   uint32_t last_pid;    // PID of last shmat/shmdt
 };
 
-// ── Global State ────────────────────────────────────────────────────────────
+// Global State
 
 static spinlock_t shm_lock = SPINLOCK_INIT;
 static struct shm_segment shm_table[SHM_MAX_SEGMENTS];
@@ -46,7 +46,7 @@ static uint32_t shm_next_id = 1;
 // Backing storage for phys_pages arrays (static to avoid heap dependency loop)
 static uint64_t shm_page_arrays[SHM_MAX_SEGMENTS][MAX_SHM_PAGES];
 
-// ── Initialization ──────────────────────────────────────────────────────────
+// Initialization
 
 void shm_init(void) {
   memset(shm_table, 0, sizeof(shm_table));
@@ -55,7 +55,7 @@ void shm_init(void) {
   klog_puts("[SHM] Shared memory subsystem initialized.\n");
 }
 
-// ── sys_shmget ───────────────────────────────────────────────────────────────
+// sys_shmget
 
 int64_t sys_shmget(uint64_t key, uint64_t size, uint64_t shmflg, uint64_t a3,
                    uint64_t a4, uint64_t a5) {
@@ -156,7 +156,7 @@ int64_t sys_shmget(uint64_t key, uint64_t size, uint64_t shmflg, uint64_t a3,
   return (int64_t)id;
 }
 
-// ── sys_shmat ───────────────────────────────────────────────────────────────
+// sys_shmat
 
 #define SHM_MMAP_REGION_BASE 0x7E0000000000ULL
 #define SHM_MMAP_REGION_LIMIT 0x7F0000000000ULL
@@ -266,7 +266,7 @@ int64_t sys_shmat(uint64_t shmid, uint64_t shmaddr, uint64_t shmflg,
   return (int64_t)vaddr;
 }
 
-// ── sys_shmdt ───────────────────────────────────────────────────────────────
+// sys_shmdt
 
 int64_t sys_shmdt(uint64_t shmaddr, uint64_t a1, uint64_t a2, uint64_t a3,
                   uint64_t a4, uint64_t a5) {
@@ -358,7 +358,7 @@ int64_t sys_shmdt(uint64_t shmaddr, uint64_t a1, uint64_t a2, uint64_t a3,
   return 0;
 }
 
-// ── sys_shmctl ───────────────────────────────────────────────────────────────
+// sys_shmctl
 
 int64_t sys_shmctl(uint64_t shmid, uint64_t cmd, uint64_t buf, uint64_t a3,
                    uint64_t a4, uint64_t a5) {
@@ -428,7 +428,7 @@ int64_t sys_shmctl(uint64_t shmid, uint64_t cmd, uint64_t buf, uint64_t a3,
   return -22; // EINVAL
 }
 
-// ── Shell Introspection ─────────────────────────────────────────────────────
+// Shell Introspection
 
 void shm_print_status(void) {
   spinlock_acquire(&shm_lock);
@@ -466,7 +466,7 @@ void shm_print_status(void) {
   spinlock_release(&shm_lock);
 }
 
-// ── Registration ────────────────────────────────────────────────────────────
+// Registration
 
 void syscall_register_shm(void) {
   syscall_register(SYS_SHMGET, (syscall_handler_t)sys_shmget);

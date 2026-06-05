@@ -3,12 +3,12 @@
 
 #include <stdint.h>
 
-// ── EtherType values (in host byte order — convert with htons before wire) ──
+// EtherType values (in host byte order — convert with htons before wire)
 #define ETHERTYPE_IPV4  0x0800
 #define ETHERTYPE_ARP   0x0806
 #define ETHERTYPE_IPV6  0x86DD
 
-// ── Ethernet frame header (14 bytes) ────────────────────────────────────────
+// Ethernet frame header (14 bytes)
 typedef struct __attribute__((packed)) {
     uint8_t  dst[6];       // Destination MAC address
     uint8_t  src[6];       // Source MAC address

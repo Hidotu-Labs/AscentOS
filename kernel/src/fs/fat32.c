@@ -6,7 +6,7 @@
 #include "vfs.h"
 #include <stddef.h>
 
-// ── Forward Declarations ─────────────────────────────────────────────────────
+// Forward Declarations
 
 static struct dirent *fat32_readdir_impl(vfs_node_t *node, uint32_t index);
 static vfs_node_t *fat32_finddir_impl(vfs_node_t *node, char *name);
@@ -18,7 +18,7 @@ static int fat32_unlink_impl(vfs_node_t *parent, char *name);
 static int fat32_rmdir_impl(vfs_node_t *parent, char *name);
 static int fat32_truncate_impl(vfs_node_t *node, uint32_t new_size);
 
-// ── Internal Helpers ─────────────────────────────────────────────────────────
+// Internal Helpers
 
 // Convert FAT date (16-bit) to Unix timestamp (approximate)
 static uint32_t fat_date_to_unix(uint16_t date, uint16_t time) {
@@ -49,7 +49,7 @@ static bool is_lfn_entry(fat32_dir_entry_t *entry) {
   return entry->attr == FAT32_ATTR_LFN;
 }
 
-// ── FAT Access ───────────────────────────────────────────────────────────────
+// FAT Access
 
 // Read a FAT entry to get the next cluster in a chain
 uint32_t fat32_get_next_cluster(fat32_mount_t *mnt, uint32_t cluster) {
@@ -95,7 +95,7 @@ int fat32_read_cluster(fat32_mount_t *mnt, uint32_t cluster, void *buffer) {
   return err;
 }
 
-// ── Write Support (Phase 5) ──────────────────────────────────────────────────
+
 
 // Write a FAT entry (set next cluster in chain)
 static int fat32_set_fat_entry(fat32_mount_t *mnt, uint32_t cluster,
@@ -207,7 +207,7 @@ int fat32_write_cluster(fat32_mount_t *mnt, uint32_t cluster, void *buffer) {
                                  mnt->sectors_per_cluster, buffer);
 }
 
-// ── Deletion Support (Phase 6) ───────────────────────────────────────────────
+
 
 // Free all clusters in a chain starting from the given cluster
 static int fat32_free_cluster_chain(fat32_mount_t *mnt,
@@ -727,7 +727,7 @@ static int fat32_create_impl(vfs_node_t *parent, char *name,
   return 0; // Success
 }
 
-// ── VFS Operations ───────────────────────────────────────────────────────────
+// VFS Operations
 
 // Read from a file
 static uint32_t fat32_read_impl(vfs_node_t *node, uint32_t offset,
@@ -853,7 +853,7 @@ static vfs_node_t *fat32_make_vfs_node(fat32_mount_t *mnt,
   return node;
 }
 
-// ── LFN Support ──────────────────────────────────────────────────────────────
+// LFN Support
 
 // Calculate checksum for LFN entries
 static uint8_t lfn_checksum(uint8_t *sfn) {
@@ -903,8 +903,7 @@ static int decode_lfn(fat32_lfn_entry_t *entries, int count, char *out,
   return out_pos;
 }
 
-// ── Directory Operations
-// ──────────────────────────────────────────────────────
+// Directory Operations
 
 // Context for directory iteration
 typedef struct {
@@ -1160,8 +1159,7 @@ static vfs_node_t *fat32_finddir_impl(vfs_node_t *node, char *name) {
   return result;
 }
 
-// ── Mount Operations
-// ──────────────────────────────────────────────────────────
+// Mount Operations
 
 int fat32_mount(struct block_device *dev, vfs_node_t *mountpoint) {
   if (!dev || !mountpoint)
@@ -1329,8 +1327,7 @@ int fat32_mount_root(struct block_device *dev) {
   return 0;
 }
 
-// ── Self-Test for Phases 1-6
-// ──────────────────────────────────────────────────
+// Self-Test for Phases 1-6
 
 void fat32_self_test(void) {
   klog_puts("\n[FAT32] ═══ FAT32 Driver Self-Test (Phases 1-6) ═══\n");

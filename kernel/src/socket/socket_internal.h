@@ -6,8 +6,7 @@
 #include "socket.h"
 #include <stdint.h>
 
-// ── Internal Socket Subsystem State
-// ───────────────────────────────────────────
+// Internal Socket Subsystem State
 
 // Maximum number of sockets system-wide
 #define SOCKET_MAX_COUNT 4096
@@ -17,7 +16,7 @@ extern socket_t *socket_table[SOCKET_MAX_COUNT];
 extern int socket_count;
 extern spinlock_t socket_table_lock;
 
-// ── Unix Domain Socket Internal Structure
+// Unix Domain Socket Internal Structure
 // ────────────────────────────────────── This is the family-specific data
 // pointed to by socket->sk for AF_UNIX
 
@@ -37,7 +36,7 @@ typedef struct unix_sock {
   wait_queue_t *wait;            // Points to parent->wait_queue
   struct unix_sock *accept_next; // Next in accept queue
 
-  // Receive buffer (simple ring buffer for Phase 1)
+
   uint8_t *recv_buf;
   size_t recv_buf_size;
   size_t recv_buf_head;
@@ -60,7 +59,7 @@ typedef struct unix_sock {
   bool orphaned;          // Client closed before accept - pending cleanup
   bool accepted_orphaned; // Accepted socket whose peer closed before accept
 
-  // Socket options (Phase 6)
+
   bool passcred;   // SO_PASSCRED - pass credentials in recvmsg
   int rcvtimeo_ms; // SO_RCVTIMEO - receive timeout in ms
   int sndtimeo_ms; // SO_SNDTIMEO - send timeout in ms
@@ -69,8 +68,8 @@ typedef struct unix_sock {
   int scm_count;                    // Number of pending nodes
 } unix_sock_t;
 
-// ── Socket Buffer (sk_buff-like structure)
-// ──────────────────────────────────── Simplified version for Phase 1
+// Socket Buffer (sk_buff-like structure)
+
 
 typedef struct sk_buff {
   uint8_t *data;
@@ -83,8 +82,7 @@ typedef struct sk_buff {
   uint16_t src_port;
 } sk_buff_t;
 
-// ── Socket Buffer Queue
-// ───────────────────────────────────────────────────────
+// Socket Buffer Queue
 typedef struct sk_buff_head {
   sk_buff_t *head;
   sk_buff_t *tail;
@@ -92,8 +90,7 @@ typedef struct sk_buff_head {
   spinlock_t lock;
 } sk_buff_head_t;
 
-// ── AF_NETLINK Socket Internal Structure
-// ──────────────────────────────────────────────
+// AF_NETLINK Socket Internal Structure
 typedef struct netlink_sock {
   socket_t *parent;
   int protocol;
@@ -104,8 +101,7 @@ typedef struct netlink_sock {
   struct list_head list;
 } netlink_sock_t;
 
-// ── Internal Functions
-// ────────────────────────────────────────────────────────
+// Internal Functions
 
 // Socket table management
 int socket_table_alloc(void);
@@ -140,7 +136,7 @@ void socket_wake(socket_t *sock);
 int socket_getsockname(socket_t *sock, struct sockaddr *addr, int *addrlen);
 int socket_getpeername(socket_t *sock, struct sockaddr *addr, int *addrlen);
 
-// ── Socket File Operations
+// Socket File Operations
 // ───────────────────────────────────────────────────── These integrate sockets
 // with the VFS
 
@@ -153,8 +149,7 @@ void socket_vfs_close(struct vfs_node *node);
 int socket_vfs_poll(struct vfs_node *node, int events);
 int socket_vfs_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg);
 
-// ── Socket State Helpers
-// ──────────────────────────────────────────────────────
+// Socket State Helpers
 
 static inline bool socket_is_connected(socket_t *sock) {
   return sock->state == SS_CONNECTED;
@@ -172,8 +167,7 @@ static inline bool socket_is_nonblocking(socket_t *sock) {
   return (sock->flags & SOCK_NONBLOCK) != 0;
 }
 
-// ── Error Handling Helpers
-// ────────────────────────────────────────────────────
+// Error Handling Helpers
 
 static inline void socket_set_error(socket_t *sock, int error) {
   sock->error = error;

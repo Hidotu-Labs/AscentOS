@@ -1,4 +1,4 @@
-// ── sysfs.c ──────────────────────────────────────────────────────────────────
+// sysfs.c
 // A real (ramfs-backed) /sys implementation.
 //
 // Layout:
@@ -36,7 +36,6 @@
 // All files are backed by ramfs and written once at boot.  The mount is done
 // the same way as procfs: allocate a fresh ramfs root, then vfs_mount() it
 // onto the /sys directory node so the VFS redirects all lookups through it.
-// ─────────────────────────────────────────────────────────────────────────────
 
 #include "fs/sysfs.h"
 #include "console/klog.h"
@@ -52,7 +51,7 @@
 // GPU device path for netlink uevents
 char sysfs_gpu_devpath[128] = "/devices/pci0000:00/0000:00:01.0/drm/card0";
 
-// ── Helpers ───────────────────────────────────────────────────────────────
+// Helpers
 
 static void u32_to_hex(uint32_t val, char *buf, int width) {
   const char *hex = "0123456789abcdef";
@@ -156,7 +155,7 @@ static void sysfs_mkfile(vfs_node_t *parent, const char *name,
   vfs_write(f, 0, len, (uint8_t *)content);
 }
 
-// ── PCI bus population ────────────────────────────────────────────────────
+// PCI bus population
 
 static void sysfs_populate_pci(vfs_node_t *pci_devices_dir) {
   uint32_t count = pci_get_device_count();
@@ -244,7 +243,7 @@ static void sysfs_populate_pci(vfs_node_t *pci_devices_dir) {
   }
 }
 
-// ── Block class population ────────────────────────────────────────────────
+// Block class population
 
 static void sysfs_populate_block(vfs_node_t *block_class_dir) {
   int count = block_count();
@@ -277,7 +276,7 @@ static void sysfs_populate_block(vfs_node_t *block_class_dir) {
   }
 }
 
-// ── Net class population ──────────────────────────────────────────────────
+// Net class population
 
 static void sysfs_populate_net(vfs_node_t *net_class_dir) {
   if (!nic_is_present())
@@ -309,7 +308,7 @@ static void sysfs_populate_net(vfs_node_t *net_class_dir) {
   sysfs_mkfile(eth0, "mtu", "1500\n");
 }
 
-// ── CPU devices population ────────────────────────────────────────────────
+// CPU devices population
 
 static void sysfs_populate_cpus(vfs_node_t *cpu_dir) {
   uint32_t count = cpu_get_count();
@@ -331,7 +330,7 @@ static void sysfs_populate_cpus(vfs_node_t *cpu_dir) {
   sysfs_mkfile(cpu_dir, "present", cpumask);
 }
 
-// ── Main init ─────────────────────────────────────────────────────────────
+// Main init
 
 void sysfs_init(void) {
   if (!fs_root)
@@ -357,16 +356,16 @@ void sysfs_init(void) {
   ramfs_mount_on(sysfs_root);
   vfs_mount(sys_dir, sysfs_root);
 
-  // ── /sys/bus/pci/devices ─────────────────────────────────────────────
+  // /sys/bus/pci/devices
   vfs_node_t *bus_dir = sysfs_mkdir(sysfs_root, "bus");
   vfs_node_t *pci_dir = sysfs_mkdir(bus_dir, "pci");
   vfs_node_t *pci_dev_dir = sysfs_mkdir(pci_dir, "devices");
   sysfs_populate_pci(pci_dev_dir);
 
-  // ── /sys/class ───────────────────────────────────────────────────────
+  // /sys/class
   vfs_node_t *class_dir = sysfs_mkdir(sysfs_root, "class");
 
-  // ── /sys/devices ─────────────────────────────────────────────────────
+  // /sys/devices
   // Must be created before class/drm so the symlink target dirs exist
   vfs_node_t *devices_dir = sysfs_mkdir(sysfs_root, "devices");
   vfs_node_t *system_dir = sysfs_mkdir(devices_dir, "system");
@@ -381,7 +380,7 @@ void sysfs_init(void) {
   vfs_node_t *net_class = sysfs_mkdir(class_dir, "net");
   sysfs_populate_net(net_class);
 
-  // ── /sys/class/drm/card0 ─────────────────────────────────────────────
+  // /sys/class/drm/card0
   // card0 is a symlink to the real device path (wlroots uses readlink on it)
   // Target: ../../devices/pci0000:00/0000:BB:SS.F/drm/card0
   // Find the display controller (PCI class 0x03)
@@ -479,11 +478,20 @@ void sysfs_init(void) {
                "SUBSYSTEM=input\nID_INPUT=1\nID_INPUT_KEYBOARD=1\n"
                "ID_BUS=isa\n"
                "PRODUCT=3/1/1/ab41\n"
-               "ID_SERIAL=ascentos_kbd\nNAME=\"AscentOS Keyboard\"\n");
+               "ID_SERIAL=ascentos_kbd\nNAME=\"AscentOS Keyboard\"\n"
+               "ID_SEAT=seat0\n");
   sysfs_mkfile(input0_dir, "uevent",
                "SUBSYSTEM=input\nID_INPUT=1\nID_INPUT_KEYBOARD=1\n"
                "NAME=\"AscentOS Keyboard\"\n"
-               "PRODUCT=3/1/1/ab41\n");
+               "PRODUCT=3/1/1/ab41\n"
+               "ID_SEAT=seat0\n");
+  sysfs_mkfile(input0_dir, "name", "AscentOS Keyboard\n");
+  vfs_node_t *id0_dir = sysfs_mkdir(input0_dir, "id");
+  sysfs_mkfile(id0_dir, "bustype", "0011\n");
+  sysfs_mkfile(id0_dir, "vendor", "0001\n");
+  sysfs_mkfile(id0_dir, "product", "0001\n");
+  sysfs_mkfile(id0_dir, "version", "ab41\n");
+
   sysfs_symlink(input0_dir, "subsystem", "../../../../class/input");
   sysfs_symlink(event0_dir, "subsystem", "../../../../../class/input");
   sysfs_symlink(event0_dir, "device", "..");
@@ -501,11 +509,20 @@ void sysfs_init(void) {
   sysfs_mkfile(event1_dir, "uevent",
                "MAJOR=13\nMINOR=65\nDEVNAME=input/event1\n"
                "SUBSYSTEM=input\nID_INPUT=1\nID_INPUT_MOUSE=1\n"
-               "ID_SERIAL=ascentos_mouse\nNAME=\"AscentOS Mouse\"\n");
+               "ID_SERIAL=ascentos_mouse\nNAME=\"AscentOS Mouse\"\n"
+               "ID_SEAT=seat0\n");
   sysfs_mkfile(input1_dir, "uevent",
                "SUBSYSTEM=input\nID_INPUT=1\nID_INPUT_MOUSE=1\n"
                "NAME=\"AscentOS Mouse\"\n"
-               "PRODUCT=3/1/1/ab42\n");
+               "PRODUCT=3/1/1/ab42\n"
+               "ID_SEAT=seat0\n");
+  sysfs_mkfile(input1_dir, "name", "AscentOS Mouse\n");
+  vfs_node_t *id1_dir = sysfs_mkdir(input1_dir, "id");
+  sysfs_mkfile(id1_dir, "bustype", "0011\n");
+  sysfs_mkfile(id1_dir, "vendor", "0002\n");
+  sysfs_mkfile(id1_dir, "product", "0005\n");
+  sysfs_mkfile(id1_dir, "version", "0000\n");
+
   sysfs_symlink(input1_dir, "subsystem", "../../../../class/input");
   sysfs_symlink(event1_dir, "subsystem", "../../../../../class/input");
   sysfs_symlink(event1_dir, "device", "..");
@@ -522,7 +539,7 @@ void sysfs_init(void) {
     sysfs_symlink(input_devices_dir, "event1", "../event1");
   }
 
-  // ── /sys/dev/block  /sys/dev/char ────────────────────────────────────
+  // /sys/dev/block  /sys/dev/char
   vfs_node_t *dev_dir = sysfs_mkdir(sysfs_root, "dev");
   sysfs_mkdir(dev_dir, "block");
   vfs_node_t *char_dir = sysfs_mkdir(dev_dir, "char");
@@ -572,7 +589,7 @@ void sysfs_init(void) {
   // ../../devices/virtual/input/input1/event1
   sysfs_symlink(char_dir, "13:65", "../../devices/virtual/input/input1/event1");
 
-  // ── /sys/subsystem ──────────────────────────────────────────────────
+  // /sys/subsystem
   // libinput and others expect this to exist for device discovery.
   // Modern Linux has /sys/subsystem/ where entries are symlinks to bus or
   // class.
@@ -583,15 +600,15 @@ void sysfs_init(void) {
     sysfs_symlink(subsystem_dir, "drm", "../class/drm");
   }
 
-  // ── /sys/kernel ──────────────────────────────────────────────────────
+  // /sys/kernel
   vfs_node_t *kernel_dir = sysfs_mkdir(sysfs_root, "kernel");
   sysfs_mkfile(kernel_dir, "hostname", "ascentos\n");
 
-  // ── /sys/power ───────────────────────────────────────────────────────
+  // /sys/power
   vfs_node_t *power_dir = sysfs_mkdir(sysfs_root, "power");
   sysfs_mkfile(power_dir, "state", "mem\n");
 
-  // ── /run/udev/data population ───────────────────────────────────────
+  // /run/udev/data population
   // libinput often falls back to the udev database if uevent is insufficient.
   // We ensure /run/udev/data is present and populated with required flags.
   vfs_node_t *run_dir = vfs_resolve_path("/run");
@@ -613,19 +630,18 @@ void sysfs_init(void) {
       data_dir = sysfs_mkdir(udev_dir, "data");
 
     if (data_dir) {
-      sysfs_mkfile(data_dir, "+input:input0",
-                   "I:1\n"
+      sysfs_mkfile(data_dir, "c13:64",
+                   "P:/devices/virtual/input/input0/event0\n"
                    "E:ID_INPUT=1\n"
                    "E:ID_INPUT_KEYBOARD=1\n"
+                   "E:ID_SEAT=seat0\n"
                    "E:NAME=\"AscentOS Keyboard\"\n");
-      sysfs_mkfile(data_dir, "+input:input1",
-                   "I:2\n"
+      sysfs_mkfile(data_dir, "c13:65",
+                   "P:/devices/virtual/input/input1/event1\n"
                    "E:ID_INPUT=1\n"
                    "E:ID_INPUT_MOUSE=1\n"
+                   "E:ID_SEAT=seat0\n"
                    "E:NAME=\"AscentOS Mouse\"\n");
-      sysfs_mkfile(data_dir, "+input:input",
-                   "E:SUBSYSTEM=input\n"
-                   "E:ID_INPUT=1\n");
     }
   }
 

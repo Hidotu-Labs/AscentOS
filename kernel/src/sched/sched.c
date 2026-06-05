@@ -67,6 +67,8 @@ void sched_init(void) {
     spinlock_acquire(&tid_lock);
     idle_thread->tid = next_tid++;
     spinlock_release(&tid_lock);
+    idle_thread->tgid = idle_thread->tid; // Each process is its own group leader
+    idle_thread->ss_flags = SS_DISABLE;    // No alternate signal stack by default
     idle_thread->is_idle = true;
     idle_thread->pgid = idle_thread->tid;
     idle_thread->state = THREAD_RUNNING;
@@ -216,6 +218,8 @@ struct thread *sched_create_kernel_thread(void (*entry)(void),
 
   spinlock_acquire(&tid_lock);
   t->tid = next_tid++;
+  t->tgid = t->tid;  // Default: each thread is its own group leader
+  t->ss_flags = SS_DISABLE;  // No alternate signal stack by default
   t->global_next = global_thread_list;
   global_thread_list = t;
 

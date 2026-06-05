@@ -121,7 +121,7 @@ static void mouse_callback(struct registers *regs) {
     if (height > 0 && global_mouse_state.y >= (int32_t)height)
       global_mouse_state.y = height - 1;
 
-    // ── Push evdev events for X11 ────────────────────────────────────
+    // Push evdev events for X11
     evdev_device_t *mdev = evdev_get_mouse();
     if (mdev) {
       // Relative motion events
@@ -197,7 +197,7 @@ void mouse_init(void) {
 
 mouse_state_t mouse_get_state(void) { return global_mouse_state; }
 
-// ── VFS Integration ──────────────────────────────────────────────────────────
+// VFS Integration
 
 static uint32_t mouse_vfs_read(vfs_node_t *node, uint32_t offset, uint32_t size,
                                uint8_t *buffer) {

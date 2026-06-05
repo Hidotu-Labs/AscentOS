@@ -355,7 +355,7 @@ uint32_t procfs_stat_read(vfs_node_t *node, uint32_t offset, uint32_t size,
   return size;
 }
 
-// ── /proc/loadavg ─────────────────────────────────────────────────────────
+// /proc/loadavg
 // Format: "load1 load5 load15 running/total last_pid\n"
 // htop parses this for the load average display.
 // We approximate load as (running_threads / ncpus) clamped to a reasonable
@@ -460,7 +460,7 @@ uint32_t procfs_cmdline_read(vfs_node_t *node, uint32_t offset, uint32_t size,
   return size;
 }
 
-// ── /proc/net/dev ─────────────────────────────────────────────────────────
+// /proc/net/dev
 // Format expected by IceWM, netsurf, and other tools:
 //   Inter-|   Receive   ...   |  Transmit ...
 //    face |bytes packets ...  | bytes packets ...
@@ -493,7 +493,7 @@ static uint32_t procfs_net_dev_read(vfs_node_t *node, uint32_t offset,
   return size;
 }
 
-// ── Dynamic per-PID /proc/<pid>/ support ─────────────────────────────────
+// Dynamic per-PID /proc/<pid>/ support
 //
 // Rather than pre-creating directories at boot (processes come and go), we
 // install custom readdir/finddir hooks on the procfs root that synthesise
@@ -503,7 +503,7 @@ static uint32_t procfs_net_dev_read(vfs_node_t *node, uint32_t offset,
 // /proc/<pid>/status – human-readable status (optional but helpful)
 // /proc/<pid>/cmdline – argv[0] of the process
 
-// ── Helpers ──────────────────────────────────────────────────────────────
+// Helpers
 
 static void pid_u32_to_str(uint32_t val, char *buf) {
   if (val == 0) {
@@ -549,7 +549,7 @@ static char thread_state_char(thread_state_t s) {
   }
 }
 
-// ── /proc/<pid>/stat read ─────────────────────────────────────────────────
+// /proc/<pid>/stat read
 //
 // Linux /proc/<pid>/stat format (fields 1-52, space-separated):
 //   pid (comm) state ppid pgrp session tty_nr ...
@@ -622,7 +622,7 @@ static uint32_t procfs_pid_stat_read(vfs_node_t *node, uint32_t offset,
   return size;
 }
 
-// ── /proc/<pid>/status read ───────────────────────────────────────────────
+// /proc/<pid>/status read
 
 static uint32_t procfs_pid_status_read(vfs_node_t *node, uint32_t offset,
                                        uint32_t size, uint8_t *buffer) {
@@ -699,7 +699,7 @@ static uint32_t procfs_pid_status_read(vfs_node_t *node, uint32_t offset,
   return size;
 }
 
-// ── /proc/<pid>/cmdline read ──────────────────────────────────────────────
+// /proc/<pid>/cmdline read
 
 static uint32_t procfs_pid_cmdline_read(vfs_node_t *node, uint32_t offset,
                                         uint32_t size, uint8_t *buffer) {
@@ -720,7 +720,7 @@ static uint32_t procfs_pid_cmdline_read(vfs_node_t *node, uint32_t offset,
   return size;
 }
 
-// ── /proc/<pid>/statm read ────────────────────────────────────────────────
+// /proc/<pid>/statm read
 // Format: "size resident shared text lib data dt\n"
 // All values in pages (4096 bytes). htop uses this for VIRT/RES columns.
 static uint32_t procfs_pid_statm_read(vfs_node_t *node, uint32_t offset,
@@ -774,7 +774,7 @@ static uint32_t procfs_pid_statm_read(vfs_node_t *node, uint32_t offset,
   return size;
 }
 
-// ── /proc/<pid>/io read ───────────────────────────────────────────────────
+// /proc/<pid>/io read
 // htop 3.x reads this for I/O accounting. Stub with zeros.
 static uint32_t procfs_pid_io_read(vfs_node_t *node, uint32_t offset,
                                    uint32_t size, uint8_t *buffer) {
@@ -794,7 +794,7 @@ static uint32_t procfs_pid_io_read(vfs_node_t *node, uint32_t offset,
   return size;
 }
 
-// ── /proc/<pid>/fd/ support ──────────────────────────────────────────────
+// /proc/<pid>/fd/ support
 
 static int procfs_pid_fd_link_readlink(vfs_node_t *node, char *buf,
                                        uint32_t size) {
@@ -880,7 +880,7 @@ static struct dirent *procfs_pid_fd_readdir(vfs_node_t *node, uint32_t index) {
   return NULL;
 }
 
-// ── Synthesise a /proc/<pid>/ directory node on demand ───────────────────
+// Synthesise a /proc/<pid>/ directory node on demand
 
 static vfs_node_t *make_pid_dir(uint32_t pid) {
   vfs_node_t *dir = kmalloc(sizeof(vfs_node_t));
@@ -974,7 +974,7 @@ static vfs_node_t *make_pid_dir(uint32_t pid) {
   return dir;
 }
 
-// ── Number of static entries in the procfs root (excluding . and ..) ─────
+// Number of static entries in the procfs root (excluding . and ..)
 // These are the nodes added by procfs_init before we install our hooks:
 //   meminfo cpuinfo partitions mounts uptime stat heapinfo cmdline loadavg net → 10
 #define PROCFS_STATIC_ENTRIES 10
@@ -993,7 +993,7 @@ static int procfs_self_readlink(vfs_node_t *node, char *buf, uint32_t size) {
   return (int)len;
 }
 
-// ── Custom readdir for /proc ──────────────────────────────────────────────
+// Custom readdir for /proc
 //
 // Index layout:
 //   0        → "."
@@ -1054,7 +1054,7 @@ static struct dirent *procfs_root_readdir(vfs_node_t *node, uint32_t index) {
   return NULL; // end of directory
 }
 
-// ── Custom finddir for /proc ──────────────────────────────────────────────
+// Custom finddir for /proc
 
 static vfs_node_t *procfs_root_finddir(vfs_node_t *node, char *name) {
   if (strcmp(name, "self") == 0) {

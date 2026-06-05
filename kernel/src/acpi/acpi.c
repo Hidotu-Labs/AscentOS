@@ -5,13 +5,13 @@
 #include "drivers/manager/device.h"
 #include <limine.h>
 
-// ── Internal state ───────────────────────────────────────────────────────────
+// Internal state
 static struct limine_rsdp_response *rsdp_response = NULL;
 static struct acpi_rsdp *rsdp = NULL;
 static struct acpi_sdt_header *root_sdt = NULL;
 static bool use_xsdt = false;
 
-// ── Parsed MADT data ────────────────────────────────────────────────────────
+// Parsed MADT data
 static uint32_t lapic_base_address = 0;
 static uint32_t ioapic_address     = 0;
 static uint32_t ioapic_gsi         = 0;
@@ -29,7 +29,7 @@ static uint32_t iso_count = 0;
 static uint8_t cpu_apic_ids[MAX_CPUS_ACPI];
 static uint32_t cpu_count = 0;
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
+// Helpers
 
 static void print_uint32(uint32_t num) {
     if (num == 0) { console_putchar('0'); return; }
@@ -55,7 +55,7 @@ static bool acpi_validate_checksum(void *table, size_t length) {
     return sum == 0;
 }
 
-// ── Table lookup ─────────────────────────────────────────────────────────────
+// Table lookup
 
 void *acpi_find_table(const char *signature) {
     if (!root_sdt) return NULL;
@@ -89,7 +89,7 @@ void *acpi_find_table(const char *signature) {
     return NULL;
 }
 
-// ── MADT Data Accessors ─────────────────────────────────────────────────────
+// MADT Data Accessors
 
 uint32_t acpi_get_lapic_base(void)      { return lapic_base_address; }
 uint32_t acpi_get_ioapic_base(void)     { return ioapic_address; }
@@ -113,7 +113,7 @@ struct acpi_mcfg *acpi_get_mcfg(void) {
     return (struct acpi_mcfg *)acpi_find_table("MCFG");
 }
 
-// ── FADT Data ────────────────────────────────────────────────────────────────
+// FADT Data
 static struct acpi_fadt *fadt_table = NULL;
 
 struct acpi_fadt *acpi_get_fadt(void) {
@@ -254,7 +254,7 @@ bool acpi_parse_fadt(void) {
     return true;
 }
 
-// ── Initialization ──────────────────────────────────────────────────────────
+// Initialization
 
 void acpi_init(struct limine_rsdp_response *response) {
     rsdp_response = response;
@@ -293,7 +293,7 @@ void acpi_init(struct limine_rsdp_response *response) {
         return;
     }
 
-    // ── Parse the MADT ──────────────────────────────────────────────────
+    // Parse the MADT
     struct acpi_madt *madt = (struct acpi_madt *)acpi_find_table("APIC");
     if (!madt) {
         console_puts("[ERR] No MADT (APIC Table) found.\n");
@@ -321,7 +321,7 @@ void acpi_init(struct limine_rsdp_response *response) {
         struct acpi_madt_entry_header *header = (struct acpi_madt_entry_header *)entries;
 
         switch (header->type) {
-        case 0: { // ── Local APIC ────────────────────────────────────────
+        case 0: { // Local APIC
             struct acpi_madt_local_apic *lapic = (struct acpi_madt_local_apic *)entries;
             if (lapic->flags & 1) {
                 if (core_count < MAX_CPUS_ACPI) {
@@ -331,7 +331,7 @@ void acpi_init(struct limine_rsdp_response *response) {
             }
             break;
         }
-        case 1: { // ── I/O APIC ─────────────────────────────────────────
+        case 1: { // I/O APIC
             struct acpi_madt_ioapic *io = (struct acpi_madt_ioapic *)entries;
             // Store the first I/O APIC we find
             if (ioapic_address == 0) {
@@ -347,7 +347,7 @@ void acpi_init(struct limine_rsdp_response *response) {
             }
             break;
         }
-        case 2: { // ── Interrupt Source Override ─────────────────────────
+        case 2: { // Interrupt Source Override
             struct acpi_madt_iso *iso = (struct acpi_madt_iso *)entries;
             if (iso_count < MAX_ISOS) {
                 iso_entries[iso_count].irq_source = iso->irq_source;

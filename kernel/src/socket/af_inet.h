@@ -3,11 +3,11 @@
 
 #include "socket_internal.h"
 
-// ── AF_INET Socket Initialization ───────────────────────────────────────────
+// AF_INET Socket Initialization
 void af_inet_init(void);
 void af_inet_self_test(void);
 
-// ── AF_INET Internal Structure ──────────────────────────────────────────────
+// AF_INET Internal Structure
 typedef struct inet_sock {
   socket_t *parent;
   struct sockaddr_in local_addr;
@@ -24,7 +24,7 @@ typedef struct inet_sock {
   sk_buff_head_t receive_queue;
 } inet_sock_t;
 
-// ── AF_INET Operations ──────────────────────────────────────────────────────
+// AF_INET Operations
 int inet_create(socket_t *sock, int protocol);
 int inet_bind(socket_t *sock, struct sockaddr *addr, int addrlen);
 int inet_connect(socket_t *sock, struct sockaddr *addr, int addrlen);

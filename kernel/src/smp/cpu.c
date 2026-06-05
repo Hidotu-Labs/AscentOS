@@ -13,18 +13,18 @@
 #include "mm/vmm.h"
 #include <stddef.h>
 
-// ── External Trampoline Symbols ──────────────────────────────────────────────
+// External Trampoline Symbols
 extern uint8_t trampoline_start[];
 extern uint8_t trampoline_end[];
 extern uint8_t trampoline_data_cr3[];
 extern uint8_t trampoline_data_rip[];
 extern uint8_t trampoline_data_stack[];
 
-// ── Storage ──────────────────────────────────────────────────────────────────
+// Storage
 static struct cpu_info cpus[MAX_CPUS];
 static uint32_t cpu_count = 0;
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
+// Helpers
 
 static void print_uint32(uint32_t num) {
   if (num == 0) {
@@ -49,7 +49,7 @@ static void print_hex32(uint32_t num) {
   }
 }
 
-// ── MSR helpers for GS base ─────────────────────────────────────────────────
+// MSR helpers for GS base
 
 // IA32_GS_BASE = 0xC0000101  (the actual GS.base used by the CPU)
 // IA32_KERNEL_GS_BASE = 0xC0000102  (swapped in/out by SWAPGS)
@@ -68,13 +68,13 @@ static inline uint64_t rdmsr(uint32_t msr) {
   return ((uint64_t)hi << 32) | lo;
 }
 
-// ── Set GS base for the current CPU ─────────────────────────────────────────
+// Set GS base for the current CPU
 static void cpu_set_gs_base(struct cpu_info *info) {
   wrmsr(MSR_GS_BASE, (uint64_t)info);
   wrmsr(MSR_KERNEL_GS_BASE, (uint64_t)info);
 }
 
-// ── Allocate a kernel stack (returns HHDM virtual address of top) ────────────
+// Allocate a kernel stack (returns HHDM virtual address of top)
 static uint64_t alloc_cpu_stack(void) {
   // We need CPU_STACK_SIZE bytes = multiple pages
   size_t pages = CPU_STACK_SIZE / PAGE_SIZE;
@@ -87,7 +87,7 @@ static uint64_t alloc_cpu_stack(void) {
   return virt_base + CPU_STACK_SIZE;
 }
 
-// ── Public API ───────────────────────────────────────────────────────────────
+// Public API
 
 struct cpu_info *cpu_get_current(void) {
   // Return the actual base address we wrote to the MSR
@@ -110,7 +110,7 @@ static inline uint32_t get_initial_apic_id(void) {
   return ebx >> 24;
 }
 
-// ── AP Entry Point ──────────────────────────────────────────────────────────
+// AP Entry Point
 
 static volatile struct cpu_info *starting_cpu = NULL;
 
@@ -131,7 +131,7 @@ void ap_main(void) {
 
   // 1.5 Switch to the dedicated kernel stack and page tables.
   // This is CRITICAL: APs must be off all bootloader memory (including tables)
-  // before reclamation occurs in Phase 6.
+
   __asm__ volatile("mov %0, %%cr3" ::"r"(current->kernel_cr3) : "memory");
   cpu_switch_stack(current->stack_top);
 
@@ -162,12 +162,12 @@ void ap_main(void) {
   }
 }
 
-// ── Initialization ──────────────────────────────────────────────────────────
+// Initialization
 
 void cpu_init(void) {
   console_puts("[INFO] Initializing per-CPU data structures...\n");
 
-  // ── Step 1: Query ACPI for all CPU APIC IDs ─────────────────────────
+  // Step 1: Query ACPI for all CPU APIC IDs
   cpu_count = acpi_get_cpu_count();
   if (cpu_count == 0) {
     console_puts("[WARN] No CPUs found in MADT, assuming 1 (BSP only).\n");
@@ -182,7 +182,7 @@ void cpu_init(void) {
   const uint8_t *apic_ids = acpi_get_cpu_apic_ids();
   uint32_t bsp_apic_id = get_initial_apic_id();
 
-  // ── Step 2: Populate cpu_info for each discovered CPU ───────────────
+  // Step 2: Populate cpu_info for each discovered CPU
   // Place BSP at index 0, APs at 1..N
   uint32_t bsp_index = 0;
   uint32_t ap_index = 1;
@@ -207,7 +207,7 @@ void cpu_init(void) {
     }
   }
 
-  // ── Step 3: Allocate kernel stacks ──────────────────────────────────
+  // Step 3: Allocate kernel stacks
   for (uint32_t i = 0; i < cpu_count; i++) {
     cpus[i].stack_top = alloc_cpu_stack();
     if (cpus[i].stack_top == 0) {
@@ -217,19 +217,19 @@ void cpu_init(void) {
     }
   }
 
-  // ── Step 4: Read the kernel CR3 for the BSP ─────────────────────────
+  // Step 4: Read the kernel CR3 for the BSP
   uint64_t cr3;
   __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
   for (uint32_t i = 0; i < cpu_count; i++) {
     cpus[i].kernel_cr3 = cr3;
   }
 
-  // ── Step 5: Set GS base for the BSP ─────────────────────────────────
+  // Step 5: Set GS base for the BSP
   // We do this EARLY in cpu_init so that any early interrupts or code that
   // depends on cpu_get_current() (e.g. loggers or the early scheduler) works.
   cpu_set_gs_base(&cpus[0]);
 
-  // ── Report ──────────────────────────────────────────────────────────
+  // Report
   console_puts("[OK] Per-CPU structures initialized.\n");
   console_puts("     Total CPUs: ");
   print_uint32(cpu_count);
@@ -251,7 +251,7 @@ void cpu_init(void) {
     console_puts("\n");
   }
 
-  // ── Step 6: Verify GS base works ────────────────────────────────────
+  // Step 6: Verify GS base works
   struct cpu_info *current = cpu_get_current();
   if (current && current == &cpus[0] && current->status == CPU_STATUS_BSP) {
     console_puts("[OK] GS base self-pointer verified for BSP.\n");
@@ -261,7 +261,7 @@ void cpu_init(void) {
 }
 
 void cpu_init_aps(void) {
-  // ── Step 7: Wake up the Application Processors ──────────────────────
+  // Step 7: Wake up the Application Processors
   if (cpu_count > 1) {
     console_puts("[INFO] Waking up Application Processors...\n");
 

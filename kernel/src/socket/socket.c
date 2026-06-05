@@ -1,5 +1,5 @@
-// ── Socket Subsystem Core Implementation
-// ────────────────────────────────────── Phase 1: Socket Infrastructure - Basic
+// Socket Subsystem Core Implementation
+
 // socket creation and FD management
 
 #include "socket.h"
@@ -16,18 +16,15 @@
 #include "socket_internal.h"
 #include <stdint.h>
 
-// ── Global Socket Table
-// ───────────────────────────────────────────────────────
+// Global Socket Table
 socket_t *socket_table[SOCKET_MAX_COUNT];
 int socket_count = 0;
 spinlock_t socket_table_lock = SPINLOCK_INIT;
 
-// ── Socket Family Registry
-// ─────────────────────────────────────────────────────
+// Socket Family Registry
 static net_family_t *family_registry = NULL;
 
-// ── Socket Table Management
-// ────────────────────────────────────────────────────
+// Socket Table Management
 
 int socket_table_alloc(void) {
   spinlock_acquire(&socket_table_lock);
@@ -65,8 +62,7 @@ socket_t *socket_table_get(int idx) {
   return sock;
 }
 
-// ── Socket Buffer Management
-// ──────────────────────────────────────────────────
+// Socket Buffer Management
 
 sk_buff_t *alloc_skb(size_t size) {
   sk_buff_t *skb = kmalloc(sizeof(sk_buff_t));
@@ -140,8 +136,7 @@ sk_buff_t *skb_dequeue(sk_buff_head_t *list) {
 
 bool skb_queue_empty(sk_buff_head_t *list) { return list->head == NULL; }
 
-// ── Socket Wait Queue Helpers
-// ─────────────────────────────────────────────────
+// Socket Wait Queue Helpers
 
 void socket_wait_queue_init(socket_t *sock) {
   wait_queue_t *wq = kmalloc(sizeof(wait_queue_t));
@@ -174,8 +169,7 @@ void socket_wake(socket_t *sock) {
     wait_queue_wake_all(sock->wait_queue);
 }
 
-// ── Socket Creation/Destruction
-// ───────────────────────────────────────────────
+// Socket Creation/Destruction
 
 socket_t *socket_create(int domain, int type, int protocol) {
   // Validate domain
@@ -317,8 +311,7 @@ void socket_put(socket_t *sock) {
   }
 }
 
-// ── Socket Operations (stubs for Phase 1)
-// ──────────────────────────────────────
+
 
 int socket_bind(socket_t *sock, struct sockaddr *addr, int addrlen) {
   if (!sock || !addr)
@@ -414,8 +407,7 @@ int socket_getpeername(socket_t *sock, struct sockaddr *addr, int *addrlen) {
   return sock->ops->getpeername(sock, addr, addrlen);
 }
 
-// ── Socketpair Creation
-// ───────────────────────────────────────────────────────
+// Socketpair Creation
 
 int socket_create_pair(int domain, int type, int protocol, socket_t *sv[2]) {
   // Validate domain
@@ -463,8 +455,7 @@ int socket_create_pair(int domain, int type, int protocol, socket_t *sv[2]) {
   return 0;
 }
 
-// ── Socket FD Management
-// ───────────────────────────────────────────────────────
+// Socket FD Management
 
 int socket_alloc_fd(socket_t *sock) {
   struct thread *t = sched_get_current();
@@ -551,8 +542,7 @@ int socket_close_fd(int fd) {
   return 0;
 }
 
-// ── Socket VFS Operations
-// ──────────────────────────────────────────────────────
+// Socket VFS Operations
 
 uint32_t socket_vfs_read(struct vfs_node *node, uint32_t offset, uint32_t size,
                          uint8_t *buffer) {
@@ -634,8 +624,7 @@ int socket_vfs_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
   return -25; // ENOTTY
 }
 
-// ── Family Registration
-// ───────────────────────────────────────────────────────
+// Family Registration
 
 void sock_register_family(net_family_t *family) {
   if (!family)
@@ -655,8 +644,7 @@ net_family_t *sock_lookup_family(int family) {
   return NULL;
 }
 
-// ── Socket Subsystem Initialization
-// ───────────────────────────────────────────
+// Socket Subsystem Initialization
 
 void socket_init(void) {
   // Initialize socket table

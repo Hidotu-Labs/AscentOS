@@ -8,7 +8,7 @@
 #include "mm/vmm.h"
 #include "syscalls/syscall.h"
 
-// ── Forward declarations ────────────────────────────────────────────────────
+// Forward declarations
 
 static uint32_t ext2_read_impl(vfs_node_t *node, uint32_t offset, uint32_t size,
                                uint8_t *buffer);
@@ -31,14 +31,14 @@ static int ext2_mknod_impl(vfs_node_t *node, char *name, uint16_t permission,
 static uint64_t ext2_mmap_impl(vfs_node_t *node, uint64_t addr, uint64_t length,
                                uint64_t prot, uint64_t flags, uint64_t offset);
 
-// ── Timestamp helper ────────────────────────────────────────────────────────
+// Timestamp helper
 
 // Returns seconds since boot (approximation for ext2 timestamps)
 static uint32_t ext2_current_time(void) {
   return (uint32_t)(lapic_timer_get_ms() / 1000);
 }
 
-// ── Block I/O ───────────────────────────────────────────────────────────────
+// Block I/O
 
 // Read a single ext2 block into buffer.
 int ext2_read_block(ext2_mount_t *mnt, uint32_t block_num, void *buffer) {
@@ -95,7 +95,7 @@ int ext2_write_block(ext2_mount_t *mnt, uint32_t block_num,
   return mnt->dev->write_sectors(mnt->dev, lba, sectors, buffer);
 }
 
-// ── Superblock / BGD persistence ────────────────────────────────────────────
+// Superblock / BGD persistence
 
 static int ext2_write_superblock(ext2_mount_t *mnt) {
   // Superblock is always at byte offset 1024, spanning 1024 bytes.
@@ -130,7 +130,7 @@ static int ext2_write_bgdt(ext2_mount_t *mnt) {
   return 0;
 }
 
-// ── Inode I/O ───────────────────────────────────────────────────────────────
+// Inode I/O
 
 int ext2_read_inode(ext2_mount_t *mnt, uint32_t inode_num, ext2_inode_t *out) {
   if (inode_num == 0)
@@ -193,7 +193,7 @@ static int ext2_write_inode(ext2_mount_t *mnt, uint32_t inode_num,
   return err;
 }
 
-// ── Block Allocation / Deallocation ─────────────────────────────────────────
+// Block Allocation / Deallocation
 
 // Allocate a free block from the filesystem. Returns block number or 0 on
 // failure.
@@ -280,7 +280,7 @@ static uint32_t ext2_alloc_inode(ext2_mount_t *mnt) {
   return 0;
 }
 
-// ── Block / Inode Deallocation ──────────────────────────────────────────────
+// Block / Inode Deallocation
 
 // Free a previously allocated block. Returns 0 on success.
 static int ext2_free_block(ext2_mount_t *mnt, uint32_t block_num) {
@@ -345,7 +345,7 @@ static int ext2_free_inode(ext2_mount_t *mnt, uint32_t inode_num) {
   return 0;
 }
 
-// ── File data block resolution ──────────────────────────────────────────────
+// File data block resolution
 
 // Get the disk block number for a given logical block index in an inode.
 // Supports direct, singly-indirect, and doubly-indirect blocks.
@@ -603,7 +603,7 @@ static int ext2_set_block_num(ext2_mount_t *mnt, ext2_inode_t *inode,
   return -1; // Beyond addressable range
 }
 
-// ── VFS Node Creation ───────────────────────────────────────────────────────
+// VFS Node Creation
 
 static vfs_node_t *ext2_make_vfs_node(ext2_mount_t *mnt, uint32_t inode_num,
                                       ext2_inode_t *inode) {
@@ -659,7 +659,7 @@ static vfs_node_t *ext2_make_vfs_node(ext2_mount_t *mnt, uint32_t inode_num,
   return node;
 }
 
-// ── VFS Read Implementation ─────────────────────────────────────────────────
+// VFS Read Implementation
 
 static uint32_t ext2_read_impl(vfs_node_t *node, uint32_t offset, uint32_t size,
                                uint8_t *buffer) {
@@ -789,7 +789,7 @@ static uint32_t ext2_write_impl(vfs_node_t *node, uint32_t offset,
   return bytes_written;
 }
 
-// ── Directory Operations ────────────────────────────────────────────────────
+// Directory Operations
 
 static struct dirent *ext2_readdir_impl(vfs_node_t *node, uint32_t index) {
   ext2_mount_t *mnt = (ext2_mount_t *)node->device;
@@ -916,7 +916,7 @@ static vfs_node_t *ext2_finddir_impl(vfs_node_t *node, char *name) {
   return NULL;
 }
 
-// ── Write: Add a directory entry ────────────────────────────────────────────
+// Write: Add a directory entry
 
 // Add a new directory entry to a directory inode.
 static int ext2_add_dir_entry(ext2_mount_t *mnt, uint32_t dir_inode_num,
@@ -1009,7 +1009,7 @@ static int ext2_add_dir_entry(ext2_mount_t *mnt, uint32_t dir_inode_num,
   return 0;
 }
 
-// ── VFS create (new file) ───────────────────────────────────────────────────
+// VFS create (new file)
 
 static int ext2_create_impl(vfs_node_t *node, char *name, uint16_t permission) {
   ext2_mount_t *mnt = (ext2_mount_t *)node->device;
@@ -1049,7 +1049,7 @@ static int ext2_create_impl(vfs_node_t *node, char *name, uint16_t permission) {
   return 0;
 }
 
-// ── VFS mkdir (new directory) ───────────────────────────────────────────────
+// VFS mkdir (new directory)
 
 static int ext2_mkdir_impl(vfs_node_t *node, char *name, uint16_t permission) {
   ext2_mount_t *mnt = (ext2_mount_t *)node->device;
@@ -1130,7 +1130,7 @@ static int ext2_mkdir_impl(vfs_node_t *node, char *name, uint16_t permission) {
   return 0;
 }
 
-// ── Symlink Operations ──────────────────────────────────────────────────────
+// Symlink Operations
 
 // Read the target path of a symbolic link.
 // Fast symlinks (<=60 bytes) store the path directly in i_block[].
@@ -1229,7 +1229,7 @@ static int ext2_symlink_impl(vfs_node_t *node, char *name, char *target) {
   return 0;
 }
 
-// ── Rename, Chmod, Chown ────────────────────────────────────────────────────
+// Rename, Chmod, Chown
 
 static int ext2_remove_dir_entry(ext2_mount_t *mnt, uint32_t dir_inode_num,
                                  const char *name);
@@ -1332,7 +1332,7 @@ static int ext2_chown_impl(vfs_node_t *node, uint32_t uid, uint32_t gid) {
   return 0;
 }
 
-// ── Free all data blocks of an inode ────────────────────────────────────────
+// Free all data blocks of an inode
 
 // Free a single indirect block and all data blocks it points to.
 static void ext2_free_indirect(ext2_mount_t *mnt, uint32_t indirect_block) {
@@ -1413,7 +1413,7 @@ static void ext2_free_all_blocks(ext2_mount_t *mnt, ext2_inode_t *inode) {
   inode->i_size = 0;
 }
 
-// ── Remove a directory entry by name ────────────────────────────────────────
+// Remove a directory entry by name
 
 static int ext2_remove_dir_entry(ext2_mount_t *mnt, uint32_t dir_inode_num,
                                  const char *name) {
@@ -1485,7 +1485,7 @@ static int ext2_remove_dir_entry(ext2_mount_t *mnt, uint32_t dir_inode_num,
   return -1; // Not found
 }
 
-// ── Check if a directory is empty (only . and ..) ───────────────────────────
+// Check if a directory is empty (only . and ..)
 
 static bool ext2_dir_is_empty(ext2_mount_t *mnt, uint32_t inode_num) {
   ext2_inode_t inode;
@@ -1532,7 +1532,7 @@ static bool ext2_dir_is_empty(ext2_mount_t *mnt, uint32_t inode_num) {
   return true;
 }
 
-// ── VFS unlink (delete file) ────────────────────────────────────────────────
+// VFS unlink (delete file)
 
 static int ext2_unlink_impl(vfs_node_t *node, char *name) {
   ext2_mount_t *mnt = (ext2_mount_t *)node->device;
@@ -1579,7 +1579,7 @@ static int ext2_unlink_impl(vfs_node_t *node, char *name) {
   return 0;
 }
 
-// ── VFS rmdir (delete empty directory) ──────────────────────────────────────
+// VFS rmdir (delete empty directory)
 
 static int ext2_rmdir_impl(vfs_node_t *node, char *name) {
   ext2_mount_t *mnt = (ext2_mount_t *)node->device;
@@ -1639,7 +1639,7 @@ static int ext2_rmdir_impl(vfs_node_t *node, char *name) {
   return 0;
 }
 
-// ── Mount ───────────────────────────────────────────────────────────────────
+// Mount
 
 int ext2_mount(struct block_device *dev, vfs_node_t *mountpoint) {
   if (!dev || !mountpoint)
@@ -1649,7 +1649,7 @@ int ext2_mount(struct block_device *dev, vfs_node_t *mountpoint) {
   klog_puts(dev->name);
   klog_puts("' for ext2 filesystem...  \n");
 
-  // ── Read the superblock (byte offset 1024) ─────────────────────────
+  // Read the superblock (byte offset 1024)
   uint8_t sb_buf[1024];
   // Read sectors 2 and 3 (byte offset 1024..2047)
   int err = dev->read_sectors(dev, 2, 2, sb_buf);
@@ -1664,7 +1664,7 @@ int ext2_mount(struct block_device *dev, vfs_node_t *mountpoint) {
     return -1;
   }
 
-  // ── Allocate and populate mount context ─────────────────────────────
+  // Allocate and populate mount context
   ext2_mount_t *mnt = kmalloc(sizeof(ext2_mount_t));
   if (!mnt)
     return -1;
@@ -1697,7 +1697,7 @@ int ext2_mount(struct block_device *dev, vfs_node_t *mountpoint) {
   klog_uint64(mnt->inode_size);
   klog_puts(" bytes\n");
 
-  // ── Read Block Group Descriptor Table ───────────────────────────────
+  // Read Block Group Descriptor Table
   uint32_t bgdt_block = mnt->sb.s_first_data_block + 1;
   uint32_t bgdt_size = mnt->groups_count * sizeof(ext2_bgd_t);
   uint32_t bgdt_blocks = (bgdt_size + mnt->block_size - 1) / mnt->block_size;
@@ -1721,7 +1721,7 @@ int ext2_mount(struct block_device *dev, vfs_node_t *mountpoint) {
 
   klog_puts("[EXT2] Block Group Descriptor Table loaded.\n");
 
-  // ── Read the root inode (always inode 2) ────────────────────────────
+  // Read the root inode (always inode 2)
   ext2_inode_t root_inode;
   err = ext2_read_inode(mnt, EXT2_ROOT_INODE, &root_inode);
   if (err) {
@@ -1738,7 +1738,7 @@ int ext2_mount(struct block_device *dev, vfs_node_t *mountpoint) {
     return -1;
   }
 
-  // ── Wire up the mountpoint ──────────────────────────────────────────
+  // Wire up the mountpoint
   vfs_node_t *root_vfs = ext2_make_vfs_node(mnt, EXT2_ROOT_INODE, &root_inode);
   if (!root_vfs) {
     kfree(mnt->bgdt);

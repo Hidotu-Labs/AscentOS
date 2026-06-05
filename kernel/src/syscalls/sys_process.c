@@ -1,4 +1,4 @@
-// ── Process Syscalls: fork, getpid, exit ────────────────────────────────────
+// Process Syscalls: fork, getpid, exit
 #include "../apic/lapic_timer.h"
 #include "../console/klog.h"
 #include "../cpu/gdt.h"
@@ -18,7 +18,10 @@ extern void mm_reset_mmap_state(struct thread *t);
 void vma_list_init(struct vma_list *list);
 void vma_list_destroy(struct vma_list *list);
 
-// ── Path Normalization ──────────────────────────────────────────────────────
+#define PR_SET_NAME 15
+#define PR_GET_NAME 16
+
+// Path Normalization
 static void path_normalize(const char *base, const char *rel, char *out) {
   char temp[512] = {0};
 
@@ -85,7 +88,7 @@ extern void fork_return_to_userspace(struct syscall_regs *regs)
 #define IA32_KERNEL_GS_BASE 0xC0000102
 #define IA32_FS_BASE 0xC0000100
 
-// ── exit / exit_group (shared) ─────────────────────────────────────────────
+// exit / exit_group (shared)
 void process_do_exit(uint64_t status) __attribute__((noreturn));
 void process_do_exit(uint64_t status) {
   struct thread *current = sched_get_current();
@@ -112,7 +115,7 @@ void process_do_exit(uint64_t status) {
     }
   }
 
-  // ── Common Cleanup ────────────────────────────────────────────────────────
+  // Common Cleanup
   // Close all open file descriptors to prevent resource leaks.
   if (current) {
     for (int i = 0; i < MAX_FDS; i++) {
@@ -158,7 +161,7 @@ void process_do_exit(uint64_t status) {
     }
   }
 
-  // ── Non-forked (main) process exit ──────────────────────────────────────
+  // Non-forked (main) process exit
   extern void restart_main_session(void);
   restart_main_session();
   while (1)
@@ -221,7 +224,7 @@ static uint64_t sys_getpid(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
   }
   return 0;
 }
-// ── sys_getcwd ──────────────────────────────────────────────────────────────
+// sys_getcwd
 static uint64_t sys_getcwd(uint64_t buf_ptr, uint64_t size, uint64_t a2,
                            uint64_t a3, uint64_t a4, uint64_t a5) {
   (void)a2;
@@ -244,7 +247,7 @@ static uint64_t sys_getcwd(uint64_t buf_ptr, uint64_t size, uint64_t a2,
   return len; // Linux getcwd syscall returns length of copied bytes
 }
 
-// ── sys_chdir ───────────────────────────────────────────────────────────────
+// sys_chdir
 static uint64_t sys_chdir(uint64_t path_ptr, uint64_t a1, uint64_t a2,
                           uint64_t a3, uint64_t a4, uint64_t a5) {
   (void)a1;
@@ -368,7 +371,7 @@ static uint64_t sys_wait4(uint64_t pid, uint64_t wstatus_ptr, uint64_t options,
   }
 }
 
-// ── sys_execve ──────────────────────────────────────────────────────────────
+// sys_execve
 static uint64_t sys_execve(struct syscall_regs *regs) {
   const char **user_argv = (const char **)regs->rsi;
   const char **user_envp = (const char **)regs->rdx;
@@ -525,7 +528,7 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
   return 0;
 }
 
-// ── Fork child kernel thread entry point ────────────────────────────────────
+// Fork child kernel thread entry point
 // This function runs as a kernel thread.  When scheduled, it switches to the
 // child's page table and sysrets to the user-space address where the parent
 // called fork().  RAX will be 0 (child return value).
@@ -552,7 +555,7 @@ static void fork_child_entry(void) {
   fork_return_to_userspace(child_regs);
 }
 
-// ── sys_fork (raw handler — receives full register frame) ───────────────────
+// sys_fork (raw handler — receives full register frame)
 uint64_t sys_fork(struct syscall_regs *regs) {
   klog_puts("[FORK] Fork requested\n");
 
@@ -613,6 +616,7 @@ uint64_t sys_fork(struct syscall_regs *regs) {
   child->cr3 = child_cr3;
   child->is_forked_child = true;
   child->fork_ctx = child_regs;
+  child->tgid = child->tid; // Fork creates a new process (new thread group)
 
   // 6. Copy file descriptors from parent to child (with reference counting)
   if (parent) {
@@ -652,6 +656,11 @@ uint64_t sys_fork(struct syscall_regs *regs) {
     child->suid = parent->suid;
     child->sgid = parent->sgid;
     child->ctty = parent->ctty; // Inherit controlling terminal
+
+    // Inherit alternate signal stack
+    child->ss_sp = parent->ss_sp;
+    child->ss_size = parent->ss_size;
+    child->ss_flags = parent->ss_flags;
   }
 
   klog_puts("[FORK] Child created with PID ");
@@ -665,7 +674,7 @@ uint64_t sys_fork(struct syscall_regs *regs) {
   return child->tid;
 }
 
-// ── sys_clone ───────────────────────────────────────────────────────────────
+// sys_clone
 static uint64_t sys_clone(struct syscall_regs *regs) {
   uint64_t flags = regs->rdi;
   uint64_t child_stack = regs->rsi;
@@ -771,6 +780,14 @@ static uint64_t sys_clone(struct syscall_regs *regs) {
   child->parent = parent;
   child->clone_flags = flags;
 
+  // CLONE_THREAD: child joins parent's thread group
+  // Otherwise: child is a new process (new thread group leader)
+  if (flags & CLONE_THREAD) {
+    child->tgid = parent->tgid;
+  } else {
+    child->tgid = child->tid;
+  }
+
   // Handle TLS
   if (flags & CLONE_SETTLS) {
     child->fs_base = newtls;
@@ -833,6 +850,11 @@ static uint64_t sys_clone(struct syscall_regs *regs) {
   memcpy(child->signal_handlers, parent->signal_handlers,
          sizeof(child->signal_handlers));
 
+  // Inherit alternate signal stack
+  child->ss_sp = parent->ss_sp;
+  child->ss_size = parent->ss_size;
+  child->ss_flags = parent->ss_flags;
+
   // NOTE: sched_create_kernel_thread already added the child to the parent's
   // children list. Adding it again here would create a circular list and
   // cause wait4 to hang or double-reap.
@@ -842,7 +864,7 @@ static uint64_t sys_clone(struct syscall_regs *regs) {
   return child->tid;
 }
 
-// ── sys_sysinfo ───────────────────────────────────────────────────────────
+// sys_sysinfo
 struct sysinfo {
   int64_t uptime;
   uint64_t loads[3];
@@ -887,7 +909,7 @@ static uint64_t sys_sysinfo(uint64_t info_ptr, uint64_t a1, uint64_t a2,
   return 0;
 }
 
-// ── sys_uname ─────────────────────────────────────────────────────────────
+// sys_uname
 struct utsname {
   char sysname[65];
   char nodename[65];
@@ -927,7 +949,7 @@ static uint64_t sys_uname(uint64_t buf_ptr, uint64_t a1, uint64_t a2,
   return 0;
 }
 
-// ── sys_uptime ─────────────────────────────────────────────────────────────
+// sys_uptime
 static uint64_t sys_uptime(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
                            uint64_t a4, uint64_t a5) {
   (void)a0;
@@ -941,16 +963,47 @@ static uint64_t sys_uptime(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
 
 static uint64_t sys_prctl(uint64_t option, uint64_t arg2, uint64_t arg3,
                           uint64_t arg4, uint64_t arg5, uint64_t a5) {
-  (void)option;
-  (void)arg2;
   (void)arg3;
   (void)arg4;
   (void)arg5;
   (void)a5;
-  return 0; // Success stub
+
+  struct thread *current = sched_get_current();
+  if (!current)
+    return (uint64_t)-1;
+
+  switch (option) {
+  case PR_SET_NAME: {
+    if (!arg2 || !vmm_is_user_addr_range_valid(arg2, 1))
+      return (uint64_t)-14; // EFAULT
+
+    const char *name = (const char *)arg2;
+    // Copy up to 15 chars + null terminator
+    strncpy(current->comm, name, 15);
+    current->comm[15] = '\0';
+
+    klog_puts("[PRCTL] Set thread name to: ");
+    klog_puts(current->comm);
+    klog_puts("\n");
+    return 0;
+  }
+  case PR_GET_NAME: {
+    if (!arg2 || !vmm_is_user_addr_range_valid(arg2, 16))
+      return (uint64_t)-14; // EFAULT
+
+    char *out = (char *)arg2;
+    strncpy(out, current->comm, 16);
+    return 0;
+  }
+  default:
+    klog_puts("[PRCTL] Unknown / Stub option: ");
+    klog_uint64(option);
+    klog_puts("\n");
+    return 0; // Success stub for everything else
+  }
 }
 
-// ── sys_umask ───────────────────────────────────────────────────────────────
+// sys_umask
 static uint64_t sys_umask(struct syscall_regs *regs) {
   uint32_t mask = (uint32_t)regs->rdi;
   struct thread *t = sched_get_current();
@@ -962,7 +1015,7 @@ static uint64_t sys_umask(struct syscall_regs *regs) {
   return old_mask;
 }
 
-// ── sys_getuid ──────────────────────────────────────────────────────────────
+// sys_getuid
 static uint64_t sys_getuid(struct syscall_regs *regs) {
   (void)regs;
   struct thread *t = sched_get_current();
@@ -971,7 +1024,7 @@ static uint64_t sys_getuid(struct syscall_regs *regs) {
   return t->uid;
 }
 
-// ── sys_getgid ──────────────────────────────────────────────────────────────
+// sys_getgid
 static uint64_t sys_getgid(struct syscall_regs *regs) {
   (void)regs;
   struct thread *t = sched_get_current();
@@ -980,7 +1033,7 @@ static uint64_t sys_getgid(struct syscall_regs *regs) {
   return t->gid;
 }
 
-// ── sys_geteuid ─────────────────────────────────────────────────────────────
+// sys_geteuid
 static uint64_t sys_geteuid(struct syscall_regs *regs) {
   (void)regs;
   struct thread *t = sched_get_current();
@@ -989,7 +1042,7 @@ static uint64_t sys_geteuid(struct syscall_regs *regs) {
   return t->euid;
 }
 
-// ── sys_getegid ─────────────────────────────────────────────────────────────
+// sys_getegid
 static uint64_t sys_getegid(struct syscall_regs *regs) {
   (void)regs;
   struct thread *t = sched_get_current();
@@ -998,7 +1051,7 @@ static uint64_t sys_getegid(struct syscall_regs *regs) {
   return t->egid;
 }
 
-// ── sys_getresuid ───────────────────────────────────────────────────────────
+// sys_getresuid
 static uint64_t sys_getresuid(struct syscall_regs *regs) {
   uint32_t *ruid_ptr = (uint32_t *)regs->rdi;
   uint32_t *euid_ptr = (uint32_t *)regs->rsi;
@@ -1027,7 +1080,7 @@ static uint64_t sys_getresuid(struct syscall_regs *regs) {
   return 0;
 }
 
-// ── sys_getresgid ───────────────────────────────────────────────────────────
+// sys_getresgid
 static uint64_t sys_getresgid(struct syscall_regs *regs) {
   uint32_t *rgid_ptr = (uint32_t *)regs->rdi;
   uint32_t *egid_ptr = (uint32_t *)regs->rsi;
@@ -1056,21 +1109,21 @@ static uint64_t sys_getresgid(struct syscall_regs *regs) {
   return 0;
 }
 
-// ── sys_setresuid ───────────────────────────────────────────────────────────
+// sys_setresuid
 static uint64_t sys_setresuid(struct syscall_regs *regs) {
   (void)regs;
   // Stub: accept any uid changes silently (we're always root)
   return 0;
 }
 
-// ── sys_setresgid ───────────────────────────────────────────────────────────
+// sys_setresgid
 static uint64_t sys_setresgid(struct syscall_regs *regs) {
   (void)regs;
   // Stub: accept any gid changes silently (we're always root)
   return 0;
 }
 
-// ── sys_setuid (syscall 105) ────────────────────────────────────────────────
+// sys_setuid (syscall 105)
 static uint64_t sys_setuid(struct syscall_regs *regs) {
   uint32_t uid = (uint32_t)regs->rdi;
   struct thread *t = sched_get_current();
@@ -1082,7 +1135,7 @@ static uint64_t sys_setuid(struct syscall_regs *regs) {
   return 0;
 }
 
-// ── sys_setgid (syscall 106) ────────────────────────────────────────────────
+// sys_setgid (syscall 106)
 static uint64_t sys_setgid(struct syscall_regs *regs) {
   uint32_t gid = (uint32_t)regs->rdi;
   struct thread *t = sched_get_current();
@@ -1094,7 +1147,7 @@ static uint64_t sys_setgid(struct syscall_regs *regs) {
   return 0;
 }
 
-// ── sys_setfsuid (syscall 122) ──────────────────────────────────────────────
+// sys_setfsuid (syscall 122)
 static uint64_t sys_setfsuid(struct syscall_regs *regs) {
   uint32_t fsuid = (uint32_t)regs->rdi;
   struct thread *t = sched_get_current();
@@ -1106,7 +1159,7 @@ static uint64_t sys_setfsuid(struct syscall_regs *regs) {
   return old_fsuid;
 }
 
-// ── sys_setfsgid (syscall 123) ──────────────────────────────────────────────
+// sys_setfsgid (syscall 123)
 static uint64_t sys_setfsgid(struct syscall_regs *regs) {
   uint32_t fsgid = (uint32_t)regs->rdi;
   struct thread *t = sched_get_current();
@@ -1118,7 +1171,7 @@ static uint64_t sys_setfsgid(struct syscall_regs *regs) {
   return old_fsgid;
 }
 
-// ── sys_getppid ─────────────────────────────────────────────────────────────
+// sys_getppid
 static uint64_t sys_getppid(struct syscall_regs *regs) {
   (void)regs;
   struct thread *t = sched_get_current();
@@ -1129,7 +1182,7 @@ static uint64_t sys_getppid(struct syscall_regs *regs) {
   return 0;
 }
 
-// ── sys_setpgid ─────────────────────────────────────────────────────────────
+// sys_setpgid
 static uint64_t sys_setpgid(struct syscall_regs *regs) {
   uint32_t pid = (uint32_t)regs->rdi;
   uint32_t pgid = (uint32_t)regs->rsi;
@@ -1181,7 +1234,7 @@ static uint64_t sys_getpgid(uint64_t pid, uint64_t a1, uint64_t a2, uint64_t a3,
   return target->pgid;
 }
 
-// ── sys_getpgrp ─────────────────────────────────────────────────────────────
+// sys_getpgrp
 static uint64_t sys_getpgrp(struct syscall_regs *regs) {
   (void)regs;
   struct thread *t = sched_get_current();
@@ -1190,7 +1243,7 @@ static uint64_t sys_getpgrp(struct syscall_regs *regs) {
   return t->pgid;
 }
 
-// ── sys_setsid (stub) ──────────────────────────────────────────────────────
+// sys_setsid (stub)
 static uint64_t sys_setsid(struct syscall_regs *regs) {
   (void)regs;
   struct thread *t = sched_get_current();
@@ -1199,7 +1252,7 @@ static uint64_t sys_setsid(struct syscall_regs *regs) {
   return t->tid; // Return own PID as new session ID
 }
 
-// ── sys_setitimer (stub) ───────────────────────────────────────────────────
+// sys_setitimer (stub)
 // X11 uses this but can work without real timer support
 static uint64_t sys_setitimer(uint64_t which, uint64_t new_val_ptr,
                               uint64_t old_val_ptr, uint64_t _a3, uint64_t _a4,
@@ -1214,7 +1267,7 @@ static uint64_t sys_setitimer(uint64_t which, uint64_t new_val_ptr,
   return 0;
 }
 
-// ── Resource Limits (getrlimit / prlimit64) ──────────────────────────────────
+// Resource Limits (getrlimit / prlimit64)
 struct rlimit {
   uint64_t rlim_cur;
   uint64_t rlim_max;
@@ -1288,7 +1341,7 @@ static uint64_t sys_membarrier(uint64_t cmd, uint64_t flags, uint64_t a2,
   return 0;
 }
 
-// ── Registration ────────────────────────────────────────────────────────────
+// Registration
 static uint64_t sys_sched_yield(uint64_t a0, uint64_t a1, uint64_t a2,
                                 uint64_t a3, uint64_t a4, uint64_t a5) {
   (void)a0;

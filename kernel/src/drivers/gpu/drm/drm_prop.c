@@ -192,14 +192,14 @@ int drm_ioctl_getproperty(struct drm_device *dev, uint64_t arg) {
   strncpy(p->name, def->name, 32);
 
   /* For RANGE properties expose [min, max] */
-  if ((def->flags & 0x3f) == DRM_PROP_TYPE_RANGE) {
+  if ((def->flags & 0x1C0) == DRM_PROP_TYPE_RANGE) {
     p->count_values = 2;
     if (p->values_ptr) {
       uint64_t *vals = (uint64_t *)p->values_ptr;
       vals[0] = def->min_val;
       vals[1] = def->max_val;
     }
-  } else if ((def->flags & 0x3f) == DRM_PROP_TYPE_ENUM) {
+  } else if ((def->flags & 0x1C0) == DRM_PROP_TYPE_ENUM) {
     /* Special case for "type" enum labels that wlroots expects */
     if (def->id == DRM_PROP_ID_TYPE) {
       p->count_enum_blobs = 3;

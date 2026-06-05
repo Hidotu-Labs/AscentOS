@@ -36,17 +36,17 @@ volatile uint32_t sb16_irq_fired = 0;
 static bool sb16_present = false;
 static bool sb16_active_16bit = false;
 
-// ── OSS device state (defaults match /dev/dsp standard) ─────────────────────
+// OSS device state (defaults match /dev/dsp standard)
 static uint32_t dsp_sample_rate = 8000;
 static uint8_t dsp_channels = 1;
 static uint8_t dsp_bits = 8;
 
-// ── DMA buffer (64KB-aligned within ISA 16MB) ───────────────────────────────
+// DMA buffer (64KB-aligned within ISA 16MB)
 static uint8_t *sb16_dma_buf = 0;
 static uint64_t sb16_dma_phys = 0;
 static bool sb16_dma_failed = false;
 
-// ── DSP low-level I/O ───────────────────────────────────────────────────────
+// DSP low-level I/O
 
 static void dsp_write(uint8_t value) {
   while (inb(DSP_WRITE) & 0x80) {
@@ -67,7 +67,7 @@ static uint8_t dsp_read(void) {
   return inb(DSP_READ);
 }
 
-// ── ISR ─────────────────────────────────────────────────────────────────────
+// ISR
 
 static void sb16_pump_audio(void);
 
@@ -88,7 +88,7 @@ static void sb16_isr(struct registers *regs) {
   sb16_pump_audio();
 }
 
-// ── DMA buffer allocation ───────────────────────────────────────────────────
+// DMA buffer allocation
 //
 // ISA DMA constraints:
 //   - Buffer must reside below 16 MB (24-bit addressing)
@@ -132,7 +132,7 @@ static int ensure_dma_buffer(void) {
   return 0;
 }
 
-// ── Early DMA reservation (called before PCI/storage eat low memory) ────────
+// Early DMA reservation (called before PCI/storage eat low memory)
 
 void sb16_reserve_dma(void) {
   // Quick probe: reset DSP and check for 0xAA ready signal.
@@ -156,7 +156,7 @@ void sb16_reserve_dma(void) {
   ensure_dma_buffer();
 }
 
-// ── Hardware initialization ─────────────────────────────────────────────────
+// Hardware initialization
 
 void sb16_init(void) {
   // Reset DSP
@@ -216,7 +216,7 @@ void sb16_init(void) {
   }
 }
 
-// ── Play a single DMA chunk (internal) ──────────────────────────────────────
+// Play a single DMA chunk (internal)
 
 void sb16_play_chunk(uint32_t phys_addr, uint32_t length, uint16_t sample_rate,
                      uint8_t channels, uint8_t bits) {
@@ -281,7 +281,7 @@ void sb16_play_chunk(uint32_t phys_addr, uint32_t length, uint16_t sample_rate,
   }
 }
 
-// ── OSS /dev/dsp format control ─────────────────────────────────────────────
+// OSS /dev/dsp format control
 
 void sb16_set_format(uint32_t rate, uint8_t channels, uint8_t bits) {
   if (rate >= 4000 && rate <= 48000)
@@ -418,7 +418,7 @@ static uint32_t dsp_vfs_write(struct vfs_node *node, uint32_t offset,
   return written;
 }
 
-// ── VFS registration ────────────────────────────────────────────────────────
+// VFS registration
 
 void sb16_register_vfs(void) {
   if (!sb16_present)

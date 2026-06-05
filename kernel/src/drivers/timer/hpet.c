@@ -9,7 +9,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-// ── Internal State ───────────────────────────────────────────────────────────
+// Internal State
 static volatile uint64_t *hpet_base = NULL;
 static uint64_t hpet_clk_period = 0;     // femtoseconds per tick
 static uint64_t hpet_frequency = 0;      // Hz
@@ -27,7 +27,7 @@ static bool watchdog_active = false;
 static uint8_t watchdog_timer_id = 0;
 static uint64_t watchdog_timeout_ticks = 0;
 
-// ── MMIO Read/Write Helpers ──────────────────────────────────────────────────
+// MMIO Read/Write Helpers
 static inline uint64_t hpet_read_reg(uint32_t offset) {
     return *(volatile uint64_t *)((uint64_t)hpet_base + offset);
 }
@@ -36,7 +36,7 @@ static inline void hpet_write_reg(uint32_t offset, uint64_t value) {
     *(volatile uint64_t *)((uint64_t)hpet_base + offset) = value;
 }
 
-// ── Helper Functions ──────────────────────────────────────────────────────────
+// Helper Functions
 static void print_hex64(uint64_t num) {
     const char *hex = "0123456789ABCDEF";
     for (int i = 60; i >= 0; i -= 4) {
@@ -52,7 +52,7 @@ static void print_uint64(uint64_t num) {
     while (i > 0) { klog_putchar(buf[--i]); }
 }
 
-// ── Timer Interrupt Handler ───────────────────────────────────────────────────
+// Timer Interrupt Handler
 static void hpet_timer_handler(struct registers *regs) {
     (void)regs;
     
@@ -73,19 +73,19 @@ static void hpet_timer_handler(struct registers *regs) {
     }
 }
 
-// ── Watchdog Interrupt Handler ───────────────────────────────────────────────
+// Watchdog Interrupt Handler
 static void hpet_watchdog_handler(struct registers *regs) {
     (void)regs;
     klog_puts("\n[CRITICAL] HPET Watchdog expired! System hang detected.\n");
     // Could trigger a system reset here in a real implementation
 }
 
-// ── ACPI Table Parsing ───────────────────────────────────────────────────────
+// ACPI Table Parsing
 static struct acpi_hpet *hpet_find_table(void) {
     return (struct acpi_hpet *)acpi_find_table("HPET");
 }
 
-// ── Public API Implementation ────────────────────────────────────────────────
+// Public API Implementation
 
 bool hpet_init(void) {
     klog_puts("[INFO] Initializing HPET...\n");
@@ -319,7 +319,7 @@ void hpet_sleep(uint32_t ms) {
     }
 }
 
-// ── Watchdog Implementation ──────────────────────────────────────────────────
+// Watchdog Implementation
 
 bool hpet_watchdog_configure(uint8_t timer_id, uint32_t timeout_ms) {
     if (!hpet_initialized || timer_id >= hpet_timer_count) return false;
@@ -380,7 +380,7 @@ bool hpet_watchdog_is_active(void) {
     return watchdog_active;
 }
 
-// ── Backup Timer Support ─────────────────────────────────────────────────────
+// Backup Timer Support
 
 bool hpet_is_backup_available(void) {
     return hpet_initialized && hpet_timer_count >= 2;

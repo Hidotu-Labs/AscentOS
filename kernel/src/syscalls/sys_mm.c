@@ -1,4 +1,4 @@
-// ── Memory Management Syscalls: mmap, munmap, brk ──────────────────────────
+// Memory Management Syscalls: mmap, munmap, brk
 #include "../console/klog.h"
 #include "../fs/vfs.h"
 #include "../lib/string.h"
@@ -9,7 +9,7 @@
 #include "syscall.h"
 #include <stdint.h>
 
-// ── Linux mmap constants ─────────────────────────────────────────────────────
+// Linux mmap constants
 #define PROT_NONE 0x0
 #define PROT_READ 0x1
 #define PROT_WRITE 0x2
@@ -22,12 +22,12 @@
 
 #define MAP_FAILED ((uint64_t)-1)
 
-// ── Errno constants ──────────────────────────────────────────────────────────
+// Errno constants
 #define E_INVAL ((uint64_t)-22)
 #define E_NOMEM ((uint64_t)-12)
 #define E_BADF ((uint64_t)-9)
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
+// Helpers
 
 #define PAGE_ALIGN_UP(x) (((x) + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1))
 #define PAGE_ALIGN_DOWN(x) ((x) & ~(PAGE_SIZE - 1))
@@ -55,13 +55,11 @@ static uint64_t build_page_flags(uint64_t prot) {
   return flags;
 }
 
-// ── Anonymous mapping ────────────────────────────────────────────────────
+// Anonymous mapping
 #define MMAP_REGION_BASE 0x7F0000000000ULL
 #define MMAP_REGION_LIMIT 0x7FF000000000ULL
 
-// ════════════════════════════════════════════════════════════════════════════
 // INTERNAL HELPERS
-// ════════════════════════════════════════════════════════════════════════════
 
 static void safe_unmap_and_free(uint64_t *pml4, uint64_t va, uint64_t phys,
                                 bool free_phys, const char *ctx) {
@@ -104,11 +102,9 @@ static void teardown_range(uint64_t *pml4, struct thread *t, uint64_t base,
   }
 }
 
-// ════════════════════════════════════════════════════════════════════════════
 // sys_mmap
 // Linux ABI: mmap(addr, length, prot, flags, fd, offset)
 //   rdi=addr  rsi=length  rdx=prot  r10=flags  r8=fd  r9=offset
-// ════════════════════════════════════════════════════════════════════════════
 uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot, uint64_t flags,
                   uint64_t fd, uint64_t offset) {
   (void)offset;
@@ -125,7 +121,7 @@ uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot, uint64_t flags,
     klog_puts("\n");
   */
 
-  // ── Validate flags ───────────────────────────────────────────────────────
+  // Validate flags
   bool is_shared = (flags & MAP_SHARED) != 0;
   bool is_private = (flags & MAP_PRIVATE) != 0;
 
@@ -143,7 +139,7 @@ uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot, uint64_t flags,
     return MAP_FAILED;
   }
 
-  // ── Determine virtual address ────────────────────────────────────────────
+  // Determine virtual address
   uint64_t aligned_len = PAGE_ALIGN_UP(length);
   struct thread *current_thread = sched_get_current();
   uint64_t *pml4 = vmm_get_active_pml4();
@@ -195,7 +191,7 @@ uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot, uint64_t flags,
     }
   }
 
-  // ── File-backed mapping ──────────────────────────────────────────────────
+  // File-backed mapping
   if (!(flags & MAP_ANONYMOUS) && (int64_t)fd != -1) {
     if (!current_thread || fd >= MAX_FDS || !current_thread->fds[fd]) {
       klog_puts("[MMAP] Error: invalid fd\n");
@@ -227,16 +223,16 @@ uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot, uint64_t flags,
     return result;
   }
 
-  // ── Reject non-anonymous mappings with no fd ─────────────────────────────
+  // Reject non-anonymous mappings with no fd
   if (!(flags & MAP_ANONYMOUS)) {
     klog_puts("[MMAP] Error: non-anonymous mapping requires a valid fd\n");
     return MAP_FAILED;
   }
 
-  // ── Anonymous mapping ────────────────────────────────────────────────────
+  // Anonymous mapping
   // (Address determination already handled above)
 
-  // ── PROT_NONE shortcut ────────────────────────────────────────────────────
+  // PROT_NONE shortcut
   // On x86-64 there is no "read-disable" bit; any PRESENT page is readable.
   // For a true PROT_NONE mapping we must NOT create any PTEs.  We only
   // record the VMA so the address range is reserved, but leave the pages
@@ -246,13 +242,13 @@ uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot, uint64_t flags,
     klog_puts("[MMAP] PROT_NONE: reserving VMA only (no PTEs)\n");
   }
 
-  // ── Demand Paging: register VMA only, no physical allocation ─────────────
+  // Demand Paging: register VMA only, no physical allocation
   // For anonymous mappings we simply record the VMA.  Physical frames are
   // allocated lazily by vmm_handle_page_fault() on first access.  This
   // dramatically reduces memory consumption for large mappings that are
   // only partially touched (e.g. musl's mmap-backed malloc arenas).
 
-  // ── Register VMA ─────────────────────────────────────────────────────────
+  // Register VMA
   if (current_thread && current_thread->mm) {
     spinlock_acquire(&current_thread->mm->lock);
     int vma_idx = vma_add(&current_thread->mm->vmas, vaddr, vaddr + aligned_len,
@@ -279,11 +275,9 @@ uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot, uint64_t flags,
   return vaddr;
 }
 
-// ════════════════════════════════════════════════════════════════════════════
 // sys_munmap
 // Linux ABI: munmap(addr, length)
 //   rdi=addr  rsi=length
-// ════════════════════════════════════════════════════════════════════════════
 uint64_t sys_munmap(uint64_t addr, uint64_t length, uint64_t a2, uint64_t a3,
                     uint64_t a4, uint64_t a5) {
   (void)a2;
@@ -291,7 +285,7 @@ uint64_t sys_munmap(uint64_t addr, uint64_t length, uint64_t a2, uint64_t a3,
   (void)a4;
   (void)a5;
 
-  // ── Validate arguments ───────────────────────────────────────────────────
+  // Validate arguments
   if (addr == 0 || length == 0)
     return E_INVAL;
   if (addr & (PAGE_SIZE - 1))
@@ -330,12 +324,12 @@ uint64_t sys_munmap(uint64_t addr, uint64_t length, uint64_t a2, uint64_t a3,
     klog_puts(")\n");
   */
 
-  // ── Unmap and free ───────────────────────────────────────────────────────
+  // Unmap and free
   // teardown_range handles the unmap-before-free ordering and guards.
   // It consults the VMA list to decide whether each frame is owned by us.
   teardown_range(pml4, current, addr, aligned_len, "sys_munmap");
 
-  // ── Remove VMAs ──────────────────────────────────────────────────────────
+  // Remove VMAs
   spinlock_acquire(&current->mm->lock);
   vma_remove(&current->mm->vmas, addr, addr + aligned_len);
   vma_merge_adjacent(&current->mm->vmas);
@@ -350,11 +344,9 @@ uint64_t sys_munmap(uint64_t addr, uint64_t length, uint64_t a2, uint64_t a3,
   return 0;
 }
 
-// ════════════════════════════════════════════════════════════════════════════
 // sys_brk  (unchanged from original — included for completeness)
 // Linux ABI: brk(addr)  —  rdi=addr
 // Returns the current/new program break.
-// ════════════════════════════════════════════════════════════════════════════
 static uint64_t sys_brk(uint64_t addr, uint64_t a1, uint64_t a2, uint64_t a3,
                         uint64_t a4, uint64_t a5) {
   (void)a1;
@@ -417,10 +409,8 @@ static uint64_t sys_brk(uint64_t addr, uint64_t a1, uint64_t a2, uint64_t a3,
   return ret;
 }
 
-// ════════════════════════════════════════════════════════════════════════════
 // sys_mprotect  (unchanged from original — included for completeness)
 // Linux ABI: mprotect(addr, len, prot)
-// ════════════════════════════════════════════════════════════════════════════
 static uint64_t sys_mprotect(uint64_t addr, uint64_t len, uint64_t prot,
                              uint64_t a3, uint64_t a4, uint64_t a5) {
   (void)a3;
@@ -464,11 +454,9 @@ static uint64_t sys_mprotect(uint64_t addr, uint64_t len, uint64_t prot,
   return 0;
 }
 
-// ════════════════════════════════════════════════════════════════════════════
 // sys_mremap
 // Linux ABI: mremap(old_addr, old_size, new_size, flags, [new_addr])
 //   rdi=old_addr  rsi=old_size  rdx=new_size  r10=flags  r8=new_addr
-// ════════════════════════════════════════════════════════════════════════════
 #define MREMAP_MAYMOVE 1
 #define MREMAP_FIXED 2
 
@@ -634,9 +622,7 @@ static uint64_t sys_madvise(uint64_t addr, uint64_t len, uint64_t advice,
   return 0; // Success stub
 }
 
-// ════════════════════════════════════════════════════════════════════════════
 // Public API
-// ════════════════════════════════════════════════════════════════════════════
 
 void syscall_register_mm(void) {
   syscall_register(SYS_MMAP, sys_mmap);

@@ -5,7 +5,7 @@
 #include "lib/string.h"
 #include <stddef.h>
 
-// ── Internal data ───────────────────────────────────────────────────────────
+// Internal data
 
 struct ata_drive {
     uint16_t io_base;
@@ -21,7 +21,7 @@ struct ata_drive {
 static struct ata_drive ata_drives[MAX_ATA_DRIVES];
 static int ata_drive_count = 0;
 
-// ── Helpers ─────────────────────────────────────────────────────────────────
+// Helpers
 
 static void print_uint64(uint64_t num) {
     if (num == 0) { console_putchar('0'); return; }
@@ -58,7 +58,7 @@ static int ata_wait_drq(uint16_t io_base) {
     return -1;  // Timeout
 }
 
-// ── IDENTIFY ────────────────────────────────────────────────────────────────
+// IDENTIFY
 
 static bool ata_identify(struct ata_drive *drive) {
     uint16_t io = drive->io_base;
@@ -125,7 +125,7 @@ static bool ata_identify(struct ata_drive *drive) {
     return true;
 }
 
-// ── PIO Read ────────────────────────────────────────────────────────────────
+// PIO Read
 
 static int ata_pio_read(struct block_device *dev, uint64_t lba, uint32_t count, void *buf) {
     struct ata_drive *drive = (struct ata_drive *)dev->driver_data;
@@ -158,7 +158,7 @@ static int ata_pio_read(struct block_device *dev, uint64_t lba, uint32_t count, 
     return 0;
 }
 
-// ── PIO Write ───────────────────────────────────────────────────────────────
+// PIO Write
 
 static int ata_pio_write(struct block_device *dev, uint64_t lba, uint32_t count, const void *buf) {
     struct ata_drive *drive = (struct ata_drive *)dev->driver_data;
@@ -192,7 +192,7 @@ static int ata_pio_write(struct block_device *dev, uint64_t lba, uint32_t count,
     return 0;
 }
 
-// ── Initialization ──────────────────────────────────────────────────────────
+// Initialization
 
 static void ata_probe_channel(uint16_t io_base, uint16_t ctrl_base, int drive_index_start) {
     for (int slave = 0; slave <= 1; slave++) {

@@ -16,7 +16,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-// ── Device Node Registry ────────────────────────────────────────────────────
+// Device Node Registry
 // Keeps track of character device nodes so they persist across lookups
 #define MAX_DEVICES 32
 
@@ -28,7 +28,7 @@ typedef struct {
 static device_entry_t device_registry[MAX_DEVICES];
 static int device_count = 0;
 
-// ── Display Backend Selection ────────────────────────────────────────────────
+// Display Backend Selection
 static fb_backend_t display_backend = FB_BACKEND_LIMINE; // Default fallback
 static bool drm_available = false;
 
@@ -308,7 +308,7 @@ void fb_copy_to_backbuffer(void) {
   memcpy((uint8_t *)backbuffer, (uint8_t *)fb->address, fb_size);
 }
 
-// ── /dev/fb0 VFS node ────────────────────────────────────────────────────────
+// /dev/fb0 VFS node
 
 static uint32_t fb_vfs_write(struct vfs_node *node, uint32_t offset,
                              uint32_t size, uint8_t *buffer) {
@@ -336,7 +336,7 @@ static uint32_t fb_vfs_write(struct vfs_node *node, uint32_t offset,
   return size;
 }
 
-// ── Framebuffer mmap: map physical fb memory directly into user space
+// Framebuffer mmap: map physical fb memory directly into user space
 // ───────── This allows apps like Doom to write directly without syscalls per
 // frame.
 #define FB_MMAP_PROT_READ 0x1
@@ -475,7 +475,7 @@ static uint32_t fb_vfs_read(struct vfs_node *node, uint32_t offset,
   return size;
 }
 
-// ── /dev/console VFS node ────────────────────────────────────────────────────
+// /dev/console VFS node
 
 static uint8_t canon_buffer[1024];
 static uint32_t canon_len = 0;
@@ -668,7 +668,7 @@ static uint32_t zero_vfs_write(struct vfs_node *node, uint32_t offset,
   return size; // Discard but report success
 }
 
-// ── Helper for device registration ──────────────────────────────────────────
+// Helper for device registration
 // Character devices are always created as virtual in-memory nodes, not
 // persisted to ext2
 static void setup_chardev(
@@ -842,7 +842,7 @@ static int fb_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
   }
 }
 
-// ── /dev/tty0 VT ioctls for Xfbdev/Xorg ─────────────────────────────────────
+// /dev/tty0 VT ioctls for Xfbdev/Xorg
 // Linux VT ioctl numbers
 #define VT_OPENQRY 0x5600
 #define VT_GETMODE 0x5601
@@ -1040,7 +1040,7 @@ static int tty0_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
   }
 }
 
-// ── Registration ─────────────────────────────────────────────────────────────
+// Registration
 
 void fb_register_vfs(void) {
   if (!fs_root)
@@ -1120,8 +1120,7 @@ void fb_register_vfs(void) {
   // Note: don't free dev_dir - it still points to a valid VFS node
 }
 
-// ── Direct drawing primitives
-// ─────────────────────────────────────────────────
+// Direct drawing primitives
 
 void fb_put_pixel(uint32_t x, uint32_t y, uint32_t color) {
   if (x >= fb->width || y >= fb->height)

@@ -52,7 +52,7 @@ void drm_run_phase3_test(void) {
     klog_uint64(kms_count);
     klog_puts("\n");
 
-    // 4. Phase 3: Dumb Buffer & MMap test
+
     klog_puts("[DRM_TEST] Phase 3: Dumb Buffer & MMAP Validation\n");
     
     struct drm_mode_create_dumb cd;
@@ -81,7 +81,7 @@ void drm_run_phase3_test(void) {
         }
     }
 
-    // 5. Phase 4: Hardware FB verification
+
     klog_puts("[DRM_TEST] Phase 4: Hardware FB Bridge Validation\n");
     bool found_hw_fb = false;
     spinlock_acquire(&global_drm_dev.lock);

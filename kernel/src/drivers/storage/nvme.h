@@ -55,7 +55,7 @@ struct nvme_controller {
     nvme_regs_t *regs;
     uint32_t db_stride; // Doorbell stride
     
-    // Phase 2+ fields
+
     void *admin_sq;
     void *admin_cq;
     uint16_t admin_sq_tail;
@@ -64,7 +64,7 @@ struct nvme_controller {
     struct device *dev;
     bool present;
 
-    // Phase 4+ fields
+
     void *io_sq;
     void *io_cq;
     uint16_t io_sq_tail;
@@ -73,7 +73,7 @@ struct nvme_controller {
 
     struct block_device bdev;
 
-    // Phase 6: MSI-X
+
     void *msix_table_virt;
     uint8_t irq_vector;
 };

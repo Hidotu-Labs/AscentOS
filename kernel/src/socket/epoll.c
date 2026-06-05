@@ -1,5 +1,5 @@
-// ── Epoll Implementation
-// ─────────────────────────────────────── Phase 8: epoll Infrastructure
+// Epoll Implementation
+
 // Implements the epoll API for event multiplexing
 
 #include "epoll.h"
@@ -13,14 +13,12 @@
 #include "socket.h"
 #include <stdint.h>
 
-// ── Global Epoll Instance Table
-// ───────────────────────────────────────────────────────
+// Global Epoll Instance Table
 static eventpoll_t *epoll_table[EPOLL_MAX_INSTANCES];
 static int epoll_count = 0;
 static spinlock_t epoll_table_lock = SPINLOCK_INIT;
 
-// ── Epoll Instance Table Management
-// ────────────────────────────────────────────────────────
+// Epoll Instance Table Management
 
 static int epoll_table_alloc(void) {
   spinlock_acquire(&epoll_table_lock);
@@ -47,8 +45,7 @@ static void epoll_table_free(int idx) {
   spinlock_release(&epoll_table_lock);
 }
 
-// ── Epoll Item Management
-// ───────────────────────────────────────────────────────
+// Epoll Item Management
 
 static epitem_t *epitem_alloc(void) {
   epitem_t *epi = kmalloc(sizeof(epitem_t));
@@ -68,8 +65,7 @@ static void epitem_free(epitem_t *epi) {
   kfree(epi);
 }
 
-// ── Epoll Instance Creation/Destruction
-// ─────────────────────────────────────────────────────────
+// Epoll Instance Creation/Destruction
 
 eventpoll_t *epoll_create(void) {
   // Allocate epoll structure
@@ -153,8 +149,7 @@ void epoll_put(eventpoll_t *ep) {
   }
 }
 
-// ── Helper: Check if FD has events
-// ────────────────────────────────────────────────────────
+// Helper: Check if FD has events
 
 static uint32_t ep_check_events(epitem_t *epi) {
   if (!epi || !epi->node)
@@ -172,8 +167,7 @@ static uint32_t ep_check_events(epitem_t *epi) {
   return (uint32_t)revents & (watch_mask | EPOLLERR | EPOLLHUP | EPOLLRDHUP);
 }
 
-// ── Helper: Add item to ready list
-// ────────────────────────────────────────────────────────
+// Helper: Add item to ready list
 
 static void ep_add_to_ready_list(eventpoll_t *ep, epitem_t *epi) {
   if (epi->on_ready_list)
@@ -208,8 +202,7 @@ static void ep_add_to_ready_list(eventpoll_t *ep, epitem_t *epi) {
   }
 }
 
-// ── Helper: Remove item from ready list
-// ─────────────────────────────────────────────────────────────
+// Helper: Remove item from ready list
 
 static void ep_remove_from_ready_list(eventpoll_t *ep, epitem_t *epi) {
   if (!epi->on_ready_list)
@@ -226,8 +219,7 @@ static void ep_remove_from_ready_list(eventpoll_t *ep, epitem_t *epi) {
   spinlock_release(&ep->lock);
 }
 
-// ── epoll_ctl Operations
-// ───────────────────────────────────────────────────────
+// epoll_ctl Operations
 
 int epoll_ctl_add(eventpoll_t *ep, int fd, struct epoll_event *event) {
   if (!ep || !event)
@@ -410,8 +402,7 @@ int epoll_ctl_mod(eventpoll_t *ep, int fd, struct epoll_event *event) {
   return 0;
 }
 
-// ── epoll_wait Implementation
-// ────────────────────────────────────────────────────────
+// epoll_wait Implementation
 
 int epoll_wait_impl(eventpoll_t *ep, struct epoll_event *events, int maxevents,
                     int timeout_ms) {
@@ -593,8 +584,7 @@ int epoll_wait_impl(eventpoll_t *ep, struct epoll_event *events, int maxevents,
   return returned;
 }
 
-// ── Epoll FD Management
-// ───────────────────────────────────────────────────────
+// Epoll FD Management
 
 int epoll_alloc_fd(eventpoll_t *ep) {
   struct thread *t = sched_get_current();
@@ -689,8 +679,7 @@ int epoll_close_fd(int fd) {
   return 0;
 }
 
-// ── Epoll VFS Operations
-// ───────────────────────────────────────────────────────
+// Epoll VFS Operations
 
 uint32_t epoll_vfs_read(struct vfs_node *node, uint32_t offset, uint32_t size,
                         uint8_t *buffer) {
@@ -752,8 +741,7 @@ int epoll_vfs_poll(struct vfs_node *node, int events) {
   return revents;
 }
 
-// ── Event Notification
-// ────────────────────────────────────────────────────────
+// Event Notification
 
 void epoll_notify_event(struct vfs_node *node, uint32_t events) {
   if (!node)
@@ -838,8 +826,7 @@ void epoll_notify_socket(int fd, uint32_t events) {
   }
 }
 
-// ── Epoll Subsystem Initialization
-// ───────────────────────────────────────────────────────
+// Epoll Subsystem Initialization
 
 void epoll_init(void) {
   memset(epoll_table, 0, sizeof(epoll_table));

@@ -1,4 +1,3 @@
-// ═══════════════════════════════════════════════════════════════════════════
 //  Named Object Slab Cache Allocator — Implementation
 //
 //  Each kmem_cache manages slabs (single 4KB pages) containing fixed-size
@@ -11,7 +10,6 @@
 //  On alloc: pick from partial (O(1) bitmap scan), fallback to free, then
 //            allocate a new slab page from PMM.
 //  On free:  clear bit, move slab full→partial or partial→free.
-// ═══════════════════════════════════════════════════════════════════════════
 
 #include "slab_cache.h"
 #include "../console/console.h"
@@ -28,7 +26,7 @@
 #define BITMAP_CLEAR(bmp, i) ((bmp)[(i) / 32] &= ~(1U << ((i) % 32)))
 #define BITMAP_TEST(bmp, i) (((bmp)[(i) / 32] & (1U << ((i) % 32))) != 0)
 
-// ── Global State ────────────────────────────────────────────────────────────
+// Global State
 
 static spinlock_t slab_global_lock = SPINLOCK_INIT;
 
@@ -39,13 +37,13 @@ static int cache_count = 0;
 // Virtual address bumper for slab pages (separate from heap bumper)
 static uint64_t slab_vaddr_cursor = KERNEL_HEAP_BASE + 0x100000000ULL;
 
-// ── Pre-built Kernel Object Caches ──────────────────────────────────────────
+// Pre-built Kernel Object Caches
 
 kmem_cache_t *thread_cache = NULL;
 kmem_cache_t *vfs_node_cache = NULL;
 kmem_cache_t *vma_cache = NULL;
 
-// ── Internal Helpers ────────────────────────────────────────────────────────
+// Internal Helpers
 
 static uint64_t slab_allocate_vaddr(void) {
   uint64_t va = slab_vaddr_cursor;
@@ -104,7 +102,7 @@ static struct slab_page *slab_page_alloc(kmem_cache_t *cache) {
   return s;
 }
 
-// ── Public API ──────────────────────────────────────────────────────────────
+// Public API
 
 void slab_cache_init(void) {
   memset(cache_pool, 0, sizeof(cache_pool));

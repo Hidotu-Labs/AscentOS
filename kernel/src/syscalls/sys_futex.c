@@ -1,4 +1,4 @@
-// ── Futex Syscall (202) ─────────────────────────────────────────────────────
+// Futex Syscall (202)
 // Implements FUTEX_WAIT and FUTEX_WAKE using a hash table keyed on the
 // physical address of the futex word.  This ensures correctness across
 // processes sharing memory (e.g. after fork + shared mappings).
@@ -16,7 +16,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-// ── Futex operation constants (Linux ABI) ───────────────────────────────────
+// Futex operation constants (Linux ABI)
 #define FUTEX_WAIT 0
 #define FUTEX_WAKE 1
 #define FUTEX_WAIT_PRIVATE 128 // FUTEX_WAIT | FUTEX_PRIVATE_FLAG
@@ -30,7 +30,7 @@
 #define EAGAIN 11
 #define ETIMEDOUT 110
 
-// ── Futex hash table ────────────────────────────────────────────────────────
+// Futex hash table
 // Each bucket is an intrusive linked list of waiters, protected by its own
 // spinlock.  We key on the physical address so that two processes mapping the
 // same physical page see the same bucket.
@@ -68,7 +68,7 @@ static inline uint32_t futex_hash_key(uint64_t phys_addr) {
   return (uint32_t)(h & (FUTEX_HASH_SIZE - 1));
 }
 
-// ── Resolve user virtual address to physical address ────────────────────────
+// Resolve user virtual address to physical address
 static uint64_t futex_get_phys(uint32_t *uaddr) {
   struct thread *t = sched_get_current();
   if (!t || !t->cr3)
@@ -84,7 +84,7 @@ static uint64_t futex_get_phys(uint32_t *uaddr) {
   return phys;
 }
 
-// ── FUTEX_WAIT ──────────────────────────────────────────────────────────────
+// FUTEX_WAIT
 // Atomically check that *uaddr == val, then block the calling thread.
 // If a timeout is specified, the thread will be woken after the timeout.
 // Returns 0 on success (woken by FUTEX_WAKE).
@@ -110,7 +110,7 @@ static uint64_t futex_wait(uint32_t *uaddr, uint32_t val,
   if (!waiter.thread)
     return (uint64_t)(-(int64_t)EFAULT);
 
-  // ── Critical section: check value + enqueue + block ───────────────────
+  // Critical section: check value + enqueue + block
   spinlock_acquire(&futex_hash[bucket].lock);
 
   // Re-read the user value while holding the lock to prevent races with
@@ -148,7 +148,7 @@ static uint64_t futex_wait(uint32_t *uaddr, uint32_t val,
   // Yield the CPU — we'll be rescheduled when woken by FUTEX_WAKE or timeout
   sched_yield();
 
-  // ── We're back!  Remove ourselves from the hash bucket ────────────────
+  // We're back!  Remove ourselves from the hash bucket
   spinlock_acquire(&futex_hash[bucket].lock);
 
   // Remove waiter from the list (may already have been removed by wake)
@@ -185,7 +185,7 @@ static uint64_t futex_wait(uint32_t *uaddr, uint32_t val,
   return 0;
 }
 
-// ── FUTEX_WAKE ──────────────────────────────────────────────────────────────
+// FUTEX_WAKE
 // Wake at most `val` threads waiting on the futex at *uaddr.
 // Returns the number of threads woken.
 static uint64_t futex_wake(uint32_t *uaddr, uint32_t val) {
@@ -222,7 +222,7 @@ static uint64_t futex_wake(uint32_t *uaddr, uint32_t val) {
   return (uint64_t)woken;
 }
 
-// ── sys_futex dispatcher ────────────────────────────────────────────────────
+// sys_futex dispatcher
 static uint64_t sys_futex(uint64_t uaddr_val, uint64_t op_val, uint64_t val_arg,
                           uint64_t timeout_ptr, uint64_t uaddr2,
                           uint64_t val3) {
@@ -251,5 +251,5 @@ static uint64_t sys_futex(uint64_t uaddr_val, uint64_t op_val, uint64_t val_arg,
   }
 }
 
-// ── Registration ────────────────────────────────────────────────────────────
+// Registration
 void syscall_register_futex(void) { syscall_register(SYS_FUTEX, sys_futex); }

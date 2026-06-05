@@ -23,7 +23,7 @@ static int controller_count = 0;
 static struct ohci_int_pipe int_pipes[OHCI_MAX_INT_PIPES];
 static int int_pipe_count = 0;
 
-// ── Register Access Helpers ─────────────────────────────────────────────────
+// Register Access Helpers
 
 static inline uint32_t ohci_read32(struct ohci_controller *hc, uint16_t reg) {
   return *(volatile uint32_t *)(hc->mmio_base + reg);
@@ -34,7 +34,7 @@ static inline void ohci_write32(struct ohci_controller *hc, uint16_t reg,
   *(volatile uint32_t *)(hc->mmio_base + reg) = val;
 }
 
-// ── Pool Allocators ─────────────────────────────────────────────────────────
+// Pool Allocators
 // Interrupt pipes use EDs 0..7 and TDs 0..15 (persistent, never reset).
 // Control transfers use EDs 8+ and TDs 16+ (reset between each transfer).
 
@@ -114,7 +114,7 @@ static void ohci_reset_pools(struct ohci_controller *hc) {
     p[i] = 0;
 }
 
-// ── Interrupt Pipe Management (Phase 5) ─────────────────────────────────────
+
 
 struct ohci_int_pipe *ohci_setup_int_in(struct ohci_controller *hc,
                                         uint8_t dev_addr, uint8_t ep_num,
@@ -241,7 +241,7 @@ void ohci_int_pipe_resubmit(struct ohci_int_pipe *pipe) {
   asm volatile("mfence" ::: "memory");
 }
 
-// ── Root Hub Port Control (Phase 4) ─────────────────────────────────────────
+
 
 static void ohci_reset_port(struct ohci_controller *hc, uint8_t port) {
   uint16_t reg = OHCI_REG_RH_PORT_STATUS + (port * 4);
@@ -307,7 +307,7 @@ static void ohci_probe_ports(struct ohci_controller *hc) {
   }
 }
 
-// ── Control Transfers (Phase 4) ─────────────────────────────────────────────
+
 
 static int ohci_control_transfer(struct ohci_controller *hc, uint8_t addr,
                                  struct usb_control_request *req, void *data,
@@ -454,7 +454,7 @@ static int ohci_hcd_control_transfer(struct usb_hcd *hcd, uint8_t addr,
   return ohci_control_transfer(hc, addr, req, data, len, low_speed);
 }
 
-// ── Interrupt Handler ───────────────────────────────────────────────────────
+// Interrupt Handler
 
 static void ohci_irq_handler(struct registers *regs) {
   (void)regs;
@@ -488,7 +488,7 @@ static void ohci_irq_handler(struct registers *regs) {
   }
 }
 
-// ── Controller Initialization ───────────────────────────────────────────────
+// Controller Initialization
 
 static void ohci_silence(struct ohci_controller *hc) {
   uint32_t control = ohci_read32(hc, OHCI_REG_CONTROL);
@@ -623,7 +623,7 @@ static bool ohci_probe_pci_device(struct pci_device *pci) {
   return true;
 }
 
-// ── Public API ──────────────────────────────────────────────────────────────
+// Public API
 
 void ohci_init(void) {
   controller_count = 0;

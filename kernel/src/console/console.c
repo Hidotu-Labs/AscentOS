@@ -24,7 +24,7 @@ static bool terminal_escape = false;
 static char terminal_escape_buffer[32];
 static size_t terminal_escape_len = 0;
 
-// ── UTF-8 multi-byte decoder state ───────────────────────────────────────────
+// UTF-8 multi-byte decoder state
 static uint32_t utf8_codepoint = 0;
 static int utf8_bytes_remaining = 0;
 static void console_render_char(uint32_t cp);
@@ -32,7 +32,7 @@ static void console_render_char(uint32_t cp);
 #define BG_COLOR 0x00000000
 #define FG_COLOR 0x00CDD6F4
 
-// ── ANSI color palette (Catppuccin Mocha) ───────────────────────────────────
+// ANSI color palette (Catppuccin Mocha)
 static uint32_t ansi_colors_normal[8] = {
     0x00181825, // 0 black   (surface0)
     0x00F38BA8, // 1 red
@@ -55,7 +55,7 @@ static uint32_t ansi_colors_bright[8] = {
     0x00FFFFFF, // 7 bright white
 };
 
-// ── Current SGR color state ──────────────────────────────────────────────────
+// Current SGR color state
 static uint32_t current_fg = FG_COLOR;
 static uint32_t current_bg = BG_COLOR;
 static bool attr_bold = false;
@@ -69,7 +69,7 @@ typedef struct {
   bool underline;
 } console_char_t;
 
-// ── 256-color palette helper ─────────────────────────────────────────────────
+// 256-color palette helper
 // Returns the 32-bit RGB value for an xterm 256-color index.
 static uint32_t xterm256_color(int idx) {
   if (idx >= 0 && idx <= 7)
@@ -272,7 +272,7 @@ static void console_wipe_history_unlocked(void) {
   attr_underline = false;
 }
 
-// ── SGR escape sequence handler ─────────────────────────────────────────────
+// SGR escape sequence handler
 static void console_process_escape_sequence(void) {
   if (terminal_escape_len == 0)
     return;
@@ -304,7 +304,7 @@ static void console_process_escape_sequence(void) {
   int value2 = (param_count > 1) ? params[1] : 0;
 
   switch (final) {
-  // ── Cursor movement ────────────────────────────────────────────────────────
+  // Cursor movement
   case 'A':
     if (value == 0)
       value = 1;
@@ -368,7 +368,7 @@ static void console_process_escape_sequence(void) {
     break;
   }
 
-  // ── Erase ─────────────────────────────────────────────────────────────────
+  // Erase
   case 'J':
     if (value == 0) {
       // Erase from cursor to end of screen
@@ -461,7 +461,7 @@ static void console_process_escape_sequence(void) {
     }
     break;
 
-  // ── Cursor visibility ──────────────────────────────────────────────────────
+  // Cursor visibility
   case 'h':
     if (question && value == 25)
       console_set_cursor_visible_unlocked(true);
@@ -471,7 +471,7 @@ static void console_process_escape_sequence(void) {
       console_set_cursor_visible_unlocked(false);
     break;
 
-  // ── Cursor position report ─────────────────────────────────────────────────
+  // Cursor position report
   case 'n':
     if (!question && value == 6) {
       char resp[32];
@@ -511,7 +511,7 @@ static void console_process_escape_sequence(void) {
     }
     break;
 
-  // ── SGR — Select Graphic Rendition (colors + attributes) ──────────────────
+  // SGR — Select Graphic Rendition (colors + attributes)
   case 'm': {
     // Bare ESC[m is equivalent to ESC[0m — full reset
     if (param_count == 1 && params[0] == 0) {
@@ -629,7 +629,7 @@ static void console_process_escape_sequence(void) {
   }
 }
 
-// ── Character drawing helpers ────────────────────────────────────────────────
+// Character drawing helpers
 
 static void draw_char_colored(uint32_t c, uint32_t col, uint32_t row,
                               uint32_t fg, uint32_t bg, bool underline) {
@@ -659,7 +659,7 @@ static void draw_history_char(uint32_t col, uint32_t row) {
   draw_char_colored(ch->c, col, row, ch->fg, ch->bg, ch->underline);
 }
 
-// ── Render a single decoded codepoint on the framebuffer console ─────────────
+// Render a single decoded codepoint on the framebuffer console
 static void console_render_char(uint32_t cp) {
   if (cp == '\n') {
     cursor_x = 0;
@@ -764,7 +764,7 @@ static void console_render_char(uint32_t cp) {
     return;
   }
 
-  // ── Deferred autowrap: if a previous character hit the right margin,
+  // Deferred autowrap: if a previous character hit the right margin,
   // perform the actual line-feed now (before drawing this new character).
   if (wrap_pending) {
     wrap_pending = false;
@@ -798,11 +798,11 @@ static void console_render_char(uint32_t cp) {
   }
 }
 
-// ── Core putchar with UTF-8 decoding (must be called with console_lock held) ─
+// Core putchar with UTF-8 decoding (must be called with console_lock held) ─
 static void console_putchar_unlocked(char c) {
   unsigned char uc = (unsigned char)c;
 
-  // ── ANSI escape sequences (all ASCII, no UTF-8 conflict) ──────────────────
+  // ANSI escape sequences (all ASCII, no UTF-8 conflict)
   if (terminal_escape) {
     if (terminal_escape_len < sizeof(terminal_escape_buffer) - 1) {
       terminal_escape_buffer[terminal_escape_len++] = c;
@@ -824,7 +824,7 @@ static void console_putchar_unlocked(char c) {
   // Always forward raw bytes to serial (serial terminals handle UTF-8 natively)
   serial_putchar(c);
 
-  // ── UTF-8 multi-byte decoding ─────────────────────────────────────────────
+  // UTF-8 multi-byte decoding
   // Continuation byte (10xxxxxx)
   if ((uc & 0xC0) == 0x80) {
     if (utf8_bytes_remaining > 0) {
@@ -864,7 +864,7 @@ static void console_putchar_unlocked(char c) {
   console_render_char((uint32_t)uc);
 }
 
-// ── Public API ───────────────────────────────────────────────────────────────
+// Public API
 
 void console_putchar(char c) {
   if (fb_get_kd_mode() == KD_GRAPHICS)

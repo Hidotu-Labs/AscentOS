@@ -1,4 +1,4 @@
-// ── Architecture Syscalls: arch_prctl ───────────────────────────────────────
+// Architecture Syscalls: arch_prctl
 #include "../apic/lapic_timer.h"
 #include "../console/klog.h"
 #include "../cpu/msr.h"
@@ -8,13 +8,13 @@
 #include "syscall.h"
 #include <stdint.h>
 
-// ── arch_prctl sub-commands (Linux x86_64) ──────────────────────────────────
+// arch_prctl sub-commands (Linux x86_64)
 #define ARCH_SET_GS 0x1001
 #define ARCH_SET_FS 0x1002
 #define ARCH_GET_FS 0x1003
 #define ARCH_GET_GS 0x1004
 
-// ── MSR addresses ───────────────────────────────────────────────────────────
+// MSR addresses
 #define IA32_FS_BASE 0xC0000100
 #define IA32_GS_BASE 0xC0000101
 #define IA32_KERNEL_GS_BASE 0xC0000102
@@ -25,7 +25,7 @@ static int is_canonical_user_addr(uint64_t addr) {
   return (sign == 0) ? (upper == 0) : (upper == 0xFFFF);
 }
 
-// ── sys_arch_prctl ──────────────────────────────────────────────────────────
+// sys_arch_prctl
 // Linux ABI: arch_prctl(code, addr)
 //   rdi = code, rsi = addr
 static uint64_t sys_arch_prctl(uint64_t code, uint64_t addr, uint64_t a2,
@@ -160,9 +160,10 @@ static uint64_t sys_nanosleep(uint64_t req_ptr, uint64_t rem_ptr, uint64_t a2,
   (void)a5;
   (void)rem_ptr;
 
-  if (!req_ptr)
+  if (!req_ptr || !vmm_is_user_addr_range_valid(req_ptr, 16))
     return (uint64_t)-14; // EFAULT
 
+  // Non-busy sleep: mark thread as sleeping and yield
   uint64_t *req = (uint64_t *)req_ptr;
   uint64_t sec = req[0];
   uint64_t nsec = req[1];
@@ -172,10 +173,13 @@ static uint64_t sys_nanosleep(uint64_t req_ptr, uint64_t rem_ptr, uint64_t a2,
   if (total_ms == 0 && nsec > 0)
     total_ms = 1; // Minimum 1ms
 
-  // Busy-wait sleep using LAPIC timer with interrupts enabled
-  uint64_t start = lapic_timer_get_ms();
-  while ((lapic_timer_get_ms() - start) < total_ms) {
-    __asm__ volatile("sti; pause"); // Enable interrupts and pause
+  if (total_ms > 0) {
+    struct thread *current = sched_get_current();
+    if (current) {
+      current->state = THREAD_SLEEPING;
+      current->wakeup_ticks = lapic_timer_get_ticks() + total_ms;
+      sched_yield();
+    }
   }
 
   return 0;

@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-// ── ATA IO Port Definitions ─────────────────────────────────────────────────
+// ATA IO Port Definitions
 
 // Primary ATA channel
 #define ATA_PRIMARY_IO     0x1F0

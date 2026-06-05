@@ -4,10 +4,10 @@
 #include "lib/string.h"
 #include <stdint.h>
 
-// ── Helpers ─────────────────────────────────────────────────────────────────
+// Helpers
 
 
-// ── Alignment helpers per VirtIO 1.0 spec ───────────────────────────────────
+// Alignment helpers per VirtIO 1.0 spec
 // Descriptor table:  16-byte aligned
 // Available ring:     2-byte aligned
 // Used ring:          4-byte aligned
@@ -30,7 +30,7 @@ static inline uint64_t virtq_used_size(uint16_t num) {
          sizeof(uint16_t);
 }
 
-// ── Virtqueue Initialization ────────────────────────────────────────────────
+// Virtqueue Initialization
 
 bool virtq_init(struct virtqueue *vq, uint16_t num) {
   // Calculate total size needed with proper alignment
@@ -91,7 +91,7 @@ bool virtq_init(struct virtqueue *vq, uint16_t num) {
   return true;
 }
 
-// ── Virtqueue Buffer Operations ─────────────────────────────────────────────
+// Virtqueue Buffer Operations
 
 static int alloc_desc(struct virtqueue *vq) {
   if (vq->num_free == 0)
@@ -200,7 +200,7 @@ void virtq_free_desc(struct virtqueue *vq, uint16_t head) {
   }
 }
 
-// ── Self-Test ───────────────────────────────────────────────────────────────
+// Self-Test
 
 void virtio_self_test(void) {
   klog_puts("\n[VIRTIO] ═══ VirtIO Foundation Self-Test ═══\n");

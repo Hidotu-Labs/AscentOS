@@ -7,17 +7,17 @@
 #include "../sched/sched.h"
 #include "../smp/cpu.h"
 
-// ── PIT constants for calibration ────────────────────────────────────────────
+// PIT constants for calibration
 #define PIT_CMD_PORT   0x43
 #define PIT_DATA_PORT0 0x40
 #define PIT_BASE_FREQ  1193182  // PIT oscillator frequency in Hz
 #define CALIBRATION_MS 10       // How long to measure (10 ms)
 
-// ── State ────────────────────────────────────────────────────────────────────
+// State
 static volatile uint64_t lapic_timer_ticks = 0;
 static uint32_t          ticks_per_ms      = 0;   // LAPIC decrements per ms
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
+// Helpers
 static void print_hex32(uint32_t num) {
     const char *hex = "0123456789ABCDEF";
     for (int i = 28; i >= 0; i -= 4) {
@@ -25,7 +25,7 @@ static void print_hex32(uint32_t num) {
     }
 }
 
-// ── Timer ISR ────────────────────────────────────────────────────────────────
+// Timer ISR
 void lapic_timer_handler(struct registers *regs) {
     // Only the primary core increments the global system uptime.
     // This prevents time from running 4x faster on a 4-core system.
@@ -50,7 +50,7 @@ void lapic_timer_handler(struct registers *regs) {
     }
 }
 
-// ── PIT polling sleep for calibration ────────────────────────────────────────
+// PIT polling sleep for calibration
 // Uses the PIT counter-latch to busy-wait for a known duration.
 // We program the PIT in mode 0 (one-shot) and poll the 16-bit counter until
 // we detect it has wrapped (current > previous means the countdown finished).
@@ -80,7 +80,7 @@ static void pit_calibration_sleep_ms(uint32_t ms) {
     }
 }
 
-// ── Calibration ──────────────────────────────────────────────────────────────
+// Calibration
 // We program the LAPIC timer to count down from 0xFFFFFFFF and measure how
 // many decrements occur during a known PIT-based delay.
 static uint32_t calibrate_lapic_timer(void) {
@@ -102,7 +102,7 @@ static uint32_t calibrate_lapic_timer(void) {
     return elapsed / CALIBRATION_MS;
 }
 
-// ── Public API ───────────────────────────────────────────────────────────────
+// Public API
 
 void lapic_timer_init(void) {
     klog_puts("[INFO] Calibrating LAPIC timer against PIT...\n");

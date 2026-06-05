@@ -61,6 +61,16 @@ struct mm_struct {
 #define SIG_DFL 0
 #define SIG_IGN 1
 
+// sigaltstack flags
+#define SS_ONSTACK 1
+#define SS_DISABLE 2
+#define SS_AUTODISARM (1U << 31)
+
+// sigaction flags
+#define SA_ONSTACK   0x08000000
+#define SA_RESTORER  0x04000000
+#define SA_NODEFER   0x40000000
+
 struct k_sigaction {
   void (*sa_handler)(int);
   uint64_t sa_flags;
@@ -98,6 +108,7 @@ struct context {
 struct thread {
   uint64_t rsp; // Must be first field (offset 0) for optimal assembly
   uint32_t tid;
+  uint32_t tgid;  // Thread group ID (== tid for group leader)
   uint8_t fpu_state[512] __attribute__((aligned(16))); // Saved SSE/FPU state
   uint64_t stack_base;
   uint64_t stack_size;
@@ -141,6 +152,11 @@ struct thread {
   struct k_sigaction signal_handlers[64];
   uint64_t pending_signals;
   uint64_t signal_mask;
+
+  // Alternate signal stack (sigaltstack)
+  uint64_t ss_sp;     // Base of alternate signal stack
+  uint64_t ss_size;   // Size of alternate signal stack
+  int ss_flags;       // SS_DISABLE, SS_ONSTACK, etc.
 
   // Embedded wait queue entry for safe blocking across context switches
   // Using stack-allocated entries is unsafe because the stack frame becomes

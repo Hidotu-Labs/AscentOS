@@ -5,7 +5,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-// ── USB HID Mouse Driver ───────────────────────────────────────────────────
+// USB HID Mouse Driver
 // Handles USB Boot Protocol mice via UHCI Interrupt Transfers.
 // Translates the 3-byte (or 4-byte) HID Boot Mouse report into the kernel's
 // existing mouse input subsystem (mouse_state_t + evdev events).
@@ -23,7 +23,7 @@ struct usb_mouse_report {
 #define USB_MOUSE_BTN_RIGHT  (1 << 1)
 #define USB_MOUSE_BTN_MIDDLE (1 << 2)
 
-// ── Public API ──────────────────────────────────────────────────────────────
+// Public API
 
 // Try to attach a USB mouse driver to this device.
 // Returns true if the device is a mouse and was successfully initialized.

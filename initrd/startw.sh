@@ -8,5 +8,23 @@ rm -f $XDG_RUNTIME_DIR/wayland-0*
 seatd -u root &
 sleep 1
 
-# Launch Weston
-LD_PRELOAD=/lib/libgcompat.so.0 weston --backend=drm-backend.so --renderer=pixman -c /etc/weston.ini
+# Disable hardware cursor — kernel DRM does not implement MODE_CURSOR ioctls
+export WLR_NO_HARDWARE_CURSORS=1
+
+# ── Wayland / Weston debug logging ──────────────────────────────────────────
+export WAYLAND_DEBUG=1
+export WESTON_DEBUG_COMPOSITOR=1
+export WLR_RENDERER_ALLOW_SOFTWARE=1
+export WLR_LOG_LEVEL=debug
+export WLR_DRM_NO_ATOMIC=1
+
+# Redirect all output to a log file so it survives a crash
+LOG=/tmp/weston-debug.log
+echo "[startw] starting weston at $(date)" > $LOG
+
+LD_PRELOAD=/lib/libgcompat.so.0 weston \
+    --backend=drm-backend.so \
+    --renderer=pixman \
+    -c /etc/weston.ini \
+    --log=$LOG \
+    2>&1 | tee -a $LOG

@@ -9,7 +9,7 @@
 static struct pci_device devices[PCI_MAX_DEVICES];
 static uint32_t device_count = 0;
 
-// ── PCI Config Space Access ─────────────────────────────────────────────────
+// PCI Config Space Access
 
 uint32_t pci_config_read32(uint8_t bus, uint8_t slot, uint8_t func,
                            uint16_t offset) {
@@ -55,7 +55,7 @@ void pci_config_write16(uint8_t bus, uint8_t slot, uint8_t func,
   pci_config_write32(bus, slot, func, offset & 0xFFFC, val);
 }
 
-// ── Helpers ─────────────────────────────────────────────────────────────────
+// Helpers
 
 static void print_hex8(uint8_t val) {
   const char *hex = "0123456789ABCDEF";
@@ -84,7 +84,7 @@ static void print_uint32(uint32_t num) {
   }
 }
 
-// ── Device scanning ─────────────────────────────────────────────────────────
+// Device scanning
 
 static void pci_check_function(uint8_t bus, uint8_t slot, uint8_t func) {
   uint32_t reg0 = pci_config_read32(bus, slot, func, 0x00);
@@ -181,7 +181,7 @@ static void pci_check_device(uint8_t bus, uint8_t slot) {
   }
 }
 
-// ── Public API ──────────────────────────────────────────────────────────────
+// Public API
 
 void pci_init(void) {
   pcie_init();

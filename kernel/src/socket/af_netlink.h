@@ -3,7 +3,7 @@
 
 #include "socket.h"
 
-// ── AF_NETLINK Family Registration ───────────────────────────────────────────
+// AF_NETLINK Family Registration
 
 /**
  * Initialize and register the AF_NETLINK socket family.

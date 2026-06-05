@@ -28,7 +28,7 @@ static uint32_t block_vfs_read(struct vfs_node *node, uint32_t offset,
   return size;
 }
 
-// ── Partition Wrapper ────────────────────────────────────────────────────────
+// Partition Wrapper
 
 struct partition_wrapper {
   struct block_device *parent;
@@ -51,7 +51,7 @@ static int partition_write(struct block_device *dev, uint64_t lba,
                                      buf);
 }
 
-// ── MBR Structures ───────────────────────────────────────────────────────────
+// MBR Structures
 
 struct mbr_partition {
   uint8_t status;

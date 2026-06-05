@@ -210,9 +210,6 @@ void kmain(void) {
     klog_puts("[WARN] Paging mode response not provided by Limine.\n");
   }
 
-  // ═══════════════════════════════════════════════════════════════════════
-  //  Phase 1: Memory management (The foundation!)
-  // ═══════════════════════════════════════════════════════════════════════
   if (memmap_request.response == NULL || hhdm_request.response == NULL) {
     klog_puts("[ERR] Missing Limine memory map or HHDM responses. Halting.\n");
     halt();
@@ -229,9 +226,6 @@ void kmain(void) {
   klog_uint64(pmm_get_usable_memory() / (1024 * 1024));
   klog_puts(" MB\n\n");
 
-  // ═══════════════════════════════════════════════════════════════════════
-  //  Phase 2: CPU descriptor tables
-  // ═══════════════════════════════════════════════════════════════════════
   gdt_init();
   cpu_features_init();
   tsc_init();
@@ -241,9 +235,6 @@ void kmain(void) {
   epoll_init();
   isr_init_exceptions();
 
-  // ═══════════════════════════════════════════════════════════════════════
-  //  Phase 3: Legacy PIC — used temporarily until APIC takes over
-  // ═══════════════════════════════════════════════════════════════════════
   pic_remap(32, 40);
   outb(0x21, 0xF8); // unmask IRQ0 (PIT), IRQ1 (Keyboard), and IRQ2 (Slave PIC)
   outb(0xA1, 0xEF); // unmask IRQ12 (Mouse)
@@ -302,9 +293,6 @@ void kmain(void) {
     }
   }
 
-  // ═══════════════════════════════════════════════════════════════════════
-  //  Phase 4: ACPI discovery
-  // ═══════════════════════════════════════════════════════════════════════
   acpi_init(rsdp_request.response);
 
   // Initialize HPET (High Precision Event Timer)
@@ -313,9 +301,6 @@ void kmain(void) {
   // Parse and log FADT (Fixed ACPI Description Table)
   acpi_parse_fadt();
 
-  // ═══════════════════════════════════════════════════════════════════════
-  //  Phase 5: Multitasking & CPU Initialization
-  // ═══════════════════════════════════════════════════════════════════════
   cpu_init();
   klog_puts("[OK] Transitioning to kernel-allocated stack...\n");
   cpu_jump_to_stack(cpu_get_bsp()->stack_top, kmain_high_half);
@@ -336,22 +321,22 @@ void kmain_high_half(void) {
     // Disable interrupts during the transition
     __asm__ volatile("cli");
 
-    // ── 5a. Disable the legacy 8259 PIC ─────────────────────────────────
+    // 5a. Disable the legacy 8259 PIC
     pic_disable();
     klog_puts("[OK] Legacy 8259 PIC disabled.\n");
 
-    // ── 5b. Initialize the Local APIC ───────────────────────────────────
+    // 5b. Initialize the Local APIC
     lapic_init((uint64_t)lapic_base);
 
-    // ── 5c. Initialize the I/O APIC ─────────────────────────────────────
+    // 5c. Initialize the I/O APIC
     ioapic_init((uint64_t)ioapic_base, acpi_get_ioapic_gsi_base());
 
-    // ── 5d. Synchronize IRQ routing ─────────────────────────────────────
+    // 5d. Synchronize IRQ routing
     // This automates ACPI overrides and transitions all early-registered
     // legacy IRQs to the I/O APIC path.
     irq_manager_sync();
 
-    // ── 5f. Switch ISR EOI routing to LAPIC ─────────────────────────────
+    // 5f. Switch ISR EOI routing to LAPIC
     isr_set_apic_mode(true);
 
     // Re-enable interrupts — now handled through the APIC path
@@ -359,15 +344,15 @@ void kmain_high_half(void) {
 
     klog_puts("[OK] APIC interrupt mode ACTIVE.\n\n");
 
-    // ── 5h. Start the LAPIC timer (calibrates against PIT) ──────────────
+    // 5h. Start the LAPIC timer (calibrates against PIT)
     lapic_timer_init();
 
-    // ── 5h.1: HPET is available as backup timer if LAPIC fails ────────────
+    // 5h.1: HPET is available as backup timer if LAPIC fails
     if (hpet_is_backup_available()) {
       klog_puts("[INFO] HPET available as backup timer.\n");
     }
 
-    // ── 5i. Wake up Application Processors ──────────────────────────────
+    // 5i. Wake up Application Processors
     // This is done AFTER lapic_timer_init because APs need the calibrated
     // ticks_per_ms value to initialize their own timers.
     cpu_init_aps();
@@ -376,10 +361,6 @@ void kmain_high_half(void) {
         "[WARN] APIC hardware not detected — staying with legacy PIC.\n\n");
   }
 
-  // ═══════════════════════════════════════════════════════════════════════
-  // ═══════════════════════════════════════════════════════════════════════
-  //  Phase 6: Reclaim bootloader memory & final heap check
-  // ═══════════════════════════════════════════════════════════════════════
   uint64_t k_phys = 0;
   if (executable_address_request.response) {
     k_phys = executable_address_request.response->physical_base;
@@ -400,9 +381,6 @@ void kmain_high_half(void) {
     klog_puts("     Heap allocation FAILED!\n");
   }
 
-  // ═══════════════════════════════════════════════════════════════════════
-  //  Phase 6.5: PCI Enumeration & Disk Drivers
-  // ═══════════════════════════════════════════════════════════════════════
   // Initialize Virtual Filesystem and Ramfs
   klog_puts("[OK] Initializing RamFS & Virtual Filesystem (VFS)...\n");
   ramfs_init();
@@ -427,7 +405,7 @@ void kmain_high_half(void) {
   uhci_self_test();
   ohci_init();
 
-  // ── VirtIO subsystem ─────────────────────────────────────────────────────
+  // VirtIO subsystem
   virtio_self_test(); // Phase 1: virtqueue foundation tests
 
   if (ahci_init() == 0) {
@@ -437,7 +415,7 @@ void kmain_high_half(void) {
   nvme_init();
   nvme_self_test();
 
-  // ── Mount root filesystem ──
+  // Mount root filesystem
   struct block_device *boot_dev = NULL;
 
   // Try to find a partition first (indices 1, 2, ... usually partitions)
@@ -475,37 +453,6 @@ mount_success:
   ramfs_mount_at("/tmp");
   ramfs_mount_at("/run");
 
-  vfs_node_t *tmp_node = vfs_resolve_path("/tmp");
-  if (tmp_node) {
-    vfs_mkdir(tmp_node, "wayland", 0777);
-  }
-
-  vfs_node_t *run_node = vfs_resolve_path("/run");
-  if (run_node) {
-    vfs_mkdir(run_node, "udev", 0755);
-    vfs_node_t *udev_node = vfs_resolve_path("/run/udev");
-    if (udev_node) {
-      vfs_mkdir(udev_node, "data", 0755);
-      vfs_node_t *data_node = vfs_resolve_path("/run/udev/data");
-      if (data_node) {
-        if (vfs_create(data_node, "c13:64", 0644) == 0) {
-          vfs_node_t *kbd_node = vfs_finddir(data_node, "c13:64");
-          if (kbd_node) {
-            const char *kbd_data = "E:ID_INPUT=1\nE:ID_INPUT_KEYBOARD=1\n";
-            vfs_write(kbd_node, 0, strlen(kbd_data), (uint8_t *)kbd_data);
-          }
-        }
-        if (vfs_create(data_node, "c13:65", 0644) == 0) {
-          vfs_node_t *mse_node = vfs_finddir(data_node, "c13:65");
-          if (mse_node) {
-            const char *mse_data = "E:ID_INPUT=1\nE:ID_INPUT_MOUSE=1\n";
-            vfs_write(mse_node, 0, strlen(mse_data), (uint8_t *)mse_data);
-          }
-        }
-      }
-    }
-  }
-
   extern void sysfs_init(void);
   sysfs_init();
   evdev_init();
@@ -533,16 +480,10 @@ mount_fail:
   hda_register_vfs();
   audio_dsp_register_vfs();
 
-  // ═══════════════════════════════════════════════════════════════════════
-  //  Phase 7: Userland
-  // ═══════════════════════════════════════════════════════════════════════
-  // Initialize networking and run stress tests BEFORE spawning init thread
+  // Run networking as a background thread
   if (nic_is_present()) {
     net_init();
-
-    // Run self-test as a background thread on any available CPU
-    extern void af_inet_self_test(void);
-    // sched_create_kernel_thread((void *)af_inet_self_test, NULL, true);
+    sched_create_kernel_thread(net_thread_entry, NULL, true);
   }
 
   // FORCE Init thread to BSP to ensure it gets first slice

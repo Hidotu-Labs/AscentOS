@@ -35,7 +35,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-// ── USB Descriptor Types (shared with usb_kbd.c) ────────────────────────────
+// USB Descriptor Types (shared with usb_kbd.c)
 
 struct usb_config_descriptor_m {
   uint8_t length;
@@ -77,7 +77,7 @@ struct usb_endpoint_descriptor_m {
 #define USB_REQ_SET_PROTOCOL_M 0x0B
 #define HID_PROTOCOL_BOOT_M 0x00
 
-// ── Mouse state ─────────────────────────────────────────────────────────────
+// Mouse state
 
 #define MAX_USB_MICE 4
 
@@ -115,7 +115,7 @@ struct usb_mouse_state {
 static struct usb_mouse_state mice[MAX_USB_MICE];
 static int mouse_count = 0;
 
-// ── Report Processing ───────────────────────────────────────────────────────
+// Report Processing
 
 static void usb_mouse_process_report(struct usb_mouse_state *mouse,
                                      uint8_t *buf, uint32_t len) {
@@ -129,7 +129,7 @@ static void usb_mouse_process_report(struct usb_mouse_state *mouse,
   // USB Boot Protocol: positive Y = down (matches screen convention).
   // No inversion needed (unlike PS/2 where positive Y = up).
 
-  // ── Update the global mouse state (same struct used by PS/2 mouse) ──────
+  // Update the global mouse state (same struct used by PS/2 mouse)
   // We read the current state and update it. The mouse_get_state() function
   // returns this global struct so cursor painting code uses it.
   mouse_state_t state = mouse_get_state();
@@ -159,7 +159,7 @@ static void usb_mouse_process_report(struct usb_mouse_state *mouse,
   // we'll push through evdev which is what X11 uses.
   // For console/raw consumers, they also use evdev or the PS/2 mouse.
 
-  // ── Push evdev events (for X11 / Xorg) ──────────────────────────────────
+  // Push evdev events (for X11 / Xorg)
   evdev_device_t *mdev = evdev_get_mouse();
   if (mdev) {
     // Relative motion events
@@ -196,7 +196,7 @@ static void usb_mouse_process_report(struct usb_mouse_state *mouse,
   mouse->prev_buttons = buttons;
 }
 
-// ── Interrupt Transfer Setup ────────────────────────────────────────────────
+// Interrupt Transfer Setup
 //
 // Uses QH pool indices 8+ to avoid conflicts with keyboard (1-4) and
 // control transfers (0). TD pool indices start at 48+ to avoid keyboard
@@ -289,7 +289,7 @@ static void usb_mouse_resubmit_td(struct usb_mouse_state *mouse) {
   __asm__ volatile("mfence" ::: "memory");
 }
 
-// ── Probe & Initialization ─────────────────────────────────────────────────
+// Probe & Initialization
 
 bool usb_mouse_probe(struct usb_device *dev) {
   if (mouse_count >= MAX_USB_MICE)
@@ -525,7 +525,7 @@ bool usb_mouse_probe(struct usb_device *dev) {
   return true;
 }
 
-// ── Polling ─────────────────────────────────────────────────────────────────
+// Polling
 // Called from the UHCI IRQ handler on IOC completion to check if
 // any mouse has new data.
 
@@ -535,7 +535,7 @@ void usb_mouse_poll(void) {
     if (!ms->active)
       continue;
 
-    // ── EHCI path ──────────────────────────────────────────────────────
+    // EHCI path
     if (ms->ehci_pipe) {
       if (!ehci_int_pipe_completed(ms->ehci_pipe))
         continue;
@@ -552,7 +552,7 @@ void usb_mouse_poll(void) {
       continue;
     }
 
-    // ── OHCI path ──────────────────────────────────────────────────────
+    // OHCI path
     if (ms->ohci_pipe) {
       if (!ohci_int_pipe_completed(ms->ohci_pipe))
         continue;
@@ -569,7 +569,7 @@ void usb_mouse_poll(void) {
       continue;
     }
 
-    // ── UHCI path ──────────────────────────────────────────────────────
+    // UHCI path
     if (!ms->int_td)
       continue;
 

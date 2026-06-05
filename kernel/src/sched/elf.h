@@ -45,7 +45,7 @@ typedef struct {
 #define PF_W 2
 #define PF_R 4
 
-// ── ELF Auxiliary Vector Types (for initial user stack) ─────────────────────
+// ELF Auxiliary Vector Types (for initial user stack)
 #define AT_NULL 0      // End of auxiliary vector
 #define AT_PHDR 3      // Program headers virtual address
 #define AT_PHENT 4     // Size of program header entry
@@ -65,7 +65,7 @@ typedef struct {
 #define AT_RANDOM 25   // Address of 16 random bytes
 #define AT_EXECFN 31   // Executable filename string address
 
-// ── ELF metadata passed from loader to stack builder ────────────────────────
+// ELF metadata passed from loader to stack builder
 typedef struct {
   uint64_t entry;        // e_entry
   uint64_t phdr;         // virtual address of program headers

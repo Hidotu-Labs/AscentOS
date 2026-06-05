@@ -9,9 +9,9 @@
 // ssize_t is not defined in freestanding headers
 typedef int64_t ssize_t;
 
-// ── Address Families ─────────────────────────────────────────────────────────
+// Address Families
 #define AF_UNSPEC 0
-// ── Socket Address Family Type ──────────────────────────────────────────────
+// Socket Address Family Type
 typedef uint16_t sa_family_t;
 
 #define AF_UNIX 1   // Unix domain sockets
@@ -21,7 +21,7 @@ typedef uint16_t sa_family_t;
 #define NETLINK_ROUTE 0
 #define NETLINK_KOBJECT_UEVENT 15
 
-// ── Netlink Address Structure ───────────────────────────────────────────────
+// Netlink Address Structure
 struct sockaddr_nl {
   sa_family_t nl_family;   // AF_NETLINK
   unsigned short nl_pad;   // zero
@@ -33,26 +33,23 @@ struct sockaddr_nl {
 #define NETLINK_ADD_MEMBERSHIP 1
 #define NETLINK_DROP_MEMBERSHIP 2
 
-// ── Socket Types
-// ──────────────────────────────────────────────────────────────
+// Socket Types
 #define SOCK_STREAM 1    // Stream (connection-oriented)
 #define SOCK_DGRAM 2     // Datagram (connectionless)
 #define SOCK_RAW 3       // Raw socket
 #define SOCK_SEQPACKET 5 // Sequenced packet stream
 
-// ── Socket States
-// ─────────────────────────────────────────────────────────────
+// Socket States
 #define SS_UNCONNECTED 0
 #define SS_CONNECTING 1
 #define SS_CONNECTED 2
 #define SS_DISCONNECTING 3
 #define SS_LISTENING 4
 
-// ── Socket Options Levels ────────────────────────────────────────────────────
+// Socket Options Levels
 #define SOL_SOCKET 1
 
-// ── Socket Options
-// ────────────────────────────────────────────────────────────
+// Socket Options
 #define SO_REUSEADDR 2
 #define SO_TYPE 3
 #define SO_ERROR 4
@@ -79,11 +76,11 @@ struct sockaddr_nl {
 #define SO_PROTOCOL 38
 #define SO_ACCEPTCONN 30
 
-// ── Socket Flags ─────────────────────────────────────────────────────────────
+// Socket Flags
 #define SOCK_CLOEXEC 0x080000 // Close on exec
 #define SOCK_NONBLOCK 0x0800  // Non-blocking
 
-// ── Message Flags ────────────────────────────────────────────────────────────
+// Message Flags
 #define MSG_OOB 0x0001
 #define MSG_PEEK 0x0002
 #define MSG_DONTROUTE 0x0004
@@ -94,13 +91,12 @@ struct sockaddr_nl {
 #define MSG_WAITALL 0x0100
 #define MSG_NOSIGNAL 0x4000
 
-// ── Shutdown How
-// ───────────────────────────────────────────────────────────────
+// Shutdown How
 #define SHUT_RD 0   // Disallow further receptions
 #define SHUT_WR 1   // Disallow further transmissions
 #define SHUT_RDWR 2 // Disallow further receptions and transmissions
 
-// ── Socket Errors ────────────────────────────────────────────────────────────
+// Socket Errors
 #define EAFNOSUPPORT 97
 #define EPROTONOSUPPORT 93
 #define EPROTOTYPE 92
@@ -115,26 +111,24 @@ struct sockaddr_nl {
 #define EAGAIN 11
 #define EWOULDBLOCK 11
 
-// ── Maximum Values
-// ────────────────────────────────────────────────────────────
+// Maximum Values
 #define UNIX_PATH_MAX 108
 #define SOCKET_MAX_FDS 256 // Max sockets per process (separate from MAX_FDS)
 
-// ── Forward Declarations
-// ──────────────────────────────────────────────────────
+// Forward Declarations
 struct socket;
 struct sock_ops;
 struct vfs_node;
 
-// ── Socket Address Family Type ──────────────────────────────────────────────
+// Socket Address Family Type
 // (moved up)
 
-// ── IPv4 Address Structure ──────────────────────────────────────────────────
+// IPv4 Address Structure
 struct in_addr {
   uint32_t s_addr;
 };
 
-// ── IPv4 Socket Address structure ───────────────────────────────────────────
+// IPv4 Socket Address structure
 struct sockaddr_in {
   sa_family_t sin_family;
   uint16_t sin_port;
@@ -142,12 +136,12 @@ struct sockaddr_in {
   char sin_zero[8];
 };
 
-// ── IPv6 Address Structure ──────────────────────────────────────────────────
+// IPv6 Address Structure
 struct in6_addr {
   uint8_t s6_addr[16];
 };
 
-// ── IPv6 Socket Address structure ───────────────────────────────────────────
+// IPv6 Socket Address structure
 struct sockaddr_in6 {
   sa_family_t     sin6_family;
   uint16_t        sin6_port;
@@ -156,20 +150,19 @@ struct sockaddr_in6 {
   uint32_t        sin6_scope_id;
 };
 
-// ── IP Protocols ─────────────────────────────────────────────────────────────
+// IP Protocols
 #define IPPROTO_IP 0
 #define IPPROTO_ICMP 1
 #define IPPROTO_TCP 6
 #define IPPROTO_UDP 17
 
-// ── Socket Address Structure (generic) ───────────────────────────────────────
+// Socket Address Structure (generic)
 struct sockaddr {
   sa_family_t sa_family;
   char sa_data[14];
 };
 
-// ── Unix Domain Socket Address
-// ────────────────────────────────────────────────
+// Unix Domain Socket Address
 struct iovec {
   void *iov_base;
   size_t iov_len;
@@ -191,8 +184,7 @@ struct sockaddr_un {
   char sun_path[UNIX_PATH_MAX];
 };
 
-// ── Socket Operations Vector
-// ──────────────────────────────────────────────────
+// Socket Operations Vector
 typedef struct sock_ops {
   int (*bind)(struct socket *sock, struct sockaddr *addr, int addrlen);
   int (*connect)(struct socket *sock, struct sockaddr *addr, int addrlen);
@@ -218,8 +210,7 @@ typedef struct sock_ops {
   void (*destroy)(struct socket *sock);
 } sock_ops_t;
 
-// ── Socket Structure
-// ──────────────────────────────────────────────────────────
+// Socket Structure
 typedef struct socket {
   int domain;            // AF_UNIX, AF_INET, etc.
   int type;              // SOCK_STREAM, SOCK_DGRAM, etc.
@@ -240,18 +231,16 @@ typedef struct socket {
   spinlock_t lock;       // Spinlock for synchronization
 } socket_t;
 
-// ── Socket Subsystem Initialization ──────────────────────────────────────────
+// Socket Subsystem Initialization
 void socket_init(void);
 
-// ── Socket Creation/ Destruction
-// ──────────────────────────────────────────────
+// Socket Creation/ Destruction
 socket_t *socket_create(int domain, int type, int protocol);
 void socket_destroy(socket_t *sock);
 void socket_get(socket_t *sock); // Increment reference count
 void socket_put(socket_t *sock); // Decrement reference count
 
-// ── Socket Operations
-// ─────────────────────────────────────────────────────────
+// Socket Operations
 int socket_bind(socket_t *sock, struct sockaddr *addr, int addrlen);
 int socket_connect(socket_t *sock, struct sockaddr *addr, int addrlen);
 int socket_listen(socket_t *sock, int backlog);
@@ -263,18 +252,15 @@ ssize_t socket_sendto(socket_t *sock, const void *buf, size_t len, int flags,
 ssize_t socket_recvfrom(socket_t *sock, void *buf, size_t len, int flags,
                         struct sockaddr *src_addr, int *addrlen);
 
-// ── Socketpair Creation
-// ───────────────────────────────────────────────────────
+// Socketpair Creation
 int socket_create_pair(int domain, int type, int protocol, socket_t *sv[2]);
 
-// ── Socket FD Management
-// ──────────────────────────────────────────────────────
+// Socket FD Management
 int socket_alloc_fd(socket_t *sock);
 socket_t *socket_from_fd(int fd);
 int socket_close_fd(int fd);
 
-// ── Family Registration
-// ───────────────────────────────────────────────────────
+// Family Registration
 typedef struct net_family {
   int family;
   int (*create)(socket_t *sock, int protocol);
@@ -284,11 +270,11 @@ typedef struct net_family {
 void sock_register_family(net_family_t *family);
 net_family_t *sock_lookup_family(int family);
 
-// ── Default Socket Buffer Sizes ───────────────────────────────────────────────
+// Default Socket Buffer Sizes
 #define SOCKET_DEFAULT_RCVBUF 65536
 #define SOCKET_DEFAULT_SNDBUF 65536
 
-// ── Ancillary Data Support ──────────────────────────────────────────────────
+// Ancillary Data Support
 #define SCM_RIGHTS 0x01
 
 struct cmsghdr {

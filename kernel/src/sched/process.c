@@ -208,7 +208,7 @@ static bool do_elf_load(const char *path, uint64_t *pml4, uint64_t load_base,
         }
       }
 
-      // ── Register segment in VMA list ──────────────────────────────────
+      // Register segment in VMA list
       // This is critical for syscall validation (vmm_is_user_addr_range_valid)
       if (current_thread && current_thread->mm) {
         // Derive PROT flags from ELF phdr flags
@@ -228,7 +228,7 @@ static bool do_elf_load(const char *path, uint64_t *pml4, uint64_t load_base,
         vfs_read(file, file_offset, filesz, (uint8_t *)vaddr);
       }
 
-      // ── Explicitly zero the BSS portion ──────────────────────────────
+      // Explicitly zero the BSS portion
       // The ELF spec requires [vaddr+filesz, vaddr+memsz) to be zero.
       // Pages were pre-zeroed above, but vfs_read may have written file
       // data into the BSS region if the linker set filesz larger than
@@ -446,7 +446,7 @@ uint64_t process_build_initial_stack(uint64_t stack_top, const char *path,
     stack_entries[idx++] = envp_ptrs[i];
   stack_entries[idx++] = 0; // end envp
 
-  // ── Auxiliary vector ──────────────────────────────────────────────────────
+  // Auxiliary vector
   if (elf_info) {
     // Copy AT_PLATFORM string ("x86_64")
     process_copy_to_user(vmm_get_active_pml4(), at_random_addr + 16, "x86_64",
@@ -519,7 +519,7 @@ uint64_t process_build_initial_stack(uint64_t stack_top, const char *path,
   return final_sp;
 }
 
-// ── Fix up __libc.auxv for TCC-compiled binaries ────────────────────────────
+// Fix up __libc.auxv for TCC-compiled binaries
 // TCC's _start calls main() directly, skipping __libc_start_main.
 // musl's mallocng reads __libc.auxv to find AT_RANDOM for its secret.
 // If auxv is NULL the code crashes. This helper finds the __libc symbol

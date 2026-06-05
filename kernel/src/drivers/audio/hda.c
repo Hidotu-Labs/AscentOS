@@ -94,7 +94,7 @@ static uint16_t hda_format_to_hw(uint32_t rate, uint8_t channels,
   return fmt;
 }
 
-// ── Register Access Helpers ────────────────────────────────────────────────
+// Register Access Helpers
 static inline void hda_write8(uint32_t reg, uint8_t val) {
   *(volatile uint8_t *)((uint8_t *)hda_regs_virt + reg) = val;
 }
@@ -119,7 +119,7 @@ static inline uint32_t hda_read32(uint32_t reg) {
   return *(volatile uint32_t *)((uint8_t *)hda_regs_virt + reg);
 }
 
-// ── CORB / RIRB Implementation ─────────────────────────────────────────────
+// CORB / RIRB Implementation
 
 static void hda_init_corb_rirb(void) {
   klog_puts("[HDA] Initializing CORB/RIRB...\n");
@@ -347,7 +347,7 @@ static void hda_irq_handler(struct registers *regs) {
   }
 }
 
-// ── Phase 1 Implementation ─────────────────────────────────────────────────
+
 
 void hda_init(void) {
   klog_puts("[HDA] Searching for Intel HDA controller...\n");

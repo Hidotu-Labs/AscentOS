@@ -3,7 +3,6 @@
 
 #include <stdint.h>
 
-// ── MSR Constants ───────────────────────────────────────────────────────────
 #define IA32_EFER 0xC0000080
 #define IA32_STAR 0xC0000081
 #define IA32_LSTAR 0xC0000082
@@ -11,7 +10,6 @@
 
 #define IA32_EFER_SCE 0x01
 
-// ── Syscall Numbers (Linux x86_64 ABI) ──────────────────────────────────────
 #define SYS_READ 0
 #define SYS_WRITE 1
 #define SYS_OPEN 2
@@ -107,6 +105,7 @@
 #define SYS_GETPGID 121
 #define SYS_SETFSUID 122
 #define SYS_SETFSGID 123
+#define SYS_GETSID 124
 #define SYS_SIGALTSTACK 131
 #define SYS_STATFS 137
 #define SYS_GETDENTS 138
@@ -114,8 +113,8 @@
 #define SYS_PRCTL 157
 #define SYS_ARCH_PRCTL 158
 #define SYS_SIGPROCMASK 186
-#define SYS_TKILL       200   /* tkill(tid, sig) — used by musl raise() */
-#define SYS_TGKILL      234   /* tgkill(tgid, tid, sig) */
+#define SYS_TKILL 200
+#define SYS_TGKILL 234
 #define SYS_FUTEX 202
 #define SYS_EPOLL_CREATE 213
 #define SYS_GETDENTS64 217
@@ -136,6 +135,7 @@
 #define SYS_NEWFSTATAT 262
 #define SYS_UNLINKAT 263
 #define SYS_FCHMODAT 268
+#define SYS_READLINKAT 267
 #define SYS_PSELECT6 270
 #define SYS_PPOLL 271
 #define SYS_UTIMES 280
@@ -160,7 +160,6 @@
 
 #define MAX_SYSCALL 512
 
-// ── Clone Flags (Linux ABI) ──────────────────────────────────────────────────
 #define CLONE_VM 0x00000100
 #define CLONE_FS 0x00000200
 #define CLONE_FILES 0x00000400
@@ -184,13 +183,11 @@
 #define CLONE_NEWNET 0x40000000
 #define CLONE_IO 0x80000000
 
-// ── Register state pushed by syscall_entry.asm ──────────────────────────────
 struct syscall_regs {
   uint64_t rdi, rsi, rdx, r10, r8, r9, rax, rbx, rbp, r12, r13, r14, r15;
   uint64_t rip, rflags, rsp;
 } __attribute__((packed));
 
-// ── Syscall handler types ───────────────────────────────────────────────────
 // Standard handler: receives the 6 argument registers, returns result in rax.
 typedef uint64_t (*syscall_handler_t)(uint64_t, uint64_t, uint64_t, uint64_t,
                                       uint64_t, uint64_t);
@@ -199,13 +196,10 @@ typedef uint64_t (*syscall_handler_t)(uint64_t, uint64_t, uint64_t, uint64_t,
 // that need access to the caller's RIP/RSP/RFLAGS (e.g. fork).
 typedef uint64_t (*syscall_raw_handler_t)(struct syscall_regs *regs);
 
-// ── Register a single syscall handler ───────────────────────────────────────
 void syscall_register(int num, syscall_handler_t handler);
 
-// ── Register a raw syscall handler (receives full register frame) ───────────
 void syscall_register_raw(int num, syscall_raw_handler_t handler);
 
-// ── Subsystem registration (called from syscall_init) ───────────────────────
 void syscall_register_io(void);
 void syscall_register_process(void);
 void syscall_register_mm(void);
@@ -219,10 +213,8 @@ void syscall_register_poll(void);
 void syscall_register_shm(void);
 void syscall_register_futex(void);
 
-// ── Core init (MSRs + calls subsystem registrations) ────────────────────────
 void syscall_init(void);
 
-// Allocate virtual address range from mmap region (for device mmap handlers)
 uint64_t mm_alloc_mmap_region(uint64_t length);
 
 #endif

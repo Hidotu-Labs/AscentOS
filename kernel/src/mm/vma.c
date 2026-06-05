@@ -3,7 +3,7 @@
 #include "heap.h"
 #include "slab_cache.h"
 
-// ── Slab-accelerated allocation for VMA nodes ──────────────────────────────
+// Slab-accelerated allocation for VMA nodes
 // Falls back to kmalloc if the vma_cache hasn't been created yet (early boot).
 static inline struct vma *vma_node_alloc(void) {
   if (vma_cache)

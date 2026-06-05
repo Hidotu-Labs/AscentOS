@@ -78,7 +78,7 @@ static int nvme_probe(struct device *dev) {
                PAGE_FLAG_RW | PAGE_FLAG_PRESENT);
   // Doorbell registers usually start at 0x1000, so we need at least 2 pages.
   // However, depending on the number of queues, we might need significantly
-  // more. For Phase 1, 2 pages are enough to see version and capabilities.
+
 
   nvme->regs = (nvme_regs_t *)virt_base;
   nvme->present = true;
@@ -96,7 +96,7 @@ static int nvme_probe(struct device *dev) {
   klog_puts("\n");
   // --- Diagnostic End ---
 
-  // 3. Basic Validation (Phase 1 Test)
+
   uint32_t version = nvme->regs->vs;
   uint64_t cap = nvme->regs->cap;
 
@@ -118,7 +118,7 @@ static int nvme_probe(struct device *dev) {
   klog_uint64(nvme->db_stride);
   klog_puts(" bytes\n");
 
-  // 4. Initialize and Identify (Phase 2-4)
+
   if (nvme_init_controller(nvme) != 0)
     return -1;
   if (nvme_identify(nvme) != 0)
@@ -126,7 +126,7 @@ static int nvme_probe(struct device *dev) {
   if (nvme_create_io_queues(nvme) != 0)
     return -1;
 
-  // 5. Register Block Device (Phase 5)
+
   nvme->bdev.driver_data = nvme;
   nvme->bdev.read_sectors = nvme_block_read;
   nvme->bdev.write_sectors = nvme_block_write;
@@ -170,7 +170,7 @@ static int nvme_init_controller(struct nvme_controller *nvme) {
   }
   klog_puts("[NVME]   Controller disabled/reset.\n");
 
-  // 2. Setup MSI-X (Phase 6)
+
   struct pci_device *pdev =
       pci_find_device_by_id(nvme->dev->vendor_id, nvme->dev->device_id);
   if (pdev)

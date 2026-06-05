@@ -19,7 +19,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-// ── RX packet ring buffer ───────────────────────────────────────────────────
+// RX packet ring buffer
 // Single-producer (IRQ handler) / single-consumer (net_poll) ring buffer.
 // No lock needed because head is only written by producer and tail by consumer.
 
@@ -28,7 +28,7 @@ static volatile uint32_t rx_head = 0; // Written by IRQ (producer)
 static volatile uint32_t rx_tail = 0; // Written by net_poll (consumer)
 static spinlock_t net_rx_lock = SPINLOCK_INIT;
 
-// ── Global network interface ────────────────────────────────────────────────
+// Global network interface
 static netif_t g_netif = {0};
 
 netif_t *netif_get(void) { return &g_netif; }
@@ -40,7 +40,7 @@ void netif_configure(uint32_t ip, uint32_t gateway, uint32_t netmask) {
   g_netif.up = true;
 }
 
-// ── Packet queue ────────────────────────────────────────────────────────────
+// Packet queue
 
 void net_rx_enqueue(const uint8_t *data, uint16_t len) {
   if (len == 0 || len > ETH_FRAME_MAX)
@@ -85,7 +85,7 @@ bool net_poll(void) {
   return true;
 }
 
-// ── Initialization ──────────────────────────────────────────────────────────
+// Initialization
 
 void net_init(void) {
   // Clear the packet queue

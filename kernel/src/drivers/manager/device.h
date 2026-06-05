@@ -91,7 +91,7 @@ struct device *device_find_by_path(const char *path);
 // Log the device tree to the console (for debugging)
 void dm_dump_tree(void);
 
-// Phase 3: Driver Registration
+
 void dm_register_driver(struct driver *drv);
 int dm_probe_device(struct device *dev);
 

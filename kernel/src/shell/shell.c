@@ -378,7 +378,7 @@ static void execute_command(char *cmd) {
 
     int global_pass = 1;
 
-    // Phase 1: Boundary & Multi-order Allocations
+
     console_puts(
         "[1/4] Testing allocations of all valid orders (0 to 10)...\n");
     void *order_blocks[11];
@@ -440,7 +440,7 @@ static void execute_command(char *cmd) {
       }
     }
 
-    // Phase 3: Fragmentation & Coalescing stress test
+
     console_puts("[3/4] Fragmentation & Coalescing stress test...\n");
     int num_blocks = 512;
     void *frag_blocks[512];
@@ -481,7 +481,7 @@ static void execute_command(char *cmd) {
     }
     console_puts("  -> Fragmentation test completed.\n");
 
-    // Phase 4: Bulk Capacity Test
+
     console_puts("[4/4] Bulk Capacity Test...\n");
     size_t free_ram = pmm_get_free_pages();
     // Allocate up to 25% of currently free memory to avoid OOM
@@ -709,7 +709,7 @@ static void execute_command(char *cmd) {
         console_puts("  -> FAIL: vmm_map_huge_page failed.\n");
         vmm_pass = 0;
       } else {
-        // Check translation depth directly in Phase 2
+
         uint64_t phys_ret =
             vmm_virt_to_phys(pml4, huge_vaddr + 0x100000); // 1MB deep lookup
         if (phys_ret == ((uint64_t)huge_block_norm + 0x100000)) {
@@ -995,14 +995,12 @@ static void execute_command(char *cmd) {
       console_puts("\n=== SLAB TEST FAILED ===\n");
     }
 
-    // ════════════════════════════════════════════════════════════════════════
     // Named Slab Cache Stress Test (kmem_cache API)
-    // ════════════════════════════════════════════════════════════════════════
   } else if (strcmp(cmd, "slabstress") == 0) {
     console_puts("Starting Named Slab Cache Stress Test...\n");
     int pass = 1;
 
-    // ── Phase 1: Custom cache create/alloc/free cycle ───────────────────
+
     console_puts("[1/6] Creating custom test cache (obj_size=96)...\n");
     kmem_cache_t *test_cache =
         kmem_cache_create("stress_test", 96, 8, NULL, NULL);
@@ -1102,7 +1100,7 @@ static void execute_command(char *cmd) {
       kmem_cache_destroy(test_cache);
     }
 
-    // ── Phase 2: Test kernel object caches (vma, vfs_node, thread) ──────
+
     console_puts("\n[BONUS] Testing kernel object caches...\n");
 
     if (vma_cache) {
@@ -1157,14 +1155,12 @@ static void execute_command(char *cmd) {
       console_puts("\n=== NAMED SLAB CACHE STRESS TEST FAILED ===\n");
     }
 
-    // ════════════════════════════════════════════════════════════════════════
     // Shared Memory (SHM) Stress Test
-    // ════════════════════════════════════════════════════════════════════════
   } else if (strcmp(cmd, "shmtest") == 0) {
     console_puts("Starting Shared Memory (SHM) Stress Test...\n");
     int pass = 1;
 
-    // ── Phase 1: Create a segment ───────────────────────────────────────
+
     console_puts("[1/5] Creating SHM segment (8192 bytes, key=42)...\n");
     int64_t shmid = sys_shmget(42, 8192, IPC_CREAT | 0x1FF, 0, 0, 0);
     if (shmid < 0) {
@@ -1178,7 +1174,7 @@ static void execute_command(char *cmd) {
       console_puts("\n");
     }
 
-    // ── Phase 2: Attach the segment ─────────────────────────────────────
+
     int64_t addr1 = 0;
     if (pass) {
       console_puts("[2/5] Attaching segment (auto-address)...\n");
@@ -1193,7 +1189,7 @@ static void execute_command(char *cmd) {
       }
     }
 
-    // ── Phase 3: Write and verify data ──────────────────────────────────
+
     if (pass) {
       console_puts("[3/5] Writing pattern and verifying...\n");
       volatile uint8_t *ptr = (volatile uint8_t *)addr1;
@@ -1217,7 +1213,7 @@ static void execute_command(char *cmd) {
       }
     }
 
-    // ── Phase 4: shmctl IPC_STAT ────────────────────────────────────────
+
     if (pass) {
       console_puts("[4/5] Querying segment info (shmctl IPC_STAT)...\n");
       struct shmid_ds info;
@@ -1236,7 +1232,7 @@ static void execute_command(char *cmd) {
       }
     }
 
-    // ── Phase 5: Detach and destroy ─────────────────────────────────────
+
     if (pass) {
       console_puts("[5/5] Detaching and destroying segment...\n");
       int64_t rc = sys_shmdt((uint64_t)addr1, 0, 0, 0, 0, 0);

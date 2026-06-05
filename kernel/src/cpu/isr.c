@@ -41,8 +41,7 @@ const char *exception_messages[] = {"Division By Zero",
                                     "Security Exception",
                                     "Reserved"};
 
-// ── Low-level output helpers
-// ──────────────────────────────────────────────────
+// Low-level output helpers
 
 static void print_hex(uint64_t value) {
   const char *hex_chars = "0123456789ABCDEF";
@@ -92,8 +91,7 @@ static bool is_canonical_addr(uint64_t vaddr) {
   return (high == 0x0000ULL) || (high == 0xFFFFULL);
 }
 
-// ── RFLAGS decoder
-// ────────────────────────────────────────────────────────────
+// RFLAGS decoder
 
 static void print_rflags_decoded(uint64_t rflags) {
   console_puts("RFLAGS: ");
@@ -120,7 +118,7 @@ static void print_rflags_decoded(uint64_t rflags) {
   console_puts("\n");
 }
 
-// ── Control register diagnostics ─────────────────────────────────────────────
+// Control register diagnostics
 
 static void print_cr_state(void) {
   uint64_t cr0, cr3, cr4;
@@ -159,8 +157,7 @@ static void print_cr_state(void) {
   console_puts("\n");
 }
 
-// ── GP fault decoder
-// ──────────────────────────────────────────────────────────
+// GP fault decoder
 
 static void print_gp_error_details(uint64_t err_code) {
   console_puts("GP_ERR_DETAILS: ");
@@ -183,8 +180,7 @@ static void print_gp_error_details(uint64_t err_code) {
   console_puts(")\n");
 }
 
-// ── PF fault error code decoder
-// ───────────────────────────────────────────────
+// PF fault error code decoder
 
 static void print_pf_error_details(uint64_t err_code) {
   bool p = (err_code >> 0) & 1;    /* page present */
@@ -431,7 +427,7 @@ static void send_eoi(struct registers *regs) {
     pic_send_eoi(regs->int_no - 32);
 }
 
-// ── Exception Handling & Signals ─────────────────────────────────────────────
+// Exception Handling & Signals
 
 static void isr_panic(struct registers *regs, const char *msg) {
   console_clear();

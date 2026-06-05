@@ -450,7 +450,7 @@ uint64_t vmm_virt_to_phys(uint64_t *pml4_phys, uint64_t virtual_addr) {
   return (entry & PAGE_MASK) | (virtual_addr & 0xFFFULL);
 }
 
-// ── Deep-copy helper for page table cloning ─────────────────────────────────
+// Deep-copy helper for page table cloning
 // Recursively clone page table levels.  At level 1 (leaf PT) we allocate
 // fresh physical pages and copy their content.  At higher levels we allocate
 // new table pages and recurse.
@@ -723,7 +723,7 @@ uint64_t *vmm_create_pml4(void) {
   return (uint64_t *)new_pml4_phys;
 }
 
-// ── Free all user-space pages and page tables for a given CR3 ───────────────
+// Free all user-space pages and page tables for a given CR3
 // Walks PML4 entries 0-255 (user half), frees all mapped physical pages
 // and all intermediate page table pages, then frees the PML4 itself.
 // CRITICAL: Uses PAGE_MASK to strip NX/available bits from PTEs.
@@ -794,7 +794,7 @@ void vmm_free_user_pages(uint64_t cr3) {
   pmm_free_page((void *)cr3);
 }
 
-// ── VMA-aware version: skip freeing MAP_SHARED physical pages ───────────────
+// VMA-aware version: skip freeing MAP_SHARED physical pages
 // Device MMIO mappings (e.g. framebuffer) are MAP_SHARED — their physical
 // frames belong to the hardware, not the process.  Blindly freeing them
 // would hand device memory back to PMM, where it gets overwritten by the
@@ -930,7 +930,7 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
     target_cr3 &= 0xFFFFFFFFFFFFF000ULL;
   }
 
-  // ── Copy-on-Write (CoW) Logic ──────────────────────────────────────────
+  // Copy-on-Write (CoW) Logic
   // If the page is PRESENT but we got a WRITE fault, check for CoW.
   if (present_bit && write_fault) {
     uint64_t *pml4 = (uint64_t *)PHYS_TO_VIRT(target_cr3);
@@ -997,7 +997,7 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
     return -1;
   }
 
-  // ── VMA-based demand paging ────────────────────────────────────────────
+  // VMA-based demand paging
   if (!current || !current->mm)
     return -1;
 
@@ -1090,7 +1090,7 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
     return -1;
   }
 
-  // ── PROT_NONE enforcement ──────────────────────────────────────────────
+  // PROT_NONE enforcement
   // A VMA with prot == PROT_NONE reserves address space but forbids access.
   if (vma_prot == PROT_NONE) {
     if (user_mode) {
@@ -1099,7 +1099,7 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
     return -1;
   }
 
-  // ── Permission check ──────────────────────────────────────────────────
+  // Permission check
   // Validate that the fault type matches the VMA protection.
   if (write_fault && !(vma_prot & PROT_WRITE)) {
     if (user_mode) {
@@ -1108,7 +1108,7 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
     return -1;
   }
 
-  // ── Allocate frame (Zero-Fill-on-Demand Engine) ────────────────────────
+  // Allocate frame (Zero-Fill-on-Demand Engine)
   void *frame = pmm_alloc_page();
   if (!frame) {
     klog_puts("[VMM] OOM during demand paging!\n");

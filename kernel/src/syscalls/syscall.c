@@ -6,7 +6,7 @@
 
 extern void syscall_entry(void);
 
-// ── Syscall dispatch tables ─────────────────────────────────────────────────
+// Syscall dispatch tables
 static syscall_handler_t syscall_table[MAX_SYSCALL] = {0};
 static syscall_raw_handler_t raw_syscall_table[MAX_SYSCALL] = {0};
 
@@ -22,7 +22,7 @@ void syscall_register_raw(int num, syscall_raw_handler_t handler) {
   }
 }
 
-// ── Dispatcher (called from syscall_entry.asm) ──────────────────────────────
+// Dispatcher (called from syscall_entry.asm)
 void syscall_dispatcher(struct syscall_regs *regs) {
   struct thread *t = sched_get_current();
   if (t) {
@@ -79,7 +79,7 @@ void syscall_dispatcher(struct syscall_regs *regs) {
   signal_deliver_syscall(regs);
 }
 
-// ── Core initialization ────────────────────────────────────────────────────
+// Core initialization
 void syscall_init(void) {
   // Register all syscall subsystems
   syscall_register_io();

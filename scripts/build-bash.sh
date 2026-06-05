@@ -140,8 +140,6 @@ build_bash() {
         --disable-nls \
         --without-bash-malloc \
         --enable-static-link \
-        --disable-readline \
-        --disable-bang-history \
         --disable-progcomp \
         --disable-net-redirections \
         CFLAGS="-static -O2 -fno-stack-protector -I$PREFIX/include" \

@@ -7,8 +7,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-// ── epoll_event Structure (user-space visible)
-// ──────────────────────────────────────────────────────
+// epoll_event Structure (user-space visible)
 typedef union epoll_data {
   void *ptr;
   int fd;
@@ -23,8 +22,7 @@ struct epoll_event {
   epoll_data_t data;   // User data variable - offset 4
 } __attribute__((packed));
 
-// ── Epoll Event Flags
-// ─────────────────────────────────────────────────────────
+// Epoll Event Flags
 #define EPOLLIN     0x00000001  // Available for read
 #define EPOLLPRI    0x00000002  // Priority data available
 #define EPOLLOUT    0x00000004  // Available for write
@@ -41,30 +39,25 @@ struct epoll_event {
 #define EPOLLONESHOT 0x40000000U    // One-shot mode (disable after event)
 #define EPOLLET     0x80000000U     // Edge-triggered mode
 
-// ── epoll_ctl Operations
-// ────────────────────────────────────────────────────────
+// epoll_ctl Operations
 #define EPOLL_CTL_ADD 1  // Add a file descriptor
 #define EPOLL_CTL_DEL 2  // Remove a file descriptor
 #define EPOLL_CTL_MOD 3  // Modify a file descriptor
 
-// ── epoll_create1 Flags
-// ────────────────────────────────────────────────────────
+// epoll_create1 Flags
 #define EPOLL_CLOEXEC 0x80000  // O_CLOEXEC (1 << 19)
 
-// ── Maximum epoll settings
-// ────────────────────────────────────────────────────────
+// Maximum epoll settings
 #define EPOLL_MAX_INSTANCES  64    // Max epoll instances system-wide
 #define EPOLL_MAX_WATCHED    4096  // Max FDs per epoll instance
 #define EPOLL_MAX_EVENTS     128   // Max events returned per epoll_wait
 
-// ── Forward Declarations
-// ────────────────────────────────────────────────────────
+// Forward Declarations
 struct vfs_node;
 struct eventpoll;
 struct epitem;
 
-// ── Epoll Item Structure (per-watched FD)
-// ────────────────────────────────────────────────────────
+// Epoll Item Structure (per-watched FD)
 typedef struct epitem {
   struct list_head rdllink;    // Link to ready list
   struct list_head fllink;     // Link to fd list
@@ -89,8 +82,7 @@ typedef struct epitem {
   spinlock_t lock;
 } epitem_t;
 
-// ── Eventpoll Structure (per epoll instance)
-// ──────────────────────────────────────────────────────────
+// Eventpoll Structure (per epoll instance)
 typedef struct eventpoll {
   int fd;                      // FD of this epoll instance
   struct vfs_node *vfs_node;   // VFS node for this epoll fd (for nested epoll)
@@ -113,19 +105,16 @@ typedef struct eventpoll {
   uint64_t refcount;
 } eventpoll_t;
 
-// ── Epoll Subsystem Initialization
-// ────────────────────────────────────────────────
+// Epoll Subsystem Initialization
 void epoll_init(void);
 
-// ── Epoll Instance Management
-// ──────────────────────────────────────────────────
+// Epoll Instance Management
 eventpoll_t *epoll_create(void);
 void epoll_destroy(eventpoll_t *ep);
 void epoll_get(eventpoll_t *ep);
 void epoll_put(eventpoll_t *ep);
 
-// ── Epoll Operations
-// ───────────────────────────────────────────────────────
+// Epoll Operations
 int epoll_ctl_add(eventpoll_t *ep, int fd, struct epoll_event *event);
 int epoll_ctl_del(eventpoll_t *ep, int fd);
 int epoll_ctl_mod(eventpoll_t *ep, int fd, struct epoll_event *event);
@@ -133,14 +122,12 @@ int epoll_ctl_mod(eventpoll_t *ep, int fd, struct epoll_event *event);
 int epoll_wait_impl(eventpoll_t *ep, struct epoll_event *events, 
                     int maxevents, int timeout_ms);
 
-// ── Epoll FD Management
-// ───────────────────────────────────────────────────────
+// Epoll FD Management
 int epoll_alloc_fd(eventpoll_t *ep);
 eventpoll_t *epoll_from_fd(int fd);
 int epoll_close_fd(int fd);
 
-// ── VFS Integration
-// ──────────────────────────────────────────────────────────
+// VFS Integration
 uint32_t epoll_vfs_read(struct vfs_node *node, uint32_t offset, 
                         uint32_t size, uint8_t *buffer);
 uint32_t epoll_vfs_write(struct vfs_node *node, uint32_t offset, 
@@ -149,15 +136,13 @@ void epoll_vfs_open(struct vfs_node *node);
 void epoll_vfs_close(struct vfs_node *node);
 int epoll_vfs_poll(struct vfs_node *node, int events);
 
-// ── Event Notification (called from socket/file subsystems)
-// ────────────────────────────────────────────────────────────────
+// Event Notification (called from socket/file subsystems)
 void epoll_notify_event(struct vfs_node *node, uint32_t events);
 
 // Notify epoll by socket FD (for abstract sockets without VFS node)
 void epoll_notify_socket(int fd, uint32_t events);
 
-// ── Phase 9: Advanced Features
-// ────────────────────────────────────────────────────────────────
+
 
 // Check if oneshot needs re-arming
 bool epoll_oneshot_is_disabled(epitem_t *epi);

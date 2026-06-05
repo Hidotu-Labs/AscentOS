@@ -32,7 +32,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-// ── USB Descriptor Types for parsing ────────────────────────────────────────
+// USB Descriptor Types for parsing
 
 struct usb_config_descriptor {
   uint8_t length;
@@ -74,7 +74,7 @@ struct usb_endpoint_descriptor {
 #define USB_REQ_SET_PROTOCOL 0x0B
 #define HID_PROTOCOL_BOOT 0x00
 
-// ── HID Usage ID to PS/2 Scancode mapping ───────────────────────────────────
+// HID Usage ID to PS/2 Scancode mapping
 // USB HID uses "Usage IDs" (from the HID Usage Tables spec) for key codes.
 // We translate these to PS/2 Set 1 scancodes so we can feed them into the
 // existing keyboard.c infrastructure.
@@ -230,7 +230,7 @@ static bool hid_is_extended(uint8_t usage) {
   }
 }
 
-// ── Keyboard state ──────────────────────────────────────────────────────────
+// Keyboard state
 
 #define MAX_USB_KEYBOARDS 4
 
@@ -273,7 +273,7 @@ struct usb_kbd_state {
 static struct usb_kbd_state keyboards[MAX_USB_KEYBOARDS];
 static int kbd_count = 0;
 
-// ── HID report → input events translation ──────────────────────────────────
+// HID report → input events translation
 
 // Modifier bit positions map to these pseudo-scancodes
 static void process_modifier(uint8_t old_mods, uint8_t new_mods, uint8_t bit,
@@ -316,7 +316,7 @@ static bool key_in_array(uint8_t usage, const uint8_t *keys, int count) {
   return false;
 }
 
-// ── PS/2 scancode → character translation ───────────────────────────────────
+// PS/2 scancode → character translation
 // We reuse the existing scancode_to_char tables from keyboard.c.
 // These are defined as extern because keyboard.c defines them.
 extern const char scancode_to_char[];
@@ -514,7 +514,7 @@ static void usb_kbd_process_report(struct usb_kbd_state *kbd,
   *prev = *report;
 }
 
-// ── LED Updates ─────────────────────────────────────────────────────────────
+// LED Updates
 
 static void usb_kbd_update_leds(struct usb_kbd_state *kbd) {
   struct usb_control_request req;
@@ -538,7 +538,7 @@ static void usb_kbd_update_leds(struct usb_kbd_state *kbd) {
                                   &report, 1, kbd->dev->low_speed);
 }
 
-// ── Interrupt Transfer Setup ────────────────────────────────────────────────
+// Interrupt Transfer Setup
 //
 // UHCI schedules interrupt transfers by placing a QH into specific frame list
 // slots. The bInterval from the endpoint descriptor tells us every how many
@@ -635,7 +635,7 @@ static void usb_kbd_resubmit_td(struct usb_kbd_state *kbd) {
   __asm__ volatile("mfence" ::: "memory");
 }
 
-// ── Probe & Initialization ─────────────────────────────────────────────────
+// Probe & Initialization
 
 bool usb_kbd_probe(struct usb_device *dev) {
   if (kbd_count >= MAX_USB_KEYBOARDS)
@@ -886,7 +886,7 @@ bool usb_kbd_probe(struct usb_device *dev) {
   return true;
 }
 
-// ── Polling ─────────────────────────────────────────────────────────────────
+// Polling
 // Called from the UHCI/OHCI IRQ handler to check if any keyboard has new data.
 
 void usb_kbd_poll(void) {
@@ -895,7 +895,7 @@ void usb_kbd_poll(void) {
     if (!kbd->active)
       continue;
 
-    // ── EHCI path ──────────────────────────────────────────────────────
+    // EHCI path
     if (kbd->ehci_pipe) {
       if (!ehci_int_pipe_completed(kbd->ehci_pipe))
         continue;
@@ -926,7 +926,7 @@ void usb_kbd_poll(void) {
       continue;
     }
 
-    // ── OHCI path ──────────────────────────────────────────────────────
+    // OHCI path
     if (kbd->ohci_pipe) {
       if (!ohci_int_pipe_completed(kbd->ohci_pipe))
         continue;
@@ -957,7 +957,7 @@ void usb_kbd_poll(void) {
       continue;
     }
 
-    // ── UHCI path ──────────────────────────────────────────────────────
+    // UHCI path
     if (!kbd->int_td)
       continue;
 

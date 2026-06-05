@@ -2,7 +2,7 @@
 #include "mm/pmm.h"
 #include "console/console.h"
 
-// ── MMIO layout ──────────────────────────────────────────────────────────────
+// MMIO layout
 // The I/O APIC uses an indirect register scheme:
 //   Offset 0x00  →  IOREGSEL  (index register, 32-bit)
 //   Offset 0x10  →  IOWIN     (data window,    32-bit)
@@ -18,7 +18,7 @@ bool ioapic_is_ready(void) {
     return ioapic_base != NULL;
 }
 
-// ── Helper: print 32-bit hex ─────────────────────────────────────────────────
+// Helper: print 32-bit hex
 static void print_hex32(uint32_t num) {
     const char *hex = "0123456789ABCDEF";
     for (int i = 28; i >= 0; i -= 4) {
@@ -34,7 +34,7 @@ static void print_uint32(uint32_t num) {
     while (i > 0) { console_putchar(buf[--i]); }
 }
 
-// ── Indirect register read/write ─────────────────────────────────────────────
+// Indirect register read/write
 
 static uint32_t ioapic_read(uint8_t reg) {
     ioapic_base[0] = (uint32_t)reg;   // IOREGSEL
@@ -46,12 +46,12 @@ static void ioapic_write(uint8_t reg, uint32_t value) {
     ioapic_base[4] = value;           // IOWIN
 }
 
-// ── Max redirection entries ──────────────────────────────────────────────────
+// Max redirection entries
 static uint32_t ioapic_get_max_redirections(void) {
     return ((ioapic_read(IOAPIC_REG_VER) >> 16) & 0xFF) + 1;
 }
 
-// ── Route a GSI through the I/O APIC ────────────────────────────────────────
+// Route a GSI through the I/O APIC
 
 void ioapic_route_irq(uint8_t gsi, uint8_t vector, uint8_t dest_apic_id,
                       uint16_t flags) {
@@ -89,7 +89,7 @@ void ioapic_route_irq(uint8_t gsi, uint8_t vector, uint8_t dest_apic_id,
     ioapic_write(reg_low,  (uint32_t)(entry & 0xFFFFFFFF));
 }
 
-// ── Mask / unmask individual GSI pins ────────────────────────────────────────
+// Mask / unmask individual GSI pins
 
 void ioapic_mask_irq(uint8_t gsi) {
     uint32_t entry_index = gsi - ioapic_gsi_base;
@@ -107,7 +107,7 @@ void ioapic_unmask_irq(uint8_t gsi) {
     ioapic_write(reg_low, low);
 }
 
-// ── Initialization ──────────────────────────────────────────────────────────
+// Initialization
 
 void ioapic_init(uint64_t base_phys, uint32_t gsi_base) {
     ioapic_base     = (volatile uint32_t *)(base_phys + pmm_get_hhdm_offset());

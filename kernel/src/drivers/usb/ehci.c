@@ -19,7 +19,7 @@ static int ehci_count = 0;
 static struct ehci_int_pipe int_pipes[EHCI_MAX_INT_PIPES];
 static int int_pipe_count = 0;
 
-// ── Helpers ─────────────────────────────────────────────────────────────────
+// Helpers
 
 static inline uint32_t ehci_read_cap32(struct ehci_controller *hc,
                                        uint32_t reg) {
@@ -39,7 +39,7 @@ static inline void ehci_write_op(struct ehci_controller *hc, uint32_t reg,
   *(volatile uint32_t *)(hc->op_base + reg) = val;
 }
 
-// ── BIOS Handover (EECP) ────────────────────────────────────────────────────
+// BIOS Handover (EECP)
 
 static void ehci_bios_handover(struct ehci_controller *hc) {
   uint32_t hccparams = ehci_read_cap32(hc, EHCI_CAP_HCCPARAMS);
@@ -76,7 +76,7 @@ static void ehci_bios_handover(struct ehci_controller *hc) {
                      0);
 }
 
-// ── Reset and Initialization ────────────────────────────────────────────────
+// Reset and Initialization
 
 static void ehci_controller_reset(struct ehci_controller *hc) {
   // 1. Stop the controller if it's running
@@ -104,7 +104,7 @@ static void ehci_controller_reset(struct ehci_controller *hc) {
 }
 
 static void ehci_init_schedule(struct ehci_controller *hc) {
-  // ── Asynchronous Schedule ─────────────────────────────────────────────
+  // Asynchronous Schedule
   // Allocate Dummy QH for Asynchronous Schedule
   uint64_t phys;
   hc->async_qh = (struct ehci_qh *)dma_alloc_page(&phys);
@@ -121,7 +121,7 @@ static void ehci_init_schedule(struct ehci_controller *hc) {
   // Set the Asynchronous List Address
   ehci_write_op(hc, EHCI_REG_ASYNCLISTADDR, hc->async_qh_phys);
 
-  // ── Periodic Schedule ─────────────────────────────────────────────────
+  // Periodic Schedule
   // Allocate the 4KB Periodic Frame List (1024 × 32-bit pointers)
   hc->periodic_list = (uint32_t *)dma_alloc_page(&phys);
   hc->periodic_list_phys = (uint32_t)phys;
@@ -134,7 +134,7 @@ static void ehci_init_schedule(struct ehci_controller *hc) {
   // Tell the hardware where the periodic list is
   ehci_write_op(hc, EHCI_REG_PERIODICLISTBASE, hc->periodic_list_phys);
 
-  // ── Interrupt Pipe Pools (QHs + qTDs for HID devices) ─────────────────
+  // Interrupt Pipe Pools (QHs + qTDs for HID devices)
   hc->int_qh_pool = (struct ehci_qh *)dma_alloc_page(&phys);
   memset(hc->int_qh_pool, 0, 4096);
   hc->int_qh_pool_phys = (uint32_t)phys;
@@ -143,7 +143,7 @@ static void ehci_init_schedule(struct ehci_controller *hc) {
   memset(hc->int_qtd_pool, 0, 4096);
   hc->int_qtd_pool_phys = (uint32_t)phys;
 
-  // ── Control Transfer Pools ────────────────────────────────────────────
+  // Control Transfer Pools
   hc->qh_pool = (struct ehci_qh *)dma_alloc_page(&phys);
   memset(hc->qh_pool, 0, 4096);
   hc->qh_pool_phys = (uint32_t)phys;
@@ -156,7 +156,7 @@ static void ehci_init_schedule(struct ehci_controller *hc) {
   hc->transfer_buffer_phys = (uint32_t)phys;
 }
 
-// ── Port Management ─────────────────────────────────────────────────────────
+// Port Management
 
 static void ehci_reset_port(struct ehci_controller *hc, uint8_t port) {
   uint32_t reg = EHCI_REG_PORTSC + (port * 4);
@@ -217,7 +217,7 @@ static void ehci_reset_port(struct ehci_controller *hc, uint8_t port) {
   }
 }
 
-// ── Control Transfers ───────────────────────────────────────────────────────
+// Control Transfers
 
 int ehci_control_transfer(struct ehci_controller *hc, uint8_t addr,
                           struct usb_control_request *req, void *data,
@@ -304,7 +304,7 @@ static int ehci_hcd_control_transfer(struct usb_hcd *hcd, uint8_t addr,
   return ehci_control_transfer(hc, addr, req, data, len, low_speed);
 }
 
-// ── Interrupt Pipe Management (Phase 5 — HID support) ───────────────────────
+
 //
 // EHCI Periodic Schedule uses QHs linked into the Periodic Frame List.
 // Each QH points to a qTD that performs an IN transfer from the device's
@@ -329,7 +329,7 @@ struct ehci_int_pipe *ehci_setup_int_in(struct ehci_controller *hc,
   pipe->active = true;
   pipe->cur_idx = 0;
 
-  // ── Allocate QH and 2 qTDs from the dedicated interrupt pools ─────────
+  // Allocate QH and 2 qTDs from the dedicated interrupt pools
   int pipe_idx = int_pipe_count;
 
   pipe->qh = &hc->int_qh_pool[pipe_idx];
@@ -343,7 +343,7 @@ struct ehci_int_pipe *ehci_setup_int_in(struct ehci_controller *hc,
   pipe->qtd_phys[1] =
       hc->int_qtd_pool_phys + ((pipe_idx * 2 + 1) * sizeof(struct ehci_qtd));
 
-  // ── Build the QH ──────────────────────────────────────────────────────
+  // Build the QH
   memset(pipe->qh, 0, sizeof(struct ehci_qh));
 
   // ep_char: device address, endpoint number, high speed, max packet size
@@ -358,7 +358,7 @@ struct ehci_int_pipe *ehci_setup_int_in(struct ehci_controller *hc,
   pipe->qh->ep_caps = (1 << 30) | // Mult = 1
                       (0x01);     // S-mask = microframe 0
 
-  // ── Build qTD[0] as the active transfer ───────────────────────────────
+  // Build qTD[0] as the active transfer
   memset(pipe->qtd[0], 0, sizeof(struct ehci_qtd));
   pipe->qtd[0]->next = EHCI_PTR_TERMINATE;
   pipe->qtd[0]->alt_next = EHCI_PTR_TERMINATE;
@@ -368,15 +368,15 @@ struct ehci_int_pipe *ehci_setup_int_in(struct ehci_controller *hc,
                         QTD_TOKEN_ACTIVE; // Data toggle = 0 (first xfer)
   pipe->qtd[0]->buffer[0] = buffer_phys;
 
-  // ── qTD[1] is the inactive spare (for ping-pong resubmit) ────────────
+  // qTD[1] is the inactive spare (for ping-pong resubmit)
   memset(pipe->qtd[1], 0, sizeof(struct ehci_qtd));
 
-  // ── Link QH overlay to our active qTD ─────────────────────────────────
+  // Link QH overlay to our active qTD
   pipe->qh->overlay.next = pipe->qtd_phys[0];
   pipe->qh->overlay.alt_next = EHCI_PTR_TERMINATE;
   pipe->qh->overlay.token = 0; // HC will override this from qtd[0]
 
-  // ── Insert QH into the Periodic Frame List ────────────────────────────
+  // Insert QH into the Periodic Frame List
   // The interval determines how many milliseconds between polls.
   // EHCI operates at 1 frame/ms; we insert the QH every N frames.
   uint16_t sched_interval = 1;
@@ -476,7 +476,7 @@ void ehci_int_pipe_resubmit(struct ehci_int_pipe *pipe) {
   asm volatile("mfence" ::: "memory");
 }
 
-// ── IRQ Handler ─────────────────────────────────────────────────────────────
+// IRQ Handler
 
 static void ehci_irq_handler(struct registers *regs) {
   (void)regs;
@@ -516,7 +516,7 @@ static void ehci_irq_handler(struct registers *regs) {
   }
 }
 
-// ── Initialization Entry ────────────────────────────────────────────────────
+// Initialization Entry
 
 void ehci_init(void) {
   ehci_count = 0;
@@ -641,7 +641,7 @@ void ehci_hand_to_companion(void) {
   }
 }
 
-// ── Port Enumeration (Phase 5) ──────────────────────────────────────────────
+
 // After resetting ports, enumerate high-speed devices through the USB core
 // which will trigger HID driver probe (keyboard/mouse).
 
@@ -683,7 +683,7 @@ static void ehci_enumerate_ports(struct ehci_controller *hc) {
   }
 }
 
-// ── Public API ──────────────────────────────────────────────────────────────
+// Public API
 
 int ehci_get_controller_count(void) { return ehci_count; }
 

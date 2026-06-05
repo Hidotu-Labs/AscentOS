@@ -28,7 +28,7 @@ static uint8_t ac97_bits = 16;
 #define AFMT_U8 0x00000008
 #define AFMT_S16_LE 0x00000010
 
-// ── DMA and BDL structures ──────────────────────────────────────────────────
+// DMA and BDL structures
 #define AC97_BDL_ENTRIES 32
 static struct ac97_bdl_entry *ac97_bdl = NULL;
 static uint64_t ac97_bdl_phys = 0;
@@ -37,7 +37,7 @@ static uint64_t ac97_bdl_phys = 0;
 static uint8_t *ac97_buffers[AC97_BDL_ENTRIES];
 static uint64_t ac97_buffers_phys[AC97_BDL_ENTRIES];
 
-// ── Ring buffer for VFS ─────────────────────────────────────────────────────
+// Ring buffer for VFS
 #define AC97_RING_SIZE                                                         \
   (64 * 1024) // 64KB total buffering (~340ms @ 48kHz stereo 16-bit)
 static uint8_t *ac97_ring = NULL;
@@ -46,7 +46,7 @@ static volatile uint32_t ring_tail = 0;
 static volatile uint32_t ring_count = 0;
 static volatile bool ac97_is_playing = false;
 
-// ── Register Access ─────────────────────────────────────────────────────────
+// Register Access
 
 static void ac97_nam_write(uint8_t reg, uint16_t val) {
   outw(nam_base + reg, val);
@@ -70,7 +70,7 @@ static uint8_t ac97_nabm_read8(uint8_t reg) { return inb(nabm_base + reg); }
 
 static uint16_t ac97_nabm_read16(uint8_t reg) { return inw(nabm_base + reg); }
 
-// ── ISR ─────────────────────────────────────────────────────────────────────
+// ISR
 
 static void ac97_pump_audio(void);
 
@@ -92,7 +92,7 @@ static void ac97_isr(struct registers *regs) {
   }
 }
 
-// ── Initialization ──────────────────────────────────────────────────────────
+// Initialization
 
 static void ac97_pump_audio(void) {
   if (ring_count == 0) {

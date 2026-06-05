@@ -4,7 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-// ── Constants ───────────────────────────────────────────────────────────────
+// Constants
 #define ARP_TABLE_SIZE  16
 #define ARP_OP_REQUEST  1
 #define ARP_OP_REPLY    2
@@ -12,7 +12,7 @@
 #define ARP_HW_ETHERNET 1
 #define ARP_PROTO_IPV4   0x0800
 
-// ── ARP packet (28 bytes for Ethernet + IPv4) ───────────────────────────────
+// ARP packet (28 bytes for Ethernet + IPv4)
 typedef struct __attribute__((packed)) {
     uint16_t hw_type;        // Hardware type (1 = Ethernet)
     uint16_t proto_type;     // Protocol type (0x0800 = IPv4)
@@ -25,14 +25,14 @@ typedef struct __attribute__((packed)) {
     uint32_t target_ip;      // Target protocol address (network byte order)
 } arp_packet_t;
 
-// ── ARP cache entry ─────────────────────────────────────────────────────────
+// ARP cache entry
 typedef struct {
     uint32_t ip;             // Host byte order
     uint8_t  mac[6];
     bool     valid;
 } arp_entry_t;
 
-// ── Public API ──────────────────────────────────────────────────────────────
+// Public API
 
 // Initialize the ARP subsystem (clears the cache)
 void arp_init(void);

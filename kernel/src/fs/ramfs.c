@@ -8,7 +8,7 @@ static uint32_t next_inode = 1;
 static int ramfs_chmod(vfs_node_t *node, uint16_t permission);
 static int ramfs_chown(vfs_node_t *node, uint32_t uid, uint32_t gid);
 
-// ── VFS Implementations ─────────────────────────────────────────────────────
+// VFS Implementations
 
 uint32_t ramfs_read(vfs_node_t *node, uint32_t offset, uint32_t size,
                     uint8_t *buffer) {
@@ -317,7 +317,7 @@ static int ramfs_chown(vfs_node_t *node, uint32_t uid, uint32_t gid) {
   return 0;
 }
 
-// ── ramfs_unlink: Remove a file from a directory ────────────────────────────
+// ramfs_unlink: Remove a file from a directory
 static int ramfs_unlink(vfs_node_t *node, char *name) {
   if (!node || (node->flags & FS_TYPE_MASK) != FS_DIRECTORY || !node->device)
     return -1;
@@ -355,7 +355,7 @@ static int ramfs_unlink(vfs_node_t *node, char *name) {
   return -1; // Not found
 }
 
-// ── ramfs_rename: Rename a file within the same directory ────────────────────
+// ramfs_rename: Rename a file within the same directory
 static int ramfs_rename(vfs_node_t *node, char *old_name, char *new_name) {
   if (!node || (node->flags & FS_TYPE_MASK) != FS_DIRECTORY || !node->device)
     return -1;
@@ -380,7 +380,7 @@ static int ramfs_rename(vfs_node_t *node, char *old_name, char *new_name) {
   return 0;
 }
 
-// ── Public APIs ─────────────────────────────────────────────────────────────
+// Public APIs
 
 void ramfs_init(void) {
   next_inode = 1;

@@ -4,7 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-// ── USB Request Types ───────────────────────────────────────────────────────
+// USB Request Types
 #define USB_REQ_GET_STATUS 0x00
 #define USB_REQ_CLEAR_FEATURE 0x01
 #define USB_REQ_SET_FEATURE 0x03
@@ -22,14 +22,14 @@ struct usb_control_request {
   uint16_t length;
 } __attribute__((packed));
 
-// ── Descriptor Types ────────────────────────────────────────────────────────
+// Descriptor Types
 #define USB_DESC_DEVICE 0x01
 #define USB_DESC_CONFIGURATION 0x02
 #define USB_DESC_STRING 0x03
 #define USB_DESC_INTERFACE 0x04
 #define USB_DESC_ENDPOINT 0x05
 
-// ── Device Descriptor ───────────────────────────────────────────────────────
+// Device Descriptor
 struct usb_device_descriptor {
   uint8_t length;
   uint8_t type;
@@ -47,7 +47,7 @@ struct usb_device_descriptor {
   uint8_t num_configurations;
 } __attribute__((packed));
 
-// ── Host Controller Interface ──────────────────────────────────────────────
+// Host Controller Interface
 struct usb_hcd {
   void *priv; // Pointer to controller-specific state (e.g. uhci_controller)
   int (*control_transfer)(struct usb_hcd *hcd, uint8_t addr,
@@ -55,7 +55,7 @@ struct usb_hcd {
                           uint16_t len, bool low_speed);
 };
 
-// ── Device Structure ────────────────────────────────────────────────────────
+// Device Structure
 struct usb_device {
   uint8_t address;
   uint8_t port;
@@ -65,7 +65,7 @@ struct usb_device {
   struct usb_hcd *hcd; // Reference to the host controller driver
 };
 
-// ── Core API ────────────────────────────────────────────────────────────────
+// Core API
 
 void usb_init(void);
 void usb_enumerate_device(struct usb_device *dev);

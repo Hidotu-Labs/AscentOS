@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 
-// ── VirtIO Device Status Bits (§2.1) ────────────────────────────────────────
+// VirtIO Device Status Bits (§2.1)
 #define VIRTIO_STATUS_ACKNOWLEDGE       1
 #define VIRTIO_STATUS_DRIVER            2
 #define VIRTIO_STATUS_DRIVER_OK         4
@@ -13,21 +13,21 @@
 #define VIRTIO_STATUS_DEVICE_NEEDS_RESET 64
 #define VIRTIO_STATUS_FAILED            128
 
-// ── VirtIO Feature Bits ─────────────────────────────────────────────────────
+// VirtIO Feature Bits
 #define VIRTIO_F_VERSION_1              (1ULL << 32)  // VirtIO 1.0+
 
-// ── Virtqueue Descriptor Flags ──────────────────────────────────────────────
+// Virtqueue Descriptor Flags
 #define VIRTQ_DESC_F_NEXT               1   // Buffer continues via 'next'
 #define VIRTQ_DESC_F_WRITE              2   // Device writes (vs. reads)
 #define VIRTQ_DESC_F_INDIRECT           4   // Buffer is a list of descriptors
 
-// ── Virtqueue Available Ring Flags ──────────────────────────────────────────
+// Virtqueue Available Ring Flags
 #define VIRTQ_AVAIL_F_NO_INTERRUPT      1
 
-// ── Virtqueue Used Ring Flags ───────────────────────────────────────────────
+// Virtqueue Used Ring Flags
 #define VIRTQ_USED_F_NO_NOTIFY          1
 
-// ── Virtqueue Descriptor ────────────────────────────────────────────────────
+// Virtqueue Descriptor
 struct virtq_desc {
   uint64_t addr;       // Guest-physical address
   uint32_t len;        // Length of buffer
@@ -35,7 +35,7 @@ struct virtq_desc {
   uint16_t next;       // Next desc index (if VIRTQ_DESC_F_NEXT)
 } __attribute__((packed));
 
-// ── Available Ring ──────────────────────────────────────────────────────────
+// Available Ring
 struct virtq_avail {
   uint16_t flags;
   uint16_t idx;        // Where the driver would put the next desc entry
@@ -43,13 +43,13 @@ struct virtq_avail {
   // Followed by: uint16_t used_event; (if VIRTIO_F_EVENT_IDX)
 } __attribute__((packed));
 
-// ── Used Ring Element ───────────────────────────────────────────────────────
+// Used Ring Element
 struct virtq_used_elem {
   uint32_t id;         // Index of start of used descriptor chain
   uint32_t len;        // Total length of the descriptor chain which was used
 } __attribute__((packed));
 
-// ── Used Ring ───────────────────────────────────────────────────────────────
+// Used Ring
 struct virtq_used {
   uint16_t flags;
   uint16_t idx;        // Where the device would put the next used entry
@@ -57,7 +57,7 @@ struct virtq_used {
   // Followed by: uint16_t avail_event; (if VIRTIO_F_EVENT_IDX)
 } __attribute__((packed));
 
-// ── Virtqueue (driver-side bookkeeping) ─────────────────────────────────────
+// Virtqueue (driver-side bookkeeping)
 #define VIRTQ_MAX_SIZE 256
 
 struct virtqueue {
@@ -81,7 +81,7 @@ struct virtqueue {
   volatile uint16_t *notify_addr;
 };
 
-// ── Virtqueue Management API ────────────────────────────────────────────────
+// Virtqueue Management API
 
 // Allocate and initialize a virtqueue with 'num' entries.
 // Returns true on success. All physical/virtual pointers are filled in.
@@ -108,7 +108,7 @@ bool virtq_poll(struct virtqueue *vq, uint32_t *id, uint32_t *len);
 // Reclaim a descriptor (chain) so it can be reused.
 void virtq_free_desc(struct virtqueue *vq, uint16_t head);
 
-// ── Self-test ───────────────────────────────────────────────────────────────
+// Self-test
 void virtio_self_test(void);
 
 #endif

@@ -1,4 +1,4 @@
-// ── evdev.c — Linux-compatible evdev input subsystem for X11 ─────────────────
+// evdev.c — Linux-compatible evdev input subsystem for X11
 //
 // Provides /dev/input/event0 (keyboard) and /dev/input/event1 (mouse) device
 // nodes that speak the standard Linux evdev protocol. This allows unmodified
@@ -28,14 +28,14 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-// ── Two global evdev devices ────────────────────────────────────────────────
+// Two global evdev devices
 static evdev_device_t kbd_evdev;
 static evdev_device_t mouse_evdev;
 
 evdev_device_t *evdev_get_keyboard(void) { return &kbd_evdev; }
 evdev_device_t *evdev_get_mouse(void) { return &mouse_evdev; }
 
-// ── Timestamp helper ────────────────────────────────────────────────────────
+// Timestamp helper
 extern uint64_t pit_get_ticks(void);
 
 static void evdev_timestamp(uint64_t *sec, uint64_t *usec) {
@@ -44,7 +44,7 @@ static void evdev_timestamp(uint64_t *sec, uint64_t *usec) {
   *usec = (ticks % 100) * 10000;
 }
 
-// ── Push an event into the ring buffer ──────────────────────────────────────
+// Push an event into the ring buffer
 void evdev_push_event(evdev_device_t *dev, uint16_t type, uint16_t code,
                       int32_t value) {
   uint64_t flags;
@@ -72,7 +72,7 @@ void evdev_push_event(evdev_device_t *dev, uint16_t type, uint16_t code,
   }
 }
 
-// ── VFS read callback ───────────────────────────────────────────────────────
+// VFS read callback
 // Returns one or more struct input_event records.
 // If the ring is empty, blocks until events arrive.
 static uint32_t evdev_vfs_read(struct vfs_node *node, uint32_t offset,
@@ -138,7 +138,7 @@ static uint32_t evdev_vfs_read(struct vfs_node *node, uint32_t offset,
   }
 }
 
-// ── VFS poll callback ───────────────────────────────────────────────────────
+// VFS poll callback
 static int evdev_vfs_poll(struct vfs_node *node, int events) {
   evdev_device_t *dev = (evdev_device_t *)node->device;
   if (!dev)
@@ -152,12 +152,12 @@ static int evdev_vfs_poll(struct vfs_node *node, int events) {
   return revents;
 }
 
-// ── Helper: set a bit in a bitmask array ────────────────────────────────────
+// Helper: set a bit in a bitmask array
 static void set_bit(uint8_t *mask, int bit) {
   mask[bit / 8] |= (1 << (bit % 8));
 }
 
-// ── VFS ioctl callback ─────────────────────────────────────────────────────
+// VFS ioctl callback
 static int evdev_vfs_ioctl(struct vfs_node *node, uint32_t request,
                            uint64_t arg) {
   evdev_device_t *dev = (evdev_device_t *)node->device;
@@ -384,7 +384,7 @@ static int evdev_vfs_ioctl(struct vfs_node *node, uint32_t request,
   return -25; // ENOTTY
 }
 
-// ── PS/2 scancode → Linux evdev keycode translation ─────────────────────────
+// PS/2 scancode → Linux evdev keycode translation
 // For the base range (scancode 0x00–0x58), the PS/2 set-1 scancode equals
 // the Linux evdev keycode. Extended scancodes (0xE0 prefix) need a lookup.
 static const uint8_t extended_scancode_to_keycode[] = {
@@ -411,7 +411,7 @@ uint16_t evdev_ps2_to_keycode(uint8_t scancode, bool is_extended) {
   return 0;
 }
 
-// ── Create a VFS node for an evdev device ───────────────────────────────────
+// Create a VFS node for an evdev device
 static void evdev_create_node(evdev_device_t *dev, const char *node_name, vfs_node_t *input_dir) {
   vfs_node_t *node = kmalloc(sizeof(vfs_node_t));
   if (!node)
@@ -466,7 +466,7 @@ static void evdev_create_node(evdev_device_t *dev, const char *node_name, vfs_no
   }
 }
 
-// ── Initialization ──────────────────────────────────────────────────────────
+// Initialization
 void evdev_init(void) {
   // Ensure /dev/input exist
   vfs_node_t *input_dir = NULL;
@@ -478,7 +478,7 @@ void evdev_init(void) {
     input_dir = vfs_resolve_path("/dev/input");
   }
 
-  // ── Keyboard device (event0) ────────────────────────────────────────────
+  // Keyboard device (event0)
   memset(&kbd_evdev, 0, sizeof(kbd_evdev));
   kbd_evdev.type = EVDEV_KEYBOARD;
   strcpy(kbd_evdev.name, "AT Translated Set 2 keyboard");
@@ -492,7 +492,7 @@ void evdev_init(void) {
 
   evdev_create_node(&kbd_evdev, "event0", input_dir);
 
-  // ── Mouse device (event1) ──────────────────────────────────────────────
+  // Mouse device (event1)
   memset(&mouse_evdev, 0, sizeof(mouse_evdev));
   mouse_evdev.type = EVDEV_MOUSE;
   strcpy(mouse_evdev.name, "ImExPS/2 Generic Explorer Mouse");

@@ -128,7 +128,7 @@ void netlink_broadcast(int protocol, uint32_t group, const void *data,
   spinlock_release(&netlink_lock);
 }
 
-// ── AF_NETLINK Operations ───────────────────────────────────────────────────
+// AF_NETLINK Operations
 
 static int netlink_bind(socket_t *sock, struct sockaddr *addr, int addrlen) {
   if (addrlen < (int)sizeof(struct sockaddr_nl))

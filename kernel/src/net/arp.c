@@ -17,14 +17,14 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-// ── ARP cache ───────────────────────────────────────────────────────────────
+// ARP cache
 static arp_entry_t arp_table[ARP_TABLE_SIZE];
 
 void arp_init(void) {
     memset(arp_table, 0, sizeof(arp_table));
 }
 
-// ── Cache operations ────────────────────────────────────────────────────────
+// Cache operations
 
 // Update or insert an entry in the ARP cache
 static void arp_cache_update(uint32_t ip, const uint8_t *mac) {
@@ -80,7 +80,7 @@ const arp_entry_t *arp_get_table(int *count) {
     return arp_table;
 }
 
-// ── Send an ARP reply ───────────────────────────────────────────────────────
+// Send an ARP reply
 
 static void arp_send_reply(const uint8_t *target_mac, uint32_t target_ip_net) {
     netif_t *nif = netif_get();
@@ -101,7 +101,7 @@ static void arp_send_reply(const uint8_t *target_mac, uint32_t target_ip_net) {
     eth_send_frame(target_mac, ETHERTYPE_ARP, &reply, sizeof(reply));
 }
 
-// ── Send an ARP request ─────────────────────────────────────────────────────
+// Send an ARP request
 
 int arp_send_request(uint32_t target_ip) {
     netif_t *nif = netif_get();
@@ -125,7 +125,7 @@ int arp_send_request(uint32_t target_ip) {
     return eth_send_frame(ETH_BROADCAST, ETHERTYPE_ARP, &req, sizeof(req));
 }
 
-// ── Handle an incoming ARP packet ───────────────────────────────────────────
+// Handle an incoming ARP packet
 
 void arp_handle_packet(const uint8_t *data, uint16_t len) {
     if (len < sizeof(arp_packet_t)) return;

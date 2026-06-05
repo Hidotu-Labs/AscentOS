@@ -5,7 +5,6 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-// ═══════════════════════════════════════════════════════════════════════════
 //  Named Object Slab Cache Allocator
 //
 //  Provides O(1) allocation/free for fixed-size kernel objects with:
@@ -14,7 +13,6 @@
 //   - Partial → Full → Free slab state machine
 //   - Optional constructor/destructor callbacks for complex objects
 //   - Global registry for introspection and statistics
-// ═══════════════════════════════════════════════════════════════════════════
 
 #define SLAB_CACHE_NAME_MAX 32
 #define SLAB_CACHE_MAX_CACHES 32
@@ -57,7 +55,7 @@ struct slab_page {
     uint32_t bitmap[4];       // 128 bits — tracks allocated objects
 } __attribute__((aligned(64)));
 
-// ── Global Cache Registry API ───────────────────────────────────────────
+// Global Cache Registry API
 
 // Initialize the slab cache subsystem
 void slab_cache_init(void);
@@ -86,7 +84,7 @@ void kmem_cache_free(kmem_cache_t *cache, void *obj);
 // Shrink a cache: release completely empty slabs back to PMM.
 void kmem_cache_shrink(kmem_cache_t *cache);
 
-// ── Introspection ───────────────────────────────────────────────────────
+// Introspection
 
 // Print statistics for all registered caches (serial/klog)
 void kmem_cache_print_all(void);
@@ -94,7 +92,7 @@ void kmem_cache_print_all(void);
 // Get number of active objects across all caches
 uint64_t kmem_cache_total_active(void);
 
-// ── Pre-built Kernel Object Caches ──────────────────────────────────────
+// Pre-built Kernel Object Caches
 
 // These are initialized by slab_cache_init() and used throughout the kernel.
 extern kmem_cache_t *thread_cache;    // struct thread

@@ -1,5 +1,5 @@
-// ── AF_UNIX Socket Family Implementation
-// ─────────────────────────────────────── Phase 2: Socket Families & Protocols
+// AF_UNIX Socket Family Implementation
+
 
 #include "af_unix.h"
 #include "../console/klog.h"
@@ -14,7 +14,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-// ── AF_UNIX Bound Sockets Tracking ───────────────────────────────────────────
+// AF_UNIX Bound Sockets Tracking
 
 static struct list_head unix_bound_list;
 static spinlock_t unix_bound_lock;
@@ -94,13 +94,12 @@ int unix_unbind_by_path(const char *path) {
   return found ? 0 : -1;
 }
 
-// ── AF_UNIX Family Structure
-// ───────────────────────────────────────────────────
+// AF_UNIX Family Structure
 
 static net_family_t unix_family = {
     .family = AF_UNIX, .create = unix_create, .next = NULL};
 
-// ── Local structure definitions for socket options
+// Local structure definitions for socket options
 // ───────────────────────────── These are used for SO_PEERCRED and
 // SO_RCVTIMEO/SO_SNDTIMEO
 struct ucred_local {
@@ -117,7 +116,7 @@ struct timeval_local {
 #define UCRED_SIZE sizeof(struct ucred_local)
 #define TIMEVAL_SIZE sizeof(struct timeval_local)
 
-// ── AF_UNIX Socket Operations (stubs for Phase 2)
+
 // ────────────────────────────── Full implementations will be in later phases
 
 static int unix_bind_abstract(unix_sock_t *usk, struct sockaddr_un *sun,
@@ -159,7 +158,7 @@ static int unix_bind_fs(unix_sock_t *usk, struct sockaddr_un *sun,
   char name[UNIX_PATH_MAX];
 
   // Very basic path splitting (doesn't handle all edge cases but sufficient for
-  // Phase 3)
+
   const char *last_slash = strrchr(sun->sun_path, '/');
   if (!last_slash) {
     // Current directory
@@ -1077,8 +1076,7 @@ static int unix_poll(socket_t *sock, int events) {
   return revents & events;
 }
 
-// ── AF_UNIX Operations Vector
-// ──────────────────────────────────────────────────
+// AF_UNIX Operations Vector
 
 static int unix_ioctl(socket_t *sock, uint32_t request, uint64_t arg) {
   if (!sock || !sock->sk)
@@ -1433,8 +1431,7 @@ static sock_ops_t unix_ops = {.bind = unix_bind,
                               .ioctl = unix_ioctl,
                               .destroy = unix_destroy};
 
-// ── AF_UNIX Socket Creation
-// ────────────────────────────────────────────────────
+// AF_UNIX Socket Creation
 
 int unix_create(socket_t *sock, int protocol) {
   if (!sock) {
@@ -1484,7 +1481,7 @@ int unix_create(socket_t *sock, int protocol) {
   usk->read_shutdown = false;
   usk->write_shutdown = false;
 
-  // Initialize socket options (Phase 6)
+
   usk->passcred = false;
   usk->rcvtimeo_ms = 0; // No timeout by default
   usk->sndtimeo_ms = 0; // No timeout by default
@@ -1545,8 +1542,7 @@ int unix_create(socket_t *sock, int protocol) {
   return 0;
 }
 
-// ── AF_UNIX Socket Destruction
-// ─────────────────────────────────────────────────
+// AF_UNIX Socket Destruction
 
 void unix_destroy(socket_t *sock) {
   if (!sock) {
@@ -1646,8 +1642,7 @@ void unix_destroy(socket_t *sock) {
   sock->sk = NULL;
 }
 
-// ── AF_UNIX Family Registration
-// ────────────────────────────────────────────────
+// AF_UNIX Family Registration
 
 net_family_t *unix_get_family(void) { return &unix_family; }
 

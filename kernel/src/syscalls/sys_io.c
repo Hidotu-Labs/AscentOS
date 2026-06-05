@@ -1,4 +1,4 @@
-// ── I/O Syscalls: read, write, close, open, lseek ────────────────────────────
+// I/O Syscalls: read, write, close, open, lseek
 #include "../apic/lapic_timer.h"
 #include "../console/console.h"
 #include "../console/klog.h"
@@ -95,6 +95,9 @@ struct vt_stat {
 #define F_SETFD 2
 #define F_GETFL 3
 #define F_SETFL 4
+#define F_GETLK 5
+#define F_SETLK 6
+#define F_SETLKW 7
 #define F_SETOWN 8
 #define F_DUPFD_CLOEXEC 1030 // F_LINUX_SPECIFIC_BASE + 0
 
@@ -103,8 +106,7 @@ struct vt_stat {
 
 #define AT_FDCWD -100
 
-// ── Linux x86_64 stat structure (matches musl struct stat)
-// ────────────────────
+// Linux x86_64 stat structure (matches musl struct stat)
 struct kstat {
   uint64_t st_dev;   // Device
   uint64_t st_ino;   // Inode
@@ -183,7 +185,7 @@ struct statx {
 
 struct termios console_termios;
 
-// ── inotify implementation ──────────────────────────────────────────────────
+// inotify implementation
 // Simple inotify support for file/directory monitoring
 #define MAX_INOTIFY_WATCHES 128
 #define MAX_INOTIFY_INSTANCES 32
@@ -663,7 +665,7 @@ static uint64_t sys_flock(uint64_t fd, uint64_t operation, uint64_t a2,
   return 0;
 }
 
-// ── fd_write ─────────────────────────────────────────────────────────────────
+// fd_write
 // For fd 0/1/2 (stdout / stderr) we use console_write_batch() so that each
 // write() syscall results in exactly ONE framebuffer blit.  This kills the
 // per-character flicker that kilo was triggering.
@@ -813,13 +815,13 @@ static uint64_t sys_writev(uint64_t fd, uint64_t iov_u, uint64_t iovcnt,
     if (len == 0)
       continue;
 
-    // Log stderr output for debugging compositor hangs
-    if (fd == 2 && t) {
+    // Log output for debugging compositor hangs
+    if ((fd == 2 || fd == 3) && t) {
       char log_buf[256];
       size_t to_log = (len < 255) ? len : 255;
       memcpy(log_buf, (const void *)base, to_log);
       log_buf[to_log] = '\0';
-      klog_puts("[STDERR] ");
+      klog_puts(fd == 2 ? "[STDERR] " : "[WESTON] ");
       klog_puts(log_buf);
       klog_puts("\n");
     }
@@ -1228,6 +1230,12 @@ static uint64_t sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,
     (void)arg;
     return 0;
   }
+  case F_GETLK:
+  case F_SETLK:
+  case F_SETLKW: {
+    // File locking stubs for Weston
+    return 0;
+  }
   case 1033: { // F_ADD_SEALS
     // For now, only support seals on files (matches memfd nodes)
     vfs_node_t *node = t->fds[fd];
@@ -1250,7 +1258,7 @@ static uint64_t sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,
   }
 }
 
-// ── Fill kstat from vfs_node ────────────────────────────────────────────────
+// Fill kstat from vfs_node
 static void fill_kstat(struct kstat *ks, vfs_node_t *node) {
   ks->st_dev = 0; // No device numbers yet
   ks->st_ino = (uint64_t)node->inode;
@@ -1306,7 +1314,7 @@ static void fill_kstat(struct kstat *ks, vfs_node_t *node) {
   ks->__unused[2] = 0;
 }
 
-// ── sys_stat: stat(path, statbuf) ────────────────────────────────────────────
+// sys_stat: stat(path, statbuf)
 static uint64_t sys_fadvise64(uint64_t fd, uint64_t offset, uint64_t len,
                               uint64_t advice, uint64_t a4, uint64_t a5) {
   (void)fd;
@@ -1341,12 +1349,8 @@ static uint64_t sys_stat(uint64_t path_ptr, uint64_t statbuf_ptr, uint64_t a2,
   }
 
   if (!node) {
-    vfs_node_t *cwd_node = fs_root;
-    if (t && t->cwd_path[0]) {
-      cwd_node = vfs_resolve_path_at(fs_root, t->cwd_path);
-      if (!cwd_node)
-        cwd_node = fs_root;
-    }
+    vfs_node_t *cwd_node = (path[0] == '/') ? fs_root : (t->cwd_node ? t->cwd_node : fs_root);
+
     node = vfs_resolve_path_at(cwd_node, path);
   }
 
@@ -1361,7 +1365,7 @@ static uint64_t sys_stat(uint64_t path_ptr, uint64_t statbuf_ptr, uint64_t a2,
   return 0;
 }
 
-// ── sys_lstat: lstat(path, statbuf) - like stat but doesn't follow final
+// sys_lstat: lstat(path, statbuf) - like stat but doesn't follow final
 // symlink
 static vfs_node_t *vfs_resolve_symlink_node(vfs_node_t *base,
                                             const char *path); // fwd decl
@@ -1398,8 +1402,7 @@ static uint64_t sys_lstat(uint64_t path_ptr, uint64_t statbuf_ptr, uint64_t a2,
   return 0;
 }
 
-// ── sys_fstat: fstat(fd, statbuf)
-// ─────────────────────────────────────────────
+// sys_fstat: fstat(fd, statbuf)
 static uint64_t sys_fstat(uint64_t fd, uint64_t statbuf_ptr, uint64_t a2,
                           uint64_t a3, uint64_t a4, uint64_t a5) {
   (void)a2;
@@ -1422,7 +1425,7 @@ static uint64_t sys_fstat(uint64_t fd, uint64_t statbuf_ptr, uint64_t a2,
   return 0;
 }
 
-// ── sys_statx: statx(dirfd, path, flags, mask, statxbuf) ─────────────────────
+// sys_statx: statx(dirfd, path, flags, mask, statxbuf)
 static uint64_t sys_statx(uint64_t dirfd, uint64_t path_ptr, uint64_t flags,
                           uint64_t mask, uint64_t statxbuf_ptr, uint64_t a5) {
   (void)a5;
@@ -1738,7 +1741,7 @@ static uint64_t sys_getrandom(uint64_t buf_ptr, uint64_t buflen, uint64_t flags,
   return written;
 }
 
-// ── sys_mkdir: mkdir(pathname, mode) — syscall 83 ──────────────────────────
+// sys_mkdir: mkdir(pathname, mode) — syscall 83
 static uint64_t sys_mkdir(uint64_t pathname, uint64_t mode, uint64_t a2,
                           uint64_t a3, uint64_t a4, uint64_t a5) {
   (void)a2;
@@ -1765,6 +1768,9 @@ static uint64_t sys_mkdir(uint64_t pathname, uint64_t mode, uint64_t a2,
     return 0; // Already exists, success
   }
 
+  struct thread *t = sched_get_current();
+  vfs_node_t *base = (clean_path[0] == '/') ? fs_root : (t->cwd_node ? t->cwd_node : fs_root);
+
   klog_puts("[MKDIR] path=");
   klog_puts(clean_path);
   klog_puts(" mode=");
@@ -1780,7 +1786,7 @@ static uint64_t sys_mkdir(uint64_t pathname, uint64_t mode, uint64_t a2,
     if (*p == '/')
       slash = p;
 
-  vfs_node_t *parent = fs_root;
+  vfs_node_t *parent = base;
   if (slash) {
     size_t parent_len = (size_t)(slash - clean_path);
     if (parent_len == 0) {
@@ -1791,13 +1797,13 @@ static uint64_t sys_mkdir(uint64_t pathname, uint64_t mode, uint64_t a2,
       for (size_t i = 0; i < parent_len; i++)
         parent_path[i] = clean_path[i];
       parent_path[parent_len] = '\0';
-      parent = vfs_resolve_path(parent_path);
+      parent = vfs_resolve_path_at(base, parent_path);
 
       // Recursive mkdir if parent doesn't exist
       if (!parent) {
         klog_puts("[MKDIR] Parent not found, creating recursively\n");
         sys_mkdir((uint64_t)parent_path, mode, 0, 0, 0, 0);
-        parent = vfs_resolve_path(parent_path);
+        parent = vfs_resolve_path_at(base, parent_path);
       }
     }
     size_t dlen = strlen(slash + 1);
@@ -1823,7 +1829,7 @@ static uint64_t sys_mkdir(uint64_t pathname, uint64_t mode, uint64_t a2,
   return 0;
 }
 
-// ── sys_mkdirat: mkdirat(dirfd, pathname, mode) — syscall 258 ────────────────
+// sys_mkdirat: mkdirat(dirfd, pathname, mode) — syscall 258
 static uint64_t sys_mkdirat(uint64_t dirfd, uint64_t pathname, uint64_t mode,
                             uint64_t a3, uint64_t a4, uint64_t a5) {
   (void)a3;
@@ -1895,7 +1901,7 @@ static uint64_t sys_mkdirat(uint64_t dirfd, uint64_t pathname, uint64_t mode,
   return 0;
 }
 
-// ── sys_unlinkat: unlinkat(dirfd, pathname, flags) — syscall 263 ────────────
+// sys_unlinkat: unlinkat(dirfd, pathname, flags) — syscall 263
 static uint64_t sys_unlinkat(uint64_t dirfd, uint64_t pathname, uint64_t flags,
                              uint64_t a3, uint64_t a4, uint64_t a5) {
   (void)flags;
@@ -1990,7 +1996,7 @@ static uint64_t sys_unlinkat(uint64_t dirfd, uint64_t pathname, uint64_t flags,
   return 0;
 }
 
-// ── sys_readv: readv(fd, iov, iovcnt) — syscall 19 ──────────────────────────
+// sys_readv: readv(fd, iov, iovcnt) — syscall 19
 static uint64_t sys_readv(uint64_t fd, uint64_t iov_u, uint64_t iovcnt,
                           uint64_t a3, uint64_t a4, uint64_t a5) {
   (void)a3;
@@ -2048,7 +2054,7 @@ static uint64_t sys_readv(uint64_t fd, uint64_t iov_u, uint64_t iovcnt,
   return total;
 }
 
-// ── sys_eventfd2: eventfd2(initval, flags) — syscall 290 ─────────────────────
+// sys_eventfd2: eventfd2(initval, flags) — syscall 290
 #define EFD_SEMAPHORE 1
 #define EFD_CLOEXEC 02000000
 #define EFD_NONBLOCK 04000
@@ -2183,7 +2189,7 @@ static uint64_t sys_eventfd2(uint64_t initval, uint64_t flags, uint64_t a2,
   return fd;
 }
 
-// ── timerfd: timerfd_create/settime/gettime — syscalls 283/286/287 ───────────
+// timerfd: timerfd_create/settime/gettime — syscalls 283/286/287
 #define TFD_NONBLOCK 04000
 #define TFD_CLOEXEC 02000000
 
@@ -2535,7 +2541,7 @@ static void pipe_close(vfs_node_t *node) {
   node->device = NULL;
 }
 
-// ── sys_pipe2: pipe2(pipefd, flags) — syscall 293 ────────────────────────────
+// sys_pipe2: pipe2(pipefd, flags) — syscall 293
 static uint64_t sys_pipe2(uint64_t pipefd_ptr, uint64_t flags, uint64_t a2,
                           uint64_t a3, uint64_t a4, uint64_t a5) {
   (void)flags;
@@ -2608,14 +2614,14 @@ static uint64_t sys_pipe2(uint64_t pipefd_ptr, uint64_t flags, uint64_t a2,
   return 0;
 }
 
-// ── sys_pipe: pipe(pipefd) — syscall 22 ──────────────────────────────────────
+// sys_pipe: pipe(pipefd) — syscall 22
 static uint64_t sys_pipe(uint64_t pipefd_ptr, uint64_t a1, uint64_t a2,
                          uint64_t a3, uint64_t a4, uint64_t a5) {
   (void)a1;
   return sys_pipe2(pipefd_ptr, 0, a2, a3, a4, a5);
 }
 
-// ── sys_access: access(pathname, mode) — syscall 21 ──────────────────────────
+// sys_access: access(pathname, mode) — syscall 21
 static uint64_t do_sys_access(int dirfd, const char *path, uint64_t mode,
                               int flags) {
   (void)flags;
@@ -2759,7 +2765,7 @@ static uint64_t sys_fchownat(uint64_t dirfd, uint64_t pathname_ptr,
   return ret == 0 ? 0 : (uint64_t)-1;
 }
 
-// ── sys_newfstatat: fstatat(dirfd, pathname, statbuf, flags) — syscall 262 ──
+// sys_newfstatat: fstatat(dirfd, pathname, statbuf, flags) — syscall 262
 #define AT_SYMLINK_NOFOLLOW 0x0100 // Don't follow final symlink (like lstat)
 
 // Forward declaration — defined later in this file before sys_readlink
@@ -2840,12 +2846,8 @@ static vfs_node_t *resolve_parent_and_name(const char *path, char *name_out,
     return NULL;
 
   struct thread *t = sched_get_current();
-  vfs_node_t *base = fs_root;
-  if (t && path[0] != '/' && t->cwd_path[0]) {
-    base = vfs_resolve_path_at(fs_root, t->cwd_path);
-    if (!base)
-      base = fs_root;
-  }
+  vfs_node_t *base = (path[0] == '/') ? fs_root : (t->cwd_node ? t->cwd_node : fs_root);
+
 
   // Find last slash
   const char *last_slash = NULL;
@@ -2885,7 +2887,7 @@ static vfs_node_t *resolve_parent_and_name(const char *path, char *name_out,
   return parent;
 }
 
-// ── sys_symlink: symlink(target, linkpath) — syscall 88 ──────────────────────
+// sys_symlink: symlink(target, linkpath) — syscall 88
 static uint64_t sys_symlink(uint64_t target_ptr, uint64_t linkpath_ptr,
                             uint64_t a2, uint64_t a3, uint64_t a4,
                             uint64_t a5) {
@@ -2923,7 +2925,7 @@ static uint64_t sys_symlink(uint64_t target_ptr, uint64_t linkpath_ptr,
   return 0;
 }
 
-// ── sys_unlink: unlink(pathname) — syscall 87 ────────────────────────────────
+// sys_unlink: unlink(pathname) — syscall 87
 static uint64_t sys_unlink(uint64_t pathname_ptr, uint64_t a1, uint64_t a2,
                            uint64_t a3, uint64_t a4, uint64_t a5) {
   (void)a1;
@@ -2968,7 +2970,7 @@ static uint64_t sys_unlink(uint64_t pathname_ptr, uint64_t a1, uint64_t a2,
   return 0;
 }
 
-// ── sys_rmdir: rmdir(pathname) — syscall 84 ──────────────────────────────────
+// sys_rmdir: rmdir(pathname) — syscall 84
 static uint64_t sys_rmdir(uint64_t pathname_ptr, uint64_t a1, uint64_t a2,
                           uint64_t a3, uint64_t a4, uint64_t a5) {
   (void)a1;
@@ -2998,7 +3000,7 @@ static uint64_t sys_rmdir(uint64_t pathname_ptr, uint64_t a1, uint64_t a2,
   return 0;
 }
 
-// ── sys_chmod: chmod(pathname, mode) — syscall 90 ────────────────────────────
+// sys_chmod: chmod(pathname, mode) — syscall 90
 static uint64_t sys_chmod(uint64_t pathname_ptr, uint64_t mode, uint64_t a2,
                           uint64_t a3, uint64_t a4, uint64_t a5) {
   (void)a2;
@@ -3027,7 +3029,7 @@ static uint64_t sys_chmod(uint64_t pathname_ptr, uint64_t mode, uint64_t a2,
   return 0;
 }
 
-// ── sys_chown: chown(pathname, owner, group) — syscall 92 ────────────────────
+// sys_chown: chown(pathname, owner, group) — syscall 92
 static uint64_t sys_chown(uint64_t pathname_ptr, uint64_t owner, uint64_t group,
                           uint64_t a3, uint64_t a4, uint64_t a5) {
   (void)a3;
@@ -3058,7 +3060,7 @@ static uint64_t sys_chown(uint64_t pathname_ptr, uint64_t owner, uint64_t group,
   return 0;
 }
 
-// ── sys_rename: rename(oldpath, newpath) — syscall 82 ────────────────────────
+// sys_rename: rename(oldpath, newpath) — syscall 82
 static uint64_t sys_rename(uint64_t oldpath_ptr, uint64_t newpath_ptr,
                            uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5) {
   (void)a2;
@@ -3099,7 +3101,7 @@ static uint64_t sys_rename(uint64_t oldpath_ptr, uint64_t newpath_ptr,
   return (uint64_t)-18; // EXDEV
 }
 
-// ── vfs_resolve_symlink_node: resolve path WITHOUT following the final symlink
+// vfs_resolve_symlink_node: resolve path WITHOUT following the final symlink
 // This is needed by readlink() and lstat() — they must return/stat the symlink
 // node itself, not the target it points to.
 // All intermediate components ARE followed (as on Linux).
@@ -3148,7 +3150,7 @@ static vfs_node_t *vfs_resolve_symlink_node(vfs_node_t *base,
   return vfs_finddir(parent, (char *)last_comp);
 }
 
-// ── sys_readlink: readlink(pathname, buf, bufsiz) — syscall 89 ───────────────
+// sys_readlink: readlink(pathname, buf, bufsiz) — syscall 89
 static uint64_t sys_readlink(uint64_t pathname_ptr, uint64_t buf_ptr,
                              uint64_t bufsiz, uint64_t a3, uint64_t a4,
                              uint64_t a5) {
@@ -3211,8 +3213,7 @@ static uint64_t sys_readlink(uint64_t pathname_ptr, uint64_t buf_ptr,
   return (uint64_t)ret;
 }
 
-// ── sys_dup: dup(oldfd) — syscall 32
-// ──────────────────────────────────────────
+// sys_dup: dup(oldfd) — syscall 32
 static uint64_t sys_dup(uint64_t oldfd, uint64_t a1, uint64_t a2, uint64_t a3,
                         uint64_t a4, uint64_t a5) {
   (void)a1;
@@ -3268,7 +3269,7 @@ static uint64_t sys_utimes(uint64_t pathname, uint64_t times, uint64_t a2,
   return 0; // successfully mocked
 }
 
-// ── sys_fchmod: fchmod(fd, mode) — syscall 91 ────────────────────────────────
+// sys_fchmod: fchmod(fd, mode) — syscall 91
 static uint64_t sys_fchmod(uint64_t fd, uint64_t mode, uint64_t a2, uint64_t a3,
                            uint64_t a4, uint64_t a5) {
   (void)a2;
@@ -3379,6 +3380,11 @@ static uint64_t sys_fchdir(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4,
   if (t->fd_paths[fd][0]) {
     strncpy(t->cwd_path, t->fd_paths[fd], sizeof(t->cwd_path) - 1);
     t->cwd_path[sizeof(t->cwd_path) - 1] = '\0';
+
+    if (t->cwd_node)
+      vfs_close(t->cwd_node);
+    t->cwd_node = t->fds[fd];
+    vfs_open(t->cwd_node);
 
     klog_puts("[FCHDIR] Changed cwd to: ");
     klog_puts(t->cwd_path);
@@ -3599,7 +3605,7 @@ static uint64_t sys_inotify_add_watch(uint64_t fd, uint64_t pathname,
   return watch->wd;
 }
 
-// ── memfd mmap handler ──────────────────────────────────────────────────────
+// memfd mmap handler
 // Maps the ramfs backing buffer directly into user address space.
 // This is essential for Wayland SHM buffer sharing between compositor and
 // clients.
@@ -3717,7 +3723,7 @@ static uint64_t memfd_mmap(vfs_node_t *node, uint64_t addr, uint64_t length,
   return vaddr;
 }
 
-// ── sys_memfd_create (syscall 319) ──────────────────────────────────────────
+// sys_memfd_create (syscall 319)
 // Creates an anonymous file in memory and returns a file descriptor.
 // Used by Wayland for SHM buffer sharing between compositor and clients.
 #define MFD_CLOEXEC 0x0001U

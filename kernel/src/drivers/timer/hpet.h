@@ -5,7 +5,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-// ── HPET ACPI Table ─────────────────────────────────────────────────────────
+// HPET ACPI Table
 struct acpi_hpet {
     char signature[4];           // "HPET"
     uint32_t length;
@@ -35,7 +35,7 @@ struct acpi_hpet {
     uint8_t page_protection;
 } __attribute__((packed));
 
-// ── HPET MMIO Registers ─────────────────────────────────────────────────────
+// HPET MMIO Registers
 // General Capabilities and ID Register (offset 0x00)
 #define HPET_CAP_COUNTER_CLK_PERIOD_MASK   0xFFFFFFFF00000000ULL
 #define HPET_CAP_COUNTER_CLK_PERIOD_SHIFT  32
@@ -79,7 +79,7 @@ struct acpi_hpet {
 // Timer N Comparator Value Register (offset 0x108 + 0x20 * N)
 // Timer N FSB Interrupt Route Register (offset 0x110 + 0x20 * N)
 
-// ── Register Offsets ────────────────────────────────────────────────────────
+// Register Offsets
 #define HPET_REG_CAP_ID        0x00
 #define HPET_REG_CONFIG        0x10
 #define HPET_REG_ISR           0x20
@@ -88,11 +88,11 @@ struct acpi_hpet {
 #define HPET_REG_TIMER_COMP(n) (0x108 + (n) * 0x20)
 #define HPET_REG_TIMER_FSB(n)  (0x110 + (n) * 0x20)
 
-// ── HPET Timer Configuration ────────────────────────────────────────────────
+// HPET Timer Configuration
 #define HPET_TIMER_VECTOR      49    // Must not collide with LAPIC_TIMER_VECTOR (48)
 #define HPET_DEFAULT_FREQUENCY 1000  // 1 KHz = 1ms per tick
 
-// ── Public API ───────────────────────────────────────────────────────────────
+// Public API
 
 // Initialize HPET from ACPI table. Returns true if HPET is available.
 bool hpet_init(void);
@@ -139,7 +139,7 @@ uint64_t hpet_get_ms(void);
 // Sleep for approximately `ms` milliseconds using HPET.
 void hpet_sleep(uint32_t ms);
 
-// ── Watchdog Capability ─────────────────────────────────────────────────────
+// Watchdog Capability
 
 // Configure a timer as a watchdog. The watchdog will fire if not petted
 // within the specified timeout. Useful for detecting kernel hangs.
@@ -157,7 +157,7 @@ void hpet_watchdog_disable(void);
 // Check if watchdog is active.
 bool hpet_watchdog_is_active(void);
 
-// ── Backup Timer Support ────────────────────────────────────────────────────
+// Backup Timer Support
 
 // Returns true if HPET can be used as a backup for LAPIC timer.
 bool hpet_is_backup_available(void);

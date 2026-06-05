@@ -1,4 +1,4 @@
-// ── PTY (Pseudoterminal) Driver ──────────────────────────────────────────────
+// PTY (Pseudoterminal) Driver
 // Implements POSIX-style PTY multiplexor (/dev/ptmx) and slave devices
 // (/dev/pts/N) for terminal emulators and shell support.
 
@@ -18,7 +18,7 @@
 static pty_pair_t pty_pool[PTY_MAX_PAIRS];
 static int pty_next_index = 0;
 
-// ── Ring buffer helpers ──────────────────────────────────────────────────────
+// Ring buffer helpers
 
 static inline uint32_t ring_used(uint32_t head, uint32_t tail) {
   return (head >= tail) ? (head - tail) : (PTY_BUFFER_SIZE - tail + head);
@@ -82,7 +82,7 @@ static uint32_t ring_read(uint8_t *buffer, uint32_t head, uint32_t *tail,
   return to_read;
 }
 
-// ── PTY subsystem initialization ─────────────────────────────────────────────
+// PTY subsystem initialization
 
 void pty_init(void) {
   for (int i = 0; i < PTY_MAX_PAIRS; i++) {
@@ -131,7 +131,7 @@ void pty_init(void) {
   klog_puts("[PTY] Initialized with 16 pairs\n");
 }
 
-// ── PTY allocation ───────────────────────────────────────────────────────────
+// PTY allocation
 
 int pty_alloc_pair(void) {
   for (int i = 0; i < PTY_MAX_PAIRS; i++) {
@@ -181,7 +181,7 @@ pty_pair_t *pty_get_pair(int index) {
   return &pty_pool[index];
 }
 
-// ── Data availability checks ────────────────────────────────────────────────
+// Data availability checks
 
 bool pty_master_can_read(pty_pair_t *pty) {
   return !ring_empty(pty->s2m_head, pty->s2m_tail);
@@ -200,7 +200,7 @@ bool pty_slave_can_read(pty_pair_t *pty) {
   return true;
 }
 
-// ── /dev/ptmx (master) VFS operations ────────────────────────────────────────
+// /dev/ptmx (master) VFS operations
 
 uint32_t ptmx_read(struct vfs_node *node, uint32_t offset, uint32_t size,
                    uint8_t *buffer) {
@@ -535,7 +535,7 @@ void ptmx_close(struct vfs_node *node) {
   spinlock_release(&pty->lock);
 }
 
-// ── /dev/pts/N (slave) VFS operations ────────────────────────────────────────
+// /dev/pts/N (slave) VFS operations
 
 uint32_t pty_slave_read(struct vfs_node *node, uint32_t offset, uint32_t size,
                         uint8_t *buffer) {
@@ -1008,7 +1008,7 @@ uint64_t pty_slave_mmap(struct vfs_node *node, uint64_t addr, uint64_t length,
   return ptmx_mmap(node, addr, length, prot, flags, offset);
 }
 
-// ── Device registration ─────────────────────────────────────────────────────
+// Device registration
 
 void pty_register_devices(void) {
   pty_init();

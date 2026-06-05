@@ -16,7 +16,7 @@
 #define ATA_CMD_WRITE_DMA_EX 0x35
 #define ATA_CMD_IDENTIFY 0xEC
 
-// ── Private structures ──────────────────────────────────────────────────────
+// Private structures
 
 struct ahci_drive {
   ahci_port_t *port;
@@ -31,7 +31,7 @@ static ahci_hba_mem_t *hba;
 static struct ahci_drive ahci_drives[32];
 static int ahci_drive_count = 0;
 
-// ── Helpers ─────────────────────────────────────────────────────────────────
+// Helpers
 
 static void print_uint64(uint64_t num) {
   if (num == 0) {
@@ -49,7 +49,7 @@ static void print_uint64(uint64_t num) {
   }
 }
 
-// ── AHCI Control ────────────────────────────────────────────────────────────
+// AHCI Control
 
 static int find_cmdslot(ahci_port_t *port) {
   // If not set, bit isn't set in SACT and CI
@@ -122,7 +122,7 @@ static void port_rebase(ahci_port_t *port) {
   start_cmd(port);
 }
 
-// ── AHCI Command IO ─────────────────────────────────────────────────────────
+// AHCI Command IO
 
 static int ahci_io(ahci_port_t *port, uint64_t lba, uint32_t count, void *buf,
                    int is_write) {
@@ -250,7 +250,7 @@ static int ahci_write(struct block_device *dev, uint64_t lba, uint32_t count,
   return ahci_io(drive->port, lba, count, (void *)buf, 1);
 }
 
-// ── Identify & Setup ────────────────────────────────────────────────────────
+// Identify & Setup
 
 static bool ahci_identify(ahci_port_t *port, struct ahci_drive *drive) {
   int slot = find_cmdslot(port);
@@ -388,7 +388,7 @@ static void probe_port(ahci_port_t *port, int portno) {
   }
 }
 
-// ── Initialization ──────────────────────────────────────────────────────────
+// Initialization
 
 static int ahci_probe(struct device *dev) {
   uint32_t abar = 0;

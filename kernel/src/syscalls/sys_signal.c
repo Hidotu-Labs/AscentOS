@@ -1,4 +1,4 @@
-// ── Signal Syscalls: rt_sigaction, rt_sigprocmask ───────────────────────────
+// Signal Syscalls: rt_sigaction, rt_sigprocmask
 #include "../console/klog.h"
 #include "../fs/vfs.h"
 #include "../lib/string.h"
@@ -13,6 +13,9 @@
 
 #define SIG_BLOCK 0
 #define SIG_UNBLOCK 1
+
+// Forward declarations
+static bool on_sig_stack(struct thread *t, uint64_t sp);
 #define SIG_SETMASK 2
 
 struct sigframe {
@@ -20,7 +23,7 @@ struct sigframe {
   uint64_t mask;
 } __attribute__((packed));
 
-// ── rt_sigaction: Set or get signal action ──────────────────────────────────
+// rt_sigaction: Set or get signal action
 static uint64_t sys_rt_sigaction(uint64_t signum, uint64_t act_ptr,
                                  uint64_t oldact_ptr, uint64_t sigsetsize,
                                  uint64_t a4, uint64_t a5) {
@@ -52,7 +55,7 @@ static uint64_t sys_rt_sigaction(uint64_t signum, uint64_t act_ptr,
   return 0;
 }
 
-// ── rt_sigprocmask: Set or get signal mask ──────────────────────────────────
+// rt_sigprocmask: Set or get signal mask
 static uint64_t sys_rt_sigprocmask(uint64_t how, uint64_t set_ptr,
                                    uint64_t oldset_ptr, uint64_t sigsetsize,
                                    uint64_t a4, uint64_t a5) {
@@ -93,7 +96,7 @@ static uint64_t sys_rt_sigprocmask(uint64_t how, uint64_t set_ptr,
   return 0;
 }
 
-// ── sigreturn ──────────────────────────────────────────────────────────────
+// sigreturn
 static uint64_t sys_rt_sigreturn(struct syscall_regs *sregs) {
   struct thread *current = sched_get_current();
   // Frame is on user stack.
@@ -127,7 +130,7 @@ static uint64_t sys_rt_sigreturn(struct syscall_regs *sregs) {
   return sregs->rax;
 }
 
-// ── Signal Delivery ─────────────────────────────────────────────────────────
+// Signal Delivery
 
 void signal_deliver(struct registers *regs) {
   struct thread *current = sched_get_current();
@@ -163,8 +166,17 @@ void signal_deliver(struct registers *regs) {
     return;
   }
 
-  // Push frame to user stack
-  uint64_t rsp = regs->rsp;
+  // Determine which stack to deliver the signal on
+  uint64_t rsp;
+  if ((sa->sa_flags & SA_ONSTACK) && !(current->ss_flags & SS_DISABLE) &&
+      !on_sig_stack(current, regs->rsp)) {
+    // Switch to the alternate signal stack (top = base + size)
+    rsp = current->ss_sp + current->ss_size;
+  } else {
+    rsp = regs->rsp;
+  }
+
+  // Push frame to the chosen stack
   rsp -= sizeof(struct sigframe);
   rsp &= ~0xFULL;
 
@@ -187,7 +199,7 @@ void signal_deliver(struct registers *regs) {
     process_do_exit(11);
   }
 
-  if (sa->sa_flags & 0x04000000) { // SA_RESTORER
+  if (sa->sa_flags & SA_RESTORER) {
     *(uint64_t *)rsp = (uint64_t)sa->sa_restorer;
   } else {
     // If no restorer, we'd need a kernel trampoline. We'll warn for now.
@@ -197,7 +209,7 @@ void signal_deliver(struct registers *regs) {
   }
   regs->rsp = rsp;
 
-  if (!(sa->sa_flags & 0x40000000)) { // !SA_NODEFER
+  if (!(sa->sa_flags & SA_NODEFER)) {
     current->signal_mask |= sa->sa_mask | (1ULL << (sig - 1));
   }
 }
@@ -245,50 +257,45 @@ void signal_deliver_syscall(struct syscall_regs *sregs) {
   sregs->rsp = regs.rsp;
 }
 
-// ── Other stubs ──────────────────────────────────────────────────────────────
+// tgkill, sigaltstack, and helpers
 // Forward declaration - defined after signalfd types below
 void signal_notify_thread(struct thread *t, int sig);
 
 static uint64_t sys_tgkill(uint64_t tgid, uint64_t tid, uint64_t sig,
                            uint64_t a3, uint64_t a4, uint64_t a5) {
-  (void)tgid;
   (void)a3;
   (void)a4;
   (void)a5;
 
-  // Validate signal number (1-64 are valid)
+  // Validate signal number (0-64 are valid; 0 is existence check)
   if (sig > 64)
     return (uint64_t)-22; // EINVAL
 
-  // Signal 0 is used for existence check - just return success
+  // tgid and tid must both be positive
+  if ((int64_t)tgid <= 0 || (int64_t)tid <= 0)
+    return (uint64_t)-22; // EINVAL
+
+  // Find the target thread by tid
+  struct thread *target = sched_get_thread_by_tid((uint32_t)tid);
+  if (!target)
+    return (uint64_t)-3; // ESRCH — no such thread
+
+  // Validate that the target thread belongs to the specified thread group
+  if (target->tgid != (uint32_t)tgid)
+    return (uint64_t)-3; // ESRCH — tid exists but not in this tgid
+
+  // Signal 0 is used for existence check only — don't deliver
   if (sig == 0)
     return 0;
 
-  // Try to find target thread
-  struct thread *target = sched_get_thread_by_tid((uint32_t)tid);
-  if (!target) {
-    // If thread not found by tid, try current thread
-    struct thread *current = sched_get_current();
-    if (!current)
-      return (uint64_t)-3; // ESRCH
-
-    // If tid matches current's tid, use current
-    if (current->tid == (uint32_t)tid) {
-      target = current;
-    } else {
-      // For now, just succeed silently (GTK doesn't care about actual delivery)
-      return 0;
-    }
-  }
-
-  // Queue signal if we found target
-  if (target && sig > 0 && sig <= 64) {
-    target->pending_signals |= (1ULL << (sig - 1));
-    signal_notify_thread(target, (int)sig);
-  }
+  // Queue the signal on the target thread
+  target->pending_signals |= (1ULL << (sig - 1));
+  signal_notify_thread(target, (int)sig);
 
   return 0;
 }
+
+#define MINSIGSTKSZ 2048
 
 typedef struct {
   uint64_t ss_sp;
@@ -296,6 +303,14 @@ typedef struct {
   uint32_t __pad;
   uint64_t ss_size;
 } stack_t;
+
+// Helper: check if the current RSP is within the alternate signal stack
+static bool on_sig_stack(struct thread *t, uint64_t sp) {
+  if (t->ss_flags & SS_DISABLE)
+    return false;
+  return sp >= t->ss_sp && sp < (t->ss_sp + t->ss_size);
+}
+
 static uint64_t sys_sigaltstack(uint64_t ss_ptr, uint64_t old_ss_ptr,
                                 uint64_t a2, uint64_t a3, uint64_t a4,
                                 uint64_t a5) {
@@ -303,18 +318,49 @@ static uint64_t sys_sigaltstack(uint64_t ss_ptr, uint64_t old_ss_ptr,
   (void)a3;
   (void)a4;
   (void)a5;
+
+  struct thread *current = sched_get_current();
+  if (!current)
+    return (uint64_t)-1;
+
+  // Return the current alternate signal stack to userspace
   if (old_ss_ptr) {
+    if (!vmm_is_user_addr_range_valid(old_ss_ptr, sizeof(stack_t)))
+      return (uint64_t)-14; // EFAULT
     stack_t *old = (stack_t *)old_ss_ptr;
-    old->ss_sp = 0;
-    old->ss_flags = 2;
-    old->ss_size = 0;
+    old->ss_sp = current->ss_sp;
+    old->ss_size = current->ss_size;
+    old->ss_flags = current->ss_flags;
+    // If we're currently executing on the alt stack, report SS_ONSTACK
+    // We can't easily know for sure here, so check the saved RSP if available
   }
+
+  // Set a new alternate signal stack
   if (ss_ptr) {
+    if (!vmm_is_user_addr_range_valid(ss_ptr, sizeof(stack_t)))
+      return (uint64_t)-14; // EFAULT
     stack_t *ss = (stack_t *)ss_ptr;
-    if (ss->ss_flags & 2)
-      return 0;
-    if (ss->ss_size < 8192)
-      return (uint64_t)-22;
+
+    // Can't change the alt stack while executing on it
+    // (We approximate this — a real kernel would check current RSP)
+
+    if (ss->ss_flags & SS_DISABLE) {
+      // Disabling the alternate signal stack
+      current->ss_sp = 0;
+      current->ss_size = 0;
+      current->ss_flags = SS_DISABLE;
+    } else if (ss->ss_flags & ~(SS_AUTODISARM)) {
+      // Only SS_DISABLE and SS_AUTODISARM are valid flags
+      return (uint64_t)-22; // EINVAL
+    } else {
+      // Validate minimum stack size
+      if (ss->ss_size < MINSIGSTKSZ)
+        return (uint64_t)-12; // ENOMEM
+      current->ss_sp = ss->ss_sp;
+      current->ss_size = ss->ss_size;
+      current->ss_flags =
+          ss->ss_flags & SS_AUTODISARM; // Store valid flags, clear SS_DISABLE
+    }
   }
   return 0;
 }
@@ -586,17 +632,23 @@ static uint64_t sys_signalfd(uint64_t fd, uint64_t mask_ptr, uint64_t sizemask,
   return sys_signalfd4(fd, mask_ptr, sizemask, 0, 0, 0);
 }
 
-static uint64_t sys_tkill(uint64_t tid, uint64_t sig,
-                          uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5) {
-  (void)a2; (void)a3; (void)a4; (void)a5;
-  if (sig > 64) return (uint64_t)-22;
-  if (sig == 0) return 0;
+static uint64_t sys_tkill(uint64_t tid, uint64_t sig, uint64_t a2, uint64_t a3,
+                          uint64_t a4, uint64_t a5) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  if (sig > 64)
+    return (uint64_t)-22;
+  if (sig == 0)
+    return 0;
 
   struct thread *target = sched_get_thread_by_tid((uint32_t)tid);
   if (!target) {
     /* Fallback: deliver to current thread (single-threaded process) */
     target = sched_get_current();
-    if (!target) return (uint64_t)-3; /* ESRCH */
+    if (!target)
+      return (uint64_t)-3; /* ESRCH */
   }
   target->pending_signals |= (1ULL << (sig - 1));
   signal_notify_thread(target, (int)sig);
@@ -609,7 +661,7 @@ void syscall_register_signal(void) {
   syscall_register(SYS_SIGPROCMASK, sys_sigprocmask);
   syscall_register_raw(SYS_RT_SIGRETURN, sys_rt_sigreturn);
   syscall_register(SYS_SIGALTSTACK, sys_sigaltstack);
-  syscall_register(SYS_TKILL,  sys_tkill);
+  syscall_register(SYS_TKILL, sys_tkill);
   syscall_register(SYS_TGKILL, sys_tgkill);
   syscall_register(SYS_KILL, sys_kill);
   syscall_register(SYS_SIGNALFD, sys_signalfd);

@@ -1,5 +1,5 @@
-// ── Socket Syscalls: socket, socketpair, bind, connect, listen, accept, etc.
-// ──── Phase 1: Basic socket creation and FD management
+// Socket Syscalls: socket, socketpair, bind, connect, listen, accept, etc.
+
 
 #include "../console/klog.h"
 #include "../fs/vfs.h"
@@ -19,7 +19,7 @@ static inline bool is_user_ptr(uint64_t addr) {
   return addr != 0 && addr <= USER_ADDR_MAX;
 }
 
-// ── Syscall: socket(int domain, int type, int protocol)
+// Syscall: socket(int domain, int type, int protocol)
 // ─────────────────────── Returns: file descriptor or negative error
 static uint64_t sys_socket(uint64_t domain, uint64_t type, uint64_t protocol,
                            uint64_t _arg3, uint64_t _arg4, uint64_t _arg5) {
@@ -72,7 +72,7 @@ static uint64_t sys_socket(uint64_t domain, uint64_t type, uint64_t protocol,
   return (uint64_t)fd;
 }
 
-// ── Syscall: socketpair(int domain, int type, int protocol, int sv[2])
+// Syscall: socketpair(int domain, int type, int protocol, int sv[2])
 // ──────── Returns: 0 on success, negative error on failure
 static uint64_t sys_socketpair(uint64_t domain, uint64_t type,
                                uint64_t protocol, uint64_t sv_ptr,
@@ -119,8 +119,7 @@ static uint64_t sys_socketpair(uint64_t domain, uint64_t type,
   return 0;
 }
 
-// ── Syscall: bind(int sockfd, const struct sockaddr *addr, socklen_t addrlen)
-// ─
+// Syscall: bind(int sockfd, const struct sockaddr *addr, socklen_t addrlen)
 static uint64_t sys_bind(uint64_t sockfd, uint64_t addr_ptr, uint64_t addrlen,
                          uint64_t _arg3, uint64_t _arg4, uint64_t _arg5) {
   (void)_arg3;
@@ -172,7 +171,7 @@ static uint64_t sys_bind(uint64_t sockfd, uint64_t addr_ptr, uint64_t addrlen,
   return (uint64_t)ret;
 }
 
-// ── Syscall: connect(int sockfd, const struct sockaddr *addr, socklen_t
+// Syscall: connect(int sockfd, const struct sockaddr *addr, socklen_t
 // addrlen)
 static uint64_t sys_connect(uint64_t sockfd, uint64_t addr_ptr,
                             uint64_t addrlen, uint64_t _arg3, uint64_t _arg4,
@@ -233,8 +232,7 @@ static uint64_t sys_connect(uint64_t sockfd, uint64_t addr_ptr,
   return (uint64_t)ret;
 }
 
-// ── Syscall: listen(int sockfd, int backlog)
-// ──────────────────────────────────
+// Syscall: listen(int sockfd, int backlog)
 static uint64_t sys_listen(uint64_t sockfd, uint64_t backlog, uint64_t _arg2,
                            uint64_t _arg3, uint64_t _arg4, uint64_t _arg5) {
   (void)_arg2;
@@ -268,8 +266,7 @@ static uint64_t sys_listen(uint64_t sockfd, uint64_t backlog, uint64_t _arg2,
   return (uint64_t)ret;
 }
 
-// ── Syscall: accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen)
-// ────
+// Syscall: accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 static uint64_t sys_accept(uint64_t sockfd, uint64_t addr_ptr,
                            uint64_t addrlen_ptr, uint64_t _arg3, uint64_t _arg4,
                            uint64_t _arg5) {
@@ -349,8 +346,7 @@ static uint64_t sys_accept(uint64_t sockfd, uint64_t addr_ptr,
   return (uint64_t)newfd;
 }
 
-// ── Syscall: sendto(int sockfd, const void *buf, size_t len, int flags, ...)
-// ──
+// Syscall: sendto(int sockfd, const void *buf, size_t len, int flags, ...)
 static uint64_t sys_sendto(uint64_t sockfd, uint64_t buf_ptr, uint64_t len,
                            uint64_t flags, uint64_t dest_addr_ptr,
                            uint64_t addrlen) {
@@ -380,7 +376,7 @@ static uint64_t sys_sendto(uint64_t sockfd, uint64_t buf_ptr, uint64_t len,
   return (uint64_t)ret;
 }
 
-// ── Syscall: recvfrom(int sockfd, void *buf, size_t len, int flags, ...) ─────
+// Syscall: recvfrom(int sockfd, void *buf, size_t len, int flags, ...)
 static uint64_t sys_recvfrom(uint64_t sockfd, uint64_t buf_ptr, uint64_t len,
                              uint64_t flags, uint64_t src_addr_ptr,
                              uint64_t addrlen_ptr) {
@@ -417,11 +413,10 @@ static uint64_t sys_recvfrom(uint64_t sockfd, uint64_t buf_ptr, uint64_t len,
   return (uint64_t)ret;
 }
 
-// ── Structures for recvmsg/sendmsg ─────────────────────────────────────────
+// Structures for recvmsg/sendmsg
 
 
-// ── Syscall: sendmsg(int sockfd, struct msghdr *msg, int flags)
-// ───────────────────────────────────────────────────────────────────
+// Syscall: sendmsg(int sockfd, struct msghdr *msg, int flags)
 static uint64_t sys_sendmsg(uint64_t sockfd, uint64_t msg_ptr, uint64_t flags,
                             uint64_t _arg3, uint64_t _arg4, uint64_t _arg5) {
   (void)_arg3;
@@ -485,8 +480,7 @@ static uint64_t sys_sendmsg(uint64_t sockfd, uint64_t msg_ptr, uint64_t flags,
   return (uint64_t)total_sent;
 }
 
-// ── Syscall: recvmsg(int sockfd, struct msghdr *msg, int flags)
-// ───────────────────────────────────────────────────────────────────
+// Syscall: recvmsg(int sockfd, struct msghdr *msg, int flags)
 static uint64_t sys_recvmsg(uint64_t sockfd, uint64_t msg_ptr, uint64_t flags,
                             uint64_t _arg3, uint64_t _arg4, uint64_t _arg5) {
   (void)_arg3;
@@ -595,8 +589,7 @@ static uint64_t sys_recvmsg(uint64_t sockfd, uint64_t msg_ptr, uint64_t flags,
   return (uint64_t)total_received;
 }
 
-// ── Syscall: shutdown(int sockfd, int how)
-// ────────────────────────────────────
+// Syscall: shutdown(int sockfd, int how)
 static uint64_t sys_shutdown(uint64_t sockfd, uint64_t how, uint64_t _arg2,
                              uint64_t _arg3, uint64_t _arg4, uint64_t _arg5) {
   (void)_arg2;
@@ -620,8 +613,7 @@ static uint64_t sys_shutdown(uint64_t sockfd, uint64_t how, uint64_t _arg2,
   return (uint64_t)ret;
 }
 
-// ── Syscall: getsockopt(int sockfd, int level, int optname, ...)
-// ──────────────
+// Syscall: getsockopt(int sockfd, int level, int optname, ...)
 static uint64_t sys_getsockopt(uint64_t sockfd, uint64_t level,
                                 uint64_t optname, uint64_t optval_ptr,
                                 uint64_t optlen_ptr, uint64_t _arg5) {
@@ -690,8 +682,7 @@ static uint64_t sys_getsockopt(uint64_t sockfd, uint64_t level,
   return (uint64_t)-92; // ENOPROTOOPT
 }
 
-// ── Syscall: setsockopt(int sockfd, int level, int optname, ...)
-// ──────────────
+// Syscall: setsockopt(int sockfd, int level, int optname, ...)
 static uint64_t sys_setsockopt(uint64_t sockfd, uint64_t level,
                                uint64_t optname, uint64_t optval_ptr,
                                uint64_t optlen, uint64_t _arg5) {
@@ -838,8 +829,7 @@ static uint64_t sys_setsockopt(uint64_t sockfd, uint64_t level,
   return 0;
 }
 
-// ── Syscall: getsockname(int sockfd, struct sockaddr *addr, ...)
-// ──────────────
+// Syscall: getsockname(int sockfd, struct sockaddr *addr, ...)
 static uint64_t sys_getsockname(uint64_t sockfd, uint64_t addr_ptr,
                                 uint64_t addrlen_ptr, uint64_t _arg3,
                                 uint64_t _arg4, uint64_t _arg5) {
@@ -870,8 +860,7 @@ static uint64_t sys_getsockname(uint64_t sockfd, uint64_t addr_ptr,
   return (uint64_t)socket_getsockname(sock, addr, addrlen);
 }
 
-// ── Syscall: getpeername(int sockfd, struct sockaddr *addr, ...)
-// ──────────────
+// Syscall: getpeername(int sockfd, struct sockaddr *addr, ...)
 static uint64_t sys_getpeername(uint64_t sockfd, uint64_t addr_ptr,
                                 uint64_t addrlen_ptr, uint64_t _arg3,
                                 uint64_t _arg4, uint64_t _arg5) {
@@ -902,8 +891,7 @@ static uint64_t sys_getpeername(uint64_t sockfd, uint64_t addr_ptr,
   return (uint64_t)socket_getpeername(sock, addr, addrlen);
 }
 
-// ── Socket Syscall Registration
-// ───────────────────────────────────────────────
+// Socket Syscall Registration
 void syscall_register_socket(void) {
   syscall_register(SYS_SOCKET, sys_socket);
   syscall_register(SYS_SOCKETPAIR, sys_socketpair);

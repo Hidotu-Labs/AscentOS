@@ -3,7 +3,7 @@
 
 #include "socket.h"
 
-// ── AF_UNIX Family Registration ───────────────────────────────────────────────
+// AF_UNIX Family Registration
 
 /**
  * Initialize and register the AF_UNIX socket family.
@@ -11,7 +11,7 @@
  */
 void af_unix_init(void);
 
-// ── AF_UNIX Socket Operations ──────────────────────────────────────────────────
+// AF_UNIX Socket Operations
 
 /**
  * Create an AF_UNIX socket.
@@ -35,7 +35,7 @@ void unix_destroy(socket_t *sock);
  */
 int unix_unbind_by_path(const char *path);
 
-// ── AF_UNIX Operations Vector ──────────────────────────────────────────────────
+// AF_UNIX Operations Vector
 
 /**
  * Get the AF_UNIX socket operations vector.
@@ -43,7 +43,7 @@ int unix_unbind_by_path(const char *path);
  */
 sock_ops_t *unix_get_ops(void);
 
-// ── AF_UNIX Family Structure ───────────────────────────────────────────────────
+// AF_UNIX Family Structure
 
 /**
  * Get the AF_UNIX net_family structure for registration.

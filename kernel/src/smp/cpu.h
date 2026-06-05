@@ -8,16 +8,16 @@
 // Forward declaration
 struct thread;
 
-// ── Limits ───────────────────────────────────────────────────────────────────
+// Limits
 #define MAX_CPUS 64
 #define CPU_STACK_SIZE (16384) // 16 KiB kernel stack per CPU
 
-// ── CPU Status ───────────────────────────────────────────────────────────────
+// CPU Status
 #define CPU_STATUS_OFFLINE 0
 #define CPU_STATUS_BSP 1
 #define CPU_STATUS_ONLINE 2
 
-// ── Per-CPU Data ─────────────────────────────────────────────────────────────
+// Per-CPU Data
 // Every CPU gets one of these.  The BSP's is initialized at boot; each AP
 // populates its own copy when it wakes up in the trampoline.
 //
@@ -42,7 +42,7 @@ struct cpu_info {
   uint64_t reserved;
 } __attribute__((aligned(64)));
 
-// ── Public API ───────────────────────────────────────────────────────────────
+// Public API
 
 // Initialize the per-CPU subsystem.  Must be called after pmm_init() and
 // acpi_init() so that physical memory can be allocated and APIC IDs are known.

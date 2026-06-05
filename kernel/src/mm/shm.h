@@ -4,7 +4,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-// ═══════════════════════════════════════════════════════════════════════════
 //  System V Shared Memory (SHM) Subsystem
 //
 //  Provides system-wide shared memory segments that can be attached to
@@ -16,7 +15,6 @@
 //    shmat(shmid, addr, flags) → mapped address
 //    shmdt(addr)               → 0 on success
 //    shmctl(shmid, cmd, buf)   → 0 on success
-// ═══════════════════════════════════════════════════════════════════════════
 
 // IPC flags
 #define IPC_CREAT   0x0200    // Create segment if it doesn't exist
@@ -60,7 +58,7 @@ struct shmid_ds {
     uint64_t __unused5;
 };
 
-// ── Kernel API ──────────────────────────────────────────────────────────
+// Kernel API
 
 // Initialize the shared memory subsystem
 void shm_init(void);

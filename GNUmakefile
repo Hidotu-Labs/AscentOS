@@ -112,7 +112,7 @@ run-fat32: edk2-ovmf $(IMAGE_NAME).iso fat32_test.img
 		$(QEMUFLAGS)
 
 # Create a 64MB ext2 disk image with sample files for testing
-disk.img: assets/test.wav assets/test.bmp assets/test.tar assets/room.png userland/hello.elf userland/test_cpp.elf userland/test_cow.elf userland/test_syscalls.elf userland/test_kilo_syscalls.elf userland/test_wait4_complex.elf userland/kilo.elf userland/test_args.elf userland/test_stat.elf userland/ls.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/test_mmap_shared_private.elf userland/playwav.elf userland/showbmp.elf userland/test_uname_pipe.elf userland/test_pipe_fork.elf userland/test_sys_access.elf userland/test_sys_cwd.elf userland/test_newfstatat.elf userland/test_unlink_rename.elf userland/wget.elf userland/kria.elf userland/doom.elf userland/poll_test.elf userland/pty_test.elf userland/test_tcc_libc.c userland/test_mm.c userland/test_dynamic.elf userland/test_dup.elf userland/test_attrib.elf userland/test_symlink.elf userland/test_cred.elf userland/test_time.elf userland/test_tsc_manual.elf userland/test_unix_sock.elf userland/test_unix_fdpass.elf userland/test_fb.elf userland/test_events.elf userland/test_read.elf userland/test_socket_phase3.elf userland/test_socket_phase3_advanced.elf userland/test_socket_phase3_megastress.elf userland/test_socket_phase4.elf userland/test_socket_phase5.elf userland/test_socket_phase6.elf userland/test_socket_phase7.elf userland/test_socket_phase7_advanced.elf userland/test_socket_phase8.elf userland/test_socket_phase9.elf userland/test_socket_phase10.elf userland/test_socket_phase11.elf userland/test_inet_stress.elf userland/dns_lookup.elf userland/xeyes.elf userland/test_x11_simple.elf userland/xkbcomp.elf userland/test_shared_irq.elf userland/jwm.elf userland/doom_x11.elf userland/gtk_test.elf userland/tinywl.elf userland/tglgears_fb.elf userland/tglgears_drm.elf userland/tglhello_drm.elf userland/drm_bench.elf userland/test_drm_kms.elf userland/test_drm_flip.elf userland/test_drm_atomic.elf userland/test_drm_epoll.elf userland/test_clone_futex.elf userland/test_clone_futex_stress.elf userland/test_mem_stress.elf userland/test_io_leak.elf userland/classicube.elf userland/terrain.png userland/texpacks/classicube.zip userland/netlink_test.elf initrd/startx.sh initrd/weston.ini
+disk.img: assets/test.wav assets/test.bmp assets/test.tar assets/room.png userland/hello.elf userland/test_cpp.elf userland/test_cow.elf userland/test_syscalls.elf userland/test_kilo_syscalls.elf userland/test_wait4_complex.elf userland/kilo.elf userland/test_args.elf userland/test_stat.elf userland/ls.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/test_mmap_shared_private.elf userland/playwav.elf userland/showbmp.elf userland/test_uname_pipe.elf userland/test_pipe_fork.elf userland/test_sys_access.elf userland/test_sys_cwd.elf userland/test_newfstatat.elf userland/test_unlink_rename.elf userland/wget.elf userland/kria.elf userland/doom.elf userland/poll_test.elf userland/pty_test.elf userland/test_tcc_libc.c userland/test_mm.c userland/test_dynamic.elf userland/test_dup.elf userland/test_attrib.elf userland/test_symlink.elf userland/test_cred.elf userland/test_time.elf userland/test_tsc_manual.elf userland/test_unix_sock.elf userland/test_unix_fdpass.elf userland/test_fb.elf userland/test_events.elf userland/test_read.elf userland/test_socket_phase3.elf userland/test_socket_phase3_advanced.elf userland/test_socket_phase3_megastress.elf userland/test_socket_phase4.elf userland/test_socket_phase5.elf userland/test_socket_phase6.elf userland/test_socket_phase7.elf userland/test_socket_phase7_advanced.elf userland/test_socket_phase8.elf userland/test_socket_phase9.elf userland/test_socket_phase10.elf userland/test_socket_phase11.elf userland/test_inet_stress.elf userland/dns_lookup.elf userland/test_signal_subsystem.elf userland/xeyes.elf userland/test_x11_simple.elf userland/xkbcomp.elf userland/test_shared_irq.elf userland/jwm.elf userland/doom_x11.elf userland/gtk_test.elf userland/tinywl.elf userland/tglgears_fb.elf userland/tglgears_drm.elf userland/tglhello_drm.elf userland/drm_bench.elf userland/test_drm_kms.elf userland/test_drm_flip.elf userland/test_drm_atomic.elf userland/test_drm_epoll.elf userland/test_clone_futex.elf userland/test_clone_futex_stress.elf userland/test_mem_stress.elf userland/test_io_leak.elf userland/classicube.elf userland/terrain.png userland/texpacks/classicube.zip userland/netlink_test.elf initrd/startx.sh initrd/weston.ini
 	@echo "Creating root filesystem (ext3)..."
 	rm -f ./part.img
 	dd if=/dev/zero of=./part.img bs=1M count=2047
@@ -275,6 +275,8 @@ disk.img: assets/test.wav assets/test.bmp assets/test.tar assets/room.png userla
 		echo "write userland/test_inet_stress.elf bin/test_inet_stress"; \
 		echo "rm bin/dns_lookup"; \
 		echo "write userland/dns_lookup.elf bin/dns_lookup"; \
+		echo "rm bin/test_signal_subsystem"; \
+		echo "write userland/test_signal_subsystem.elf bin/test_signal_subsystem"; \
 		echo "rm test.tar"; \
 		echo "write assets/test.tar test.tar"; \
 		echo "rm bin/tglgears"; \
@@ -836,9 +838,6 @@ userland/pty_test.elf: userland/pty_test.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/pty_test.c -o userland/pty_test.elf
 
-userland/jwm.elf: scripts/build-jwm.sh
-	./scripts/build-jwm.sh
-
 userland/gtk_test.elf: userland/gtk_test.c scripts/build-gtktest.sh scripts/setup-alpine.sh
 	./scripts/build-gtktest.sh
 
@@ -898,6 +897,10 @@ userland/dns_lookup.elf: userland/dns_lookup.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/dns_lookup.c -o userland/dns_lookup.elf
 
+userland/test_signal_subsystem.elf: userland/test_signal_subsystem.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_signal_subsystem.c -o userland/test_signal_subsystem.elf
+
 userland/classicube.elf: scripts/build-classicube.sh
 	./scripts/build-classicube.sh
 
@@ -911,3 +914,42 @@ userland/terrain.png: userland/texpacks/classicube.zip
 	cd userland && unzip -o texpacks/classicube.zip terrain.png
 
 .PHONY: all qemu clean
+
+# ── addr2line helper ──────────────────────────────────────────────────────────
+# Resolve one or more kernel addresses from the serial log to source locations.
+#
+# Usage:
+#   make addr2line ADDRS="0xffffffff80012abc 0xffffffff80034def"
+#
+# Or pipe addresses extracted from the log directly:
+#   grep -oP '(?<=caller=|TRACE #\d\] )0x[0-9A-Fa-f]+' serial.log | \
+#       xargs make addr2line ADDRS=
+#
+# The kernel binary keeps full DWARF info (-g) so addr2line gives exact
+# file:line and function name for every address.
+KERNEL_BIN := kernel/bin-x86_64/kernel
+ADDRS ?=
+
+.PHONY: addr2line
+addr2line:
+	@if [ -z "$(ADDRS)" ]; then \
+		echo "Usage: make addr2line ADDRS=\"0xffffffff80012abc 0xffffffff80034def\""; \
+		echo ""; \
+		echo "Quick extract from serial.log:"; \
+		echo "  grep -oP '(?<=caller=|\\[TRACE #[0-9]+\\] )0x[0-9A-Fa-f]+' serial.log | sort -u | xargs -I{} make addr2line ADDRS={}"; \
+		exit 0; \
+	fi
+	@echo "=== addr2line: $(KERNEL_BIN) ==="
+	@for addr in $(ADDRS); do \
+		echo -n "$$addr  ->  "; \
+		addr2line -e $(KERNEL_BIN) -f -p "$$addr" 2>/dev/null || echo "(not found)"; \
+	done
+
+# Convenience: extract ALL [HERE]/[TRACE] addresses from serial.log and resolve them
+.PHONY: resolve-log
+resolve-log:
+	@echo "=== Resolving all [HERE]/[TRACE] addresses from serial.log ==="
+	@grep -oP '(?<=(caller=|\] ))0x[0-9A-Fa-f]+' serial.log 2>/dev/null | sort -u | while read addr; do \
+		echo -n "$$addr  ->  "; \
+		addr2line -e $(KERNEL_BIN) -f -p "$$addr" 2>/dev/null || echo "(not found)"; \
+	done

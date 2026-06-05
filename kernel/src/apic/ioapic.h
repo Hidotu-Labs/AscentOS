@@ -5,19 +5,19 @@
 #include <stdbool.h>
 #include <stdbool.h>
 
-// ── I/O APIC Register Indices (accessed indirectly via IOREGSEL / IOWIN) ────
+// I/O APIC Register Indices (accessed indirectly via IOREGSEL / IOWIN)
 #define IOAPIC_REG_ID       0x00    // I/O APIC ID
 #define IOAPIC_REG_VER      0x01    // I/O APIC Version + Max Redirection Entry
 #define IOAPIC_REG_ARB      0x02    // I/O APIC Arbitration ID
 #define IOAPIC_REG_REDTBL   0x10    // Redirection Table (base; 2 regs per entry)
 
-// ── Redirection Entry Flags ──────────────────────────────────────────────────
+// Redirection Entry Flags
 #define IOAPIC_REDIR_MASKED     (1ULL << 16)
 #define IOAPIC_REDIR_LEVEL      (1ULL << 15)   // Level-triggered
 #define IOAPIC_REDIR_ACTIVELOW  (1ULL << 13)   // Active-low polarity
 #define IOAPIC_REDIR_LOGICAL    (1ULL << 11)   // Logical destination mode
 
-// ── Public API ───────────────────────────────────────────────────────────────
+// Public API
 
 // Initialize the I/O APIC at the given physical base with a Global System
 // Interrupt base offset.  All redirection entries are masked on init.

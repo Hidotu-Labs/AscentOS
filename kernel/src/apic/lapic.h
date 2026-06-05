@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-// ── Local APIC Register Offsets ──────────────────────────────────────────────
+// Local APIC Register Offsets
 #define LAPIC_ID 0x020            // Local APIC ID
 #define LAPIC_VERSION 0x030       // Local APIC Version
 #define LAPIC_TPR 0x080           // Task Priority Register
@@ -31,17 +31,17 @@
 #define LAPIC_TIMER_CURRENT 0x390 // Timer Current Count Register
 #define LAPIC_TIMER_DIV 0x3E0     // Timer Divide Configuration Register
 
-// ── SVR Flags ────────────────────────────────────────────────────────────────
+// SVR Flags
 #define LAPIC_SVR_ENABLE (1 << 8)
 
-// ── LVT Mask Bit ─────────────────────────────────────────────────────────────
+// LVT Mask Bit
 #define LAPIC_LVT_MASKED (1 << 16)
 
-// ── Spurious Interrupt Vector ────────────────────────────────────────────────
+// Spurious Interrupt Vector
 #define LAPIC_SPURIOUS_VECTOR 0xFF
 #define IPI_VECTOR_RESCHEDULE 49
 
-// ── ICR Delivery Modes ───────────────────────────────────────────────────────
+// ICR Delivery Modes
 #define LAPIC_ICR_FIXED (0 << 8)
 #define LAPIC_ICR_SMI (2 << 8)
 #define LAPIC_ICR_NMI (4 << 8)
@@ -52,12 +52,12 @@
 #define LAPIC_ICR_DEASSERT (0 << 14)
 #define LAPIC_ICR_PENDING (1 << 12)
 
-// ── Timer Modes ──────────────────────────────────────────────────────────────
+// Timer Modes
 #define LAPIC_TIMER_ONESHOT 0x00
 #define LAPIC_TIMER_PERIODIC 0x20000
 #define LAPIC_TIMER_TSC 0x40000
 
-// ── Timer Divisors ───────────────────────────────────────────────────────────
+// Timer Divisors
 #define LAPIC_TIMER_DIV_1 0x0B
 #define LAPIC_TIMER_DIV_2 0x00
 #define LAPIC_TIMER_DIV_4 0x01
@@ -67,7 +67,7 @@
 #define LAPIC_TIMER_DIV_64 0x09
 #define LAPIC_TIMER_DIV_128 0x0A
 
-// ── Public API ───────────────────────────────────────────────────────────────
+// Public API
 
 // Initialize the Local APIC using the given physical base address from the
 // MADT.
@@ -86,7 +86,7 @@ bool lapic_is_ready(void);
 // Returns the BSP's APIC ID.
 uint32_t lapic_get_id(void);
 
-// ── IPI support ─────────────────────────────────────────────────────────────
+// IPI support
 #define LAPIC_ICR_DEST_SELF        (1 << 18)
 #define LAPIC_ICR_DEST_ALL         (2 << 18)
 #define LAPIC_ICR_DEST_ALL_BUT_SELF (3 << 18)

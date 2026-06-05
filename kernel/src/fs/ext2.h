@@ -6,7 +6,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-// ── Ext2 Constants ──────────────────────────────────────────────────────────
+// Ext2 Constants
 
 #define EXT2_MAGIC 0xEF53
 #define EXT2_ROOT_INODE 2
@@ -30,7 +30,7 @@
 #define EXT2_FT_SOCK 6
 #define EXT2_FT_SYMLINK 7
 
-// ── On-Disk Structures ─────────────────────────────────────────────────────
+// On-Disk Structures
 
 typedef struct {
   uint32_t s_inodes_count;      // Total number of inodes
@@ -133,7 +133,7 @@ typedef struct {
   char name[];       // Filename (NOT null-terminated on disk)
 } __attribute__((packed)) ext2_dirent_t;
 
-// ── Mount Context ───────────────────────────────────────────────────────────
+// Mount Context
 
 typedef struct {
   struct block_device *dev;  // Underlying block device
@@ -152,7 +152,7 @@ typedef struct {
   } cache[32];
 } ext2_mount_t;
 
-// ── Public API ──────────────────────────────────────────────────────────────
+// Public API
 
 // Mount an ext2 filesystem from the given block device onto the given VFS node.
 // Returns 0 on success, -1 on failure.

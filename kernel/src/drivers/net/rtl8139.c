@@ -25,7 +25,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-// ── RTL8139 Register Offsets (PIO) ──────────────────────────────────────────
+// RTL8139 Register Offsets (PIO)
 #define RTL_IDR0 0x00 // MAC address byte 0
 #define RTL_IDR1 0x01
 #define RTL_IDR2 0x02
@@ -48,13 +48,13 @@
 #define RTL_MSR 0x58     // Media Status Register
 #define RTL_BMCR 0x62    // Basic Mode Control Register
 
-// ── Command Register (CR) bits ──────────────────────────────────────────────
+// Command Register (CR) bits
 #define CR_RST 0x10  // Reset
 #define CR_RE 0x08   // Receiver Enable
 #define CR_TE 0x04   // Transmitter Enable
 #define CR_BUFE 0x01 // Buffer Empty (RX)
 
-// ── Interrupt Status/Mask bits ──────────────────────────────────────────────
+// Interrupt Status/Mask bits
 #define INT_ROK (1 << 0)      // Receive OK
 #define INT_RER (1 << 1)      // Receive Error
 #define INT_TOK (1 << 2)      // Transmit OK
@@ -63,27 +63,27 @@
 #define INT_LNKCHG (1 << 5)   // Link Change
 #define INT_TIMEOUT (1 << 14) // Timeout
 
-// ── TX Status Descriptor bits ───────────────────────────────────────────────
+// TX Status Descriptor bits
 #define TSD_OWN (1 << 13)    // DMA ownership (0 = NIC owns, 1 = driver owns)
 #define TSD_TOK (1 << 15)    // Transmit OK
 #define TSD_SIZE_MASK 0x1FFF // Packet size (bits 0-12)
 
-// ── RX Configuration Register bits ─────────────────────────────────────────
+// RX Configuration Register bits
 #define RCR_AAP (1 << 0)  // Accept All Packets (promiscuous)
 #define RCR_APM (1 << 1)  // Accept Physical Match
 #define RCR_AM (1 << 2)   // Accept Multicast
 #define RCR_AB (1 << 3)   // Accept Broadcast
 #define RCR_WRAP (1 << 7) // Wrap bit — receive buffer wraps around
 
-// ── TX Configuration Register bits ─────────────────────────────────────────
+// TX Configuration Register bits
 #define TCR_IFG96 (3 << 24)     // Inter-frame gap = 96-bit times (standard)
 #define TCR_MXDMA_2048 (7 << 8) // Max DMA burst = 2048 bytes
 
-// ── Media Status Register bits ─────────────────────────────────────────────
+// Media Status Register bits
 #define MSR_LINK                                                               \
   (1 << 2) // Link status (0 = link up, 1 = link down — inverted!)
 
-// ── Buffer sizes ────────────────────────────────────────────────────────────
+// Buffer sizes
 #define RX_BUF_SIZE 8192
 #define RX_BUF_PAD 16    // RTL8139 hardware requires 16-byte pad
 #define RX_BUF_WRAP 1536 // Extra space for wrap-around
@@ -95,7 +95,7 @@
 #define RTL_VENDOR_ID 0x10EC
 #define RTL_DEVICE_ID 0x8139
 
-// ── Driver state ────────────────────────────────────────────────────────────
+// Driver state
 
 static bool nic_present = false;
 static uint16_t nic_iobase = 0;
@@ -112,13 +112,13 @@ static uint8_t *tx_buffers[TX_DESC_COUNT] = {0};      // Virtual addresses
 static uint64_t tx_buffers_phys[TX_DESC_COUNT] = {0}; // Physical addresses
 static uint8_t tx_cur_desc = 0; // Current TX descriptor index
 
-// ── Statistics ──────────────────────────────────────────────────────────────
+// Statistics
 static uint64_t stat_rx_packets = 0;
 static uint64_t stat_tx_packets = 0;
 static uint64_t stat_rx_errors = 0;
 static uint64_t stat_tx_errors = 0;
 
-// ── Helpers ─────────────────────────────────────────────────────────────────
+// Helpers
 
 static void print_hex8(uint8_t val) {
   const char *hex = "0123456789ABCDEF";
@@ -152,7 +152,7 @@ static void print_uint32(uint32_t num) {
   }
 }
 
-// ── IRQ Handler ─────────────────────────────────────────────────────────────
+// IRQ Handler
 
 static void rtl8139_irq_handler(struct registers *regs);
 
@@ -213,10 +213,10 @@ static void rtl8139_irq_handler(struct registers *regs) {
   }
 }
 
-// ── Public API ──────────────────────────────────────────────────────────────
+// Public API
 
 void rtl8139_init(void) {
-  // ── Step 1: Find the NIC on the PCI bus ─────────────────────────────
+  // Step 1: Find the NIC on the PCI bus
   struct pci_device *dev = pci_find_device_by_id(RTL_VENDOR_ID, RTL_DEVICE_ID);
   if (!dev) {
     console_puts("[WARN] RTL8139 NIC not found on PCI bus.\n");
@@ -231,7 +231,7 @@ void rtl8139_init(void) {
   print_uint32(dev->func);
   console_putchar('\n');
 
-  // ── Step 2: Read I/O base from BAR0 ─────────────────────────────────
+  // Step 2: Read I/O base from BAR0
   // BAR0 bit 0 = 1 means I/O space; bits [31:2] are the I/O base
   uint32_t bar0 = dev->bar[0];
   if (!(bar0 & 1)) {
@@ -247,13 +247,13 @@ void rtl8139_init(void) {
   print_uint32(nic_irq);
   console_putchar('\n');
 
-  // ── Step 3: Enable PCI bus mastering (required for DMA) ─────────────
+  // Step 3: Enable PCI bus mastering (required for DMA)
   pci_enable_bus_mastering(dev);
 
-  // ── Step 4: Power on the NIC ────────────────────────────────────────
+  // Step 4: Power on the NIC
   outb(nic_iobase + RTL_CONFIG1, 0x00);
 
-  // ── Step 5: Software reset ──────────────────────────────────────────
+  // Step 5: Software reset
   outb(nic_iobase + RTL_CR, CR_RST);
 
   // Spin until the reset bit clears (hardware clears it when done)
@@ -267,7 +267,7 @@ void rtl8139_init(void) {
   }
   console_puts("     Software reset complete.\n");
 
-  // ── Step 6: Read MAC address ────────────────────────────────────────
+  // Step 6: Read MAC address
   for (int i = 0; i < 6; i++) {
     nic_mac[i] = inb(nic_iobase + RTL_IDR0 + i);
   }
@@ -280,7 +280,7 @@ void rtl8139_init(void) {
   }
   console_putchar('\n');
 
-  // ── Step 7: Allocate RX buffer (physically contiguous) ──────────────
+  // Step 7: Allocate RX buffer (physically contiguous)
   // Need RX_BUF_TOTAL bytes = ~9.7KB ≈ 3 pages
   uint32_t rx_pages = (RX_BUF_TOTAL + PAGE_SIZE - 1) / PAGE_SIZE;
   void *rx_phys = pmm_alloc_blocks(rx_pages);
@@ -298,7 +298,7 @@ void rtl8139_init(void) {
   print_hex32((uint32_t)rx_buffer_phys);
   console_putchar('\n');
 
-  // ── Step 8: Allocate 4 TX buffers ───────────────────────────────────
+  // Step 8: Allocate 4 TX buffers
   for (int i = 0; i < TX_DESC_COUNT; i++) {
     void *tx_phys = pmm_alloc();
     if (!tx_phys) {
@@ -315,21 +315,21 @@ void rtl8139_init(void) {
   }
   console_puts("     TX descriptors initialized.\n");
 
-  // ── Step 9: Configure interrupts ────────────────────────────────────
+  // Step 9: Configure interrupts
   // Enable ROK, TOK, RX error, TX error, and RX overflow interrupts
   outw(nic_iobase + RTL_IMR, INT_ROK | INT_TOK | INT_RER | INT_TER | INT_RXOVW);
 
-  // ── Step 10: Configure RX ───────────────────────────────────────────
+  // Step 10: Configure RX
   // Accept broadcast + physical match + multicast, wrap, no FIFO threshold
   outl(nic_iobase + RTL_RCR,
        RCR_AB | RCR_APM | RCR_AM | RCR_WRAP |
            (7 << 8) |  // RBLEN = 0 (8K buffer), MXDMA = 7 (unlimited)
            (7 << 13)); // RX FIFO threshold: no threshold (transfer all)
 
-  // ── Step 11: Configure TX ───────────────────────────────────────────
+  // Step 11: Configure TX
   outl(nic_iobase + RTL_TCR, TCR_IFG96 | TCR_MXDMA_2048);
 
-  // ── Step 12: Install IRQ handler and route through I/O APIC ─────────
+  // Step 12: Install IRQ handler and route through I/O APIC
   irq_install_handler(nic_irq, rtl8139_irq_handler, 0x000F);
 
   console_puts("     IRQ ");
@@ -338,7 +338,7 @@ void rtl8139_init(void) {
   print_uint32(32 + nic_irq);
   console_putchar('\n');
 
-  // ── Step 13: Enable RX and TX ───────────────────────────────────────
+  // Step 13: Enable RX and TX
   outb(nic_iobase + RTL_CR, CR_RE | CR_TE);
 
   rx_cur_offset = 0;

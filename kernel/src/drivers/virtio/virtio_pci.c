@@ -9,11 +9,11 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-// ── Helpers ─────────────────────────────────────────────────────────────────
+// Helpers
 
 
 
-// ── BAR Mapping ─────────────────────────────────────────────────────────────
+// BAR Mapping
 
 // Decode BAR size by writing all 1s and reading back.
 static uint64_t pci_bar_size(struct pci_device *pci, int bar_idx) {
@@ -113,7 +113,7 @@ static uint64_t map_bar(struct pci_device *pci, int bar_idx, uint64_t *out_size)
   return virt_base;
 }
 
-// ── PCI Capability Walking ──────────────────────────────────────────────────
+// PCI Capability Walking
 
 // Read a VirtIO PCI capability at 'cap_off' in config space.
 static void read_pci_cap(struct pci_device *pci, uint8_t cap_off,
@@ -138,7 +138,7 @@ static void read_pci_cap(struct pci_device *pci, uint8_t cap_off,
   out->length    = dw3;
 }
 
-// ── Public API ──────────────────────────────────────────────────────────────
+// Public API
 
 bool virtio_pci_init(struct virtio_pci_device *vdev, struct pci_device *pci) {
   memset(vdev, 0, sizeof(*vdev));

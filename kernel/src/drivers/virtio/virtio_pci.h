@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include "drivers/pci/pci.h"
 
-// ── VirtIO PCI Vendor / Device IDs ──────────────────────────────────────────
+// VirtIO PCI Vendor / Device IDs
 #define VIRTIO_PCI_VENDOR_ID            0x1AF4
 
 // Transitional device IDs (0x1000–0x103F)
@@ -16,14 +16,14 @@
 // Modern (non-transitional) device IDs (0x1040+)
 #define VIRTIO_PCI_DEVICE_GPU           0x1050
 
-// ── PCI Capability Types (§4.1.4) ───────────────────────────────────────────
+// PCI Capability Types (§4.1.4)
 #define VIRTIO_PCI_CAP_COMMON_CFG       1
 #define VIRTIO_PCI_CAP_NOTIFY_CFG       2
 #define VIRTIO_PCI_CAP_ISR_CFG          3
 #define VIRTIO_PCI_CAP_DEVICE_CFG       4
 #define VIRTIO_PCI_CAP_PCI_CFG          5
 
-// ── Common Configuration Structure (§4.1.4.3) ──────────────────────────────
+// Common Configuration Structure (§4.1.4.3)
 // This is mapped via BAR + offset from the VIRTIO_PCI_CAP_COMMON_CFG cap.
 struct virtio_pci_common_cfg {
   /* About the whole device */
@@ -46,14 +46,14 @@ struct virtio_pci_common_cfg {
   uint64_t queue_used;              // RW — physical address
 } __attribute__((packed));
 
-// ── Notify Configuration (§4.1.4.4) ────────────────────────────────────────
+// Notify Configuration (§4.1.4.4)
 // The notify_off_multiplier comes from the capability itself (extra field).
 // The actual notify address for queue q = notify_base + queue_notify_off * multiplier.
 
-// ── ISR Status (§4.1.4.5) ──────────────────────────────────────────────────
+// ISR Status (§4.1.4.5)
 // A single byte; bit 0 = queue interrupt, bit 1 = device config change.
 
-// ── Per-capability header in PCI config space ───────────────────────────────
+// Per-capability header in PCI config space
 struct virtio_pci_cap {
   uint8_t  cap_vndr;     // Generic PCI field: PCI_CAP_ID_VNDR (0x09)
   uint8_t  cap_next;     // Next capability offset (0 = end)
@@ -66,7 +66,7 @@ struct virtio_pci_cap {
   uint32_t length;       // Length of the structure
 };
 
-// ── Resolved capability pointers (after BAR mapping) ────────────────────────
+// Resolved capability pointers (after BAR mapping)
 struct virtio_pci_device {
   struct pci_device *pci;
 
@@ -82,7 +82,7 @@ struct virtio_pci_device {
   uint64_t bar_size[6];
 };
 
-// ── VirtIO PCI Transport API ────────────────────────────────────────────────
+// VirtIO PCI Transport API
 
 // Probe a PCI device for VirtIO capabilities and map the BARs.
 // Returns true on success (all required capabilities found).

@@ -4,20 +4,20 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-// ── Constants ───────────────────────────────────────────────────────────────
+// Constants
 #define ETH_ALEN 6           // Ethernet MAC address length (bytes)
 #define ETH_HEADER_LEN 14    // dst(6) + src(6) + ethertype(2)
 #define ETH_FRAME_MAX 1518   // Max Ethernet frame (no VLAN tag)
 #define ETH_DATA_MAX 1500    // Max Ethernet payload
 #define NET_RX_QUEUE_SIZE 256 // RX packet ring entries
 
-// ── Packet buffer ───────────────────────────────────────────────────────────
+// Packet buffer
 typedef struct net_packet {
   uint8_t data[ETH_FRAME_MAX];
   uint16_t length;
 } net_packet_t;
 
-// ── Public API ──────────────────────────────────────────────────────────────
+// Public API
 
 // Initialize the network subsystem: packet queue, netif, ARP.
 // Must be called after nic_init().

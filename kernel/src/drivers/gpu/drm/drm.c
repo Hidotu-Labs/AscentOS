@@ -381,6 +381,16 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
       }
     }
     spinlock_release(&dev->lock);
+    klog_puts("[DRM] GETRESOURCES: fbs=");
+    klog_uint64(fbs);
+    klog_puts(" crtcs=");
+    klog_uint64(crtcs);
+    klog_puts(" connectors=");
+    klog_uint64(connectors);
+    klog_puts(" encoders=");
+    klog_uint64(encoders);
+    klog_puts("\n");
+
     res->count_fbs = fbs;
     res->count_crtcs = crtcs;
     res->count_connectors = connectors;

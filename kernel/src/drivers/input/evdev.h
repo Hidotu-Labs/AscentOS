@@ -7,7 +7,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-// ── Linux input_event structure (ABI-compatible) ────────────────────────────
+// Linux input_event structure (ABI-compatible)
 // Xorg's evdev driver reads these directly from /dev/input/eventN
 struct input_event {
   uint64_t time_sec;  // struct timeval.tv_sec
@@ -17,7 +17,7 @@ struct input_event {
   int32_t value;
 };
 
-// ── Event types (from linux/input-event-codes.h) ────────────────────────────
+// Event types (from linux/input-event-codes.h)
 #define EV_SYN 0x00
 #define EV_KEY 0x01
 #define EV_REL 0x02
@@ -28,13 +28,13 @@ struct input_event {
 #define EV_REP 0x14
 #define EV_MAX 0x1f
 
-// ── Synchronization codes ───────────────────────────────────────────────────
+// Synchronization codes
 #define SYN_REPORT 0
 #define SYN_CONFIG 1
 #define SYN_MT_REPORT 2
 #define SYN_DROPPED 3
 
-// ── Relative axis codes (EV_REL) ───────────────────────────────────────────
+// Relative axis codes (EV_REL)
 #define REL_X 0x00
 #define REL_Y 0x01
 #define REL_Z 0x02
@@ -47,12 +47,12 @@ struct input_event {
 #define REL_MISC 0x09
 #define REL_MAX 0x0f
 
-// ── Absolute axis codes (EV_ABS) ───────────────────────────────────────────
+// Absolute axis codes (EV_ABS)
 #define ABS_X 0x00
 #define ABS_Y 0x01
 #define ABS_MAX 0x3f
 
-// ── Button / key codes (EV_KEY) ─────────────────────────────────────────────
+// Button / key codes (EV_KEY)
 // Mouse buttons
 #define BTN_MISC 0x100
 #define BTN_LEFT 0x110
@@ -169,7 +169,7 @@ struct input_event {
 #define KEY_DELETE_EV 111
 #define KEY_MAX_EV 0x2ff
 
-// ── ioctl commands (from linux/input.h) ─────────────────────────────────────
+// ioctl commands (from linux/input.h)
 #define EVIOCGVERSION 0x80044501                     // get driver version
 #define EVIOCGID 0x80084502                          // get device ID
 #define EVIOCGNAME(len) (0x80004506 | ((len) << 16)) // get device name
@@ -203,14 +203,14 @@ struct input_absinfo {
 // Bus types
 #define BUS_I8042 0x11
 
-// ── Evdev device types ──────────────────────────────────────────────────────
+// Evdev device types
 #define EVDEV_KEYBOARD 0
 #define EVDEV_MOUSE 1
 
-// ── Ring buffer size ────────────────────────────────────────────────────────
+// Ring buffer size
 #define EVDEV_RING_SIZE 256
 
-// ── Evdev device structure ──────────────────────────────────────────────────
+// Evdev device structure
 typedef struct evdev_device {
   int type;           // EVDEV_KEYBOARD or EVDEV_MOUSE
   char name[64];      // Device name string
@@ -226,7 +226,7 @@ typedef struct evdev_device {
   vfs_node_t *vfs_node; // The /dev/input/eventN node
 } evdev_device_t;
 
-// ── Public API ──────────────────────────────────────────────────────────────
+// Public API
 void evdev_init(void);
 
 // Push an event into a device's ring buffer (called from IRQ handlers)

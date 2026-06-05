@@ -17,10 +17,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
-// ── Broadcast MAC ───────────────────────────────────────────────────────────
+// Broadcast MAC
 const uint8_t ETH_BROADCAST[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
-// ── Send ────────────────────────────────────────────────────────────────────
+// Send
 
 int eth_send_frame(const uint8_t *dst_mac, uint16_t ethertype,
                    const void *payload, uint16_t payload_len) {
@@ -56,7 +56,7 @@ int eth_send_frame(const uint8_t *dst_mac, uint16_t ethertype,
     return ret;
 }
 
-// ── Receive dispatch ────────────────────────────────────────────────────────
+// Receive dispatch
 
 void eth_handle_frame(const uint8_t *data, uint16_t len) {
     if (len < ETH_HEADER_LEN) return;  // Runt frame

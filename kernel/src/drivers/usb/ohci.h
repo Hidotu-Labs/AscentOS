@@ -5,7 +5,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-// ── OHCI MMIO Register Offsets ──────────────────────────────────────────────
+// OHCI MMIO Register Offsets
 #define OHCI_REG_REVISION 0x00
 #define OHCI_REG_CONTROL 0x04
 #define OHCI_REG_COMMAND_STATUS 0x08
@@ -29,7 +29,7 @@
 #define OHCI_REG_RH_STATUS 0x50
 #define OHCI_REG_RH_PORT_STATUS 0x54 // Array of ports
 
-// ── HcControl bits ──────────────────────────────────────────────────────────
+// HcControl bits
 #define OHCI_CTRL_CLE (1 << 4) // Control List Enable
 #define OHCI_CTRL_BLE (1 << 5) // Bulk List Enable
 #define OHCI_CTRL_PLE (1 << 2) // Periodic List Enable
@@ -41,22 +41,22 @@
 #define OHCI_CTRL_HCFS_OPERATIONAL 0x80
 #define OHCI_CTRL_HCFS_SUSPEND 0xC0
 
-// ── HcCommandStatus bits ─────────────────────────────────────────────────────
+// HcCommandStatus bits
 #define OHCI_CMD_HCR (1 << 0) // Host Controller Reset
 #define OHCI_CMD_CLF (1 << 1) // Control List Filled
 
-// ── HcInterrupt bits ────────────────────────────────────────────────────────
+// HcInterrupt bits
 #define OHCI_INTR_MIE (1 << 31) // Master Interrupt Enable
 #define OHCI_INTR_WDH (1 << 1)  // Writeback Done Head
 #define OHCI_INTR_RHSC (1 << 6) // Root Hub Status Change
 #define OHCI_INTR_UE (1 << 4)   // Unrecoverable Error
 
-// ── HcRhDescriptorA bits ────────────────────────────────────────────────────
+// HcRhDescriptorA bits
 #define OHCI_RHA_NPS (1 << 9)  // No Power Switching
 #define OHCI_RHA_PSM (1 << 8)  // Power Switching Mode
 #define OHCI_RHA_NDP_MASK 0xFF // Number Downstream Ports
 
-// ── HcRhPortStatus bits (read/write-1-to-set/write-1-to-clear) ──────────────
+// HcRhPortStatus bits (read/write-1-to-set/write-1-to-clear)
 #define OHCI_PORT_CCS (1 << 0)   // Current Connect Status (R)
 #define OHCI_PORT_PES (1 << 1)   // Port Enable Status (R/W1S)
 #define OHCI_PORT_PSS (1 << 2)   // Port Suspend Status
@@ -70,7 +70,7 @@
 #define OHCI_PORT_OCIC (1 << 19) // Over Current Indicator Change
 #define OHCI_PORT_PRSC (1 << 20) // Port Reset Status Change (W1C)
 
-// ── TD Control Field bits ───────────────────────────────────────────────────
+// TD Control Field bits
 // Bits [20:19] = Direction PID: 00=SETUP, 01=OUT, 10=IN
 #define OHCI_TD_DP_SETUP (0 << 19)
 #define OHCI_TD_DP_OUT (1 << 19)
@@ -90,7 +90,7 @@
 #define OHCI_TD_CC_NOERR 0x00000000
 #define OHCI_TD_CC_NOT_ACCESSED 0xF0000000
 
-// ── ED Control Field bits ───────────────────────────────────────────────────
+// ED Control Field bits
 #define OHCI_ED_FA_SHIFT 0       // Function Address [6:0]
 #define OHCI_ED_EN_SHIFT 7       // Endpoint Number [10:7]
 #define OHCI_ED_DIR_TD (0 << 11) // Direction from TD
@@ -105,7 +105,7 @@
 #define OHCI_ED_HEAD_HALT (1 << 0)  // Halted
 #define OHCI_ED_HEAD_CARRY (1 << 1) // Toggle carry
 
-// ── OHCI Structures ─────────────────────────────────────────────────────────
+// OHCI Structures
 
 // Host Controller Communications Area (Must be 256-byte aligned)
 struct ohci_hcca {
@@ -135,7 +135,7 @@ struct ohci_td {
 #define OHCI_MAX_EDS 64
 #define OHCI_MAX_TDS 128
 
-// ── OHCI Controller State ───────────────────────────────────────────────────
+// OHCI Controller State
 #define OHCI_MAX_CONTROLLERS 4
 
 struct ohci_controller {
@@ -172,7 +172,7 @@ struct ohci_controller {
 #define OHCI_CTRL_ED_START 8
 #define OHCI_CTRL_TD_START 16
 
-// ── Interrupt Pipe (for persistent interrupt IN endpoints) ──────────────────
+// Interrupt Pipe (for persistent interrupt IN endpoints)
 #define OHCI_MAX_INT_PIPES 8
 
 struct ohci_int_pipe {
@@ -201,7 +201,7 @@ bool ohci_int_pipe_completed(struct ohci_int_pipe *pipe);
 // Resubmit the pipe for the next transfer.
 void ohci_int_pipe_resubmit(struct ohci_int_pipe *pipe);
 
-// ── Public API ──────────────────────────────────────────────────────────────
+// Public API
 void ohci_init(void);
 int ohci_get_controller_count(void);
 struct ohci_controller *ohci_get_controller(int index);

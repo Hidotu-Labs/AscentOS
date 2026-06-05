@@ -5,7 +5,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-// ── Register Offsets (HDA Spec 1.0a, Section 3.3) ───────────────────────────
+// Register Offsets (HDA Spec 1.0a, Section 3.3)
 #define HDA_GCAP 0x00       // Global Capabilities (2 bytes)
 #define HDA_VMIN 0x02       // Minor Version (1 byte)
 #define HDA_VMAJ 0x03       // Major Version (1 byte)
@@ -109,13 +109,13 @@ struct hda_bdl_entry {
   uint32_t flags; // Bit 0: IOC
 } __attribute__((packed));
 
-// ── Register Bits ───────────────────────────────────────────────────────────
+// Register Bits
 #define HDA_GCTL_CRST (1 << 0) // Controller Reset
 
 #define HDA_CORBCTL_RUN (1 << 1)
 #define HDA_RIRBCTL_RUN (1 << 1)
 
-// ── Driver Interface ────────────────────────────────────────────────────────
+// Driver Interface
 void hda_init(void);
 void hda_register_vfs(void);
 void hda_phase1_test(void);

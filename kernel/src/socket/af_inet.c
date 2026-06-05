@@ -13,18 +13,18 @@
 #include "../smp/cpu.h"
 #include "socket_internal.h"
 
-// ── TCP ↔ AF_INET Mapping ──────────────────────────────────────────────────
+// TCP ↔ AF_INET Mapping
 static inet_sock_t *tcp_inet_map[MAX_TCP_SOCKETS];
 
-// ── Early Data Buffer ──────────────────────────────────────────────────────
+// Early Data Buffer
 // On loopback, data can arrive at a child TCP socket before inet_accept()
 // has set up the tcp_inet_map entry. We buffer it here and drain in accept.
 static sk_buff_t *early_data[MAX_TCP_SOCKETS];
 
-// ── UDP ↔ AF_INET Mapping ──────────────────────────────────────────────────
+// UDP ↔ AF_INET Mapping
 static inet_sock_t *udp_inet_map[MAX_UDP_SOCKETS];
 
-// ── AF_INET Family Registration ─────────────────────────────────────────────
+// AF_INET Family Registration
 int inet_create(socket_t *sock, int protocol);
 
 static net_family_t inet_family_ops = {
@@ -32,7 +32,7 @@ static net_family_t inet_family_ops = {
     .create = inet_create,
 };
 
-// ── TCP Data Bridge Callback ────────────────────────────────────────────────
+// TCP Data Bridge Callback
 static void tcp_data_callback(int sock_id, const uint8_t *data, uint16_t len) {
   if (sock_id < 0 || sock_id >= MAX_TCP_SOCKETS)
     return;
@@ -85,7 +85,7 @@ static void tcp_event_callback(int sock_id) {
   }
 }
 
-// ── UDP Data Bridge Callback ────────────────────────────────────────────────
+// UDP Data Bridge Callback
 static void udp_data_callback(uint16_t local_port, const uint8_t *data,
                               uint16_t len, uint32_t src_ip,
                               uint16_t src_port) {
@@ -123,7 +123,7 @@ static void udp_data_callback(uint16_t local_port, const uint8_t *data,
     socket_wake(inet->parent);
 }
 
-// ── AF_INET Socket Operations ──────────────────────────────────────────────
+// AF_INET Socket Operations
 static sock_ops_t inet_stream_ops = {
     .bind = inet_bind,
     .connect = inet_connect,

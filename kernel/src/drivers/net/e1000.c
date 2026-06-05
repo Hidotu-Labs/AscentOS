@@ -33,11 +33,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
-// ── Intel e1000 PCI IDs ─────────────────────────────────────────────────────
+// Intel e1000 PCI IDs
 #define E1000_VENDOR_ID 0x8086
 #define E1000_DEVICE_ID 0x100E // 82540EM — the QEMU default
 
-// ── Register Offsets (MMIO) ─────────────────────────────────────────────────
+// Register Offsets (MMIO)
 #define E1000_CTRL 0x00000   // Device Control
 #define E1000_STATUS 0x00008 // Device Status
 #define E1000_EECD 0x00010   // EEPROM/Flash Control
@@ -63,19 +63,19 @@
 #define E1000_RAL0 0x05400   // Receive Address Low  (MAC bytes 0-3)
 #define E1000_RAH0 0x05404   // Receive Address High (MAC bytes 4-5 + AV)
 
-// ── CTRL Register bits ──────────────────────────────────────────────────────
+// CTRL Register bits
 #define CTRL_SLU (1u << 6)  // Set Link Up
 #define CTRL_ASDE (1u << 5) // Auto-Speed Detection Enable
 #define CTRL_RST (1u << 26) // Device Reset
 
-// ── STATUS Register bits ────────────────────────────────────────────────────
+// STATUS Register bits
 #define STATUS_LU (1u << 1) // Link Up
 
-// ── EERD Register bits ──────────────────────────────────────────────────────
+// EERD Register bits
 #define EERD_START (1u << 0) // Start Read
 #define EERD_DONE (1u << 4)  // Read Done
 
-// ── RCTL Register bits ──────────────────────────────────────────────────────
+// RCTL Register bits
 #define RCTL_EN (1u << 1)          // Receiver Enable
 #define RCTL_SBP (1u << 2)         // Store Bad Packets
 #define RCTL_UPE (1u << 3)         // Unicast Promiscuous Enable
@@ -88,13 +88,13 @@
 #define RCTL_BSEX (1u << 25)       // Buffer Size Extension
 #define RCTL_SECRC (1u << 26)      // Strip Ethernet CRC
 
-// ── TCTL Register bits ──────────────────────────────────────────────────────
+// TCTL Register bits
 #define TCTL_EN (1u << 1)  // Transmit Enable
 #define TCTL_PSP (1u << 3) // Pad Short Packets
 #define TCTL_CT_SHIFT 4    // Collision Threshold
 #define TCTL_COLD_SHIFT 12 // Collision Distance
 
-// ── Interrupt bits (ICR/IMS/IMC) ────────────────────────────────────────────
+// Interrupt bits (ICR/IMS/IMC)
 #define ICR_TXDW (1u << 0)   // TX Descriptor Written Back
 #define ICR_TXQE (1u << 1)   // TX Queue Empty
 #define ICR_LSC (1u << 2)    // Link Status Change
@@ -103,7 +103,7 @@
 #define ICR_RXO (1u << 6)    // RX Overrun
 #define ICR_RXT0 (1u << 7)   // RX Timer Interrupt
 
-// ── RX Descriptor (legacy format) ───────────────────────────────────────────
+// RX Descriptor (legacy format)
 struct e1000_rx_desc {
   uint64_t addr;     // Buffer physical address
   uint16_t length;   // Received packet length
@@ -116,7 +116,7 @@ struct e1000_rx_desc {
 #define RXD_STAT_DD (1u << 0)  // Descriptor Done
 #define RXD_STAT_EOP (1u << 1) // End of Packet
 
-// ── TX Descriptor (legacy format) ───────────────────────────────────────────
+// TX Descriptor (legacy format)
 struct e1000_tx_desc {
   uint64_t addr;    // Buffer physical address
   uint16_t length;  // Data length
@@ -132,12 +132,12 @@ struct e1000_tx_desc {
 #define TXD_CMD_RS (1u << 3)   // Report Status
 #define TXD_STAT_DD (1u << 0)  // Descriptor Done
 
-// ── Ring sizes ──────────────────────────────────────────────────────────────
+// Ring sizes
 #define E1000_NUM_RX_DESC 32
 #define E1000_NUM_TX_DESC 8
 #define E1000_RX_BUF_SIZE 2048
 
-// ── Driver state ────────────────────────────────────────────────────────────
+// Driver state
 
 static bool nic_present = false;
 static volatile uint8_t *mmio_base = NULL; // MMIO virtual address
@@ -158,13 +158,13 @@ static uint8_t *tx_buffers[E1000_NUM_TX_DESC];
 static uint64_t tx_buf_phys[E1000_NUM_TX_DESC];
 static uint16_t tx_cur = 0;
 
-// ── Statistics ──────────────────────────────────────────────────────────────
+// Statistics
 static uint64_t stat_rx_packets = 0;
 static uint64_t stat_tx_packets = 0;
 static uint64_t stat_rx_errors = 0;
 static uint64_t stat_tx_errors = 0;
 
-// ── Helpers ─────────────────────────────────────────────────────────────────
+// Helpers
 
 static void print_hex8(uint8_t val) {
   const char *hex = "0123456789ABCDEF";
@@ -203,7 +203,7 @@ static void print_uint32(uint32_t num) {
   }
 }
 
-// ── MMIO Register Access ────────────────────────────────────────────────────
+// MMIO Register Access
 
 static inline void e1000_write(uint32_t reg, uint32_t value) {
   *(volatile uint32_t *)(mmio_base + reg) = value;
@@ -213,7 +213,7 @@ static inline uint32_t e1000_read(uint32_t reg) {
   return *(volatile uint32_t *)(mmio_base + reg);
 }
 
-// ── EEPROM Read ─────────────────────────────────────────────────────────────
+// EEPROM Read
 
 static uint16_t e1000_eeprom_read(uint8_t addr) {
   e1000_write(E1000_EERD, ((uint32_t)addr << 8) | EERD_START);
@@ -232,7 +232,7 @@ static uint16_t e1000_eeprom_read(uint8_t addr) {
   return 0;
 }
 
-// ── Read MAC address ────────────────────────────────────────────────────────
+// Read MAC address
 
 static bool e1000_read_mac(void) {
   // Try EEPROM first
@@ -267,7 +267,7 @@ static bool e1000_read_mac(void) {
   return true;
 }
 
-// ── RX Ring Initialization ──────────────────────────────────────────────────
+// RX Ring Initialization
 
 static bool e1000_init_rx(void) {
   // Allocate descriptor ring using DMA allocator (uncached, below 4GB)
@@ -313,7 +313,7 @@ static bool e1000_init_rx(void) {
   return true;
 }
 
-// ── TX Ring Initialization ──────────────────────────────────────────────────
+// TX Ring Initialization
 
 static bool e1000_init_tx(void) {
   // Allocate descriptor ring using DMA allocator (uncached, below 4GB)
@@ -363,7 +363,7 @@ static bool e1000_init_tx(void) {
   return true;
 }
 
-// ── IRQ Handler ─────────────────────────────────────────────────────────────
+// IRQ Handler
 
 static void e1000_handle_rx(void) {
   while (rx_descs[rx_cur].status & RXD_STAT_DD) {
@@ -423,7 +423,7 @@ static void e1000_irq_handler(struct registers *regs) {
   }
 }
 
-// ── Public API ──────────────────────────────────────────────────────────────
+// Public API
 
 static int e1000_probe(struct device *dev) {
   // Use resources from 'dev' instead of global scanning
@@ -463,7 +463,7 @@ static int e1000_probe(struct device *dev) {
     }
   }
 
-  // ── Step 3: Enable PCI bus mastering (required for DMA) ─────────────
+  // Step 3: Enable PCI bus mastering (required for DMA)
   // We need the bus/slot/func. We can store them in dev->driver_data
   // or use a helper. For now, we'll just scan the legacy PCI data using
   // vendor/device.
@@ -482,7 +482,7 @@ static int e1000_probe(struct device *dev) {
   pci_config_write16(pci_dev->bus, pci_dev->slot, pci_dev->func, 0x04,
                      (uint16_t)cmd);
 
-  // ── Step 4: Software reset ──────────────────────────────────────────
+  // Step 4: Software reset
   uint32_t ctrl = e1000_read(E1000_CTRL);
   e1000_write(E1000_CTRL, ctrl | CTRL_RST);
 
@@ -502,22 +502,22 @@ static int e1000_probe(struct device *dev) {
 
   console_puts("     Software reset complete.\n");
 
-  // ── Step 5: Disable all interrupts during setup ─────────────────────
+  // Step 5: Disable all interrupts during setup
   e1000_write(E1000_IMC, 0xFFFFFFFF);
 
-  // ── Step 6: Set link up ─────────────────────────────────────────────
+  // Step 6: Set link up
   ctrl = e1000_read(E1000_CTRL);
   ctrl |= CTRL_SLU;  // Set Link Up
   ctrl |= CTRL_ASDE; // Auto-Speed Detection
   ctrl &= ~CTRL_RST; // Clear reset bit
   e1000_write(E1000_CTRL, ctrl);
 
-  // ── Step 7: Clear multicast table array ─────────────────────────────
+  // Step 7: Clear multicast table array
   for (int i = 0; i < 128; i++) {
     e1000_write(E1000_MTA + (i * 4), 0);
   }
 
-  // ── Step 8: Read MAC address ────────────────────────────────────────
+  // Step 8: Read MAC address
   if (!e1000_read_mac()) {
     console_puts("[ERR] e1000: failed to read MAC address.\n");
     return -1;
@@ -539,7 +539,7 @@ static int e1000_probe(struct device *dev) {
   }
   console_putchar('\n');
 
-  // ── Step 9: Initialize RX ring ──────────────────────────────────────
+  // Step 9: Initialize RX ring
   if (!e1000_init_rx()) {
     console_puts("[ERR] e1000: failed to initialize RX ring.\n");
     return -1;
@@ -548,7 +548,7 @@ static int e1000_probe(struct device *dev) {
   print_uint32(E1000_NUM_RX_DESC);
   console_puts(" descriptors).\n");
 
-  // ── Step 10: Initialize TX ring ─────────────────────────────────────
+  // Step 10: Initialize TX ring
   if (!e1000_init_tx()) {
     console_puts("[ERR] e1000: failed to initialize TX ring.\n");
     return -1;
@@ -559,7 +559,7 @@ static int e1000_probe(struct device *dev) {
 
   irq_install_handler(nic_irq, e1000_irq_handler, 0x000F);
 
-  // ── Step 12: Enable interrupts ──────────────────────────────────────
+  // Step 12: Enable interrupts
   e1000_write(E1000_IMS,
               ICR_RXT0 |       // RX Timer
                   ICR_RXDMT0 | // RX Desc Min Threshold

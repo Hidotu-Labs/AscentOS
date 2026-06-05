@@ -5,7 +5,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-// ── USB HID Keyboard Driver ────────────────────────────────────────────────
+// USB HID Keyboard Driver
 // Handles USB Boot Protocol keyboards via UHCI Interrupt Transfers.
 // Translates the 8-byte HID Boot Keyboard report into the kernel's
 // existing keyboard input subsystem (ring buffer + evdev events).
@@ -28,14 +28,14 @@ struct usb_kbd_report {
 #define USB_KBD_MOD_RALT   (1 << 6)
 #define USB_KBD_MOD_RGUI   (1 << 7)
 
-// ── Public API ──────────────────────────────────────────────────────────────
+// Public API
 
 // Try to attach a USB keyboard driver to this device.
 // Returns true if the device is a keyboard and was successfully initialized.
 bool usb_kbd_probe(struct usb_device *dev);
 
 // Called periodically to poll the keyboard for new data.
-// In Phase 5, this is timer-driven rather than truly interrupt-driven.
+
 void usb_kbd_poll(void);
 
 #endif

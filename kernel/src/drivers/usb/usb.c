@@ -46,7 +46,7 @@ void usb_device_discovered(struct usb_hcd *hcd, uint8_t port, bool low_speed) {
 
   devices[device_count++] = dev;
 
-  // Phase 4 - Enumeration
+
   usb_enumerate_device(dev);
 }
 
@@ -111,7 +111,7 @@ void usb_enumerate_device(struct usb_device *dev) {
   klog_hex32(dev->desc.product_id);
   klog_puts("\n");
 
-  // Phase 5 — Probe for HID drivers
+
   if (usb_kbd_probe(dev)) {
     klog_puts("[USB] USB Keyboard driver attached\n");
   } else if (usb_mouse_probe(dev)) {

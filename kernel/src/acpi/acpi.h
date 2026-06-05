@@ -6,7 +6,7 @@
 #include <stddef.h>
 #include <limine.h>
 
-// ── ACPI SDT Header ─────────────────────────────────────────────────────────
+// ACPI SDT Header
 struct acpi_sdt_header {
     char signature[4];
     uint32_t length;
@@ -19,7 +19,7 @@ struct acpi_sdt_header {
     uint32_t creator_revision;
 } __attribute__((packed));
 
-// ── ACPI 1.0 RSDP ───────────────────────────────────────────────────────────
+// ACPI 1.0 RSDP
 struct acpi_rsdp {
     char signature[8]; // "RSD PTR "
     uint8_t checksum;
@@ -28,7 +28,7 @@ struct acpi_rsdp {
     uint32_t rsdt_address;
 } __attribute__((packed));
 
-// ── ACPI 2.0+ Extended RSDP ─────────────────────────────────────────────────
+// ACPI 2.0+ Extended RSDP
 struct acpi_rsdp_ext {
     struct acpi_rsdp first_part;
     uint32_t length;
@@ -37,19 +37,19 @@ struct acpi_rsdp_ext {
     uint8_t reserved[3];
 } __attribute__((packed));
 
-// ── RSDT (32-bit pointers) ──────────────────────────────────────────────────
+// RSDT (32-bit pointers)
 struct acpi_rsdt {
     struct acpi_sdt_header header;
     uint32_t pointers[]; 
 } __attribute__((packed));
 
-// ── XSDT (64-bit pointers) ──────────────────────────────────────────────────
+// XSDT (64-bit pointers)
 struct acpi_xsdt {
     struct acpi_sdt_header header;
     uint64_t pointers[];
 } __attribute__((packed));
 
-// ── MADT (Multiple APIC Description Table) ──────────────────────────────────
+// MADT (Multiple APIC Description Table)
 struct acpi_madt {
     struct acpi_sdt_header header;
     uint32_t local_apic_address;
@@ -57,13 +57,13 @@ struct acpi_madt {
     uint8_t entries[];
 } __attribute__((packed));
 
-// ── MADT Entry Header ───────────────────────────────────────────────────────
+// MADT Entry Header
 struct acpi_madt_entry_header {
     uint8_t type;
     uint8_t length;
 } __attribute__((packed));
 
-// ── MADT Entry Type 0: Processor Local APIC ─────────────────────────────────
+// MADT Entry Type 0: Processor Local APIC
 struct acpi_madt_local_apic {
     struct acpi_madt_entry_header header;
     uint8_t acpi_processor_id;
@@ -71,7 +71,7 @@ struct acpi_madt_local_apic {
     uint32_t flags;
 } __attribute__((packed));
 
-// ── MADT Entry Type 1: I/O APIC ─────────────────────────────────────────────
+// MADT Entry Type 1: I/O APIC
 struct acpi_madt_ioapic {
     struct acpi_madt_entry_header header;
     uint8_t ioapic_id;
@@ -80,7 +80,7 @@ struct acpi_madt_ioapic {
     uint32_t gsi_base;
 } __attribute__((packed));
 
-// ── ACPI MADT Entry Type 2: Interrupt Source Override ─────────────────────────────
+// ACPI MADT Entry Type 2: Interrupt Source Override
 struct acpi_madt_iso {
     struct acpi_madt_entry_header header;
     uint8_t bus_source;     // 0 = ISA
@@ -89,7 +89,7 @@ struct acpi_madt_iso {
     uint16_t flags;          // Polarity (bits 1:0) and Trigger (bits 3:2)
 } __attribute__((packed));
 
-// ── MCFG (Memory Mapped Configuration Space Base Address Description Table) ─────
+// MCFG (Memory Mapped Configuration Space Base Address Description Table)
 struct acpi_mcfg_entry {
     uint64_t base_address;
     uint16_t pci_segment_group_number;
@@ -104,7 +104,7 @@ struct acpi_mcfg {
     struct acpi_mcfg_entry entries[];
 } __attribute__((packed));
 
-// ── FADT (Fixed ACPI Description Table) ───────────────────────────────────────
+// FADT (Fixed ACPI Description Table)
 struct acpi_fadt {
     struct acpi_sdt_header header;
     uint32_t firmware_ctrl;        // FACS address (32-bit)
@@ -270,11 +270,11 @@ static inline const char *fadt_pm_profile_name(uint8_t profile) {
 #define FADT_FLAG_HW_REDUCED_ACPI   (1 << 20)  // Hardware-reduced ACPI
 #define FADT_FLAG_LOW_PWR_IDLE_S0   (1 << 21)  // Low power idle in S0
 
-// ── ACPI Initialization & Table Lookup ───────────────────────────────────────
+// ACPI Initialization & Table Lookup
 void acpi_init(struct limine_rsdp_response *response);
 void *acpi_find_table(const char *signature);
 
-// ── MADT Data Accessors (valid after acpi_init) ─────────────────────────────
+// MADT Data Accessors (valid after acpi_init)
 
 // Returns the physical base address of the Local APIC from the MADT.
 uint32_t acpi_get_lapic_base(void);
