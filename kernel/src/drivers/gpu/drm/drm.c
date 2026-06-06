@@ -303,8 +303,8 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     return 0;
   }
   case 0x80086406: /* DRM_IOCTL_GET_STATS */
-    klog_puts("[DRM] GET_STATS -> ENOSYS\n");
-    return -38; /* ENOSYS */
+    klog_puts("[DRM] GET_STATS -> ENOTTY\n");
+    return -25; /* ENOTTY */
   case DRM_IOCTL_MODE_CREATE_LEASE:
     klog_puts("[DRM] MODE_CREATE_LEASE -> EINVAL\n");
     return -22; /* EINVAL: Leasing not supported on this driver version */
@@ -354,6 +354,11 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     m->offset = obj->phys_addr | 0x1000000000000000ULL;
     return 0;
   }
+  case DRM_IOCTL_MODE_DESTROY_DUMB: {
+    uint32_t handle = *(uint32_t *)arg;
+    drm_file_gem_release(file, handle);
+    return 0;
+  }
 
   /* ── KMS resource queries ────────────────────────────────────────── */
   case DRM_IOCTL_MODE_GETRESOURCES: {
@@ -367,8 +372,14 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
           ((uint32_t *)res->crtc_id_ptr)[crtcs] = mobj->id;
         crtcs++;
       } else if (mobj->type == DRM_MODE_OBJECT_CONNECTOR) {
-        if (res->connector_id_ptr && connectors < res->count_connectors)
+        if (res->connector_id_ptr && connectors < res->count_connectors) {
           ((uint32_t *)res->connector_id_ptr)[connectors] = mobj->id;
+          klog_puts("[DRM] GETRESOURCES: filling connector id=");
+          klog_uint64(mobj->id);
+          klog_puts(" at ptr=");
+          klog_hex64(res->connector_id_ptr + connectors * 4);
+          klog_puts("\n");
+        }
         connectors++;
       } else if (mobj->type == DRM_MODE_OBJECT_ENCODER) {
         if (res->encoder_id_ptr && encoders < res->count_encoders)
@@ -495,11 +506,19 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
   }
   case DRM_IOCTL_MODE_GETCONNECTOR: {
     struct drm_mode_get_connector *c = (struct drm_mode_get_connector *)arg;
+    klog_puts("[DRM] GETCONNECTOR: arg=");
+    klog_hex64((uint64_t)arg);
+    klog_puts(" id_in_struct=");
+    klog_uint64(c->connector_id);
+    klog_puts("\n");
     spinlock_acquire(&dev->lock);
     struct drm_mode_object *mobj = drm_mode_object_find(dev, c->connector_id);
     if (!mobj || mobj->type != DRM_MODE_OBJECT_CONNECTOR) {
+      klog_puts("[DRM] GETCONNECTOR: object not found or wrong type: id=");
+      klog_uint64(c->connector_id);
+      klog_puts("\n");
       spinlock_release(&dev->lock);
-      return -1;
+      return -2; /* ENOENT */
     }
     struct drm_connector *conn = (struct drm_connector *)mobj;
     c->connector_type = conn->connector_type;
@@ -689,8 +708,11 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     return 0;
   }
 
+  case DRM_IOCTL_MODE_GETGAMMA:
+  case DRM_IOCTL_MODE_SETGAMMA:
+    return 0; /* stub */
   default:
-    return -38; /* ENOSYS */
+    return -25; /* ENOTTY */
   }
 }
 

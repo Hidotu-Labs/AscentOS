@@ -378,7 +378,6 @@ static void execute_command(char *cmd) {
 
     int global_pass = 1;
 
-
     console_puts(
         "[1/4] Testing allocations of all valid orders (0 to 10)...\n");
     void *order_blocks[11];
@@ -440,7 +439,6 @@ static void execute_command(char *cmd) {
       }
     }
 
-
     console_puts("[3/4] Fragmentation & Coalescing stress test...\n");
     int num_blocks = 512;
     void *frag_blocks[512];
@@ -480,7 +478,6 @@ static void execute_command(char *cmd) {
         pmm_free_pages(frag_blocks[i], 1);
     }
     console_puts("  -> Fragmentation test completed.\n");
-
 
     console_puts("[4/4] Bulk Capacity Test...\n");
     size_t free_ram = pmm_get_free_pages();
@@ -1000,7 +997,6 @@ static void execute_command(char *cmd) {
     console_puts("Starting Named Slab Cache Stress Test...\n");
     int pass = 1;
 
-
     console_puts("[1/6] Creating custom test cache (obj_size=96)...\n");
     kmem_cache_t *test_cache =
         kmem_cache_create("stress_test", 96, 8, NULL, NULL);
@@ -1100,7 +1096,6 @@ static void execute_command(char *cmd) {
       kmem_cache_destroy(test_cache);
     }
 
-
     console_puts("\n[BONUS] Testing kernel object caches...\n");
 
     if (vma_cache) {
@@ -1160,7 +1155,6 @@ static void execute_command(char *cmd) {
     console_puts("Starting Shared Memory (SHM) Stress Test...\n");
     int pass = 1;
 
-
     console_puts("[1/5] Creating SHM segment (8192 bytes, key=42)...\n");
     int64_t shmid = sys_shmget(42, 8192, IPC_CREAT | 0x1FF, 0, 0, 0);
     if (shmid < 0) {
@@ -1173,7 +1167,6 @@ static void execute_command(char *cmd) {
       shell_print_uint64((uint64_t)shmid);
       console_puts("\n");
     }
-
 
     int64_t addr1 = 0;
     if (pass) {
@@ -1188,7 +1181,6 @@ static void execute_command(char *cmd) {
         console_puts("\n");
       }
     }
-
 
     if (pass) {
       console_puts("[3/5] Writing pattern and verifying...\n");
@@ -1213,7 +1205,6 @@ static void execute_command(char *cmd) {
       }
     }
 
-
     if (pass) {
       console_puts("[4/5] Querying segment info (shmctl IPC_STAT)...\n");
       struct shmid_ds info;
@@ -1231,7 +1222,6 @@ static void execute_command(char *cmd) {
         pass = 0;
       }
     }
-
 
     if (pass) {
       console_puts("[5/5] Detaching and destroying segment...\n");
@@ -1291,8 +1281,8 @@ static void execute_command(char *cmd) {
 
     // Test 2: Dense Overlap Avoidance
     console_puts("[2/3] Dense Interval Map Avoidance Check...\n");
-    if (vma_add(&tester_list, 0x1000 * 250, 0x1000 * 251, 0x3, 0x22, -1, 0, NULL) ==
-        0) {
+    if (vma_add(&tester_list, 0x1000 * 250, 0x1000 * 251, 0x3, 0x22, -1, 0,
+                NULL) == 0) {
       console_puts("  -> FAIL: Interval search tree silently allowed overlap "
                    "injection!\n");
       vma_pass = 0;

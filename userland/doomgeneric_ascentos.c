@@ -483,6 +483,20 @@ void DG_SetWindowTitle(const char *title) {
   (void)title; // no window manager, no title
 }
 
+// ── I_Quit ─────────────────────────────────────────────────────────────────
+// Called by DOOM when exiting. We must reset terminal state and exit.
+void I_Quit(void) {
+  // Disable scancode mode
+  ioctl(0, KBDSCANMODE_SET, 0);
+
+  // Restore blocking mode on stdin
+  int flags = fcntl(0, F_GETFL, 0);
+  fcntl(0, F_SETFL, flags & ~O_NONBLOCK);
+
+  printf("\nExiting DOOM...\n");
+  exit(0);
+}
+
 // ── main ───────────────────────────────────────────────────────────────────
 int main(int argc, char **argv) {
   doomgeneric_Create(argc, argv);

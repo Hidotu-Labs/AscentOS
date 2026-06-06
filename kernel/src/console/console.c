@@ -118,8 +118,9 @@ static uint32_t max_rows;
 static bool cursor_logical_visible = false;
 static bool cursor_phys_on = false;
 static uint64_t last_blink_ms = 0;
-static bool cursor_repositioned = false;  // Set when CUP/ESC[H moves cursor above bottom
-static bool wrap_pending = false;  // Deferred line wrap (autowrap pending)
+static bool cursor_repositioned =
+    false; // Set when CUP/ESC[H moves cursor above bottom
+static bool wrap_pending = false; // Deferred line wrap (autowrap pending)
 
 static void console_redraw(void) {
   fb_set_backbuffer_mode(true);
@@ -142,8 +143,8 @@ static void console_redraw(void) {
       if (ch->c != 0) {
         const uint8_t *glyph = font_get_glyph(ch->c);
         for (uint32_t gy = 0; gy < FONT_HEIGHT; gy++) {
-          uint8_t bits = (ch->underline && gy >= FONT_HEIGHT - 2) ? 0xFF
-                                                                   : glyph[gy];
+          uint8_t bits =
+              (ch->underline && gy >= FONT_HEIGHT - 2) ? 0xFF : glyph[gy];
           for (uint32_t gx = 0; gx < FONT_WIDTH; gx++) {
             uint32_t color = (bits & (0x80 >> gx)) ? ch->fg : ch->bg;
             fb_put_pixel(px + gx, py + gy, color);
@@ -359,8 +360,8 @@ static void console_process_escape_sequence(void) {
       cursor_x = max_cols - 1;
     // If cursor is moved above the current content bottom, mark as
     // repositioned so that subsequent newlines don't advance history.
-    uint32_t bottom = (history_write_row >= max_rows - 1) ? max_rows - 1
-                                                          : history_write_row;
+    uint32_t bottom =
+        (history_write_row >= max_rows - 1) ? max_rows - 1 : history_write_row;
     if (new_y < bottom)
       cursor_repositioned = true;
     cursor_y = new_y;
@@ -734,7 +735,7 @@ static void console_render_char(uint32_t cp) {
 
   if (cp == '\r') {
     cursor_x = 0;
-    wrap_pending = false;  // \r cancels any pending autowrap
+    wrap_pending = false; // \r cancels any pending autowrap
     return;
   }
 
@@ -794,7 +795,7 @@ static void console_render_char(uint32_t cp) {
     // This matches real terminal behavior ("autowrap pending").
     // A \r or cursor-positioning escape will cancel the pending wrap.
     wrap_pending = true;
-    cursor_x = max_cols - 1;  // cursor stays at last column
+    cursor_x = max_cols - 1; // cursor stays at last column
   }
 }
 

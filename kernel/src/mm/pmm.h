@@ -2,31 +2,35 @@
 #define PMM_H
 
 #include <limine.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <stdbool.h>
 
 #define PAGE_SIZE 4096
 
 // Initialize basic PMM state (hhdm offset) so early components can function.
 void pmm_init_early(uint64_t hhdm_offset);
 
-// Initialize the full physical memory manager using the memory map and HHDM offset.
+// Initialize the full physical memory manager using the memory map and HHDM
+// offset.
 void pmm_init(struct limine_memmap_response *memmap, uint64_t hhdm_offset);
 
 // New Buddy Allocator API
-void *pmm_alloc_page(void);                    // Allocate single page
-void *pmm_alloc_pages(size_t count);           // Allocate multiple (will allocate ceil(log2(count)))
+void *pmm_alloc_page(void); // Allocate single page
+void *pmm_alloc_pages(
+    size_t count); // Allocate multiple (will allocate ceil(log2(count)))
 void *pmm_alloc_pages_constrained(size_t count, uint64_t max_phys_addr);
-void *pmm_alloc_pages_range(size_t count, uint64_t min_phys_addr, uint64_t max_phys_addr); 
-void pmm_free_page(void *ptr);                 // Free single page
-void pmm_free_pages(void *ptr, size_t count);  // Free multiple pages
+void *pmm_alloc_pages_range(size_t count, uint64_t min_phys_addr,
+                            uint64_t max_phys_addr);
+void pmm_free_page(void *ptr);                // Free single page
+void pmm_free_pages(void *ptr, size_t count); // Free multiple pages
 
 // Refcounting (for CoW)
-void pmm_incref(void *ptr);                    // Increment reference count
-void pmm_decref(void *ptr);                    // Decrement reference count (frees if 0)
-uint16_t pmm_get_ref(void *ptr);               // Get current reference count
-bool pmm_is_managed(uint64_t phys);            // Check if page is managed by PMM (RAM vs MMIO)
+void pmm_incref(void *ptr);      // Increment reference count
+void pmm_decref(void *ptr);      // Decrement reference count (frees if 0)
+uint16_t pmm_get_ref(void *ptr); // Get current reference count
+bool pmm_is_managed(
+    uint64_t phys); // Check if page is managed by PMM (RAM vs MMIO)
 
 // Compatibility aliases for existing code
 #define pmm_alloc pmm_alloc_page

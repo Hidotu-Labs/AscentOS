@@ -1079,7 +1079,7 @@ void hda_register_vfs(void) {
 
   // Register node
   vfs_node_t *node = kmalloc(sizeof(vfs_node_t));
-  memset(node, 0, sizeof(vfs_node_t));
+  vfs_node_init(node);
   strcpy(node->name, "hda_audio");
   node->flags = FS_CHARDEV;
   node->mask = 0666;

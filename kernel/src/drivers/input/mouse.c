@@ -226,7 +226,7 @@ void mouse_register_vfs(void) {
   if (!node)
     return;
 
-  memset(node, 0, sizeof(vfs_node_t));
+  vfs_node_init(node);
   strcpy(node->name, "mouse");
   node->flags = FS_CHARDEV;
   node->mask = 0666;

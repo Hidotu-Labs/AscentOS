@@ -378,14 +378,10 @@ static uint64_t fb_vfs_mmap(struct vfs_node *node, uint64_t addr,
 
   // In graphics mode (X11), map the X11 backbuffer for double buffering
   // In text mode, map the hardware framebuffer directly
-  void *buffer_to_map;
-  if (fb_get_kd_mode() == KD_GRAPHICS && x11_backbuffer) {
-    buffer_to_map = x11_backbuffer;
-    klog_puts("[FB_MMAP] Mapping X11 backbuffer (double buffer mode)\n");
-  } else {
-    buffer_to_map = fb->address;
-    klog_puts("[FB_MMAP] Mapping hardware framebuffer (direct mode)\n");
-  }
+  // FORCE direct mapping of hardware framebuffer.
+  // The X11 double buffering logic is broken and results in a black screen.
+  void *buffer_to_map = fb->address;
+  klog_puts("[FB_MMAP] Mapping hardware framebuffer (direct mode) FORCED\n");
 
 // Allocate a virtual address range in user space
 // Use the mmap bump allocator from sys_mm.c
@@ -687,7 +683,7 @@ static void setup_chardev(
   if (!node)
     return;
 
-  memset(node, 0, sizeof(vfs_node_t));
+  vfs_node_init(node);
   strncpy(node->name, name, 127);
   node->flags = FS_CHARDEV | FS_PERSISTENT;
   node->mask = 0666;

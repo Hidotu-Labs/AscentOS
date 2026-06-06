@@ -211,9 +211,9 @@ uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot, uint64_t flags,
 
     if (current_thread && current_thread->mm) {
       spinlock_acquire(&current_thread->mm->lock);
-      int vma_idx = vma_add(&current_thread->mm->vmas, result,
-                            result + aligned_len, prot, flags, (int)fd, offset,
-                            node);
+      int vma_idx =
+          vma_add(&current_thread->mm->vmas, result, result + aligned_len, prot,
+                  flags, (int)fd, offset, node);
       spinlock_release(&current_thread->mm->lock);
       if (vma_idx < 0) {
         klog_puts("[MMAP] Warning: failed to register VMA for file mapping\n");

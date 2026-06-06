@@ -2,6 +2,9 @@
 #include "../console/klog.h"
 #include "../lib/string.h"
 #include "../mm/heap.h"
+#include "../mm/pmm.h"
+
+#define PHYS_TO_VIRT(p) ((void *)((uint64_t)(p) + pmm_get_hhdm_offset()))
 
 vfs_node_t *fs_root = 0;
 
@@ -15,34 +18,87 @@ static vfs_mount_entry_t *vfs_mount_list = NULL;
 
 uint32_t vfs_read(vfs_node_t *node, uint32_t offset, uint32_t size,
                   uint8_t *buffer) {
-  if (node && node->read) {
-    uint32_t ret = node->read(node, offset, size, buffer);
-    /* if (ret == 0 && size > 0) {
-      klog_puts("[VFS] node->read returned 0 node=");
-      klog_uint64((uint64_t)node);
-      klog_puts(" name=");
-      klog_puts(node->name);
-      klog_puts("\n");
-    } */
-    return ret;
+  if (!node)
+    return 0;
+
+  // For regular files, try to serve from page cache first
+  if ((node->flags & FS_TYPE_MASK) == FS_FILE) {
+    uint32_t bytes_read = 0;
+    while (bytes_read < size) {
+      uint32_t file_offset = offset + bytes_read;
+      if (file_offset >= node->length)
+        break;
+      uint32_t page_off = file_offset % 4096;
+      uint32_t page_base = file_offset - page_off;
+      uint32_t avail_in_file = node->length - file_offset;
+      uint32_t to_copy = 4096 - page_off;
+      if (to_copy > (size - bytes_read))
+        to_copy = size - bytes_read;
+      if (to_copy > avail_in_file)
+        to_copy = avail_in_file;
+
+      vfs_page_t *page = vfs_cache_lookup(node, page_base);
+      if (page) {
+        memcpy(buffer + bytes_read,
+               (uint8_t *)PHYS_TO_VIRT(page->frame_phys) + page_off, to_copy);
+        bytes_read += to_copy;
+      } else {
+        // Cache miss: fall back to filesystem read for the rest
+        break;
+      }
+    }
+    if (bytes_read > 0)
+      return bytes_read;
   }
-  if (node && !node->read) {
-    klog_puts("[VFS] node->read is NULL node=");
-    klog_uint64((uint64_t)node);
-    klog_puts(" name=");
-    klog_puts(node->name);
-    klog_puts("\n");
+
+  if (node->read) {
+    return node->read(node, offset, size, buffer);
   }
   return 0;
 }
 
 uint32_t vfs_write(vfs_node_t *node, uint32_t offset, uint32_t size,
                    uint8_t *buffer) {
-  if (node && node->write) {
+  if (!node)
+    return 0;
+
+  // Write-back path: buffer writes in page cache for regular files
+  if ((node->flags & FS_TYPE_MASK) == FS_FILE) {
+    uint32_t bytes_written = 0;
+    while (bytes_written < size) {
+      uint32_t file_offset = offset + bytes_written;
+      uint32_t page_off = file_offset % 4096;
+      uint32_t page_base = file_offset - page_off;
+      uint32_t to_copy = 4096 - page_off;
+      if (to_copy > (size - bytes_written))
+        to_copy = size - bytes_written;
+
+      vfs_page_t *page = vfs_cache_get_or_create(node, page_base);
+      if (page) {
+        memcpy((uint8_t *)PHYS_TO_VIRT(page->frame_phys) + page_off,
+               buffer + bytes_written, to_copy);
+        page->dirty = true;
+        bytes_written += to_copy;
+      } else {
+        // Fallback to direct write if cache allocation fails
+        break;
+      }
+    }
+
+    if (bytes_written > 0) {
+      // Update file length if we wrote past the end
+      if (offset + bytes_written > node->length) {
+        node->length = offset + bytes_written;
+      }
+      return bytes_written;
+    }
+  }
+
+  // Direct write fallback (non-file nodes, or cache alloc failure)
+  if (node->write) {
     uint32_t written = node->write(node, offset, size, buffer);
-    if (written > 0 && node->flags != FS_PIPE) {
-      // Filter out common high-volume writes if needed, but for now log
-      // klog_puts("[VFS] node write successful\n");
+    if (written > 0 && (node->flags & FS_TYPE_MASK) == FS_FILE) {
+      vfs_cache_invalidate_range(node, offset, written);
     }
     return written;
   }
@@ -62,9 +118,13 @@ void vfs_close(vfs_node_t *node) {
   if (!node)
     return;
   if (--node->refcount == 0) {
+    if ((node->flags & FS_TYPE_MASK) == FS_FILE) {
+      vfs_cache_sync(node);
+    }
     if (node->close) {
       node->close(node);
     }
+    vfs_cache_clear(node);
     if (!(node->flags & FS_PERSISTENT)) {
       kfree(node);
     }
@@ -84,18 +144,11 @@ vfs_node_t *vfs_finddir(vfs_node_t *node, char *name) {
     if (!res)
       return 0;
 
-    // Check if this inode/dev combo or path is a mountpoint
-    // For simplicity, we check if the returned node matches any mountpoint
-    // in the global list. Since lookups return new nodes (like in ext2),
-    // we should match by inode (and eventually device id).
     vfs_mount_entry_t *curr = vfs_mount_list;
     while (curr) {
       if (curr->mountpoint->inode == res->inode &&
           curr->mountpoint->device == res->device) {
-        // If it's the root directory of the same mount, don't recurse
         if (curr->target != res) {
-          // kfree(res); // Discarding the 'covered' node is risky without
-          // refcounts
           return curr->target;
         }
       }
@@ -179,7 +232,11 @@ int vfs_mknod(vfs_node_t *node, char *name, uint16_t permission, uint32_t flags,
 
 int vfs_truncate(vfs_node_t *node, uint32_t size) {
   if (node && node->truncate) {
-    return node->truncate(node, size);
+    int res = node->truncate(node, size);
+    if (res == 0 && (node->flags & FS_TYPE_MASK) == FS_FILE) {
+      vfs_cache_invalidate_range(node, size, node->length - size + 4096);
+    }
+    return res;
   }
   return -1;
 }
@@ -195,7 +252,6 @@ int vfs_poll(vfs_node_t *node, int events) {
   if (node && node->poll) {
     return node->poll(node, events);
   }
-  // Default: if no poll handler, assume ready for regular files
   uint32_t type = (node->flags & FS_TYPE_MASK);
   if (type == FS_FILE || type == FS_DIRECTORY) {
     return events & (POLLIN | POLLOUT);
@@ -219,14 +275,11 @@ vfs_node_t *vfs_resolve_path_at(vfs_node_t *dir, const char *path) {
   int symlink_depth = 0;
   char *p = path_buf;
 
-  // Parent stack so ".." can walk up correctly even in ramfs nodes that
-  // return self for "..".  Depth of 32 is more than enough for any real path.
 #define VFS_PARENT_STACK_DEPTH 32
   vfs_node_t *parent_stack[VFS_PARENT_STACK_DEPTH];
   int stack_top = 0;
   parent_stack[0] = current;
 
-  // Initial skip of root slashes
   if (path_buf[0] == '/') {
     while (*p == '/')
       p++;
@@ -236,57 +289,54 @@ vfs_node_t *vfs_resolve_path_at(vfs_node_t *dir, const char *path) {
     char comp[128];
     int i = 0;
 
-    // Skip slashes
     while (*p == '/')
       p++;
     if (*p == '\0')
       break;
 
-    // Extract next component
     while (*p && *p != '/' && i < 127) {
       comp[i++] = *p++;
     }
     comp[i] = '\0';
 
-    // Handle ".." by popping the parent stack instead of asking the fs,
-    // because ramfs_finddir returns self for ".." (no parent pointer stored).
     if (strcmp(comp, "..") == 0) {
-      if (stack_top > 0)
+      if (stack_top > 0) {
+        vfs_node_t *to_free = current;
         stack_top--;
-      current = parent_stack[stack_top];
+        current = parent_stack[stack_top];
+        if (to_free != fs_root && to_free != dir && to_free != current &&
+            !(to_free->flags & FS_PERSISTENT)) {
+          kfree(to_free);
+        }
+      }
       continue;
     }
 
-    // Handle "." — stay in place
     if (strcmp(comp, ".") == 0)
       continue;
 
     vfs_node_t *next = vfs_finddir(current, comp);
     if (!next) {
-      klog_puts("[VFS] component not found: ");
-      klog_puts(comp);
-      klog_puts(" in parent=");
-      klog_puts(current->name);
-      klog_puts("\n");
-      if (current != fs_root && current != dir)
-        if (!(current->flags & FS_PERSISTENT))
-          kfree(current);
+      for (int j = 1; j <= stack_top; j++) {
+        if (parent_stack[j] != fs_root && parent_stack[j] != dir &&
+            !(parent_stack[j]->flags & FS_PERSISTENT)) {
+          kfree(parent_stack[j]);
+        }
+      }
       kfree(path_buf);
       return 0;
     }
 
-    // Handle symlinks
     if ((next->flags & FS_TYPE_MASK) == FS_SYMLINK) {
-      klog_puts("[VFS] encountered symlink: ");
-      klog_puts(comp);
-      klog_puts("\n");
       if (++symlink_depth > MAX_SYMLINK_DEPTH) {
-        klog_puts("[VFS] max symlink depth exceeded\n");
         if (!(next->flags & FS_PERSISTENT))
           kfree(next);
-        if (current != fs_root && current != dir)
-          if (!(current->flags & FS_PERSISTENT))
-            kfree(current);
+        for (int j = 1; j <= stack_top; j++) {
+          if (parent_stack[j] != fs_root && parent_stack[j] != dir &&
+              !(parent_stack[j]->flags & FS_PERSISTENT)) {
+            kfree(parent_stack[j]);
+          }
+        }
         kfree(path_buf);
         return 0;
       }
@@ -297,24 +347,25 @@ vfs_node_t *vfs_resolve_path_at(vfs_node_t *dir, const char *path) {
         kfree(next);
 
       if (len < 0) {
-        klog_puts("[VFS] readlink failed\n");
-        if (current != fs_root && current != dir)
-          if (!(current->flags & FS_PERSISTENT))
-            kfree(current);
+        for (int j = 1; j <= stack_top; j++) {
+          if (parent_stack[j] != fs_root && parent_stack[j] != dir &&
+              !(parent_stack[j]->flags & FS_PERSISTENT)) {
+            kfree(parent_stack[j]);
+          }
+        }
         kfree(path_buf);
         return 0;
       }
       link_target[len] = '\0';
-      klog_puts("[VFS] symlink target: ");
-      klog_puts(link_target);
-      klog_puts("\n");
 
-      // Construct new path: [link_target] + "/" + [remaining p]
       char *next_path = kmalloc(512);
       if (!next_path) {
-        if (current != fs_root && current != dir)
-          if (!(current->flags & FS_PERSISTENT))
-            kfree(current);
+        for (int j = 1; j <= stack_top; j++) {
+          if (parent_stack[j] != fs_root && parent_stack[j] != dir &&
+              !(parent_stack[j]->flags & FS_PERSISTENT)) {
+            kfree(parent_stack[j]);
+          }
+        }
         kfree(path_buf);
         return 0;
       }
@@ -323,7 +374,6 @@ vfs_node_t *vfs_resolve_path_at(vfs_node_t *dir, const char *path) {
       if (*p) {
         int cur_len = (int)strlen(next_path);
         if (cur_len < 510) {
-          // If neither has a slash, add one. If both have a slash, skip one.
           bool target_ends_in_slash =
               (cur_len > 0 && next_path[cur_len - 1] == '/');
           bool p_starts_with_slash = (*p == '/');
@@ -331,47 +381,54 @@ vfs_node_t *vfs_resolve_path_at(vfs_node_t *dir, const char *path) {
           if (!target_ends_in_slash && !p_starts_with_slash) {
             strcat(next_path, "/");
           } else if (target_ends_in_slash && p_starts_with_slash) {
-            p++; // Skip leading slash in p to avoid double slash
+            p++;
           }
           strncat(next_path, p, 511 - strlen(next_path));
         }
       }
       next_path[511] = '\0';
-      klog_puts("[VFS] expanded path: ");
-      klog_puts(next_path);
-      klog_puts("\n");
 
-      // Update path_buf and p
       strcpy(path_buf, next_path);
       kfree(next_path);
       p = path_buf;
 
       if (path_buf[0] == '/') {
-        if (current != fs_root && current != dir)
-          if (!(current->flags & FS_PERSISTENT))
-            kfree(current);
+        for (int j = 1; j <= stack_top; j++) {
+          if (parent_stack[j] != fs_root && parent_stack[j] != dir &&
+              !(parent_stack[j]->flags & FS_PERSISTENT)) {
+            kfree(parent_stack[j]);
+          }
+        }
         current = fs_root;
-        // Reset parent stack to root for absolute symlink targets
         stack_top = 0;
         parent_stack[0] = fs_root;
         while (*p == '/')
           p++;
       }
-      // Continue loop with new path and same current (if relative) or root (if
-      // absolute)
       continue;
     }
 
-    // Move to next directory component
-    if (current != fs_root && current != dir &&
-        !(current->flags & FS_PERSISTENT)) {
-      kfree(current);
-    }
     current = next;
-    // Push onto parent stack
-    if (stack_top < VFS_PARENT_STACK_DEPTH - 1)
+    if (stack_top < VFS_PARENT_STACK_DEPTH - 1) {
       stack_top++;
-    parent_stack[stack_top] = current;
+      parent_stack[stack_top] = current;
+    } else {
+      // Stack overflow - just replace current and lose parent history
+      // This is better than crashing or leaking.
+      // We free the previous current if it was transient.
+      vfs_node_t *prev = parent_stack[stack_top];
+      if (prev != fs_root && prev != dir && !(prev->flags & FS_PERSISTENT)) {
+        kfree(prev);
+      }
+      parent_stack[stack_top] = current;
+    }
+  }
+
+  for (int j = 1; j < stack_top; j++) {
+    if (parent_stack[j] != current && parent_stack[j] != fs_root &&
+        parent_stack[j] != dir && !(parent_stack[j]->flags & FS_PERSISTENT)) {
+      kfree(parent_stack[j]);
+    }
   }
 
   kfree(path_buf);
@@ -388,6 +445,10 @@ void vfs_node_init(vfs_node_t *node) {
   memset(node, 0, sizeof(vfs_node_t));
   INIT_LIST_HEAD(&node->ep_watchers);
   spinlock_init(&node->ep_lock);
+  for (int i = 0; i < 32; i++) {
+    INIT_LIST_HEAD(&node->pages[i]);
+  }
+  spinlock_init(&node->pages_lock);
   node->refcount = 1;
 }
 
@@ -396,6 +457,8 @@ int vfs_mount(vfs_node_t *mountpoint, vfs_node_t *target) {
     return -1;
 
   vfs_mount_entry_t *entry = kmalloc(sizeof(vfs_mount_entry_t));
+  if (!entry)
+    return -1;
   entry->mountpoint = mountpoint;
   entry->target = target;
   entry->next = vfs_mount_list;

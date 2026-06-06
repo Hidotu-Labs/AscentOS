@@ -272,7 +272,8 @@ int inet_connect(socket_t *sock, struct sockaddr *addr, int addrlen) {
   int sock_id = tcp_connect(ip, port, tcp_data_callback);
   if (sock_id < 0) {
     sock->state = SS_UNCONNECTED;
-    // tcp_connect returns -ECONNREFUSED (-111) on RST, -ETIMEDOUT (-110) on timeout
+    // tcp_connect returns -ECONNREFUSED (-111) on RST, -ETIMEDOUT (-110) on
+    // timeout
     return sock_id;
   }
 
@@ -370,7 +371,8 @@ int inet_poll(socket_t *sock, int events) {
 
   if (events & POLLOUT) {
     if (sock->type == SOCK_DGRAM) {
-      /* UDP sockets are always writable (sendto doesn't require SS_CONNECTED) */
+      /* UDP sockets are always writable (sendto doesn't require SS_CONNECTED)
+       */
       revents |= POLLOUT;
     } else if (sock->state == SS_CONNECTED) {
       revents |= POLLOUT;
@@ -427,11 +429,11 @@ ssize_t inet_sendto(socket_t *sock, const void *buf, size_t len, int flags,
      * connected UDP socket with NULL dest is equivalent to send). */
     if (sock->state != SS_CONNECTED)
       return -22; // EINVAL: not connected and no dest given
-    dest_ip   = ntohl(inet->remote_addr.sin_addr.s_addr);
+    dest_ip = ntohl(inet->remote_addr.sin_addr.s_addr);
     dest_port = ntohs(inet->remote_addr.sin_port);
   } else {
     struct sockaddr_in *sin = (struct sockaddr_in *)dest_addr;
-    dest_ip   = ntohl(sin->sin_addr.s_addr);
+    dest_ip = ntohl(sin->sin_addr.s_addr);
     dest_port = ntohs(sin->sin_port);
   }
 

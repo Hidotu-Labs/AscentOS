@@ -458,8 +458,17 @@ static void evdev_create_node(evdev_device_t *dev, const char *node_name, vfs_no
        vfs_node_t *mice = kmalloc(sizeof(vfs_node_t));
        if (mice) {
          vfs_node_init(mice);
-         memcpy(mice, node, sizeof(vfs_node_t));
+         // Do not memcpy - it would break the list heads initialized above.
+         // Manually copy the necessary fields for this alias.
          strcpy(mice->name, "mice");
+         mice->flags = node->flags;
+         mice->mask = node->mask;
+         mice->device = node->device;
+         mice->read = node->read;
+         mice->poll = node->poll;
+         mice->ioctl = node->ioctl;
+         mice->wait_queue = node->wait_queue;
+         mice->inode = node->inode;
          ramfs_mount_node(input_dir, mice);
        }
     }

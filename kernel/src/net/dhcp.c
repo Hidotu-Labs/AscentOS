@@ -1,6 +1,6 @@
 #include "net/dhcp.h"
-#include "drivers/timer/pit.h"
 #include "console/console.h"
+#include "drivers/timer/pit.h"
 #include "lib/string.h"
 #include "net/byteorder.h"
 #include "net/ipv4.h"

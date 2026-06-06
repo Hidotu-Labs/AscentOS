@@ -175,6 +175,7 @@ static void ep_add_to_ready_list(eventpoll_t *ep, epitem_t *epi) {
 
   spinlock_acquire(&ep->lock);
 
+  bool was_empty = (ep->rdllist_count == 0);
   if (!epi->on_ready_list) {
     list_add_tail(&epi->rdllink, &ep->rdllist);
     epi->on_ready_list = true;
@@ -197,7 +198,7 @@ static void ep_add_to_ready_list(eventpoll_t *ep, epitem_t *epi) {
   // This is required for nested epoll (epoll-in-epoll) to work: when this
   // epoll's ready list becomes non-empty, any outer epoll that has registered
   // this epoll's VFS node must be woken up.
-  if (ep->vfs_node) {
+  if (was_empty && ep->vfs_node) {
     epoll_notify_event(ep->vfs_node, EPOLLIN);
   }
 }
@@ -268,6 +269,11 @@ int epoll_ctl_add(eventpoll_t *ep, int fd, struct epoll_event *event) {
     }
     // Different node - fd was reused, remove stale item
     ep_remove_from_ready_list(ep, old);
+    if (old->node) {
+      spinlock_acquire(&old->node->ep_lock);
+      list_del(&old->ep_node_link);
+      spinlock_release(&old->node->ep_lock);
+    }
     spinlock_acquire(&ep->lock);
     ep->items[fd] = NULL;
     ep->item_count--;
@@ -761,7 +767,13 @@ void epoll_notify_event(struct vfs_node *node, uint32_t events) {
   klog_uint64((uint64_t)&node->ep_watchers);
   klog_puts("\n");
 
-  spinlock_acquire(&node->ep_lock);
+  /* Try-acquire the lock. If it's held, we skip this notification
+     rather than risk a deadlock in IRQ context or spinning. 
+     This is acceptable because level-triggered events will be 
+     detected by the next poll/tick, and edge-triggered events 
+     can be handled by re-trying or deferred work (future work). */
+  if (!spinlock_try_acquire(&node->ep_lock))
+    return;
   struct list_head *pos, *n;
   list_for_each_safe(pos, n, &node->ep_watchers) {
     epitem_t *epi = list_entry(pos, epitem_t, ep_node_link);

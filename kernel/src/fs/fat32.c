@@ -794,7 +794,7 @@ static vfs_node_t *fat32_make_vfs_node(fat32_mount_t *mnt,
   vfs_node_t *node = kmalloc(sizeof(vfs_node_t));
   if (!node)
     return NULL;
-  memset(node, 0, sizeof(vfs_node_t));
+  vfs_node_init(node);
 
   // Set name - use LFN if available, otherwise SFN
   if (lfn_name && lfn_name[0]) {
@@ -1272,7 +1272,7 @@ int fat32_mount(struct block_device *dev, vfs_node_t *mountpoint) {
     kfree(mnt);
     return -1;
   }
-  memset(root_vfs, 0, sizeof(vfs_node_t));
+  vfs_node_init(root_vfs);
 
   memcpy(root_vfs->name, "mnt", 4);
   root_vfs->flags = FS_DIRECTORY;
@@ -1310,7 +1310,7 @@ int fat32_mount_root(struct block_device *dev) {
   vfs_node_t *root = kmalloc(sizeof(vfs_node_t));
   if (!root)
     return -1;
-  memset(root, 0, sizeof(vfs_node_t));
+  vfs_node_init(root);
 
   memcpy(root->name, "/", 2);
   root->flags = FS_DIRECTORY;
@@ -1353,7 +1353,7 @@ void fat32_self_test(void) {
     klog_puts("[FAT32] TEST FAIL: Out of memory\n");
     return;
   }
-  memset(mountpoint, 0, sizeof(vfs_node_t));
+  vfs_node_init(mountpoint);
   memcpy(mountpoint->name, "test", 5);
 
   int mount_result = fat32_mount(dev, mountpoint);

@@ -67,8 +67,9 @@ void sched_init(void) {
     spinlock_acquire(&tid_lock);
     idle_thread->tid = next_tid++;
     spinlock_release(&tid_lock);
-    idle_thread->tgid = idle_thread->tid; // Each process is its own group leader
-    idle_thread->ss_flags = SS_DISABLE;    // No alternate signal stack by default
+    idle_thread->tgid =
+        idle_thread->tid;               // Each process is its own group leader
+    idle_thread->ss_flags = SS_DISABLE; // No alternate signal stack by default
     idle_thread->is_idle = true;
     idle_thread->pgid = idle_thread->tid;
     idle_thread->state = THREAD_RUNNING;
@@ -103,6 +104,8 @@ void sched_init(void) {
     // Do NOT enqueue the idle thread; it's handled specially by sched_yield
     cpu->idle_thread = idle_thread;
     cpu->current_thread = idle_thread;
+    idle_thread->cpu_affinity = (1ULL << count) - 1;
+    if (count == 64) idle_thread->cpu_affinity = ~0ULL;
     spinlock_release(&tid_lock);
 
     spinlock_release(&cpu->queue_lock);
@@ -135,6 +138,10 @@ void sched_enqueue_thread(struct thread *t, struct cpu_info *explicit_cpu) {
     for (uint32_t i = 0; i < count; i++) {
       struct cpu_info *cpu = cpu_get_info(i);
       if (!cpu || cpu->status == CPU_STATUS_OFFLINE)
+        continue;
+
+      // Skip if this CPU is not in the thread's affinity mask
+      if (!(t->cpu_affinity & (1ULL << i)))
         continue;
 
       // We don't necessarily need the lock here for a heuristic,
@@ -216,10 +223,14 @@ struct thread *sched_create_kernel_thread(void (*entry)(void),
     spinlock_init(&t->mm->lock);
   }
 
+  uint32_t cpu_count = cpu_get_count();
+  t->cpu_affinity = (1ULL << cpu_count) - 1;
+  if (cpu_count == 64) t->cpu_affinity = ~0ULL;
+
   spinlock_acquire(&tid_lock);
   t->tid = next_tid++;
-  t->tgid = t->tid;  // Default: each thread is its own group leader
-  t->ss_flags = SS_DISABLE;  // No alternate signal stack by default
+  t->tgid = t->tid;         // Default: each thread is its own group leader
+  t->ss_flags = SS_DISABLE; // No alternate signal stack by default
   t->global_next = global_thread_list;
   global_thread_list = t;
 
@@ -229,8 +240,10 @@ struct thread *sched_create_kernel_thread(void (*entry)(void),
     t->sibling_next = current->children;
     current->children = t;
     t->pgid = current->pgid; // Inherit PGID by default
+    t->sid = current->sid;   // Inherit SID by default
   } else {
     t->pgid = t->tid; // Root threads have PGID = TID
+    t->sid = t->tid;  // Root threads have SID = TID
   }
   spinlock_release(&tid_lock);
 
@@ -327,7 +340,9 @@ static void sched_balance(struct cpu_info *cpu) {
     struct thread *prev = NULL;
     do {
       // Find a READY thread (don't steal the currently running one).
-      if (curr->state == THREAD_READY && !curr->is_idle) {
+      // Ensure the thread is allowed to run on THIS CPU (the stealing CPU).
+      if (curr->state == THREAD_READY && !curr->is_idle &&
+          (curr->cpu_affinity & (1ULL << cpu->cpu_id))) {
         stolen = curr;
 
         // Remove from remote runqueue
@@ -556,9 +571,29 @@ void sched_yield(void) {
 void sched_tick(struct registers *regs) {
   (void)regs;
   struct cpu_info *cpu = cpu_get_current();
-  if (cpu->current_thread) {
+  struct thread *curr = cpu->current_thread;
+  if (curr) {
     // Account one tick (1 ms at LAPIC_TIMER_HZ=1000) of CPU time
-    cpu->current_thread->runtime_total++;
+    curr->runtime_total++;
+
+    // ITIMER_REAL handling
+    if (curr->it_real_value > 0) {
+      if (curr->it_real_value <= 1) {
+        // Timer expired!
+        extern void signal_send(struct thread * t, int sig);
+        signal_send(curr, SIGALRM);
+
+        // Reload if requested
+        if (curr->it_real_interval > 0) {
+          curr->it_real_value = curr->it_real_interval;
+        } else {
+          curr->it_real_value = 0;
+        }
+      } else {
+        curr->it_real_value--;
+      }
+    }
+
     sched_yield();
   }
 }

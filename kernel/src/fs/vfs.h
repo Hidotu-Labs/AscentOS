@@ -28,6 +28,13 @@
 #define POLLNVAL 0x0020
 
 struct vfs_node;
+typedef struct vfs_page {
+  uint32_t offset;       // Byte offset within the file (page aligned)
+  uint64_t frame_phys;   // Physical address of the frame
+  bool dirty;            // True if data has been modified but not written back
+  struct list_head list; // List linkage for vfs_node_t
+} vfs_page_t;
+
 struct dirent {
   char name[128];
   uint32_t ino;
@@ -106,6 +113,9 @@ typedef struct vfs_node {
 
   struct vfs_node *ptr; // Used by mountpoints and symlinks
   uint32_t refcount;    // Reference count for memory management
+
+  struct list_head pages[32]; // Hash table of cached pages (vfs_page_t)
+  spinlock_t pages_lock;      // Lock for the page cache hash table
 } vfs_node_t;
 
 extern vfs_node_t *fs_root;
@@ -137,5 +147,15 @@ int vfs_mknod(vfs_node_t *node, char *name, uint16_t permission, uint32_t flags,
 int vfs_poll(vfs_node_t *node, int events);
 void vfs_node_init(vfs_node_t *node);
 int vfs_mount(vfs_node_t *mountpoint, vfs_node_t *target);
+
+// Page Cache API
+vfs_page_t *vfs_cache_lookup(vfs_node_t *node, uint32_t offset);
+vfs_page_t *vfs_cache_insert(vfs_node_t *node, uint32_t offset, uint64_t frame);
+void vfs_cache_invalidate(vfs_node_t *node, uint32_t offset);
+void vfs_cache_invalidate_range(vfs_node_t *node, uint32_t offset,
+                                uint32_t length);
+void vfs_cache_clear(vfs_node_t *node);
+void vfs_cache_sync(vfs_node_t *node);
+vfs_page_t *vfs_cache_get_or_create(vfs_node_t *node, uint32_t offset);
 
 #endif

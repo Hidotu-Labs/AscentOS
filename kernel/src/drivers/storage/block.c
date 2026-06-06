@@ -135,7 +135,7 @@ int block_register(struct block_device *dev) {
     vfs_node_t *dev_dir = vfs_finddir(fs_root, "dev");
     if (dev_dir) {
       vfs_node_t *node = kmalloc(sizeof(vfs_node_t));
-      memset(node, 0, sizeof(vfs_node_t));
+      vfs_node_init(node);
       strncpy(node->name, dev->name, 127);
       node->flags = FS_BLOCKDEV;
       node->mask = 0600;
@@ -180,7 +180,7 @@ void block_repopulate_devices(void) {
     vfs_node_t *node = kmalloc(sizeof(vfs_node_t));
     if (!node)
       continue;
-    memset(node, 0, sizeof(vfs_node_t));
+    vfs_node_init(node);
     strncpy(node->name, dev->name, 127);
     node->flags = FS_BLOCKDEV;
     node->mask = 0600;

@@ -86,7 +86,7 @@ void devfs_setup_chardev(
   if (!node)
     return;
 
-  memset(node, 0, sizeof(vfs_node_t));
+  vfs_node_init(node);
   strncpy(node->name, name, 127);
   node->flags = FS_CHARDEV | FS_PERSISTENT;
   node->mask = 0666;

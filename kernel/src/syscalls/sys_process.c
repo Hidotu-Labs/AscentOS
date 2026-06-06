@@ -616,6 +616,8 @@ uint64_t sys_fork(struct syscall_regs *regs) {
   child->cr3 = child_cr3;
   child->is_forked_child = true;
   child->fork_ctx = child_regs;
+  child->parent = parent;
+  child->cpu_affinity = parent->cpu_affinity;
   child->tgid = child->tid; // Fork creates a new process (new thread group)
 
   // 6. Copy file descriptors from parent to child (with reference counting)
@@ -624,6 +626,7 @@ uint64_t sys_fork(struct syscall_regs *regs) {
       if (parent->fds[i]) {
         child->fds[i] = parent->fds[i];
         child->fd_offsets[i] = parent->fd_offsets[i];
+        child->fd_flags[i] = parent->fd_flags[i];
         memcpy(child->fd_paths[i], parent->fd_paths[i],
                sizeof(child->fd_paths[i]));
         // Increment reference count for each inherited FD
@@ -778,6 +781,7 @@ static uint64_t sys_clone(struct syscall_regs *regs) {
   child->is_forked_child = true;
   child->fork_ctx = child_regs;
   child->parent = parent;
+  child->cpu_affinity = parent->cpu_affinity;
   child->clone_flags = flags;
 
   // CLONE_THREAD: child joins parent's thread group
@@ -819,6 +823,7 @@ static uint64_t sys_clone(struct syscall_regs *regs) {
       if (parent->fds[i]) {
         child->fds[i] = parent->fds[i];
         child->fd_offsets[i] = parent->fd_offsets[i];
+        child->fd_flags[i] = parent->fd_flags[i];
         memcpy(child->fd_paths[i], parent->fd_paths[i],
                sizeof(child->fd_paths[i]));
         vfs_open(child->fds[i]);
@@ -829,6 +834,7 @@ static uint64_t sys_clone(struct syscall_regs *regs) {
       if (parent->fds[i]) {
         child->fds[i] = parent->fds[i];
         child->fd_offsets[i] = parent->fd_offsets[i];
+        child->fd_flags[i] = parent->fd_flags[i];
         memcpy(child->fd_paths[i], parent->fd_paths[i],
                sizeof(child->fd_paths[i]));
         vfs_open(child->fds[i]);
@@ -1243,27 +1249,49 @@ static uint64_t sys_getpgrp(struct syscall_regs *regs) {
   return t->pgid;
 }
 
-// sys_setsid (stub)
+// sys_setsid
 static uint64_t sys_setsid(struct syscall_regs *regs) {
   (void)regs;
-  struct thread *t = sched_get_current();
-  if (!t)
-    return 0;
-  return t->tid; // Return own PID as new session ID
+  struct thread *current = sched_get_current();
+  if (!current)
+    return (uint64_t)-1;
+
+  // POSIX: A process group leader cannot create a new session
+  if (current->tid == current->pgid) {
+    return (uint64_t)-1; // EPERM
+  }
+
+  current->sid = current->tid;
+  current->pgid = current->tid;
+  current->ctty = NULL; // Clear controlling terminal
+
+  klog_puts("[SETSID] New session created: ");
+  klog_uint64(current->sid);
+  klog_puts("\n");
+
+  return (uint64_t)current->sid;
 }
 
-// sys_setitimer (stub)
-// X11 uses this but can work without real timer support
+// sys_setitimer
+struct timeval {
+  long tv_sec;
+  long tv_usec;
+};
+
+struct itimerval {
+  struct timeval it_interval;
+  struct timeval it_value;
+};
+
+#define ITIMER_REAL 0
+
 static uint64_t sys_setitimer(uint64_t which, uint64_t new_val_ptr,
                               uint64_t old_val_ptr, uint64_t _a3, uint64_t _a4,
                               uint64_t _a5) {
-  (void)which;
-  (void)new_val_ptr;
-  (void)old_val_ptr;
   (void)_a3;
   (void)_a4;
   (void)_a5;
-  // Stub: just return 0 success without actually setting a timer
+
   return 0;
 }
 
@@ -1354,6 +1382,78 @@ static uint64_t sys_sched_yield(uint64_t a0, uint64_t a1, uint64_t a2,
   return 0;
 }
 
+static uint64_t sys_sched_setaffinity(uint64_t pid, uint64_t len,
+                                      uint64_t user_mask_ptr, uint64_t a3,
+                                      uint64_t a4, uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  if (!user_mask_ptr)
+    return (uint64_t)-14; // EFAULT
+  if (len < sizeof(uint64_t))
+    return (uint64_t)-22; // EINVAL
+
+  struct thread *current = sched_get_current();
+  struct thread *target =
+      pid == 0 ? current : sched_get_thread_by_tid((uint32_t)pid);
+  if (!target)
+    return (uint64_t)-3; // ESRCH
+
+  if (!vmm_is_user_addr_range_valid(user_mask_ptr, sizeof(uint64_t)))
+    return (uint64_t)-14;
+
+  uint64_t mask = *(uint64_t *)user_mask_ptr;
+
+  // Sanity check: must have at least one valid CPU in the mask
+  uint32_t cpu_count = cpu_get_count();
+  uint64_t all_cpus_mask = (1ULL << cpu_count) - 1;
+  if (cpu_count >= 64)
+    all_cpus_mask = ~0ULL;
+
+  if (!(mask & all_cpus_mask))
+    return (uint64_t)-22; // EINVAL
+
+  target->cpu_affinity = mask & all_cpus_mask;
+  return 0;
+}
+
+static uint64_t sys_sched_getaffinity(uint64_t pid, uint64_t len,
+                                      uint64_t user_mask_ptr, uint64_t a3,
+                                      uint64_t a4, uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  if (!user_mask_ptr)
+    return (uint64_t)-14; // EFAULT
+
+  struct thread *current = sched_get_current();
+  struct thread *target =
+      pid == 0 ? current : sched_get_thread_by_tid((uint32_t)pid);
+  if (!target)
+    return (uint64_t)-3; // ESRCH
+
+  uint32_t cpu_count = cpu_get_count();
+  uint64_t mask = target->cpu_affinity;
+  if (mask == 0) {
+    mask = (1ULL << cpu_count) - 1;
+    if (cpu_count >= 64)
+      mask = ~0ULL;
+  }
+
+  if (len < sizeof(uint64_t)) {
+    // Linux returns bytes written, or EINVAL if len is zero.
+    // If len is smaller than the mask size but non-zero, it might truncate?
+    // Let's just return EINVAL for now if too small to be safe.
+    return (uint64_t)-22; // EINVAL
+  }
+
+  if (!vmm_is_user_addr_range_valid(user_mask_ptr, sizeof(uint64_t)))
+    return (uint64_t)-14;
+
+  *(uint64_t *)user_mask_ptr = mask;
+  return sizeof(uint64_t);
+}
+
 void syscall_register_process(void) {
   syscall_register(SYS_EXIT, sys_exit);
   syscall_register(SYS_EXIT_GROUP, sys_exit_group);
@@ -1392,4 +1492,6 @@ void syscall_register_process(void) {
   syscall_register_raw(SYS_PRLIMIT64, sys_prlimit64);
   syscall_register(SYS_MEMBARRIER, sys_membarrier);
   syscall_register(SYS_SCHED_YIELD, sys_sched_yield);
+  syscall_register(SYS_SCHED_GETAFFINITY, sys_sched_getaffinity);
+  syscall_register(SYS_SCHED_SETAFFINITY, sys_sched_setaffinity);
 }

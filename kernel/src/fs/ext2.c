@@ -1943,46 +1943,7 @@ static uint64_t ext2_mmap_impl(vfs_node_t *node, uint64_t addr, uint64_t length,
     return (uint64_t)-1;
   }
 
-  uint64_t num_pages = aligned_len / 4096;
-  uint64_t *pml4 = vmm_get_active_pml4();
-  uint64_t hhdm = pmm_get_hhdm_offset();
-
-  uint64_t page_flags = PAGE_FLAG_PRESENT | PAGE_FLAG_USER;
-  if (prot & EXT2_MMAP_PROT_WRITE)
-    page_flags |= PAGE_FLAG_RW;
-  if (!(prot & EXT2_MMAP_PROT_EXEC))
-    page_flags |= PAGE_FLAG_NX;
-
-  for (uint64_t i = 0; i < num_pages; i++) {
-    void *phys = pmm_alloc();
-    if (!phys) {
-      klog_puts("[EXT2_MMAP] Error: physical allocation failed\n");
-      return (uint64_t)-1;
-    }
-
-    uint64_t virt_page = vaddr + i * 4096;
-    uint64_t phys_page = (uint64_t)phys;
-
-    // Zero the page first
-    memset((void *)(phys_page + hhdm), 0, 4096);
-
-    // Read from file into the physical page
-    uint64_t file_off = offset + i * 4096;
-    if (file_off < node->length) {
-      uint32_t to_read = 4096;
-      if (file_off + to_read > node->length) {
-        to_read = node->length - file_off;
-      }
-      ext2_read_impl(node, (uint32_t)file_off, to_read,
-                     (uint8_t *)(phys_page + hhdm));
-    }
-
-    if (!vmm_map_page(pml4, virt_page, phys_page, page_flags)) {
-      klog_puts("[EXT2_MMAP] Error: vmm_map_page failed\n");
-      return (uint64_t)-1;
-    }
-    vmm_flush_tlb(virt_page);
-  }
-
+  // We no longer allocate or map pages here. 
+  // sys_mmap will register the VMA, and demand paging will handle the rest.
   return vaddr;
 }

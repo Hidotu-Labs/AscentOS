@@ -1108,48 +1108,107 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
     return -1;
   }
 
-  // Allocate frame (Zero-Fill-on-Demand Engine)
-  void *frame = pmm_alloc_page();
-  if (!frame) {
-    klog_puts("[VMM] OOM during demand paging!\n");
-    if (user_mode) {
-      sched_terminate_thread(current->tid);
-      return 0;
-    }
-    return -1;
-  }
+  void *frame = NULL;
 
-  // Zero the frame through HHDM
-  uint64_t *frame_virt = (uint64_t *)PHYS_TO_VIRT((uint64_t)frame);
-
-  // If this is a file-backed mapping, read data from the filesystem node
-  if (vma_file_node) {
+  vfs_node_t *node = (vfs_node_t *)vma_file_node;
+  if (node && (node->flags & FS_TYPE_MASK) == FS_FILE) {
+    // --- CLUSTERED FAULTING & AGGRESSIVE READ-AHEAD ---
     uint64_t page_offset = (cr2 & ~0xFFFULL) - vma_start;
-    uint32_t bytes_to_read = 4096;
-    // node->length is uint32_t in our VFS, but we should handle it
-    // Wait, check vfs_node_t length type. It is uint32_t.
-    vfs_node_t *node = (vfs_node_t *)vma_file_node;
-    if (vma_offset + page_offset >= node->length) {
-      // Past EOF, zero the rest
-      for (int i = 0; i < 512; i++)
-        frame_virt[i] = 0;
+    uint32_t file_offset = (uint32_t)(vma_offset + page_offset);
+
+    // 1. Try to satisfy from cache first
+    vfs_page_t *cached = vfs_cache_lookup(node, file_offset);
+    if (cached) {
+      frame = (void *)cached->frame_phys;
     } else {
-      uint32_t avail = node->length - (uint32_t)(vma_offset + page_offset);
-      if (avail < 4096) {
-        bytes_to_read = avail;
-        // Zero the remainder of the page
-        memset(((uint8_t *)frame_virt) + bytes_to_read, 0,
-               4096 - bytes_to_read);
+      // 2. Cache Miss: Perform Clustered Read-Ahead
+      // We read up to 16 pages (64KB) at once to maximize disk throughput.
+      uint32_t cluster_base = file_offset & ~0xFFFFULL; // 64KB aligned
+      uint32_t cluster_size = 64 * 1024;
+      if (cluster_base + cluster_size > node->length) {
+        cluster_size = (node->length > cluster_base) ? (node->length - cluster_base) : 0;
       }
-      // Perform the VFS read
-      vfs_read(node, (uint32_t)(vma_offset + page_offset), bytes_to_read,
-               (uint8_t *)frame_virt);
+
+      if (cluster_size > 0) {
+        // Find which pages in the cluster are missing from the cache
+        for (uint32_t off = 0; off < cluster_size; off += 4096) {
+          uint32_t current_file_off = cluster_base + off;
+          if (vfs_cache_lookup(node, current_file_off))
+            continue;
+
+          // Allocate frame for this page
+          void *new_frame = pmm_alloc_page();
+          if (!new_frame)
+            break;
+
+          // Read the page from disk
+          // We could optimize this further by batching the vfs_read calls,
+          // but even populating the cache here is a huge win.
+          uint32_t to_read = (node->length - current_file_off >= 4096) ? 4096 : (node->length - current_file_off);
+          if (to_read > 0) {
+            vfs_read(node, current_file_off, to_read, (uint8_t *)PHYS_TO_VIRT((uint64_t)new_frame));
+            if (to_read < 4096) {
+              memset((uint8_t *)PHYS_TO_VIRT((uint64_t)new_frame) + to_read, 0, 4096 - to_read);
+            }
+          } else {
+            memset(PHYS_TO_VIRT((uint64_t)new_frame), 0, 4096);
+          }
+
+          vfs_cache_insert(node, current_file_off, (uint64_t)new_frame);
+        }
+      }
+
+      cached = vfs_cache_lookup(node, file_offset);
+      if (cached) {
+        frame = (void *)cached->frame_phys;
+      }
     }
+
+    if (!frame) {
+      // Past EOF or memory allocation fail
+      frame = pmm_alloc_page();
+      if (!frame) return -1;
+      memset(PHYS_TO_VIRT((uint64_t)frame), 0, 4096);
+    }
+
+    // 3. Proactive Clustered Mapping
+    // While we're here, map other pages in the same 64KB cluster if they're in the cache.
+    // This avoids future page faults for the same library.
+    uint64_t cluster_vstart = cr2 & ~0xFFFFULL;
+    uint64_t flags = dp_build_flags(vma_prot);
+
+    for (int i = 0; i < 16; i++) {
+        uint64_t vpage = cluster_vstart + (i * 4096);
+        if (vpage == (cr2 & ~0xFFFULL)) continue; // Handled by main mapping below
+        
+        // Stay within VMA bounds
+        if (vpage < vma_start || vpage >= vma_start + (vma->end - vma_start)) continue;
+
+        // Only map if not already present
+        if (vmm_virt_to_phys((uint64_t *)target_cr3, vpage) != 0) continue;
+
+        uint32_t foff = (uint32_t)(vma_offset + (vpage - vma_start));
+        vfs_page_t *p = vfs_cache_lookup(node, foff);
+        if (p) {
+            vmm_map_page((uint64_t *)target_cr3, vpage, p->frame_phys, flags);
+        }
+    }
+
   } else {
-    // Anonymous mapping: zero-fill
-    for (int i = 0; i < 512; i++)
-      frame_virt[i] = 0;
+    // Anonymous mapping: allocate and zero-fill
+    frame = pmm_alloc_page();
+    if (!frame) {
+      klog_puts("[VMM] OOM during demand paging!\n");
+      if (user_mode) {
+        sched_terminate_thread(current->tid);
+        return 0;
+      }
+      return -1;
+    }
+    memset(PHYS_TO_VIRT((uint64_t)frame), 0, 4096);
   }
+
+map_it:;
 
   // Derive PTE flags from the VMA's protection bits
   uint64_t flags = dp_build_flags(vma_prot);

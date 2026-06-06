@@ -1020,7 +1020,7 @@ void pty_register_devices(void) {
   if (!ptmx_node)
     return;
 
-  memset(ptmx_node, 0, sizeof(vfs_node_t));
+  vfs_node_init(ptmx_node);
   klog_puts("[PTY] pty_slave_write addr=0x");
   klog_hex64((uint64_t)pty_slave_write);
   klog_puts("\n");

@@ -374,6 +374,14 @@ static uint64_t sys_sigprocmask(uint64_t how, uint64_t set_ptr,
   return sys_rt_sigprocmask(how, set_ptr, oldset_ptr, 8, 0, 0);
 }
 
+// Send a signal to a specific thread
+void signal_send(struct thread *t, int sig) {
+  if (!t || sig <= 0 || sig > 64)
+    return;
+  t->pending_signals |= (1ULL << (sig - 1));
+  signal_notify_thread(t, sig);
+}
+
 // Send signal to all processes in a process group
 void signal_send_pgid(uint32_t pgid, int sig) {
   if (sig <= 0 || sig > 64)

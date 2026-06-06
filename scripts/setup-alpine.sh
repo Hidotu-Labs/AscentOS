@@ -113,7 +113,35 @@ install_apk "libice" "main"
 install_apk "imlib2" "main"
 install_apk "libstdc++" "main"
 
+# Openbox window manager (LXDE base) and dependencies
+echo "[*] Installing Openbox window manager..."
+install_apk "openbox" "community"
+install_apk "openbox-libs" "community"
+install_apk "libxml2" "main"
+install_apk "startup-notification" "community"
+install_apk "libxcomposite" "main"
+install_apk "libxdamage" "main"
+
+
+
 # X11 utilities and toolkit libraries (xclock, xterm, etc.)
+echo "[*] Installing Xorg Server and DRM drivers..."
+install_apk "xorg-server" "community"
+install_apk "xf86-input-libinput" "community"
+install_apk "xf86-input-evdev" "community"
+install_apk "libxfont2" "community"
+install_apk "libxcvt" "community"
+install_apk "libfontenc" "main"
+install_apk "font-cursor-misc" "main"
+install_apk "font-misc-misc" "main"
+install_apk "xkbcomp" "main"
+install_apk "mesa-dri-gallium" "main"
+install_apk "libdrm" "main"
+install_apk "mesa-gbm" "main"
+install_apk "mesa-egl" "main"
+install_apk "nettle" "main"
+install_apk "libmagic" "main"
+
 echo "[*] Installing X11 utilities and toolkit libraries..."
 install_apk "libxt" "main"
 install_apk "libxmu" "main"
@@ -146,17 +174,6 @@ install_apk "libuuid" "main"
 install_apk "shared-mime-info" "main"
 install_apk "pcre2" "main"
 install_apk "libffi" "main"
-install_apk "pixman" "main"
-install_apk "libjpeg-turbo" "main"
-install_apk "libmount" "main"
-install_apk "libblkid" "main"
-install_apk "libeconf" "main"
-install_apk "libintl" "main"
-install_apk "graphite2" "main"
-install_apk "libxcomposite" "main"
-install_apk "libxdamage" "main"
-install_apk "gettext-libs" "main"
-install_apk "libxrandr" "main"
 install_apk "libxinerama" "main"
 install_apk "util-linux" "main"
 install_apk "libbz2" "main"
@@ -195,8 +212,7 @@ install_apk "weston-terminal" "community"
 install_apk "wayland-protocols" "main"
 install_apk "wayland-dev" "main"
 install_apk "vulkan-loader" "main"
-install_apk "mesa-gbm" "main"
-install_apk "mesa-egl" "main"
+install_apk "mesa-gl" "main"
 install_apk "mesa-gles" "main"
 install_apk "mesa-vulkan-swrast" "main"
 install_apk "libliftoff" "community"
@@ -208,8 +224,17 @@ install_apk "mtdev" "community"
 install_apk "libxml2" "main"
 install_apk "libdisplay-info" "community"
 install_apk "eudev-libs" "main"
-install_apk "libdrm" "main"
 install_apk "pixman" "main"
+install_apk "libjpeg-turbo" "main"
+install_apk "libmount" "main"
+install_apk "libblkid" "main"
+install_apk "libeconf" "main"
+install_apk "libintl" "main"
+install_apk "graphite2" "main"
+install_apk "libxcomposite" "main"
+install_apk "libxdamage" "main"
+install_apk "gettext-libs" "main"
+install_apk "libxrandr" "main"
 install_apk "libseat" "community"
 install_apk "libelogind" "community"
 install_apk "libcap2" "main"
@@ -344,7 +369,6 @@ install_apk "ca-certificates" "main"
 install_apk "libbz2" "main"
 install_apk "zlib" "main"
 
-
 # 4. Finalize GTK environment
 echo "[*] Compiling GSettings schemas..."
 if [ -d "${ROOTFS_DIR}/usr/share/glib-2.0/schemas" ]; then
@@ -400,6 +424,113 @@ cat > "${ROOTFS_DIR}${LOADERS_DIR}/loaders.cache" <<EOF
 " <!DOCTYPE svg" "* " 100
 
 EOF
+
+# 4a. Configure Xorg for DRM/Modesetting
+echo "[*] Configuring Xorg DRM/modesetting..."
+XORG_CONF_DIR="${ROOTFS_DIR}/etc/X11/xorg.conf.d"
+mkdir -p "${XORG_CONF_DIR}"
+cat > "${XORG_CONF_DIR}/10-modesetting.conf" <<EOF
+Section "Device"
+    Identifier  "Card0"
+    Driver      "modesetting"
+EndSection
+
+Section "InputClass"
+    Identifier "libinput pointer catchall"
+    MatchIsPointer "on"
+    MatchDevicePath "/dev/input/event*"
+    Driver "libinput"
+EndSection
+
+Section "InputClass"
+    Identifier "libinput keyboard catchall"
+    MatchIsKeyboard "on"
+    MatchDevicePath "/dev/input/event*"
+    Driver "libinput"
+EndSection
+EOF
+
+# 4b. Inject Openbox / LXDE startup config
+echo "[*] Configuring Openbox as default X11 session..."
+
+mkdir -p "${ROOTFS_DIR}/etc/skel"
+cat > "${ROOTFS_DIR}/etc/skel/.xinitrc" << 'EOF'
+#!/bin/sh
+exec openbox-session
+EOF
+chmod +x "${ROOTFS_DIR}/etc/skel/.xinitrc"
+
+# Also place it at /root/.xinitrc since root is the typical user
+cp "${ROOTFS_DIR}/etc/skel/.xinitrc" "${ROOTFS_DIR}/root/.xinitrc"
+
+# Minimal Openbox rc.xml (no dbus dependency, clean keybinds)
+mkdir -p "${ROOTFS_DIR}/etc/xdg/openbox"
+cat > "${ROOTFS_DIR}/etc/xdg/openbox/rc.xml" << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<openbox_config xmlns="http://openbox.org/3.4/rc"
+                xmlns:xi="http://www.w3.org/2001/XInclude">
+  <resistance><strength>10</strength><screen_edge_strength>20</screen_edge_strength></resistance>
+  <focus><focusNew>yes</focusNew><followMouse>no</followMouse><focusLast>yes</focusLast></focus>
+  <placement><policy>Smart</policy></placement>
+  <theme>
+    <name>Clearlooks</name>
+    <titleLayout>NLC</titleLayout>
+    <keepBorder>yes</keepBorder>
+  </theme>
+  <desktops><number>2</number><firstdesk>1</firstdesk><names><name>Main</name><name>Extra</name></names></desktops>
+  <resize><drawContents>yes</drawContents></resize>
+  <mouse>
+    <dragThreshold>8</dragThreshold>
+    <doubleClickTime>200</doubleClickTime>
+    <context name="Frame">
+      <mousebind button="A-Left" action="Press"><action name="Focus"/><action name="Raise"/></mousebind>
+      <mousebind button="A-Left" action="Drag"><action name="Move"/></mousebind>
+      <mousebind button="A-Right" action="Drag"><action name="Resize"/></mousebind>
+    </context>
+    <context name="Titlebar">
+      <mousebind button="Left" action="Drag"><action name="Move"/></mousebind>
+      <mousebind button="Left" action="DoubleClick"><action name="ToggleMaximizeFull"/></mousebind>
+    </context>
+    <context name="Desktop">
+      <mousebind button="Right" action="Press"><action name="ShowMenu"><menu>root-menu</menu></action></mousebind>
+    </context>
+  </mouse>
+  <keyboard>
+    <keybind key="A-F4"><action name="Close"/></keybind>
+    <keybind key="A-Tab"><action name="NextWindow"/></keybind>
+    <keybind key="A-space"><action name="ShowMenu"><menu>client-menu</menu></action></keybind>
+    <keybind key="Super_L"><action name="ShowMenu"><menu>root-menu</menu></action></keybind>
+  </keyboard>
+  <applications/>
+</openbox_config>
+EOF
+
+# Minimal right-click desktop menu
+cat > "${ROOTFS_DIR}/etc/xdg/openbox/menu.xml" << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<openbox_menu xmlns="http://openbox.org/3.4/menu">
+  <menu id="root-menu" label="AscentOS">
+    <item label="Terminal (st)">
+      <action name="Execute"><execute>st</execute></action>
+    </item>
+    <item label="File Manager">
+      <action name="Execute"><execute>pcmanfm</execute></action>
+    </item>
+    <item label="Text Editor">
+      <action name="Execute"><execute>mousepad</execute></action>
+    </item>
+    <separator/>
+    <item label="Reconfigure Openbox">
+      <action name="Reconfigure"/>
+    </item>
+    <item label="Exit">
+      <action name="Exit"/>
+    </item>
+  </menu>
+</openbox_menu>
+EOF
+
+
 
 # 4. Create weston.ini
 echo "[*] Creating /etc/weston.ini..."

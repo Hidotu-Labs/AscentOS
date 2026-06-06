@@ -85,9 +85,15 @@ struct vt_stat {
 #define O_RDWR 2
 #define O_CREAT 0x40
 #define O_TRUNC 0x200
+#define O_ACCMODE 3
 #define O_APPEND 0x400
 #define O_NONBLOCK 0x800
 #define O_CLOEXEC 0x80000
+
+/* FD_CLOEXEC is a descriptor flag (F_GETFD/F_SETFD), not a file status flag.
+ * We pack it into the high bits of fd_flags[] to avoid adding a new array.
+ * Bit 24 is used — it's well outside O_ACCMODE|O_APPEND|O_NONBLOCK range. */
+#define FD_FLAGS_CLOEXEC_BIT (1u << 24)
 
 // fcntl commands
 #define F_DUPFD 0
@@ -128,6 +134,22 @@ struct kstat {
   int64_t st_ctim_sec;  // Status change time seconds
   int64_t st_ctim_nsec; // Status change time nanoseconds
   int64_t __unused[3];  // Unused padding
+};
+
+// statfs structure (Linux x86_64)
+struct statfs_buf {
+  uint64_t f_type;
+  uint64_t f_bsize;
+  uint64_t f_blocks;
+  uint64_t f_bfree;
+  uint64_t f_bavail;
+  uint64_t f_files;
+  uint64_t f_ffree;
+  uint64_t f_fsid[2];
+  uint64_t f_namelen;
+  uint64_t f_frsize;
+  uint64_t f_flags;
+  uint64_t f_spare[4];
 };
 
 struct statx_timestamp {
@@ -236,6 +258,17 @@ int alloc_fd(struct thread *t) {
   }
   klog_puts("[SYSCALL] alloc_fd: EMFILE (all FDs full)\n");
   return -1; // ENFILE
+}
+
+int alloc_fd_from(struct thread *t, int from) {
+  if (from < 0 || from >= MAX_FDS)
+    return -1;
+  for (int i = from; i < MAX_FDS; i++) {
+    if (t->fds[i] == NULL) {
+      return i;
+    }
+  }
+  return -1;
 }
 
 static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags,
@@ -448,6 +481,7 @@ open_done:
   vfs_open(node);
   t->fds[fd] = node;
   t->fd_offsets[fd] = 0;
+  t->fd_flags[fd] = flags;
 
   // Store the full path for fchdir support
   if (path[0] == '/') {
@@ -520,6 +554,12 @@ static uint64_t sys_dup2(uint64_t oldfd, uint64_t newfd, uint64_t a2,
 
   t->fds[newfd] = t->fds[oldfd];
   t->fd_offsets[newfd] = t->fd_offsets[oldfd];
+  t->fd_flags[newfd] = t->fd_flags[oldfd];
+  if (t->fd_paths[oldfd][0]) {
+    strcpy(t->fd_paths[newfd], t->fd_paths[oldfd]);
+  } else {
+    t->fd_paths[newfd][0] = '\0';
+  }
   vfs_open(t->fds[newfd]);
 
   return newfd;
@@ -914,8 +954,6 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
       klog_puts("\n");
 
       if (res != (uint64_t)-25) {
-        klog_puts(
-            "[SYSCALL] ioctl: node handler return value bypasses switch\n");
         return res;
       }
     }
@@ -1077,11 +1115,6 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
     break;
   }
   default:
-    klog_puts("[SYSCALL] ioctl: unhandled request 0x");
-    klog_hex32((uint32_t)request);
-    klog_puts(" on fd=");
-    klog_uint64(fd);
-    klog_puts(" -> ENOTTY\n");
     ret = (uint64_t)-25; // ENOTTY
     break;
   }
@@ -1158,56 +1191,59 @@ static uint64_t sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,
   case F_DUPFD:
   case F_DUPFD_CLOEXEC: {
     // Duplicate fd to lowest available >= arg
-    int newfd = alloc_fd(t);
+    int newfd = alloc_fd_from(t, (int)arg);
     if (newfd < 0)
       return (uint64_t)-24; // EMFILE
-    if ((uint64_t)newfd < arg) {
-      // Find lowest available >= arg
-      for (int i = (int)arg; i < MAX_FDS; i++) {
-        if (t->fds[i] == NULL) {
-          newfd = i;
-          break;
-        }
-      }
-      if ((uint64_t)newfd < arg)
-        return (uint64_t)-24; // EMFILE
-    }
+
     t->fds[newfd] = t->fds[fd];
     t->fd_offsets[newfd] = t->fd_offsets[fd];
+    t->fd_flags[newfd] = t->fd_flags[fd];
+    if (t->fd_paths[fd][0]) {
+      strcpy(t->fd_paths[newfd], t->fd_paths[fd]);
+    } else {
+      t->fd_paths[newfd][0] = '\0';
+    }
     vfs_open(t->fds[newfd]);
 
-    // For F_DUPFD_CLOEXEC, we'd set FD_CLOEXEC but we don't track per-FD flags
-    // yet
     return (uint64_t)newfd;
   }
   case F_GETFD: {
-    // Get file descriptor flags (we don't track per-FD flags yet, return 0)
-    (void)arg;
-    return 0;
+    /* Return descriptor flags — currently only FD_CLOEXEC (bit 0) */
+    uint64_t dflags = 0;
+    if (t->fd_flags[fd] & FD_FLAGS_CLOEXEC_BIT)
+      dflags |= 1; /* FD_CLOEXEC = 1 */
+    return dflags;
   }
   case F_SETFD: {
-    // Set file descriptor flags (FD_CLOEXEC)
-    // We don't track per-FD flags yet, just succeed
-    (void)arg;
+    /* Set descriptor flags — only FD_CLOEXEC is defined */
+    if (arg & 1) /* FD_CLOEXEC */
+      t->fd_flags[fd] |= FD_FLAGS_CLOEXEC_BIT;
+    else
+      t->fd_flags[fd] &= ~(uint64_t)FD_FLAGS_CLOEXEC_BIT;
     return 0;
   }
   case F_GETFL: {
-    uint64_t flags = O_RDWR;
+    uint64_t flags = t->fd_flags[fd] & (O_ACCMODE | O_APPEND | O_NONBLOCK);
     vfs_node_t *node = t->fds[fd];
-    if ((node->flags & FS_TYPE_MASK) == FS_SOCKET) {
+    if (node && (node->flags & FS_TYPE_MASK) == FS_SOCKET) {
       socket_t *sock = (socket_t *)node->device;
       if (sock && (sock->flags & SOCK_NONBLOCK)) {
         flags |= O_NONBLOCK;
       }
     }
-    if (node->flags & FS_NONBLOCK) {
+    if (node && (node->flags & FS_NONBLOCK)) {
       flags |= O_NONBLOCK;
     }
     return flags;
   }
   case F_SETFL: {
+    // Only status flags can be changed via F_SETFL
+    uint64_t status_flags = arg & (O_APPEND | O_NONBLOCK);
+    t->fd_flags[fd] =
+        (t->fd_flags[fd] & ~(O_APPEND | O_NONBLOCK)) | status_flags;
+
     vfs_node_t *node = t->fds[fd];
-    if ((node->flags & FS_TYPE_MASK) == FS_SOCKET) {
+    if (node && (node->flags & FS_TYPE_MASK) == FS_SOCKET) {
       socket_t *sock = (socket_t *)node->device;
       if (sock) {
         if (arg & O_NONBLOCK) {
@@ -1218,10 +1254,12 @@ static uint64_t sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,
       }
     }
     // Also track in VFS node for char devs etc
-    if (arg & O_NONBLOCK) {
-      node->flags |= FS_NONBLOCK;
-    } else {
-      node->flags &= ~FS_NONBLOCK;
+    if (node) {
+      if (arg & O_NONBLOCK) {
+        node->flags |= FS_NONBLOCK;
+      } else {
+        node->flags &= ~FS_NONBLOCK;
+      }
     }
     return 0;
   }
@@ -1349,7 +1387,8 @@ static uint64_t sys_stat(uint64_t path_ptr, uint64_t statbuf_ptr, uint64_t a2,
   }
 
   if (!node) {
-    vfs_node_t *cwd_node = (path[0] == '/') ? fs_root : (t->cwd_node ? t->cwd_node : fs_root);
+    vfs_node_t *cwd_node =
+        (path[0] == '/') ? fs_root : (t->cwd_node ? t->cwd_node : fs_root);
 
     node = vfs_resolve_path_at(cwd_node, path);
   }
@@ -1769,7 +1808,8 @@ static uint64_t sys_mkdir(uint64_t pathname, uint64_t mode, uint64_t a2,
   }
 
   struct thread *t = sched_get_current();
-  vfs_node_t *base = (clean_path[0] == '/') ? fs_root : (t->cwd_node ? t->cwd_node : fs_root);
+  vfs_node_t *base =
+      (clean_path[0] == '/') ? fs_root : (t->cwd_node ? t->cwd_node : fs_root);
 
   klog_puts("[MKDIR] path=");
   klog_puts(clean_path);
@@ -2075,13 +2115,30 @@ static uint32_t eventfd_read(vfs_node_t *node, uint32_t offset, uint32_t size,
   if (!ctx)
     return (uint32_t)-22;
 
+  struct thread *t = sched_get_current();
+  int fd = -1;
+  for (int i = 0; i < MAX_FDS; i++) {
+    if (t->fds[i] == node) {
+      fd = i;
+      break;
+    }
+  }
+
   spinlock_acquire(&ctx->lock);
-  if (ctx->counter == 0) {
+  while (ctx->counter == 0) {
+    if (fd != -1 && (t->fd_flags[fd] & 0x800 /* O_NONBLOCK */)) {
+      spinlock_release(&ctx->lock);
+      return (uint32_t)-11; // EAGAIN
+    }
+    // Block until counter > 0
+    wait_queue_entry_t entry = {.thread = t, .next = NULL};
+    wait_queue_add(&ctx->wq, &entry);
+    t->state = THREAD_BLOCKED;
     spinlock_release(&ctx->lock);
-    klog_puts("[EVENTFD] counter 0, EAGAIN node=");
-    klog_uint64((uint64_t)node);
-    klog_puts("\n");
-    return (uint32_t)-11; // EAGAIN
+    sched_yield();
+    t->state = THREAD_RUNNING;
+    wait_queue_remove(&ctx->wq, &entry);
+    spinlock_acquire(&ctx->lock);
   }
   uint64_t val;
   if (ctx->flags & EFD_SEMAPHORE) {
@@ -2117,7 +2174,7 @@ static uint32_t eventfd_write(vfs_node_t *node, uint32_t offset, uint32_t size,
 
   wait_queue_wake_all(&ctx->wq);
   /* Notify any epoll instances watching this eventfd */
-  extern void epoll_notify_event(struct vfs_node *node, uint32_t events);
+  extern void epoll_notify_event(struct vfs_node * node, uint32_t events);
   epoll_notify_event(node, 0x0001 /* EPOLLIN */);
   return 8;
 }
@@ -2185,6 +2242,7 @@ static uint64_t sys_eventfd2(uint64_t initval, uint64_t flags, uint64_t a2,
 
   t->fds[fd] = node;
   t->fd_offsets[fd] = 0;
+  t->fd_flags[fd] = flags;
 
   return fd;
 }
@@ -2213,7 +2271,10 @@ static spinlock_t timerfd_table_lock = SPINLOCK_INIT;
 static void timerfd_register(timerfd_ctx_t *ctx) {
   spinlock_acquire(&timerfd_table_lock);
   for (int i = 0; i < TIMERFD_MAX; i++) {
-    if (!timerfd_table[i]) { timerfd_table[i] = ctx; break; }
+    if (!timerfd_table[i]) {
+      timerfd_table[i] = ctx;
+      break;
+    }
   }
   spinlock_release(&timerfd_table_lock);
 }
@@ -2221,7 +2282,10 @@ static void timerfd_register(timerfd_ctx_t *ctx) {
 static void timerfd_unregister(timerfd_ctx_t *ctx) {
   spinlock_acquire(&timerfd_table_lock);
   for (int i = 0; i < TIMERFD_MAX; i++) {
-    if (timerfd_table[i] == ctx) { timerfd_table[i] = NULL; break; }
+    if (timerfd_table[i] == ctx) {
+      timerfd_table[i] = NULL;
+      break;
+    }
   }
   spinlock_release(&timerfd_table_lock);
 }
@@ -2232,7 +2296,7 @@ static void timerfd_unregister(timerfd_ctx_t *ctx) {
  */
 void timerfd_tick(void) {
   extern uint64_t lapic_timer_get_ms(void);
-  extern void epoll_notify_event(struct vfs_node *node, uint32_t events);
+  extern void epoll_notify_event(struct vfs_node * node, uint32_t events);
   uint64_t now = lapic_timer_get_ms();
 
   /* Try-acquire: if locked, skip this tick rather than spin in IRQ context */
@@ -2241,25 +2305,34 @@ void timerfd_tick(void) {
 
   for (int i = 0; i < TIMERFD_MAX; i++) {
     timerfd_ctx_t *ctx = timerfd_table[i];
-    if (!ctx || ctx->expire_ms == 0) continue;
+    if (!ctx || ctx->expire_ms == 0)
+      continue;
 
     if (now >= ctx->expire_ms) {
       /* Try-acquire ctx lock; skip if contended */
-      if (!spinlock_try_acquire(&ctx->lock)) continue;
+      if (!spinlock_try_acquire(&ctx->lock))
+        continue;
 
       ctx->expirations++;
       if (ctx->interval_sec || ctx->interval_nsec) {
         uint64_t iv = ctx->interval_sec * 1000 + ctx->interval_nsec / 1000000;
-        if (iv == 0) iv = 1;
+        if (iv == 0)
+          iv = 1;
         ctx->expire_ms = now + iv;
       } else {
         ctx->expire_ms = 0;
       }
-      spinlock_release(&ctx->lock);
 
       if (ctx->node) {
-        epoll_notify_event(ctx->node, 0x0001 /* EPOLLIN */);
+        vfs_node_t *node = ctx->node;
+        /* We can't hold ctx->lock while notifying epoll as it may lead to
+           complex lock ordering, but we can safely notify after updating.
+           ctx is protected by timerfd_table_lock here. */
+        spinlock_release(&ctx->lock);
+        epoll_notify_event(node, 0x0001 /* EPOLLIN */);
         wait_queue_wake_all(&ctx->wq);
+      } else {
+        spinlock_release(&ctx->lock);
       }
     }
   }
@@ -2277,12 +2350,29 @@ static uint32_t timerfd_read(vfs_node_t *node, uint32_t offset, uint32_t size,
 
   spinlock_acquire(&ctx->lock);
 
-  if (ctx->expirations == 0) {
+  while (ctx->expirations == 0) {
+    struct thread *t = sched_get_current();
+    // Determine FD for this node to check flags
+    int fd = -1;
+    for (int i = 0; i < MAX_FDS; i++) {
+      if (t->fds[i] == node) {
+        fd = i;
+        break;
+      }
+    }
+    if (fd != -1 && (t->fd_flags[fd] & 0x800 /* O_NONBLOCK */)) {
+      spinlock_release(&ctx->lock);
+      return (uint32_t)-11; // EAGAIN
+    }
+
+    wait_queue_entry_t entry = {.thread = t, .next = NULL};
+    wait_queue_add(&ctx->wq, &entry);
+    t->state = THREAD_BLOCKED;
     spinlock_release(&ctx->lock);
-    klog_puts("[TIMERFD] counter 0, EAGAIN node=");
-    klog_uint64((uint64_t)node);
-    klog_puts("\n");
-    return (uint32_t)-11; // EAGAIN
+    sched_yield();
+    t->state = THREAD_RUNNING;
+    wait_queue_remove(&ctx->wq, &entry);
+    spinlock_acquire(&ctx->lock);
   }
 
   uint64_t val = ctx->expirations;
@@ -2328,6 +2418,15 @@ static uint64_t sys_timerfd_create(uint64_t clockid, uint64_t flags,
   if (!t)
     return (uint64_t)-1;
 
+  /* Validate clockid: only CLOCK_REALTIME(0), CLOCK_MONOTONIC(1),
+   * CLOCK_BOOTTIME(7) are accepted by Linux timerfd. */
+  if (clockid != 0 && clockid != 1 && clockid != 7)
+    return (uint64_t)-22; /* EINVAL */
+
+  /* Validate flags: only TFD_NONBLOCK and TFD_CLOEXEC are valid. */
+  if (flags & ~(uint64_t)(TFD_NONBLOCK | TFD_CLOEXEC))
+    return (uint64_t)-22; /* EINVAL */
+
   int fd = alloc_fd(t);
   if (fd < 0)
     return (uint64_t)-24;
@@ -2360,6 +2459,14 @@ static uint64_t sys_timerfd_create(uint64_t clockid, uint64_t flags,
 
   t->fds[fd] = node;
   t->fd_offsets[fd] = 0;
+  /* Store file status flags (O_NONBLOCK) and descriptor flags (FD_CLOEXEC
+   * packed into bit 24) so that F_GETFL and F_GETFD both work correctly. */
+  uint64_t fd_flags_val = 0;
+  if (flags & TFD_NONBLOCK)
+    fd_flags_val |= O_NONBLOCK; /* O_NONBLOCK for F_GETFL */
+  if (flags & TFD_CLOEXEC)
+    fd_flags_val |= FD_FLAGS_CLOEXEC_BIT; /* FD_CLOEXEC packed for F_GETFD */
+  t->fd_flags[fd] = fd_flags_val;
   return (uint64_t)fd;
 }
 
@@ -2409,14 +2516,39 @@ static uint64_t sys_timerfd_settime(uint64_t fd, uint64_t flags_arg,
     ctx->expire_ms = 0; // Disarm
   } else {
     extern uint64_t lapic_timer_get_ms(void);
-    uint64_t delay_ms = nv->it_value_sec * 1000 + nv->it_value_nsec / 1000000;
-    if (delay_ms == 0)
-      delay_ms = 1;
-    if (flags_arg & 1) {
-      // TFD_TIMER_ABSTIME — treat as absolute (just use delay as-is for now)
-      ctx->expire_ms = delay_ms;
+    extern uint64_t rtc_get_boot_timestamp(void);
+    uint64_t lapic_now = lapic_timer_get_ms();
+    uint64_t value_ms = nv->it_value_sec * 1000 + nv->it_value_nsec / 1000000;
+    if (flags_arg & 1 /* TFD_TIMER_ABSTIME */) {
+      if (ctx->clockid == 0 /* CLOCK_REALTIME */) {
+        /* value_ms is an absolute Unix timestamp in ms.
+         * Convert to a lapic-relative expiry:
+         *   current_realtime_ms = boot_unix_ms + lapic_now
+         *   delta = value_ms - current_realtime_ms
+         *   expire_ms = lapic_now + delta  */
+        uint64_t boot_unix_ms = rtc_get_boot_timestamp() * 1000;
+        uint64_t current_realtime_ms = boot_unix_ms + lapic_now;
+        if (value_ms <= current_realtime_ms) {
+          /* Already expired — fire on the very next tick */
+          ctx->expire_ms = lapic_now + 1;
+        } else {
+          uint64_t delta = value_ms - current_realtime_ms;
+          ctx->expire_ms = lapic_now + delta;
+        }
+      } else {
+        /* CLOCK_MONOTONIC (and others): absolute value is ms since boot,
+         * which is the same unit as lapic_timer_get_ms(). */
+        if (value_ms <= lapic_now)
+          ctx->expire_ms = lapic_now + 1;
+        else
+          ctx->expire_ms = value_ms;
+      }
     } else {
-      ctx->expire_ms = lapic_timer_get_ms() + delay_ms;
+      /* Relative: value_ms is a duration */
+      uint64_t delay_ms = value_ms;
+      if (delay_ms == 0)
+        delay_ms = 1;
+      ctx->expire_ms = lapic_now + delay_ms;
     }
   }
   spinlock_release(&ctx->lock);
@@ -2440,6 +2572,7 @@ static uint64_t sys_timerfd_gettime(uint64_t fd, uint64_t curr_value_ptr,
     return (uint64_t)-14;
 
   struct itimerspec *cv = (struct itimerspec *)curr_value_ptr;
+  spinlock_acquire(&ctx->lock);
   cv->it_interval_sec = ctx->interval_sec;
   cv->it_interval_nsec = ctx->interval_nsec;
 
@@ -2453,11 +2586,12 @@ static uint64_t sys_timerfd_gettime(uint64_t fd, uint64_t curr_value_ptr,
       cv->it_value_sec = 0;
       cv->it_value_nsec = 1; // Already expired
     } else {
-      uint64_t remaining = ctx->expire_ms - now;
-      cv->it_value_sec = remaining / 1000;
-      cv->it_value_nsec = (remaining % 1000) * 1000000;
+      uint64_t remaining_ms = ctx->expire_ms - now;
+      cv->it_value_sec = remaining_ms / 1000;
+      cv->it_value_nsec = (remaining_ms % 1000) * 1000000;
     }
   }
+  spinlock_release(&ctx->lock);
   return 0;
 }
 
@@ -2475,9 +2609,37 @@ static uint32_t pipe_read(vfs_node_t *node, uint32_t offset, uint32_t size,
     return 0;
 
   spinlock_acquire(&ctx->lock);
-  if (node->impl >= node->length) {
+  while (node->impl >= node->length) {
+    struct thread *t = sched_get_current();
+    // Optimization: find which FD we are reading from
+    int fd = -1;
+    for (int i = 0; i < MAX_FDS; i++) {
+      if (t->fds[i] == node) {
+        fd = i;
+        break;
+      }
+    }
+    if (fd != -1 && (t->fd_flags[fd] & 0x800 /* O_NONBLOCK */)) {
+      spinlock_release(&ctx->lock);
+      return (uint32_t)-11; // EAGAIN
+    }
+
+    // Check if writers still exist.
+    // Since each open FD owns one reference, if refcount is 1, and we are the
+    // caller, then no other FD (including writers) exists.
+    if (node->refcount <= 1) {
+      spinlock_release(&ctx->lock);
+      return 0; // EOF
+    }
+
+    wait_queue_entry_t entry = {.thread = t, .next = NULL};
+    wait_queue_add(&ctx->wq, &entry);
+    t->state = THREAD_BLOCKED;
     spinlock_release(&ctx->lock);
-    return (uint32_t)-11; // EAGAIN
+    sched_yield();
+    t->state = THREAD_RUNNING;
+    wait_queue_remove(&ctx->wq, &entry);
+    spinlock_acquire(&ctx->lock);
   }
 
   uint32_t ret = ramfs_read(node, node->impl, size, buffer);
@@ -2501,13 +2663,17 @@ static uint32_t pipe_write(vfs_node_t *node, uint32_t offset, uint32_t size,
     return 0;
 
   spinlock_acquire(&ctx->lock);
+  if (node->refcount <= 1) {
+    spinlock_release(&ctx->lock);
+    return (uint32_t)-32; // EPIPE
+  }
   uint32_t ret = ramfs_write(node, node->length, size, buffer);
   spinlock_release(&ctx->lock);
 
   if (ret > 0) {
     wait_queue_wake_all(&ctx->wq);
     /* Notify any epoll instances watching this pipe */
-    extern void epoll_notify_event(struct vfs_node *node, uint32_t events);
+    extern void epoll_notify_event(struct vfs_node * node, uint32_t events);
     epoll_notify_event(node, 0x0001 /* EPOLLIN */);
   }
   return ret;
@@ -2523,7 +2689,11 @@ static int pipe_poll(vfs_node_t *node, int events) {
   if (node->length > node->impl) {
     revents |= POLLIN;
   }
-  revents |= POLLOUT; // Always ready to write in this simple impl
+  if (node->refcount <= 1) {
+    revents |= (POLLHUP | POLLERR);
+  } else {
+    revents |= POLLOUT; // Only ready to write if a reader exists
+  }
   spinlock_release(&ctx->lock);
 
   return revents & events;
@@ -2533,6 +2703,11 @@ static void pipe_close(vfs_node_t *node) {
   if (!node || !node->device)
     return;
   pipe_ctx_t *ctx = (pipe_ctx_t *)node->device;
+
+  spinlock_acquire(&ctx->lock);
+  wait_queue_wake_all(&ctx->wq);
+  spinlock_release(&ctx->lock);
+
   // Last reference check performed by vfs_close calling this on refcount 0
   if (ctx->ramfs.data) {
     kfree(ctx->ramfs.data);
@@ -2600,13 +2775,16 @@ static uint64_t sys_pipe2(uint64_t pipefd_ptr, uint64_t flags, uint64_t a2,
   pipe_node->close = pipe_close;
   pipe_node->wait_queue = &ctx->wq;
 
-  // Both fds point to the same node
+  // Each FD should own one reference. The initial 1 from vfs_node_init
+  // will be used by the first FD, and we open one more for the second FD.
   vfs_open(pipe_node);
-  vfs_open(pipe_node);
+
   t->fds[fd_read] = pipe_node;
   t->fds[fd_write] = pipe_node;
   t->fd_offsets[fd_read] = 0; // Legacy, ignored by pipe_read/write
   t->fd_offsets[fd_write] = 0;
+  t->fd_flags[fd_read] = flags;
+  t->fd_flags[fd_write] = flags;
 
   pipefd[0] = fd_read;
   pipefd[1] = fd_write;
@@ -2846,8 +3024,8 @@ static vfs_node_t *resolve_parent_and_name(const char *path, char *name_out,
     return NULL;
 
   struct thread *t = sched_get_current();
-  vfs_node_t *base = (path[0] == '/') ? fs_root : (t->cwd_node ? t->cwd_node : fs_root);
-
+  vfs_node_t *base =
+      (path[0] == '/') ? fs_root : (t->cwd_node ? t->cwd_node : fs_root);
 
   // Find last slash
   const char *last_slash = NULL;
@@ -3231,6 +3409,12 @@ static uint64_t sys_dup(uint64_t oldfd, uint64_t a1, uint64_t a2, uint64_t a3,
 
   t->fds[newfd] = t->fds[oldfd];
   t->fd_offsets[newfd] = t->fd_offsets[oldfd];
+  t->fd_flags[newfd] = t->fd_flags[oldfd];
+  if (t->fd_paths[oldfd][0]) {
+    strcpy(t->fd_paths[newfd], t->fd_paths[oldfd]);
+  } else {
+    t->fd_paths[newfd][0] = '\0';
+  }
   vfs_open(t->fds[newfd]);
 
   return newfd;
@@ -3412,21 +3596,7 @@ static uint64_t sys_statfs(uint64_t path_ptr, uint64_t buf_ptr, uint64_t a3,
   if (!is_user_ptr(path_ptr) || !is_user_ptr(buf_ptr))
     return (uint64_t)-14; // EFAULT
 
-  // statfs structure (Linux x86_64)
-  struct statfs_buf {
-    uint64_t f_type;
-    uint64_t f_bsize;
-    uint64_t f_blocks;
-    uint64_t f_bfree;
-    uint64_t f_bavail;
-    uint64_t f_files;
-    uint64_t f_ffree;
-    uint64_t f_fsid[2];
-    uint64_t f_namelen;
-    uint64_t f_frsize;
-    uint64_t f_flags;
-    uint64_t f_spare[4];
-  } *buf = (struct statfs_buf *)buf_ptr;
+  struct statfs_buf *buf = (struct statfs_buf *)buf_ptr;
 
   // Basic stub implementation - return dummy values
   buf->f_type = 0x61657673;   // "aev" in hex - custom filesystem type
@@ -3436,6 +3606,41 @@ static uint64_t sys_statfs(uint64_t path_ptr, uint64_t buf_ptr, uint64_t a3,
   buf->f_bavail = 1024 * 128; // ~512MB available to user
   buf->f_files = 10000;       // max inodes
   buf->f_ffree = 5000;        // free inodes
+  buf->f_fsid[0] = 1;
+  buf->f_fsid[1] = 0;
+  buf->f_namelen = 255;
+  buf->f_frsize = 4096;
+  buf->f_flags = 0;
+
+  return 0; // Success
+}
+
+// fstatfs(2) - syscall 138
+// Returns filesystem statistics for a given file descriptor
+static uint64_t sys_fstatfs(uint64_t fd, uint64_t buf_ptr, uint64_t a3,
+                            uint64_t a4, uint64_t a5, uint64_t a6) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  (void)a6;
+
+  struct thread *t = sched_get_current();
+  if (!t || fd >= MAX_FDS || !t->fds[fd])
+    return (uint64_t)-9; // EBADF
+
+  if (!buf_ptr || !is_user_ptr(buf_ptr))
+    return (uint64_t)-14; // EFAULT
+
+  struct statfs_buf *buf = (struct statfs_buf *)buf_ptr;
+
+  // Basic stub implementation - return same dummy values as statfs
+  buf->f_type = 0x61657673;
+  buf->f_bsize = 4096;
+  buf->f_blocks = 1024 * 256;
+  buf->f_bfree = 1024 * 128;
+  buf->f_bavail = 1024 * 128;
+  buf->f_files = 10000;
+  buf->f_ffree = 5000;
   buf->f_fsid[0] = 1;
   buf->f_fsid[1] = 0;
   buf->f_namelen = 255;
@@ -3853,6 +4058,7 @@ void syscall_register_io(void) {
   syscall_register(SYS_LINK, sys_link);
   syscall_register(SYS_FADVISE64, sys_fadvise64);
   syscall_register(SYS_STATFS, sys_statfs);
+  syscall_register(SYS_FSTATFS, sys_fstatfs);
   syscall_register(SYS_INOTIFY_INIT, sys_inotify_init);
   syscall_register(SYS_INOTIFY_INIT1, sys_inotify_init1);
   syscall_register(SYS_INOTIFY_ADD_WATCH, sys_inotify_add_watch);

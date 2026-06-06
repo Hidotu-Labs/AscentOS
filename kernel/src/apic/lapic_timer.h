@@ -6,10 +6,10 @@
 // LAPIC Timer Configuration
 // The timer fires at this vector.  Must not collide with existing IRQ vectors
 // (32-47) or the spurious vector (255).
-#define LAPIC_TIMER_VECTOR  48
+#define LAPIC_TIMER_VECTOR 48
 
 // Target frequency in Hz — how many times per second the timer fires.
-#define LAPIC_TIMER_HZ      1000
+#define LAPIC_TIMER_HZ 1000
 
 // Public API
 

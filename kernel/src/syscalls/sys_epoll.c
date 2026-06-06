@@ -49,6 +49,9 @@ static uint64_t sys_epoll_create(uint64_t size, uint64_t a1, uint64_t a2,
   return (uint64_t)fd;
 }
 
+/* FD_FLAGS_CLOEXEC_BIT must match the definition in sys_io.c */
+#define EPOLL_FD_FLAGS_CLOEXEC_BIT (1u << 24)
+
 // sys_epoll_create1: Create epoll instance with flags
 static uint64_t sys_epoll_create1(uint64_t flags, uint64_t a1, uint64_t a2,
                                   uint64_t a3, uint64_t a4, uint64_t a5) {
@@ -62,7 +65,7 @@ static uint64_t sys_epoll_create1(uint64_t flags, uint64_t a1, uint64_t a2,
   klog_uint64(flags);
   klog_puts("\n");
 
-  // Validate flags
+  // Validate flags — only EPOLL_CLOEXEC (0x80000) is valid
   if (flags & ~EPOLL_CLOEXEC) {
     klog_puts("[EPOLL] epoll_create1: invalid flags\n");
     return (uint64_t)-22; // EINVAL
@@ -85,9 +88,14 @@ static uint64_t sys_epoll_create1(uint64_t flags, uint64_t a1, uint64_t a2,
     return (uint64_t)-24; // EMFILE
   }
 
-  // Handle CLOEXEC flag (would set FD_CLOEXEC on the fd)
-  // For now, we just accept the flag but don't implement exec
-  (void)flags;
+  // Apply EPOLL_CLOEXEC: set FD_CLOEXEC on the file descriptor.
+  // We use the same bit (bit 24) that sys_io.c uses for FD_FLAGS_CLOEXEC_BIT.
+  if (flags & EPOLL_CLOEXEC) {
+    struct thread *t = sched_get_current();
+    if (t && fd < MAX_FDS) {
+      t->fd_flags[fd] |= EPOLL_FD_FLAGS_CLOEXEC_BIT;
+    }
+  }
 
   klog_puts("[OK] epoll_create1: created epoll instance fd=");
   klog_uint64(fd);

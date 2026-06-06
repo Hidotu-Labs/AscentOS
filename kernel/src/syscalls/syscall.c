@@ -26,6 +26,7 @@ void syscall_register_raw(int num, syscall_raw_handler_t handler) {
 void syscall_dispatcher(struct syscall_regs *regs) {
   struct thread *t = sched_get_current();
   if (t) {
+    /*
    klog_puts("[SYSCALL] tid=");
     klog_uint64(t->tid);
     klog_puts(" rax=");
@@ -33,7 +34,7 @@ void syscall_dispatcher(struct syscall_regs *regs) {
     klog_puts(" rdi=");
     klog_uint64(regs->rdi);
     klog_puts("\n");
-  
+    */
   }
 
   if (regs->rax >= MAX_SYSCALL) {

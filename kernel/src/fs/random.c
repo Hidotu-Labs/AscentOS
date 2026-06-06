@@ -26,7 +26,7 @@ void random_register_vfs(void) {
   vfs_node_t *unode = kmalloc(sizeof(vfs_node_t));
   if (!unode)
     return;
-  memset(unode, 0, sizeof(vfs_node_t));
+  vfs_node_init(unode);
   strcpy(unode->name, "urandom");
   unode->flags = FS_CHARDEV;
   unode->mask = 0666;
@@ -36,7 +36,7 @@ void random_register_vfs(void) {
   vfs_node_t *rnode = kmalloc(sizeof(vfs_node_t));
   if (!rnode)
     return;
-  memset(rnode, 0, sizeof(vfs_node_t));
+  vfs_node_init(rnode);
   strcpy(rnode->name, "random");
   rnode->flags = FS_CHARDEV;
   rnode->mask = 0666;

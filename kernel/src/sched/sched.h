@@ -67,9 +67,9 @@ struct mm_struct {
 #define SS_AUTODISARM (1U << 31)
 
 // sigaction flags
-#define SA_ONSTACK   0x08000000
-#define SA_RESTORER  0x04000000
-#define SA_NODEFER   0x40000000
+#define SA_ONSTACK 0x08000000
+#define SA_RESTORER 0x04000000
+#define SA_NODEFER 0x40000000
 
 struct k_sigaction {
   void (*sa_handler)(int);
@@ -108,7 +108,7 @@ struct context {
 struct thread {
   uint64_t rsp; // Must be first field (offset 0) for optimal assembly
   uint32_t tid;
-  uint32_t tgid;  // Thread group ID (== tid for group leader)
+  uint32_t tgid; // Thread group ID (== tid for group leader)
   uint8_t fpu_state[512] __attribute__((aligned(16))); // Saved SSE/FPU state
   uint64_t stack_base;
   uint64_t stack_size;
@@ -116,6 +116,7 @@ struct thread {
   uint64_t wakeup_ticks;
   vfs_node_t *fds[MAX_FDS];
   uint64_t fd_offsets[MAX_FDS]; // Track seek offset per file descriptor
+  uint64_t fd_flags[MAX_FDS];   // Track flags (O_NONBLOCK, etc.) for each FD
   char fd_paths[MAX_FDS][256];  // Track full path for each file descriptor
   uint64_t cr3;                 // Per-process page table (0 = inherited/kernel)
   bool is_forked_child;         // True for forked children (affects sys_exit)
@@ -127,6 +128,7 @@ struct thread {
   struct thread *children; // Head of children list
   struct thread *sibling_next; // Link to next sibling in parent's children list
   uint32_t pgid;               // Process group ID
+  uint32_t sid;                // Session ID
   int exit_status;             // Status code when exiting (for wait4)
   uint64_t *tid_address;       // Pointer to user-space TID for set_tid_address
   struct thread *global_next;  // Used to link all threads together
@@ -145,6 +147,11 @@ struct thread {
   uint32_t fsgid;              // File system Group ID
   uint32_t umask;              // File creation mask
 
+  // Real-time interval timer (ITIMER_REAL)
+  uint64_t it_real_value;    // Remaining ticks until signal (0 = disabled)
+  uint64_t it_real_interval; // Reload value in ticks
+  uint64_t it_real_next;     // Absolute tick count when timer expires
+
   // Controlling terminal (set when opening PTY slave as session leader)
   vfs_node_t *ctty; // Controlling terminal (PTY slave or console)
 
@@ -154,9 +161,9 @@ struct thread {
   uint64_t signal_mask;
 
   // Alternate signal stack (sigaltstack)
-  uint64_t ss_sp;     // Base of alternate signal stack
-  uint64_t ss_size;   // Size of alternate signal stack
-  int ss_flags;       // SS_DISABLE, SS_ONSTACK, etc.
+  uint64_t ss_sp;   // Base of alternate signal stack
+  uint64_t ss_size; // Size of alternate signal stack
+  int ss_flags;     // SS_DISABLE, SS_ONSTACK, etc.
 
   // Embedded wait queue entry for safe blocking across context switches
   // Using stack-allocated entries is unsafe because the stack frame becomes
@@ -168,9 +175,11 @@ struct thread {
   uint8_t priority;        // Current dynamic priority (0-31)
   uint8_t static_priority; // Base priority
   uint64_t time_slice;     // Remaining ticks in current quantum
-  uint64_t runtime_total;  // Total CPU time consumed (in LAPIC ticks, 1 tick = 1ms)
-  uint64_t runtime_burst;  // CPU time used in current quantum (for MLFQ)
-  char comm[16];           // Executable name (basename, max 15 chars + NUL)
+  uint64_t
+      runtime_total; // Total CPU time consumed (in LAPIC ticks, 1 tick = 1ms)
+  uint64_t runtime_burst; // CPU time used in current quantum (for MLFQ)
+  char comm[16];          // Executable name (basename, max 15 chars + NUL)
+  uint64_t cpu_affinity;  // Bitmask of allowed CPUs
 };
 
 void sched_init(void);

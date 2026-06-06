@@ -120,6 +120,15 @@ void keyboard_set_scancode_mode(bool enabled) {
   __asm__ volatile("cli");
   scancode_mode_enabled = enabled;
   extended_scancode = false; // Reset state to avoid corrupting next key
+
+  // Clear character buffer to prevent input pollution between mode switches
+  kbd_head = 0;
+  kbd_tail = 0;
+
+  // Also clear scancode buffer if we are re-enabling or disabling it
+  scancode_head = 0;
+  scancode_tail = 0;
+
   __asm__ volatile("sti");
 }
 
@@ -145,7 +154,6 @@ static void keyboard_callback(struct registers *regs) {
       return;
     }
 
-    // Push to scancode buffer FIRST before any early returns
     if (extended_scancode) {
       extended_scancode = false;
       scancode_buffer_push(scancode, 1, release ? 1 : 0);
@@ -162,32 +170,6 @@ static void keyboard_callback(struct registers *regs) {
         if (kdev) {
           evdev_push_event(kdev, EV_KEY, kc, release ? 0 : 1);
           evdev_push_event(kdev, EV_SYN, SYN_REPORT, 0);
-        }
-      }
-      // Also push escape sequences for arrow keys to character buffer
-      // so /dev/stdin works in scancode mode
-      if (!release) {
-        switch (scancode) {
-        case 0x48: { // Up
-          const char seq[] = {'\x1B', '[', 'A'};
-          keyboard_push_bytes(seq, 3);
-          break;
-        }
-        case 0x50: { // Down
-          const char seq[] = {'\x1B', '[', 'B'};
-          keyboard_push_bytes(seq, 3);
-          break;
-        }
-        case 0x4B: { // Left
-          const char seq[] = {'\x1B', '[', 'D'};
-          keyboard_push_bytes(seq, 3);
-          break;
-        }
-        case 0x4D: { // Right
-          const char seq[] = {'\x1B', '[', 'C'};
-          keyboard_push_bytes(seq, 3);
-          break;
-        }
         }
       }
     } else {
@@ -207,31 +189,6 @@ static void keyboard_callback(struct registers *regs) {
         if (kdev) {
           evdev_push_event(kdev, EV_KEY, kc, release ? 0 : 1);
           evdev_push_event(kdev, EV_SYN, SYN_REPORT, 0);
-        }
-      }
-      // Also translate to character and push to character buffer
-      // so /dev/stdin works in scancode mode
-      if (!release && scancode < sizeof(scancode_to_char)) {
-        bool use_shift = left_shift || right_shift;
-        char c = use_shift ? scancode_to_char_shift[scancode]
-                           : scancode_to_char[scancode];
-        if (left_ctrl || right_ctrl) {
-          if (c >= 'a' && c <= 'z') {
-            c = c - 'a' + 1;
-          } else if (c >= 'A' && c <= 'Z') {
-            c = c - 'A' + 1;
-          }
-        } else if (caps_lock) {
-          if (c >= 'a' && c <= 'z')
-            c -= 32;
-          else if (c >= 'A' && c <= 'Z')
-            c += 32;
-        }
-        if (c != 0 && (unsigned char)c < 0xE0) {
-          klog_puts("[KBD] scancode mode: pushing char 0x");
-          klog_hex64((unsigned char)c);
-          klog_puts(" to kbd_buffer\n");
-          ring_buffer_push(c);
         }
       }
     }

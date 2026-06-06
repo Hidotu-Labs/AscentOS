@@ -22,6 +22,7 @@
 #define FUTEX_WAIT_PRIVATE 128 // FUTEX_WAIT | FUTEX_PRIVATE_FLAG
 #define FUTEX_WAKE_PRIVATE 129 // FUTEX_WAKE | FUTEX_PRIVATE_FLAG
 #define FUTEX_PRIVATE_FLAG 128
+#define FUTEX_REQUEUE 3
 #define FUTEX_CMD_MASK 127
 
 // Error codes
@@ -149,10 +150,12 @@ static uint64_t futex_wait(uint32_t *uaddr, uint32_t val,
   sched_yield();
 
   // We're back!  Remove ourselves from the hash bucket
-  spinlock_acquire(&futex_hash[bucket].lock);
+  // The waiter might have been requeued to a different bucket.
+  uint32_t final_bucket = futex_hash_key(waiter.phys_addr);
+  spinlock_acquire(&futex_hash[final_bucket].lock);
 
   // Remove waiter from the list (may already have been removed by wake)
-  struct futex_waiter **pp = &futex_hash[bucket].head;
+  struct futex_waiter **pp = &futex_hash[final_bucket].head;
   while (*pp) {
     if (*pp == &waiter) {
       *pp = waiter.next;
@@ -161,7 +164,7 @@ static uint64_t futex_wait(uint32_t *uaddr, uint32_t val,
     pp = &(*pp)->next;
   }
 
-  spinlock_release(&futex_hash[bucket].lock);
+  spinlock_release(&futex_hash[final_bucket].lock);
 
   // Determine return value: if we timed out the state would have been
   // set back to READY by the scheduler's timeout logic, but wakeup_ticks
@@ -222,11 +225,75 @@ static uint64_t futex_wake(uint32_t *uaddr, uint32_t val) {
   return (uint64_t)woken;
 }
 
+// FUTEX_REQUEUE
+// Wake at most `val` threads waiting on uaddr1, and move at most `val2`
+// remaining threads to wait on uaddr2 instead.
+static uint64_t futex_requeue(uint32_t *uaddr1, uint32_t val, uint32_t val2,
+                              uint32_t *uaddr2) {
+  futex_init_once();
+
+  uint64_t phys1 = futex_get_phys(uaddr1);
+  uint64_t phys2 = futex_get_phys(uaddr2);
+  if (phys1 == 0 || phys2 == 0)
+    return (uint64_t)(-(int64_t)EFAULT);
+
+  if (phys1 == phys2)
+    return futex_wake(uaddr1, val);
+
+  uint32_t bucket1 = futex_hash_key(phys1);
+  uint32_t bucket2 = futex_hash_key(phys2);
+
+  uint32_t total_woken = 0;
+  uint32_t total_requeued = 0;
+
+  // Always acquire locks in bucket order to avoid deadlocks
+  if (bucket1 < bucket2) {
+    spinlock_acquire(&futex_hash[bucket1].lock);
+    spinlock_acquire(&futex_hash[bucket2].lock);
+  } else {
+    spinlock_acquire(&futex_hash[bucket2].lock);
+    spinlock_acquire(&futex_hash[bucket1].lock);
+  }
+
+  struct futex_waiter **pp = &futex_hash[bucket1].head;
+  while (*pp) {
+    struct futex_waiter *w = *pp;
+    if (w->phys_addr == phys1) {
+      if (total_woken < val) {
+        // Wake this thread
+        if (w->thread && w->thread->state == THREAD_BLOCKED) {
+          w->thread->state = THREAD_READY;
+          w->thread->wakeup_ticks = 0;
+          total_woken++;
+        }
+        // Remove from bucket1
+        *pp = w->next;
+      } else if (total_requeued < val2) {
+        // Requeue: move to bucket2
+        *pp = w->next; // Remove from bucket1
+        w->phys_addr = phys2;
+        w->next = futex_hash[bucket2].head;
+        futex_hash[bucket2].head = w;
+        total_requeued++;
+      } else {
+        // Limit reached for both waking and requeueing
+        pp = &w->next;
+      }
+    } else {
+      pp = &w->next;
+    }
+  }
+
+  spinlock_release(&futex_hash[bucket1].lock);
+  spinlock_release(&futex_hash[bucket2].lock);
+
+  return (uint64_t)total_woken;
+}
+
 // sys_futex dispatcher
 static uint64_t sys_futex(uint64_t uaddr_val, uint64_t op_val, uint64_t val_arg,
-                          uint64_t timeout_ptr, uint64_t uaddr2,
+                          uint64_t timeout_ptr, uint64_t uaddr2_val,
                           uint64_t val3) {
-  (void)uaddr2;
   (void)val3;
 
   uint32_t *uaddr = (uint32_t *)uaddr_val;
@@ -242,6 +309,10 @@ static uint64_t sys_futex(uint64_t uaddr_val, uint64_t op_val, uint64_t val_arg,
 
   case FUTEX_WAKE:
     return futex_wake(uaddr, val);
+
+  case FUTEX_REQUEUE:
+    return futex_requeue(uaddr, val, (uint32_t)timeout_ptr,
+                         (uint32_t *)uaddr2_val);
 
   default:
     klog_puts("[FUTEX] Unsupported op: ");
