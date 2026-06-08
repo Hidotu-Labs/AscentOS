@@ -1,11 +1,11 @@
 #include "drivers/pci/pci.h"
 #include "console/console.h"
+#include "console/klog.h"
 #include "drivers/manager/device.h"
 #include "drivers/pci/pcie.h"
 #include "io/io.h"
 #include "lib/string.h"
 #include <stddef.h>
-
 static struct pci_device devices[PCI_MAX_DEVICES];
 static uint32_t device_count = 0;
 
@@ -186,7 +186,8 @@ static void pci_check_device(uint8_t bus, uint8_t slot) {
 void pci_init(void) {
   pcie_init();
   device_count = 0;
-  console_puts("[INFO] Scanning PCI bus...\n");
+  console_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET
+                              " Scanning PCI bus...\n");
 
   for (uint16_t bus = 0; bus < 256; bus++) {
     for (uint8_t slot = 0; slot < 32; slot++) {
@@ -194,7 +195,7 @@ void pci_init(void) {
     }
   }
 
-  console_puts("[OK] PCI: Found ");
+  console_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " PCI: Found ");
   print_uint32(device_count);
   console_puts(" device(s). Dumping Device Tree...\n");
 

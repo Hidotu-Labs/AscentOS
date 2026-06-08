@@ -1,5 +1,6 @@
 #include "net/dhcp.h"
 #include "console/console.h"
+#include "console/klog.h"
 #include "drivers/timer/pit.h"
 #include "lib/string.h"
 #include "net/byteorder.h"
@@ -8,7 +9,6 @@
 #include "net/netif.h"
 #include "net/udp.h"
 #include "sched/sched.h"
-
 static uint32_t current_xid = 0xAA55CC33;
 static volatile bool dhcp_done = false;
 static uint32_t offered_ip = 0;
@@ -112,7 +112,8 @@ static void dhcp_recv_cb(uint16_t local_port, const uint8_t *payload,
   }
 
   if (ntohl(pkt->magic_cookie) != 0x63825363) {
-    console_puts("[DHCP] Invalid magic cookie!\n");
+    console_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET
+                              " DHCP: Invalid magic cookie!\n");
     return;
   }
 
@@ -151,15 +152,18 @@ static void dhcp_recv_cb(uint16_t local_port, const uint8_t *payload,
     offered_ip = pkt->yiaddr;
     server_ip = server_id;
     dhcp_state = 2;
-    console_puts("[DHCP] State: OFFER received.\n");
+    console_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET
+                                " DHCP: OFFER received.\n");
   } else if (msg_type == DHCP_MSG_ACK && (dhcp_state == 3 || dhcp_state == 2)) {
     offered_netmask = netmask;
     offered_router = router;
     dhcp_state = 4;
     dhcp_done = true;
-    console_puts("[DHCP] State: ACK received.\n");
+    console_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET
+                                " DHCP: ACK received.\n");
   } else if (msg_type == DHCP_MSG_NAK) {
-    console_puts("[DHCP] Received NAK from server.\n");
+    console_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET
+                              " DHCP: Received NAK from server.\n");
   } else {
     // Hidden debug info to avoid terminal clutter unless manually enabled
     /*
@@ -183,7 +187,8 @@ bool dhcp_negotiate(void) {
 
   // Retry Discover up to 3 times
   for (int attempts = 0; attempts < 3 && dhcp_state < 2; attempts++) {
-    console_puts("[DHCP] Sending DISCOVER...\n");
+    console_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET
+                                " Sending DHCP DISCOVER...\n");
     dhcp_send_discover();
     uint64_t start = pit_get_ticks();
     while (dhcp_state < 2 && (pit_get_ticks() - start < 200)) { // 2s timeout
@@ -193,10 +198,12 @@ bool dhcp_negotiate(void) {
   }
 
   if (dhcp_state == 2) {
-    console_puts("[DHCP] Received OFFER...\n");
+    console_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET
+                                " Received DHCP OFFER...\n");
     // Retry Request up to 3 times
     for (int attempts = 0; attempts < 3 && dhcp_state < 4; attempts++) {
-      console_puts("[DHCP] Sending REQUEST...\n");
+      console_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET
+                                  " Sending DHCP REQUEST...\n");
       dhcp_send_request();
       uint64_t start = pit_get_ticks();
       while (dhcp_state < 4 && (pit_get_ticks() - start < 200)) { // 2s timeout
@@ -213,10 +220,12 @@ bool dhcp_negotiate(void) {
     nif->gateway = ntohl(offered_router);
     nif->up = true;
 
-    console_puts("[DHCP] Received ACK: Successfully bound!\n");
+    console_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET
+                                " DHCP ACK: Successfully bound!\n");
     return true;
   }
 
-  console_puts("[DHCP] Negotiation failed.\n");
+  console_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET
+                            " DHCP negotiation failed.\n");
   return false;
 }

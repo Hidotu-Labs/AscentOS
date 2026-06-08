@@ -1,6 +1,6 @@
 #include "drivers/manager/dtb.h"
 #include "drivers/manager/device.h"
-#include "console/console.h"
+#include "console/klog.h"
 #include "lib/string.h"
 
 static uint32_t fdt_swap32(uint32_t val) {
@@ -15,11 +15,11 @@ void dm_parse_dtb(void *fdt_blob) {
 
     struct fdt_header *header = (struct fdt_header *)fdt_blob;
     if (fdt_swap32(header->magic) != 0xd00dfeed) {
-        console_puts("[DTB] Invalid magic - not a valid DTB blob.\n");
+        klog_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " DTB: Invalid magic - not a valid DTB blob.\n");
         return;
     }
 
-    console_puts("[DTB] Found valid blob. Parsing...\n");
+    klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " DTB: Found valid blob. Parsing...\n");
 
     uint32_t *p = (uint32_t *)((uint8_t *)fdt_blob + fdt_swap32(header->off_dt_struct));
     const char *str_tab = (const char *)((uint8_t *)fdt_blob + fdt_swap32(header->off_dt_strings));
@@ -49,6 +49,7 @@ void dm_parse_dtb(void *fdt_blob) {
             uint32_t data_len = fdt_swap32(*p++);
             uint32_t name_off = fdt_swap32(*p++);
             const char *prop_name = str_tab + name_off;
+            (void)prop_name; /* unused for now */
 
             /* 
              * For now, we don't do much with properties, but we could 
@@ -62,5 +63,5 @@ void dm_parse_dtb(void *fdt_blob) {
         }
     }
 
-    console_puts("[DTB] Parsing complete.\n");
+    klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " DTB: Parsing complete.\n");
 }

@@ -113,7 +113,6 @@ static void uhci_irq_handler(struct registers *regs) {
       klog_puts("\n");
     }
 
-
     if (sts & UHCI_STS_USBINT) {
       usb_kbd_poll();
       usb_mouse_poll();
@@ -226,8 +225,6 @@ static struct uhci_td *uhci_alloc_td(struct uhci_controller *hc,
   }
   return NULL;
 }
-
-
 
 int uhci_control_transfer(struct uhci_controller *hc, uint8_t addr,
                           struct usb_control_request *req, void *data,
@@ -394,8 +391,6 @@ static uint8_t uhci_detect_ports(struct uhci_controller *hc) {
   }
   return count ? count : 2; // Default to 2 if detection fails
 }
-
-
 
 void uhci_reset_port(struct uhci_controller *hc, uint8_t port) {
   uint16_t reg = UHCI_REG_PORTSC1 + (port * 2);
@@ -682,7 +677,6 @@ void uhci_self_test(void) {
       fail++;
     }
 
-
     uint16_t cmd = uhci_read16(hc, UHCI_REG_USBCMD);
     if (cmd & UHCI_CMD_CF) {
       console_puts("    [PASS] USBCMD configure flag set (0x");
@@ -695,7 +689,6 @@ void uhci_self_test(void) {
       console_puts(")\n");
       fail++;
     }
-
 
     uint16_t intr = uhci_read16(hc, UHCI_REG_USBINTR);
     uint16_t expected_intr =

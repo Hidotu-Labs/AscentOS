@@ -347,8 +347,6 @@ static void hda_irq_handler(struct registers *regs) {
   }
 }
 
-
-
 void hda_init(void) {
   klog_puts("[HDA] Searching for Intel HDA controller...\n");
 
@@ -1009,6 +1007,39 @@ static int hda_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     return -5;
 
   switch (request) {
+  case 0x5000: // SNDCTL_DSP_RESET
+  {
+    __asm__ volatile("cli");
+    if (hda_is_playing) {
+      uint16_t gcap = hda_read16(HDA_GCAP);
+      int iss = (gcap >> 8) & 0xF;
+      uint32_t sd_off = HDA_SD_BASE + (iss * 0x20);
+      hda_write32(sd_off + HDA_SD_CTL,
+                  hda_read32(sd_off + HDA_SD_CTL) & ~HDA_SD_CTL_RUN);
+      hda_is_playing = false;
+    }
+    ring_head = ring_tail = ring_count = 0;
+    __asm__ volatile("sti");
+    return 0;
+  }
+  case 0xC004500A: // SNDCTL_DSP_SETFRAGMENT
+    return 0;
+  case 0x8010500C: // SNDCTL_DSP_GETOSPACE
+  {
+    struct {
+      int fragments;
+      int fragstotal;
+      int fragsize;
+      int bytes;
+    } *info = (void *)arg;
+    if (!info)
+      return -14;
+    info->fragsize = HDA_VFS_BUF_SIZE;
+    info->fragstotal = HDA_RING_SIZE / HDA_VFS_BUF_SIZE;
+    info->bytes = HDA_RING_SIZE - ring_count;
+    info->fragments = (int)(info->bytes / info->fragsize);
+    return 0;
+  }
   case SNDCTL_DSP_SPEED: {
     uint32_t *rate = (uint32_t *)arg;
     if (rate)
@@ -1018,7 +1049,7 @@ static int hda_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
   case SNDCTL_DSP_CHANNELS: {
     int *ch = (int *)arg;
     if (ch)
-      hda_channels = *ch;
+      hda_channels = (uint8_t)*ch;
     return 0;
   }
   case SNDCTL_DSP_SETFMT: {

@@ -2,6 +2,7 @@
 #include "mm/heap.h"
 #include "lib/string.h"
 #include "console/console.h"
+#include "console/klog.h"
 #include <stddef.h>
 
 static struct device *root_node = NULL;
@@ -23,7 +24,7 @@ void dm_init(void) {
     // Create /sys for system devices
     device_create(root_node, "sys");
     
-    console_puts("[OK] Device Manager initialized.\n");
+    console_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " Device Manager initialized.\n");
 }
 
 struct device *device_create(struct device *parent, const char *name) {
@@ -129,7 +130,7 @@ static void dm_probe_all(struct device *dev) {
 void dm_register_driver(struct driver *drv) {
     drv->next = driver_list;
     driver_list = drv;
-    console_puts("[UDM] Registered driver: ");
+    console_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " UDM: Registered driver: ");
     console_puts(drv->name);
     console_puts("\n");
 
@@ -162,7 +163,7 @@ int dm_probe_device(struct device *dev) {
             if (match_id(dev, &drv->ids[i])) {
                 if (drv->probe(dev) == 0) {
                     dev->driver = drv;
-                    console_puts("[UDM] Bound device ");
+                    console_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " UDM: Bound device ");
                     console_puts(dev->name);
                     console_puts(" to driver ");
                     console_puts(drv->name);

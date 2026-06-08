@@ -5,11 +5,11 @@
 extern struct drm_device global_drm_dev;
 
 void drm_run_phase3_test(void) {
-  klog_puts("[DRM_TEST] Starting Phase 1, 2 & 3 Stress Test\n");
+  klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " Starting DRM Phase 1, 2 & 3 Stress Test\n");
 
   struct vfs_node *node = vfs_resolve_path("/dev/dri/card0");
   if (!node) {
-    klog_puts("[DRM_TEST] ERROR: /dev/dri/card0 not found!\n");
+    klog_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " /dev/dri/card0 not found!\n");
     return;
   }
 
@@ -24,13 +24,13 @@ void drm_run_phase3_test(void) {
   ver.desc_len = 64;
 
   if (node->ioctl(node, DRM_IOCTL_VERSION, (uint64_t)&ver) == 0) {
-    klog_puts("[DRM_TEST] Version: ");
+    klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " DRM Version: ");
     klog_puts(name);
     klog_puts("\n");
   }
 
   // 2. GEM Stress Test
-  klog_puts("[DRM_TEST] Running GEM allocation stress loop...\n");
+  klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " Running GEM allocation stress loop...\n");
   for (int i = 0; i < 100; i++) {
     struct drm_gem_create c;
     c.size = 4096;
@@ -40,20 +40,20 @@ void drm_run_phase3_test(void) {
       node->ioctl(node, DRM_IOCTL_GEM_FREE, (uint64_t)&f);
     }
   }
-  klog_puts("[DRM_TEST] GEM allocation loop PASSED.\n");
+  klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " GEM allocation loop PASSED.\n");
 
   // 3. KMS Stress Test
-  klog_puts("[DRM_TEST] Phase 2: KMS Pipeline Validation\n");
+  klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " Phase 2: KMS Pipeline Validation\n");
   spinlock_acquire(&global_drm_dev.lock);
   int kms_count = 0;
   struct drm_mode_object *mobj;
   list_for_each_entry(mobj, &global_drm_dev.kms_objects, list) { kms_count++; }
   spinlock_release(&global_drm_dev.lock);
-  klog_puts("[DRM_TEST] KMS Object count: ");
+  klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " KMS Object count: ");
   klog_uint64(kms_count);
   klog_puts("\n");
 
-  klog_puts("[DRM_TEST] Phase 3: Dumb Buffer & MMAP Validation\n");
+  klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " Phase 3: Dumb Buffer & MMAP Validation\n");
 
   struct drm_mode_create_dumb cd;
   cd.width = 128;
@@ -68,23 +68,23 @@ void drm_run_phase3_test(void) {
         uint64_t addr = node->mmap(node, 0, cd.size,
                                    3 /* PROT_READ|PROT_WRITE */, 0, md.offset);
         if (addr != (uint64_t)-1) {
-          klog_puts("[DRM_TEST] Mapped Dumb Buffer successfully.\n");
+          klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " Mapped Dumb Buffer successfully.\n");
           // Write test
           volatile uint32_t *ptr = (volatile uint32_t *)addr;
           ptr[0] = 0xDEADBEEF;
           if (ptr[0] == 0xDEADBEEF) {
-            klog_puts("[DRM_TEST] Mapped write test: SUCCESS\n");
+            klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " Mapped write test: SUCCESS\n");
           } else {
-            klog_puts("[DRM_TEST] Mapped write test: FAILED\n");
+            klog_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " Mapped write test: FAILED\n");
           }
         } else {
-          klog_puts("[DRM_TEST] ERROR: node->mmap failed!\n");
+          klog_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " node->mmap failed!\n");
         }
       }
     }
   }
 
-  klog_puts("[DRM_TEST] Phase 4: Hardware FB Bridge Validation\n");
+  klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " Phase 4: Hardware FB Bridge Validation\n");
   bool found_hw_fb = false;
   spinlock_acquire(&global_drm_dev.lock);
   struct drm_gem_object *obj;
@@ -96,10 +96,10 @@ void drm_run_phase3_test(void) {
   }
   spinlock_release(&global_drm_dev.lock);
   if (found_hw_fb) {
-    klog_puts("[DRM_TEST] Hardware FB GEM found! Bridge is ACTIVE.\n");
+    klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " Hardware FB GEM found! Bridge is ACTIVE.\n");
   } else {
-    klog_puts("[DRM_TEST] ERROR: Hardware FB GEM not found!\n");
+    klog_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " Hardware FB GEM not found!\n");
   }
 
-  klog_puts("[DRM_TEST] Stress Test COMPLETE. Graphics stack is healthy.\n");
+  klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " Stress Test COMPLETE. Graphics stack is healthy.\n");
 }

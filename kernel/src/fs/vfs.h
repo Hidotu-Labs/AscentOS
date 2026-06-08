@@ -68,6 +68,23 @@ typedef uint64_t (*mmap_type_t)(struct vfs_node *, uint64_t addr,
 typedef int (*poll_type_t)(struct vfs_node *, int events);
 typedef int (*fallocate_type_t)(struct vfs_node *, int mode, uint32_t offset,
                                 uint32_t len);
+// statfs structure (Linux x86_64 compatible)
+struct statfs_buf {
+  uint64_t f_type;
+  uint64_t f_bsize;
+  uint64_t f_blocks;
+  uint64_t f_bfree;
+  uint64_t f_bavail;
+  uint64_t f_files;
+  uint64_t f_ffree;
+  uint64_t f_fsid[2];
+  uint64_t f_namelen;
+  uint64_t f_frsize;
+  uint64_t f_flags;
+  uint64_t f_spare[4];
+};
+
+typedef int (*statfs_type_t)(struct vfs_node *, struct statfs_buf *buf);
 
 typedef struct vfs_node {
   char name[128];
@@ -104,6 +121,7 @@ typedef struct vfs_node {
   truncate_type_t truncate;
   mmap_type_t mmap;   // Device-specific mmap handler
   poll_type_t poll;   // Device-specific poll handler
+  statfs_type_t statfs;
   ioctl_type_t ioctl; // Device-specific ioctl handler
   fallocate_type_t fallocate;
   void *wait_queue; // Pointer to wait_queue_t for poll() wakeups
@@ -147,6 +165,17 @@ int vfs_mknod(vfs_node_t *node, char *name, uint16_t permission, uint32_t flags,
 int vfs_poll(vfs_node_t *node, int events);
 void vfs_node_init(vfs_node_t *node);
 int vfs_mount(vfs_node_t *mountpoint, vfs_node_t *target);
+int vfs_mount_ex(vfs_node_t *mountpoint, vfs_node_t *target, const char *dev_name, const char *fs_type);
+int vfs_statfs(vfs_node_t *node, void *buf);
+
+typedef struct vfs_mount_info {
+  char mountpoint[128];
+  char target[128];
+  char dev_name[64];
+  char fs_type[32];
+} vfs_mount_info_t;
+
+int vfs_get_mounts(vfs_mount_info_t *buffer, int max_count);
 
 // Page Cache API
 vfs_page_t *vfs_cache_lookup(vfs_node_t *node, uint32_t offset);

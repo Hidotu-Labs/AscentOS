@@ -65,6 +65,15 @@ static uint32_t dsp_vfs_write(struct vfs_node *node, uint32_t offset,
 static int dsp_vfs_ioctl(struct vfs_node *node, uint32_t request,
                          uint64_t arg) {
   (void)node;
+
+  // Handle OSS version request centrally
+  if (request == 0x80044D76) { // OSS_GETVERSION
+    int *version = (int *)arg;
+    if (!version) return -14; // EFAULT
+    *version = 0x040000; // Report OSS 4.0
+    return 0;
+  }
+
   vfs_node_t *audio = get_active_audio_node();
   if (!audio || !audio->ioctl) {
     return -6; // ENXIO - no such device

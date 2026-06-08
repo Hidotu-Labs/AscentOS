@@ -250,7 +250,7 @@ build_libfontenc() {
         --prefix="$SYSROOT" \
         --enable-static \
         --disable-shared \
-        CFLAGS="-static -O2 -I$SYSROOT/include" \
+        CFLAGS="-static -O3 -I$SYSROOT/include" \
         LDFLAGS="-static -L$SYSROOT/lib"
     make -j"$JOBS"
     make install
@@ -266,7 +266,7 @@ build_libXfont2() {
         --enable-static \
         --disable-shared \
         --without-fop \
-        CFLAGS="-static -O2 -I$SYSROOT/include -I$SYSROOT/include/freetype2" \
+        CFLAGS="-static -O3 -I$SYSROOT/include -I$SYSROOT/include/freetype2" \
         LDFLAGS="-static -L$SYSROOT/lib"
     make -j"$JOBS"
     make install
@@ -339,7 +339,7 @@ build_xserver() {
         --with-xkb-path=/share/X11/xkb \
         --with-xkb-output=/tmp \
         --with-xkb-bin-directory=/bin \
-        CFLAGS="-static -O2 -I$SYSROOT/include -DHAVE_CBRT -Wno-incompatible-pointer-types -Wno-array-bounds -D__uid_t=uid_t -D__gid_t=gid_t" \
+        CFLAGS="-static -O3 -I$SYSROOT/include -DHAVE_CBRT -Wno-incompatible-pointer-types -Wno-array-bounds -D__uid_t=uid_t -D__gid_t=gid_t" \
         LDFLAGS="-static -L$SYSROOT/lib" \
         LIBS="-lpixman-1 -lfreetype -lfontenc -lz"
 
@@ -472,7 +472,7 @@ build_xkbcomp() {
         --prefix="$SYSROOT" \
         --enable-static \
         --disable-shared \
-        CFLAGS="-static -O2 -I$SYSROOT/include" \
+        CFLAGS="-static -O3 -I$SYSROOT/include" \
         LDFLAGS="-static -L$SYSROOT/lib" \
         LIBS="-lxcb -lXau -lXdmcp"
     make -j"$JOBS"

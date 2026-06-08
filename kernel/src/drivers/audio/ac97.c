@@ -335,6 +335,32 @@ int ac97_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     return -5; // EIO
 
   switch (request) {
+  case 0x5000: // SNDCTL_DSP_RESET
+  {
+    asm volatile("cli");
+    ring_head = ring_tail = ring_count = 0;
+    ac97_is_playing = false;
+    ac97_nabm_write8(AC97_PO_CR, 0);
+    asm volatile("sti");
+    return 0;
+  }
+  case 0xC004500A: // SNDCTL_DSP_SETFRAGMENT
+    return 0; // Dummy success
+  case 0x8010500C: // SNDCTL_DSP_GETOSPACE
+  {
+    struct {
+      int fragments;
+      int fragstotal;
+      int fragsize;
+      int bytes;
+    } *info = (void *)arg;
+    if (!info) return -14;
+    info->fragsize = AC97_BUFFER_SIZE;
+    info->fragstotal = AC97_RING_SIZE / AC97_BUFFER_SIZE;
+    info->bytes = AC97_RING_SIZE - ring_count;
+    info->fragments = info->bytes / info->fragsize;
+    return 0;
+  }
   case SNDCTL_DSP_SPEED: {
     uint32_t *rate = (uint32_t *)arg;
     if (!rate)

@@ -183,20 +183,28 @@ static int unix_bind_fs(unix_sock_t *usk, struct sockaddr_un *sun,
       cwd_node = fs_root;
   }
 
-  // Check if target file already exists
-  vfs_node_t *existing = vfs_resolve_path_at(cwd_node, sun->sun_path);
-  if (existing) {
-    // Already exists
-    klog_puts("[WARN] unix_bind_fs: filesystem node already exists: ");
-    klog_puts(sun->sun_path);
-    klog_puts("\n");
-    return -EADDRINUSE;
-  }
-
   vfs_node_t *parent = vfs_resolve_path_at(cwd_node, parent_path);
   if (!parent) {
     klog_puts("[WARN] unix_bind_fs: parent directory not found\n");
     return -2; // ENOENT
+  }
+
+  // Check if target file already exists
+  vfs_node_t *existing = vfs_finddir(parent, name);
+  if (existing) {
+    // If it exists in VFS but NOT in our bound list, it's a stale socket file
+    if (!unix_find_socket_by_addr(sun, addrlen)) {
+      klog_puts("[INFO] unix_bind_fs: unlinking stale socket node: ");
+      klog_puts(sun->sun_path);
+      klog_puts("\n");
+      vfs_unlink(parent, name);
+      // Proceed to create fresh node
+    } else {
+      klog_puts("[WARN] unix_bind_fs: address already in use: ");
+      klog_puts(sun->sun_path);
+      klog_puts("\n");
+      return -EADDRINUSE;
+    }
   }
 
   // Create socket node

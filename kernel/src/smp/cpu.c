@@ -165,16 +165,16 @@ void ap_main(void) {
 // Initialization
 
 void cpu_init(void) {
-  console_puts("[INFO] Initializing per-CPU data structures...\n");
+  console_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " Initializing per-CPU data structures...\n");
 
   // Step 1: Query ACPI for all CPU APIC IDs
   cpu_count = acpi_get_cpu_count();
   if (cpu_count == 0) {
-    console_puts("[WARN] No CPUs found in MADT, assuming 1 (BSP only).\n");
+    console_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " No CPUs found in MADT, assuming 1 (BSP only).\n");
     cpu_count = 1;
   }
   if (cpu_count > MAX_CPUS) {
-    console_puts("[WARN] CPU count exceeds MAX_CPUS, clamping.\n");
+    console_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " CPU count exceeds MAX_CPUS, clamping.\n");
     cpu_count = MAX_CPUS;
   }
 
@@ -211,7 +211,7 @@ void cpu_init(void) {
   for (uint32_t i = 0; i < cpu_count; i++) {
     cpus[i].stack_top = alloc_cpu_stack();
     if (cpus[i].stack_top == 0) {
-      console_puts("[ERR] Failed to allocate stack for CPU ");
+      console_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " Failed to allocate stack for CPU ");
       print_uint32(i);
       console_puts("!\n");
     }
@@ -230,7 +230,7 @@ void cpu_init(void) {
   cpu_set_gs_base(&cpus[0]);
 
   // Report
-  console_puts("[OK] Per-CPU structures initialized.\n");
+  console_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " Per-CPU structures initialized.\n");
   console_puts("     Total CPUs: ");
   print_uint32(cpu_count);
   console_puts("\n");
@@ -254,16 +254,16 @@ void cpu_init(void) {
   // Step 6: Verify GS base works
   struct cpu_info *current = cpu_get_current();
   if (current && current == &cpus[0] && current->status == CPU_STATUS_BSP) {
-    console_puts("[OK] GS base self-pointer verified for BSP.\n");
+    console_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " GS base self-pointer verified for BSP.\n");
   } else {
-    console_puts("[ERR] GS base verification FAILED!\n");
+    console_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " GS base verification " KLOG_CLR_RED "FAILED!" KLOG_CLR_RESET "\n");
   }
 }
 
 void cpu_init_aps(void) {
   // Step 7: Wake up the Application Processors
   if (cpu_count > 1) {
-    console_puts("[INFO] Waking up Application Processors...\n");
+    console_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " Waking up Application Processors...\n");
 
     uint64_t cr3;
     __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
@@ -279,7 +279,7 @@ void cpu_init_aps(void) {
     // transitions PAGING -> 64-bit Long Mode
     if (!vmm_map_page(vmm_get_active_pml4(), tramp_phys, tramp_phys,
                       PAGE_FLAG_RW | PAGE_FLAG_PRESENT)) {
-      klog_puts("[SMP] Warning: Failed to map trampoline page\n");
+      klog_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " Warning: Failed to map trampoline page\n");
     }
 
     // Find offsets to modify the trampoline variables natively

@@ -147,10 +147,10 @@ void restart_main_session(void) {
 }
 
 static void init_thread_entry(void) {
-  klog_puts("[INIT] Init thread started\n");
+  klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " Init thread started\n");
   // Clear console only once when userland starts
   console_clear();
-  klog_puts("[INIT] Console cleared, starting session...\n");
+  klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " Console cleared, starting session...\n");
 
   while (1) {
     const char *bash_argv[] = {"/bin/bash", NULL};
@@ -161,7 +161,7 @@ static void init_thread_entry(void) {
     }
 
     if (!process_exec_argv(bash_argv)) {
-      klog_puts("\n[ERR] Failed to start Bash. Falling back to shell.\n");
+      klog_puts("\n" KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " Failed to start Bash. Falling back to shell.\n");
       shell_init();
       shell_run();
       break;
@@ -170,7 +170,7 @@ static void init_thread_entry(void) {
 }
 
 static void net_thread_entry(void) {
-  klog_puts("[NET] Background thread started\n");
+  klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " Background networking thread started\n");
   while (1) {
     net_poll();
     sched_yield();
@@ -195,29 +195,29 @@ void kmain(void) {
   fb_init(fb);
   klog_set_screen_logging(true);
 
-  klog_puts("AscentOS Kernel Booting...\n");
+  klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " AscentOS Kernel Booting...\n");
 
   if (paging_mode_request.response != NULL) {
     if (paging_mode_request.response->mode == LIMINE_PAGING_MODE_X86_64_4LVL) {
-      klog_puts("[OK] Limine Paging Mode: 4-level (x86_64)\n");
+      klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " Limine Paging Mode: 4-level (x86_64)\n");
     } else if (paging_mode_request.response->mode ==
                LIMINE_PAGING_MODE_X86_64_5LVL) {
-      klog_puts("[OK] Limine Paging Mode: 5-level (x86_64)\n");
+      klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " Limine Paging Mode: 5-level (x86_64)\n");
     } else {
-      klog_puts("[OK] Limine Paging Mode: Unknown\n");
+      klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " Limine Paging Mode: Unknown\n");
     }
   } else {
-    klog_puts("[WARN] Paging mode response not provided by Limine.\n");
+    klog_puts(KLOG_CLR_YELLOW "[ WARN ]" KLOG_CLR_RESET " Paging mode response not provided by Limine.\n");
   }
 
   if (memmap_request.response == NULL || hhdm_request.response == NULL) {
-    klog_puts("[ERR] Missing Limine memory map or HHDM responses. Halting.\n");
+    klog_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " Missing Limine memory map or HHDM responses. Halting.\n");
     halt();
   }
 
   pmm_init(memmap_request.response, hhdm_request.response->offset);
 
-  klog_puts("[OK] Physical Memory Manager (PMM) Initialized.\n");
+  klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " Physical Memory Manager (PMM) Initialized.\n");
   klog_puts("     Total RAM:  ");
   klog_uint64(pmm_get_total_memory() / (1024 * 1024));
   klog_puts(" MB\n");
@@ -241,13 +241,13 @@ void kmain(void) {
 
   pit_init(100);
   rtc_init();
-  klog_puts("[OK] Legacy PIC Remapped, PIT 100Hz and RTC started.\n");
+  klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " Legacy PIC Remapped, PIT 100Hz and RTC started.\n");
 
   keyboard_init();
   mouse_init();
   __asm__ volatile("sti"); // Enable hardware interrupts!
 
-  klog_puts("[OK] Initializing Virtual Memory Manager (VMM)...\n");
+  klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " Initializing Virtual Memory Manager (VMM)...\n");
   vmm_init();
   klog_puts("     Active CR3 Page Map hooked.\n");
   heap_init();
@@ -267,28 +267,28 @@ void kmain(void) {
   klog_set_screen_logging(false);
   dm_init();
 
-  console_puts("[UDM] Checking for platform DTB...\n");
+  console_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " Checking for platform DTB...\n");
   if (dtb_request.response && dtb_request.response->dtb_ptr) {
     dm_parse_dtb(dtb_request.response->dtb_ptr);
   } else {
     console_puts("      No platform DTB provided (standard for x86/ACPI).\n");
   }
 
-  klog_puts("[OK] Testing VMM mapping... (0xCAFEBABE000)\n");
+  klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " Testing VMM mapping... (0xCAFEBABE000)\n");
   void *test_phys = pmm_alloc();
   if (test_phys) {
     uint64_t vaddr = 0xCAFEBABE000;
     if (!vmm_map_page(vmm_get_active_pml4(), vaddr, (uint64_t)test_phys,
                       PAGE_FLAG_RW | PAGE_FLAG_USER)) {
-      klog_puts("[ERROR] vmm_map_page test failed\n");
+      klog_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " vmm_map_page test failed\n");
     } else {
       volatile uint64_t *test_ptr = (volatile uint64_t *)vaddr;
       *test_ptr = 0x1337BEEF; // If this page faults, the mapping failed!
 
       if (*test_ptr == 0x1337BEEF) {
-        klog_puts("     VMM custom mapping test SUCCESSFUL!\n");
+        klog_puts("     VMM custom mapping test " KLOG_CLR_GREEN "SUCCESSFUL!" KLOG_CLR_RESET "\n");
       } else {
-        klog_puts("     VMM custom mapping test FAILED!\n");
+        klog_puts("     VMM custom mapping test " KLOG_CLR_RED "FAILED!" KLOG_CLR_RESET "\n");
       }
     }
   }
@@ -302,28 +302,28 @@ void kmain(void) {
   acpi_parse_fadt();
 
   cpu_init();
-  klog_puts("[OK] Transitioning to kernel-allocated stack...\n");
+  klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " Transitioning to kernel-allocated stack...\n");
   cpu_jump_to_stack(cpu_get_bsp()->stack_top, kmain_high_half);
 }
 
 void kmain_high_half(void) {
-  klog_puts("[OK] Switched to kernel-allocated stack.\n");
+  klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " Switched to kernel-allocated stack.\n");
 
   uint32_t lapic_base = acpi_get_lapic_base();
   uint32_t ioapic_base = acpi_get_ioapic_base();
 
-  klog_puts("[INFO] Initializing Scheduler...\n");
+  klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " Initializing Scheduler...\n");
   sched_init();
 
   if (lapic_base && ioapic_base) {
-    klog_puts("\n[INFO] Switching to APIC interrupt mode...\n");
+    klog_puts("\n" KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " Switching to APIC interrupt mode...\n");
 
     // Disable interrupts during the transition
     __asm__ volatile("cli");
 
     // 5a. Disable the legacy 8259 PIC
     pic_disable();
-    klog_puts("[OK] Legacy 8259 PIC disabled.\n");
+    klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " Legacy 8259 PIC disabled.\n");
 
     // 5b. Initialize the Local APIC
     lapic_init((uint64_t)lapic_base);
@@ -342,14 +342,14 @@ void kmain_high_half(void) {
     // Re-enable interrupts — now handled through the APIC path
     __asm__ volatile("sti");
 
-    klog_puts("[OK] APIC interrupt mode ACTIVE.\n\n");
+    klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " APIC interrupt mode ACTIVE.\n\n");
 
     // 5h. Start the LAPIC timer (calibrates against PIT)
     lapic_timer_init();
 
     // 5h.1: HPET is available as backup timer if LAPIC fails
     if (hpet_is_backup_available()) {
-      klog_puts("[INFO] HPET available as backup timer.\n");
+      klog_puts(KLOG_CLR_BLUE "[ INFO ]" KLOG_CLR_RESET " HPET available as backup timer.\n");
     }
 
     // 5i. Wake up Application Processors
@@ -358,7 +358,7 @@ void kmain_high_half(void) {
     cpu_init_aps();
   } else {
     klog_puts(
-        "[WARN] APIC hardware not detected — staying with legacy PIC.\n\n");
+        KLOG_CLR_YELLOW "[ WARN ]" KLOG_CLR_RESET " APIC hardware not detected — staying with legacy PIC.\n\n");
   }
 
   uint64_t k_phys = 0;
@@ -368,7 +368,7 @@ void kmain_high_half(void) {
   pmm_reclaim_bootloader(k_phys);
   char *heap_test = kmalloc(64);
   if (heap_test) {
-    const char *test_msg = "     Heap allocation SUCCESSFUL!\n";
+    const char *test_msg = "     Heap allocation " KLOG_CLR_GREEN "SUCCESSFUL!" KLOG_CLR_RESET "\n";
     int i = 0;
     while (test_msg[i] != '\0') {
       heap_test[i] = test_msg[i];
@@ -378,11 +378,11 @@ void kmain_high_half(void) {
     klog_puts(heap_test);
     kfree(heap_test);
   } else {
-    klog_puts("     Heap allocation FAILED!\n");
+    klog_puts("     Heap allocation " KLOG_CLR_RED "FAILED!" KLOG_CLR_RESET "\n");
   }
 
   // Initialize Virtual Filesystem and Ramfs
-  klog_puts("[OK] Initializing RamFS & Virtual Filesystem (VFS)...\n");
+  klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " Initializing RamFS & Virtual Filesystem (VFS)...\n");
   ramfs_init();
 
   // Create VFS node slab cache now that the full kernel is up.
@@ -423,7 +423,7 @@ void kmain_high_half(void) {
   for (int i = 1; i < block_count(); i++) {
     boot_dev = block_get(i);
     if (boot_dev) {
-      klog_puts("[INFO] Attempting to mount root from partition: ");
+      klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " Attempting to mount root from partition: ");
       klog_puts(boot_dev->name);
       klog_puts("...\n");
       if (ext2_mount_root(boot_dev) == 0) {
@@ -435,7 +435,7 @@ void kmain_high_half(void) {
   // Fallback to raw disk
   boot_dev = block_get(0);
   if (boot_dev) {
-    klog_puts("[INFO] Attempting to mount root from raw device: ");
+    klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " Attempting to mount root from raw device: ");
     klog_puts(boot_dev->name);
     klog_puts("...\n");
     if (ext2_mount_root(boot_dev) == 0) {
@@ -443,11 +443,11 @@ void kmain_high_half(void) {
     }
   }
 
-  klog_puts("[ERR] Failed to mount root filesystem on any device.\n");
+  klog_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " Failed to mount root filesystem on any device.\n");
   goto mount_fail;
 
 mount_success:
-  klog_puts("[OK] Root filesystem mounted successfully.\n");
+  klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " Root filesystem mounted successfully.\n");
   // Mount /dev and /tmp as in-memory filesystems
   ramfs_mount_at("/dev");
   ramfs_mount_at("/tmp");
@@ -489,7 +489,7 @@ mount_fail:
   struct thread *init_thread =
       sched_create_kernel_thread(init_thread_entry, cpu_get_bsp(), true);
   if (!init_thread) {
-    klog_puts("[ERR] Failed to create init thread!\n");
+    klog_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " Failed to create init thread!\n");
     halt();
   }
 

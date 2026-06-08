@@ -21,7 +21,7 @@ static void draw_history_char(uint32_t col, uint32_t row);
 static void console_wipe_history_unlocked(void);
 
 static bool terminal_escape = false;
-static char terminal_escape_buffer[32];
+static char terminal_escape_buffer[64];
 static size_t terminal_escape_len = 0;
 
 // UTF-8 multi-byte decoder state
@@ -121,6 +121,12 @@ static uint64_t last_blink_ms = 0;
 static bool cursor_repositioned =
     false; // Set when CUP/ESC[H moves cursor above bottom
 static bool wrap_pending = false; // Deferred line wrap (autowrap pending)
+static bool acs_active = false;   // true when SO (G1 line-drawing) is selected
+static uint32_t saved_cursor_x = 0;
+static uint32_t saved_cursor_y = 0;
+static uint32_t scroll_region_top = 0;
+static uint32_t scroll_region_bottom = 0; // 0 means "use max_rows-1"
+static uint32_t last_printed_cp = ' ';    // for REP (ESC[nb)
 
 static void console_redraw(void) {
   fb_set_backbuffer_mode(true);
@@ -231,6 +237,12 @@ void console_init(struct limine_framebuffer *framebuffer) {
   terminal_escape_len = 0;
   cursor_repositioned = false;
   wrap_pending = false;
+  acs_active = false;
+  scroll_region_top = 0;
+  scroll_region_bottom = 0;
+  saved_cursor_x = 0;
+  saved_cursor_y = 0;
+  last_printed_cp = ' ';
 
   fb_clear(BG_COLOR);
 }
@@ -267,13 +279,90 @@ static void console_wipe_history_unlocked(void) {
   cursor_phys_on = false;
   cursor_repositioned = false;
   wrap_pending = false;
+  acs_active = false;
+  scroll_region_top = 0;
+  scroll_region_bottom = 0;
+  last_printed_cp = ' ';
   current_fg = FG_COLOR;
   current_bg = BG_COLOR;
   attr_bold = false;
   attr_underline = false;
 }
 
-// SGR escape sequence handler
+// VT100 ACS (Alternate Character Set) → Unicode mapping.
+// When G1 is active (SO), bytes 0x60–0x7E map to line-drawing characters.
+static const uint32_t acs_map[0x20] = {
+    // 0x60  `  → ◆ DIAMOND
+    0x25C6,
+    // 0x61  a  → ░ MEDIUM SHADE (checkerboard)
+    0x2592,
+    // 0x62  b  → HT (no glyph, render space)
+    0x0020,
+    // 0x63  c  → FF (no glyph, render space)
+    0x0020,
+    // 0x64  d  → CR (no glyph, render space)
+    0x0020,
+    // 0x65  e  → LF (no glyph, render space)
+    0x0020,
+    // 0x66  f  → ° DEGREE SIGN
+    0x00B0,
+    // 0x67  g  → ± PLUS-MINUS SIGN
+    0x00B1,
+    // 0x68  h  → NL (no glyph, render space)
+    0x0020,
+    // 0x69  i  → VT (no glyph, render space)
+    0x0020,
+    // 0x6A  j  → ┘ BOX DRAWINGS LIGHT UP AND LEFT
+    0x2518,
+    // 0x6B  k  → ┐ BOX DRAWINGS LIGHT DOWN AND LEFT
+    0x2510,
+    // 0x6C  l  → ┌ BOX DRAWINGS LIGHT DOWN AND RIGHT
+    0x250C,
+    // 0x6D  m  → └ BOX DRAWINGS LIGHT UP AND RIGHT
+    0x2514,
+    // 0x6E  n  → ┼ BOX DRAWINGS LIGHT VERTICAL AND HORIZONTAL
+    0x253C,
+    // 0x6F  o  → ⎺ HORIZONTAL SCAN LINE 1 (use overline approx)
+    0x23BA,
+    // 0x70  p  → ⎻ HORIZONTAL SCAN LINE 3
+    0x23BB,
+    // 0x71  q  → ─ BOX DRAWINGS LIGHT HORIZONTAL
+    0x2500,
+    // 0x72  r  → ⎼ HORIZONTAL SCAN LINE 7
+    0x23BC,
+    // 0x73  s  → ⎽ HORIZONTAL SCAN LINE 9
+    0x23BD,
+    // 0x74  t  → ├ BOX DRAWINGS LIGHT VERTICAL AND RIGHT
+    0x251C,
+    // 0x75  u  → ┤ BOX DRAWINGS LIGHT VERTICAL AND LEFT
+    0x2524,
+    // 0x76  v  → ┴ BOX DRAWINGS LIGHT UP AND HORIZONTAL
+    0x2534,
+    // 0x77  w  → ┬ BOX DRAWINGS LIGHT DOWN AND HORIZONTAL
+    0x252C,
+    // 0x78  x  → │ BOX DRAWINGS LIGHT VERTICAL
+    0x2502,
+    // 0x79  y  → ≤ LESS-THAN OR EQUAL TO
+    0x2264,
+    // 0x7A  z  → ≥ GREATER-THAN OR EQUAL TO
+    0x2265,
+    // 0x7B  {  → π PI
+    0x03C0,
+    // 0x7C  |  → ≠ NOT EQUAL TO
+    0x2260,
+    // 0x7D  }  → £ POUND SIGN
+    0x00A3,
+    // 0x7E  ~  → · MIDDLE DOT
+    0x00B7,
+};
+
+static uint32_t scroll_bottom(void) {
+  return (scroll_region_bottom > 0 && scroll_region_bottom < max_rows)
+             ? scroll_region_bottom
+             : max_rows - 1;
+}
+
+
 static void console_process_escape_sequence(void) {
   if (terminal_escape_len == 0)
     return;
@@ -464,12 +553,23 @@ static void console_process_escape_sequence(void) {
 
   // Cursor visibility
   case 'h':
-    if (question && value == 25)
-      console_set_cursor_visible_unlocked(true);
+    if (question) {
+      if (value == 25)
+        console_set_cursor_visible_unlocked(true);
+      // ?7h = DECAWM enable (autowrap on — default, no-op since we always do deferred wrap)
+      // ?1049h = alternate screen (no-op, we don't have a separate screen buffer)
+      // ?2004h = bracketed paste mode (no-op)
+    }
     break;
   case 'l':
-    if (question && value == 25)
-      console_set_cursor_visible_unlocked(false);
+    if (question) {
+      if (value == 25)
+        console_set_cursor_visible_unlocked(false);
+      // ?7l = DECAWM disable — disable the deferred autowrap
+      // (we leave wrap_pending as-is; full-screen apps manage line endings themselves)
+      // ?1049l = alternate screen exit (no-op)
+      // ?2004l = bracketed paste mode off (no-op)
+    }
     break;
 
   // Cursor position report
@@ -624,6 +724,98 @@ static void console_process_escape_sequence(void) {
     if (cursor_y >= max_rows)
       cursor_y = max_rows - 1;
     break;
+
+  case 'r': // Set scroll region (DECSTBM): ESC[top;bottom r
+    scroll_region_top = (value > 0) ? (uint32_t)(value - 1) : 0;
+    scroll_region_bottom = (value2 > 0) ? (uint32_t)(value2 - 1) : 0;
+    if (scroll_region_top >= max_rows)
+      scroll_region_top = 0;
+    if (scroll_region_bottom >= max_rows)
+      scroll_region_bottom = max_rows - 1;
+    // Reset cursor to home on scroll region change (xterm behaviour)
+    cursor_x = 0;
+    cursor_y = scroll_region_top;
+    wrap_pending = false;
+    break;
+
+  case 'S': { // Scroll Up N lines
+    int n = (value > 0) ? value : 1;
+    for (int i = 0; i < n; i++) {
+      scroll_up();
+      history_write_row++;
+      uint32_t new_row = history_write_row % HISTORY_MAX;
+      for (uint32_t x = 0; x < COLS_MAX; x++) {
+        history[new_row][x].c = 0;
+        history[new_row][x].fg = FG_COLOR;
+        history[new_row][x].bg = BG_COLOR;
+      }
+    }
+    break;
+  }
+
+  case 'X': { // ECH — Erase Character (paint N cells with bg, don't move cursor)
+    int n = (value > 0) ? value : 1;
+    uint32_t row = console_history_row(cursor_y);
+    for (int i = 0; i < n && cursor_x + (uint32_t)i < max_cols; i++) {
+      uint32_t cx = cursor_x + (uint32_t)i;
+      history[row][cx].c = 0;
+      history[row][cx].fg = current_fg;
+      history[row][cx].bg = current_bg;
+      if (view_scroll_offset == 0)
+        fb_fill_rect(cx * FONT_WIDTH, cursor_y * FONT_HEIGHT, FONT_WIDTH,
+                     FONT_HEIGHT, current_bg);
+    }
+    break;
+  }
+
+  case 'b': { // REP — Repeat Preceding Graphic Character N times
+    int n = (value > 0) ? value : 1;
+    // Repeat the last character that was actually drawn (tracked below)
+    // We implement this by re-rendering console_render_char for the last cp.
+    for (int i = 0; i < n; i++)
+      console_render_char(last_printed_cp);
+    break;
+  }
+
+  case 'P': { // Delete N characters (DCH)
+    int n = (value > 0) ? value : 1;
+    uint32_t row = console_history_row(cursor_y);
+    uint32_t end = max_cols - (uint32_t)n;
+    for (uint32_t x = cursor_x; x < max_cols; x++) {
+      if (x + (uint32_t)n < max_cols) {
+        history[row][x] = history[row][x + (uint32_t)n];
+      } else {
+        history[row][x].c = 0;
+        history[row][x].fg = FG_COLOR;
+        history[row][x].bg = BG_COLOR;
+      }
+    }
+    (void)end;
+    if (view_scroll_offset == 0) {
+      for (uint32_t x = cursor_x; x < max_cols; x++)
+        draw_history_char(x, cursor_y);
+    }
+    break;
+  }
+
+  case '@': { // Insert N blank characters (ICH)
+    int n = (value > 0) ? value : 1;
+    uint32_t row = console_history_row(cursor_y);
+    for (uint32_t x = max_cols - 1; x >= cursor_x + (uint32_t)n; x--) {
+      history[row][x] = history[row][x - (uint32_t)n];
+      if (x == cursor_x) break;
+    }
+    for (uint32_t x = cursor_x; x < cursor_x + (uint32_t)n && x < max_cols; x++) {
+      history[row][x].c = 0;
+      history[row][x].fg = FG_COLOR;
+      history[row][x].bg = BG_COLOR;
+    }
+    if (view_scroll_offset == 0) {
+      for (uint32_t x = cursor_x; x < max_cols; x++)
+        draw_history_char(x, cursor_y);
+    }
+    break;
+  }
 
   default:
     break;
@@ -789,6 +981,7 @@ static void console_render_char(uint32_t cp) {
                       attr_underline);
   }
 
+  last_printed_cp = cp; // track for REP (ESC[nb)
   cursor_x++;
   if (cursor_x >= max_cols) {
     // Don't wrap immediately — defer until the next printable character.
@@ -808,17 +1001,124 @@ static void console_putchar_unlocked(char c) {
     if (terminal_escape_len < sizeof(terminal_escape_buffer) - 1) {
       terminal_escape_buffer[terminal_escape_len++] = c;
     }
-    if (c >= '@' && c <= '~' && !(terminal_escape_len == 1 && c == '[')) {
-      console_process_escape_sequence();
+
+    // Two-character escape sequences: ESC followed by a single final byte
+    // from 0x40–0x7E (but not '[' which starts CSI, and not intermediaries).
+    // Intermediary bytes are 0x20–0x2F; they prefix a final byte.
+    // We terminate on the first byte in 0x40–0x7E that follows 0+ intermediaries,
+    // OR on any byte in 0x40–0x7E that is not '[' when it's the first byte.
+    if (terminal_escape_len == 1) {
+      // First byte after ESC
+      if (c == '[') {
+        // CSI — accumulate until final byte
+        return;
+      }
+      // Single-byte intermediaries (0x20–0x2F): accumulate another byte
+      if (c >= 0x20 && c <= 0x2F) {
+        return; // wait for the final byte
+      }
+      // Final byte of a 2-char sequence (0x40–0x7E) or special bytes
+      if (c >= 0x40 && c <= 0x7E) {
+        // Handle specific 2-char ESC sequences
+        switch (c) {
+        case 'M': { // Reverse Index (RI) — scroll down / cursor up
+          if (cursor_y > scroll_region_top) {
+            cursor_y--;
+          } else {
+            // At top of scroll region: scroll region down one line
+            // Shift rows in scroll region down
+            uint32_t bot = scroll_bottom();
+            for (uint32_t row = bot; row > scroll_region_top; row--) {
+              uint32_t dst = console_history_row(row);
+              uint32_t src = console_history_row(row - 1);
+              for (uint32_t x = 0; x < COLS_MAX; x++)
+                history[dst][x] = history[src][x];
+            }
+            // Clear the top line
+            uint32_t top_row = console_history_row(scroll_region_top);
+            for (uint32_t x = 0; x < COLS_MAX; x++) {
+              history[top_row][x].c = 0;
+              history[top_row][x].fg = FG_COLOR;
+              history[top_row][x].bg = BG_COLOR;
+            }
+            console_redraw();
+          }
+          break;
+        }
+        case '7': // Save cursor
+          saved_cursor_x = cursor_x;
+          saved_cursor_y = cursor_y;
+          break;
+        case '8': // Restore cursor
+          cursor_x = saved_cursor_x;
+          cursor_y = saved_cursor_y;
+          if (cursor_x >= max_cols) cursor_x = max_cols - 1;
+          if (cursor_y >= max_rows) cursor_y = max_rows - 1;
+          wrap_pending = false;
+          break;
+        case '=': // Keypad application mode — no-op
+        case '>': // Keypad normal mode — no-op
+        case 'c': // RIS — full reset, treat as clear
+          console_wipe_history_unlocked();
+          break;
+        default:
+          break;
+        }
+        terminal_escape = false;
+        terminal_escape_len = 0;
+        return;
+      }
+      // Non-final, non-intermediate byte (e.g. 0x30–0x3F numeric) - keep accumulating
+      // (shouldn't happen in well-formed VT but be safe)
+      return;
+    }
+
+    // Second byte after ESC + one intermediary (e.g. ESC ( 0 or ESC ) B)
+    if (terminal_escape_len == 2 && terminal_escape_buffer[0] >= 0x20 && terminal_escape_buffer[0] <= 0x2F) {
+      // This is the final byte of a 3-char sequence like ESC ( 0
+      char inter = terminal_escape_buffer[0];
+      char fin   = c;
+      // ESC ( 0 — designate G1 as VT100 line drawing (we track but render via acs_active)
+      // ESC ( B — designate G0/G1 as ASCII (no-op for us, just reset flag if needed)
+      // We don't differentiate G0/G1 designation internals beyond the SO/SI switching,
+      // so just silently accept all of them.
+      (void)inter;
+      (void)fin;
       terminal_escape = false;
       terminal_escape_len = 0;
+      return;
     }
+
+    // CSI sequence (starts with '['): terminate on final byte 0x40–0x7E
+    if (terminal_escape_buffer[0] == '[') {
+      if (c >= '@' && c <= '~') {
+        console_process_escape_sequence();
+        terminal_escape = false;
+        terminal_escape_len = 0;
+      }
+      return;
+    }
+
+    // Safety: if we've accumulated too many bytes without termination, flush
+    terminal_escape = false;
+    terminal_escape_len = 0;
     return;
   }
 
   if (c == 0x1B) {
     terminal_escape = true;
     terminal_escape_len = 0;
+    return;
+  }
+
+  // SO (0x0E) — switch to G1 character set (line drawing)
+  if (uc == 0x0E) {
+    acs_active = true;
+    return;
+  }
+  // SI (0x0F) — switch back to G0 character set (ASCII)
+  if (uc == 0x0F) {
+    acs_active = false;
     return;
   }
 
@@ -861,7 +1161,11 @@ static void console_putchar_unlocked(char c) {
     return;
   }
 
-  // Plain ASCII byte — render directly on framebuffer
+  // Plain ASCII byte — check for ACS (line drawing) mode first
+  if (acs_active && uc >= 0x60 && uc <= 0x7E) {
+    console_render_char(acs_map[uc - 0x60]);
+    return;
+  }
   console_render_char((uint32_t)uc);
 }
 

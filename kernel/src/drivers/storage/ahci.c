@@ -174,7 +174,7 @@ static int ahci_io(ahci_port_t *port, uint64_t lba, uint32_t count, void *buf,
   uint64_t pages = (bytes + 4095) / 4096;
   void *bounce_phys = pmm_alloc_blocks(pages);
   if (!bounce_phys) {
-    console_puts("[ERR] AHCI OOM: bounce buffer alloc failed\n");
+    console_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " AHCI OOM: bounce buffer alloc failed\n");
     return -1;
   }
   void *bounce_virt = (void *)((uint64_t)bounce_phys + pmm_get_hhdm_offset());
@@ -220,7 +220,7 @@ static int ahci_io(ahci_port_t *port, uint64_t lba, uint32_t count, void *buf,
     if ((port->ci & (1 << slot)) == 0)
       break;
     if (port->is & (1 << 30)) { // Error (TFES - Task File Error Status)
-      console_puts("[ERR] AHCI Disk Error during wait: IS=");
+      console_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " AHCI Disk Error during wait: IS=");
       // Note: we'd ideally dump more regs here
       pmm_free_blocks(bounce_phys, pages);
       return -1;
@@ -435,9 +435,9 @@ int ahci_init(void) {
   dm_register_driver(&ahci_driver);
 
   if (ahci_drive_count == 0) {
-    console_puts("[WARN] No SATA drives successfully initialized.\n");
+    console_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " No SATA drives successfully initialized.\n");
   } else {
-    console_puts("[OK] AHCI: ");
+    console_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " AHCI: ");
     print_uint64(ahci_drive_count);
     console_puts(" drive(s) registered.\n");
   }

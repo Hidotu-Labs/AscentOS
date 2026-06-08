@@ -136,21 +136,6 @@ struct kstat {
   int64_t __unused[3];  // Unused padding
 };
 
-// statfs structure (Linux x86_64)
-struct statfs_buf {
-  uint64_t f_type;
-  uint64_t f_bsize;
-  uint64_t f_blocks;
-  uint64_t f_bfree;
-  uint64_t f_bavail;
-  uint64_t f_files;
-  uint64_t f_ffree;
-  uint64_t f_fsid[2];
-  uint64_t f_namelen;
-  uint64_t f_frsize;
-  uint64_t f_flags;
-  uint64_t f_spare[4];
-};
 
 struct statx_timestamp {
   int64_t tv_sec;
@@ -3598,19 +3583,29 @@ static uint64_t sys_statfs(uint64_t path_ptr, uint64_t buf_ptr, uint64_t a3,
 
   struct statfs_buf *buf = (struct statfs_buf *)buf_ptr;
 
-  // Basic stub implementation - return dummy values
-  buf->f_type = 0x61657673;   // "aev" in hex - custom filesystem type
-  buf->f_bsize = 4096;        // 4K block size
-  buf->f_blocks = 1024 * 256; // ~1GB total
-  buf->f_bfree = 1024 * 128;  // ~512MB free
-  buf->f_bavail = 1024 * 128; // ~512MB available to user
-  buf->f_files = 10000;       // max inodes
-  buf->f_ffree = 5000;        // free inodes
-  buf->f_fsid[0] = 1;
-  buf->f_fsid[1] = 0;
-  buf->f_namelen = 255;
-  buf->f_frsize = 4096;
-  buf->f_flags = 0;
+  vfs_node_t *node = vfs_resolve_path((const char *)path_ptr);
+  if (!node)
+    return (uint64_t)-2; // ENOENT
+
+  int ret = vfs_statfs(node, buf);
+  if (ret != 0) {
+    // Fallback to basic stub values if not implemented
+    buf->f_type = 0x61657673;   // "aev" in hex - custom filesystem type
+    buf->f_bsize = 4096;        // 4K block size
+    buf->f_blocks = 1024 * 256; // ~1GB total
+    buf->f_bfree = 1024 * 128;  // ~512MB free
+    buf->f_bavail = 1024 * 128; // ~512MB available to user
+    buf->f_files = 10000;       // max inodes
+    buf->f_ffree = 5000;        // free inodes
+    buf->f_fsid[0] = 1;
+    buf->f_fsid[1] = 0;
+    buf->f_namelen = 255;
+    buf->f_frsize = 4096;
+    buf->f_flags = 0;
+  }
+
+  if (!(node->flags & FS_PERSISTENT))
+    kfree(node);
 
   return 0; // Success
 }
@@ -3633,19 +3628,23 @@ static uint64_t sys_fstatfs(uint64_t fd, uint64_t buf_ptr, uint64_t a3,
 
   struct statfs_buf *buf = (struct statfs_buf *)buf_ptr;
 
-  // Basic stub implementation - return same dummy values as statfs
-  buf->f_type = 0x61657673;
-  buf->f_bsize = 4096;
-  buf->f_blocks = 1024 * 256;
-  buf->f_bfree = 1024 * 128;
-  buf->f_bavail = 1024 * 128;
-  buf->f_files = 10000;
-  buf->f_ffree = 5000;
-  buf->f_fsid[0] = 1;
-  buf->f_fsid[1] = 0;
-  buf->f_namelen = 255;
-  buf->f_frsize = 4096;
-  buf->f_flags = 0;
+  vfs_node_t *node = t->fds[fd];
+  int ret = vfs_statfs(node, buf);
+  if (ret != 0) {
+    // Basic stub implementation - return same dummy values as statfs
+    buf->f_type = 0x61657673;
+    buf->f_bsize = 4096;
+    buf->f_blocks = 1024 * 256;
+    buf->f_bfree = 1024 * 128;
+    buf->f_bavail = 1024 * 128;
+    buf->f_files = 10000;
+    buf->f_ffree = 5000;
+    buf->f_fsid[0] = 1;
+    buf->f_fsid[1] = 0;
+    buf->f_namelen = 255;
+    buf->f_frsize = 4096;
+    buf->f_flags = 0;
+  }
 
   return 0; // Success
 }
@@ -4003,6 +4002,29 @@ static uint64_t sys_memfd_create(uint64_t name_ptr, uint64_t flags_arg,
   return (uint64_t)fd;
 }
 
+// sys_fsync (syscall 74)
+// Flushes all dirty data and metadata for the file referred to by fd.
+// On this kernel all writes are synchronous (no write-back cache), so this
+// is a no-op that just validates the file descriptor.
+static uint64_t sys_fsync(uint64_t fd, uint64_t a1, uint64_t a2, uint64_t a3,
+                          uint64_t a4, uint64_t a5) {
+  (void)a1;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+
+  struct thread *t = sched_get_current();
+  if (!t || fd >= MAX_FDS || !t->fds[fd])
+    return (uint64_t)-9; // EBADF
+
+  klog_puts("[SYSCALL] fsync: fd=");
+  klog_uint64(fd);
+  klog_puts(" (no-op, synchronous writes)\n");
+
+  return 0;
+}
+
 void syscall_register_io(void) {
   syscall_register(SYS_READ, sys_read);
   syscall_register(SYS_WRITE, sys_write);
@@ -4019,6 +4041,7 @@ void syscall_register_io(void) {
   syscall_register(SYS_FTRUNCATE, sys_ftruncate);
   syscall_register(SYS_FALLOCATE, sys_fallocate);
   syscall_register(SYS_FLOCK, sys_flock);
+  syscall_register(SYS_FSYNC, sys_fsync);
   syscall_register(SYS_FCNTL, sys_fcntl);
   syscall_register(SYS_SENDFILE, sys_sendfile);
   syscall_register(SYS_TIMERFD_CREATE, sys_timerfd_create);

@@ -3,6 +3,12 @@
 
 #define COM1 0x3F8
 
+// Ring buffer for non-blocking serial output
+#define SERIAL_BUF_SIZE 4096
+static char serial_buf[SERIAL_BUF_SIZE];
+static volatile uint32_t serial_head = 0; // write position
+static volatile uint32_t serial_tail = 0; // read/send position
+
 void serial_init(void) {
   outb(COM1 + 1, 0x00); // Disable all interrupts
   outb(COM1 + 3, 0x80); // Enable DLAB (set baud rate divisor)
@@ -15,15 +21,33 @@ void serial_init(void) {
 
 static int is_transmit_empty(void) { return inb(COM1 + 5) & 0x20; }
 
-void serial_putchar(char c) {
-  if (c == '\n') {
-    while (is_transmit_empty() == 0)
-      ;
-    outb(COM1, '\r');
+// Enqueue a character into the ring buffer (non-blocking, drops if full)
+static void serial_enqueue(char c) {
+  uint32_t next = (serial_head + 1) % SERIAL_BUF_SIZE;
+  if (next == serial_tail)
+    return; // buffer full — drop silently
+  serial_buf[serial_head] = c;
+  serial_head = next;
+}
+
+// Drain as many queued bytes as the UART FIFO can accept right now (non-blocking)
+void serial_flush(void) {
+  // Try to drain up to 16 bytes (UART FIFO depth) per call
+  int max_drain = 16;
+  while (serial_tail != serial_head && max_drain-- > 0) {
+    if (!is_transmit_empty())
+      break;
+    outb(COM1, serial_buf[serial_tail]);
+    serial_tail = (serial_tail + 1) % SERIAL_BUF_SIZE;
   }
-  while (is_transmit_empty() == 0)
-    ;
-  outb(COM1, c);
+}
+
+void serial_putchar(char c) {
+  if (c == '\n')
+    serial_enqueue('\r');
+  serial_enqueue(c);
+  // Opportunistic drain — send what we can without blocking
+  serial_flush();
 }
 
 int serial_received(void) { return inb(COM1 + 5) & 1; }

@@ -46,7 +46,7 @@ static void ehci_bios_handover(struct ehci_controller *hc) {
   uint8_t eecp_offset = (hccparams >> 8) & 0xFF;
 
   if (eecp_offset < 0x40) {
-    klog_puts("[EHCI] No EECP found (BIOS handover not needed).\n");
+    klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " EHCI: No EECP found (BIOS handover not needed).\n");
     return;
   }
 
@@ -58,7 +58,7 @@ static void ehci_bios_handover(struct ehci_controller *hc) {
                      legsup | EHCI_LEGACY_OS_OWNED);
 
   if (legsup & EHCI_LEGACY_BIOS_OWNED) {
-    klog_puts("[EHCI] BIOS owns the controller. Waiting for handover...\n");
+    klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " EHCI: BIOS owns controller. Waiting for handover...\n");
     int timeout = 1000;
     while (timeout > 0) {
       legsup = pci_config_read32(hc->pci_bus, hc->pci_slot, hc->pci_func,
@@ -97,7 +97,7 @@ static void ehci_controller_reset(struct ehci_controller *hc) {
     for (int i = 0; i < 1000; i++)
       io_wait();
     if (--timeout == 0) {
-      klog_puts("[EHCI] Reset timed out!\n");
+      klog_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " EHCI: Reset timed out!\n");
       return;
     }
   }
@@ -203,13 +203,13 @@ static void ehci_reset_port(struct ehci_controller *hc, uint8_t port) {
   // 8. If port is ENABLED, it's High-Speed (or QEMU FS/LS via built-in TT).
   // If port is NOT enabled, it's FS/LS requiring companion controller.
   if (!(status & EHCI_PORT_ENABLE)) {
-    klog_puts("[EHCI] Port ");
+    klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " EHCI: Port ");
     klog_uint64(port);
     klog_puts(": Not enabled after reset (FS/LS). Handing to companion...\n");
     status |= EHCI_PORT_OWNER;
     ehci_write_op(hc, reg, status);
   } else {
-    klog_puts("[EHCI] Port ");
+    klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " EHCI: Port ");
     klog_uint64(port);
     klog_puts(": Device enabled (portsc=0x");
     klog_hex32(status);
@@ -415,7 +415,7 @@ struct ehci_int_pipe *ehci_setup_int_in(struct ehci_controller *hc,
 
   int_pipe_count++;
 
-  klog_puts("[EHCI] Interrupt IN pipe: addr=");
+  klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " EHCI: Interrupt IN pipe: addr=");
   klog_uint64(dev_addr);
   klog_puts(", ep=");
   klog_uint64(ep_num);
@@ -503,11 +503,11 @@ static void ehci_irq_handler(struct registers *regs) {
     }
 
     if (active & EHCI_STS_ERROR) {
-      klog_puts("[EHCI] USB Error Interrupt\n");
+      klog_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " EHCI USB Error Interrupt\n");
     }
 
     if (active & EHCI_STS_HSE) {
-      klog_puts("[EHCI] Host System Error!\n");
+      klog_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " EHCI: Host System Error!\n");
     }
 
     if (active & EHCI_STS_PCD) {
@@ -521,7 +521,7 @@ static void ehci_irq_handler(struct registers *regs) {
 void ehci_init(void) {
   ehci_count = 0;
   int_pipe_count = 0;
-  klog_puts("[EHCI] Searching for EHCI controllers...\n");
+  klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " Searching for EHCI controllers...\n");
 
   for (uint32_t i = 0; i < pci_get_device_count(); i++) {
     struct pci_device *pdev = pci_get_device(i);
@@ -560,10 +560,10 @@ void ehci_init(void) {
 
       ehci_bios_handover(hc);
 
-      klog_puts("[EHCI] Resetting controller...\n");
+      klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " EHCI: Resetting controller...\n");
       ehci_controller_reset(hc);
 
-      klog_puts("[EHCI] Initializing schedules...\n");
+      klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " EHCI: Initializing schedules...\n");
       ehci_init_schedule(hc);
 
       // Register IRQ handler for EHCI interrupts
@@ -632,7 +632,7 @@ void ehci_hand_to_companion(void) {
 
       // This port has a connected device that didn't enable under EHCI
       // (FS/LS device). Hand it to the companion controller.
-      klog_puts("[EHCI] Handing port ");
+       klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " EHCI: Handing port ");
       klog_uint64(p);
       klog_puts(" to companion controller\n");
       portsc |= EHCI_PORT_OWNER;
@@ -646,7 +646,7 @@ void ehci_hand_to_companion(void) {
 // which will trigger HID driver probe (keyboard/mouse).
 
 static void ehci_enumerate_ports(struct ehci_controller *hc) {
-  klog_puts("[EHCI] Scanning ");
+  klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " EHCI: Scanning ");
   klog_uint64(hc->num_ports);
   klog_puts(" ports...\n");
 
@@ -655,7 +655,7 @@ static void ehci_enumerate_ports(struct ehci_controller *hc) {
 
     klog_puts("       Port ");
     klog_uint64(p);
-    klog_puts(": PORTSC=0x");
+    klog_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " EHCI Xfer fail. SETUP=0x");
     klog_hex32(portsc);
 
     if (!(portsc & EHCI_PORT_CONNECT)) {
@@ -694,9 +694,9 @@ struct ehci_controller *ehci_get_controller(int index) {
 }
 
 void ehci_self_test(void) {
-  klog_puts("[TEST] EHCI Phase 5: Port Enumeration & HID Support\n");
+  klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " EHCI self-test: Port Enumeration & HID Support\n");
   if (ehci_count == 0) {
-    klog_puts("       No EHCI controllers detected. FAIL.\n");
+    klog_puts("       No EHCI controllers detected.\n");
     return;
   }
 
@@ -705,5 +705,5 @@ void ehci_self_test(void) {
     ehci_enumerate_ports(hc);
   }
 
-  klog_puts("[TEST] EHCI Phase 5 complete.\n\n");
+  klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " EHCI self-test complete.\n\n");
 }

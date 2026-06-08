@@ -258,10 +258,25 @@ install_apk "xcalc" "community"
 install_apk "figlet" "community"
 install_apk "nyancat" "community"
 install_apk "micro-tetris" "community" "edge"
+install_apk "cmus" "community"
+
+# cmus audio dependencies
+echo "[*] Installing cmus audio codecs and libraries..."
+install_apk "libflac" "main"
+install_apk "alsa-lib" "main"
+install_apk "faad2-libs" "community"
+install_apk "libmad" "community"
+install_apk "libvorbis" "main"
+install_apk "wavpack-libs" "community"
+install_apk "opusfile" "main"
+# ffmpeg libs (for additional codec support)
+install_apk "ffmpeg-libavcodec" "community"
+install_apk "ffmpeg-libavformat" "community"
+install_apk "libpulse" "community"
 
 install_apk "xkeyboard-config" "main"
 install_apk "font-dejavu" "main"
-
+install_apk "sl" "community"
 
 # GTK2 Development headers (for host compilation)
 echo "[*] Installing GTK 2.0 development packages..."
@@ -294,6 +309,7 @@ install_apk "libxfixes-dev" "main"
 install_apk "xorgproto" "main"
 install_apk "python3" "main"
 install_apk "dbus-dev" "main"
+install_apk "nano" "main"
 
 # GTK 3.0 Development headers
 echo "[*] Installing GTK 3.0 development packages..."
@@ -518,6 +534,9 @@ cat > "${ROOTFS_DIR}/etc/xdg/openbox/menu.xml" << 'EOF'
     </item>
     <item label="Text Editor">
       <action name="Execute"><execute>mousepad</execute></action>
+    </item>
+    <item label="Music Player (cmus)">
+      <action name="Execute"><execute>st -e cmus</execute></action>
     </item>
     <separator/>
     <item label="Reconfigure Openbox">

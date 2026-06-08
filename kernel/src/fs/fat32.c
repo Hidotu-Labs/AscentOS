@@ -95,8 +95,6 @@ int fat32_read_cluster(fat32_mount_t *mnt, uint32_t cluster, void *buffer) {
   return err;
 }
 
-
-
 // Write a FAT entry (set next cluster in chain)
 static int fat32_set_fat_entry(fat32_mount_t *mnt, uint32_t cluster,
                                uint32_t value) {
@@ -206,8 +204,6 @@ int fat32_write_cluster(fat32_mount_t *mnt, uint32_t cluster, void *buffer) {
   return mnt->dev->write_sectors(mnt->dev, first_sector,
                                  mnt->sectors_per_cluster, buffer);
 }
-
-
 
 // Free all clusters in a chain starting from the given cluster
 static int fat32_free_cluster_chain(fat32_mount_t *mnt,

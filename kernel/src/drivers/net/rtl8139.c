@@ -219,11 +219,11 @@ void rtl8139_init(void) {
   // Step 1: Find the NIC on the PCI bus
   struct pci_device *dev = pci_find_device_by_id(RTL_VENDOR_ID, RTL_DEVICE_ID);
   if (!dev) {
-    console_puts("[WARN] RTL8139 NIC not found on PCI bus.\n");
+    console_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " RTL8139 NIC not found on PCI bus.\n");
     return;
   }
 
-  console_puts("[INFO] RTL8139 NIC found at PCI ");
+  console_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " RTL8139 NIC found at PCI ");
   print_uint32(dev->bus);
   console_putchar(':');
   print_uint32(dev->slot);
@@ -235,7 +235,7 @@ void rtl8139_init(void) {
   // BAR0 bit 0 = 1 means I/O space; bits [31:2] are the I/O base
   uint32_t bar0 = dev->bar[0];
   if (!(bar0 & 1)) {
-    console_puts("[ERR] RTL8139 BAR0 is memory-mapped, expected I/O.\n");
+    console_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " RTL8139 BAR0 is memory-mapped, expected I/O.\n");
     return;
   }
   nic_iobase = (uint16_t)(bar0 & 0xFFFC);
@@ -262,7 +262,7 @@ void rtl8139_init(void) {
     timeout--;
   }
   if (timeout == 0) {
-    console_puts("[ERR] RTL8139 reset timed out!\n");
+    console_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " RTL8139 reset timed out!\n");
     return;
   }
   console_puts("     Software reset complete.\n");
@@ -285,7 +285,7 @@ void rtl8139_init(void) {
   uint32_t rx_pages = (RX_BUF_TOTAL + PAGE_SIZE - 1) / PAGE_SIZE;
   void *rx_phys = pmm_alloc_blocks(rx_pages);
   if (!rx_phys) {
-    console_puts("[ERR] RTL8139: failed to allocate RX buffer.\n");
+    console_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " RTL8139: failed to allocate RX buffer.\n");
     return;
   }
   rx_buffer_phys = (uint64_t)rx_phys;
@@ -302,7 +302,7 @@ void rtl8139_init(void) {
   for (int i = 0; i < TX_DESC_COUNT; i++) {
     void *tx_phys = pmm_alloc();
     if (!tx_phys) {
-      console_puts("[ERR] RTL8139: failed to allocate TX buffer.\n");
+      console_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " RTL8139: failed to allocate TX buffer.\n");
       return;
     }
     tx_buffers_phys[i] = (uint64_t)tx_phys;
@@ -350,7 +350,7 @@ void rtl8139_init(void) {
   console_puts("     Link: ");
   console_puts((msr & MSR_LINK) ? "DOWN\n" : "UP\n");
 
-  console_puts("[OK] RTL8139 driver initialized.\n\n");
+  console_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " RTL8139 driver initialized.\n\n");
 }
 
 const uint8_t *rtl8139_get_mac(void) {

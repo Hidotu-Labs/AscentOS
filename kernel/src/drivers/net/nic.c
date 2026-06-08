@@ -9,6 +9,7 @@
 #include "drivers/net/rtl8139.h"
 #include "drivers/net/e1000.h"
 #include "console/console.h"
+#include "console/klog.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -28,7 +29,7 @@ void nic_init(void) {
     e1000_init();
     if (e1000_is_present()) {
         active_nic = NIC_E1000;
-        console_puts("[NIC] Active driver: Intel e1000\n");
+        console_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " Active NIC driver: Intel e1000\n");
         return;
     }
 
@@ -36,11 +37,11 @@ void nic_init(void) {
     rtl8139_init();
     if (rtl8139_is_present()) {
         active_nic = NIC_RTL8139;
-        console_puts("[NIC] Active driver: Realtek RTL8139\n");
+        console_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " Active NIC driver: Realtek RTL8139\n");
         return;
     }
 
-    console_puts("[WARN] No supported NIC found.\n");
+    console_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " No supported NIC found.\n");
 }
 
 const uint8_t *nic_get_mac(void) {

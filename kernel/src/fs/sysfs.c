@@ -446,10 +446,10 @@ void sysfs_init(void) {
     sysfs_mkfile(pci_seg, "uevent", "SUBSYSTEM=pci\n");
     sysfs_symlink(gpu_dev, "subsystem", "../../../bus/pci");
 
-    // Mesa reads vendor/device/class from /sys/dev/char/226:0/device/vendor etc.
-    // The path resolves: 226:0 -> card0_dir, then "device" -> gpu_dev.
-    // gpu_dev is a freshly created node (separate from sysfs_populate_pci's node),
-    // so we must add vendor/device/class/irq files here explicitly.
+    // Mesa reads vendor/device/class from /sys/dev/char/226:0/device/vendor
+    // etc. The path resolves: 226:0 -> card0_dir, then "device" -> gpu_dev.
+    // gpu_dev is a freshly created node (separate from sysfs_populate_pci's
+    // node), so we must add vendor/device/class/irq files here explicitly.
     {
       uint32_t vid = 0x1234, did = 0x1111, cls = 0x030000;
       uint32_t pci_cnt = pci_get_device_count();
@@ -464,16 +464,25 @@ void sysfs_init(void) {
         }
       }
       char vbuf[10], dbuf[10], cbuf[12];
-      vbuf[0] = '0'; vbuf[1] = 'x';
-      u32_to_hex(vid, vbuf + 2, 4); vbuf[6] = '\n'; vbuf[7] = '\0';
-      dbuf[0] = '0'; dbuf[1] = 'x';
-      u32_to_hex(did, dbuf + 2, 4); dbuf[6] = '\n'; dbuf[7] = '\0';
-      cbuf[0] = '0'; cbuf[1] = 'x';
-      u32_to_hex(cls, cbuf + 2, 6); cbuf[8] = '\n'; cbuf[9] = '\0';
+      vbuf[0] = '0';
+      vbuf[1] = 'x';
+      u32_to_hex(vid, vbuf + 2, 4);
+      vbuf[6] = '\n';
+      vbuf[7] = '\0';
+      dbuf[0] = '0';
+      dbuf[1] = 'x';
+      u32_to_hex(did, dbuf + 2, 4);
+      dbuf[6] = '\n';
+      dbuf[7] = '\0';
+      cbuf[0] = '0';
+      cbuf[1] = 'x';
+      u32_to_hex(cls, cbuf + 2, 6);
+      cbuf[8] = '\n';
+      cbuf[9] = '\0';
       sysfs_mkfile(gpu_dev, "vendor", vbuf);
       sysfs_mkfile(gpu_dev, "device", dbuf);
-      sysfs_mkfile(gpu_dev, "class",  cbuf);
-      sysfs_mkfile(gpu_dev, "irq",    "11\n");
+      sysfs_mkfile(gpu_dev, "class", cbuf);
+      sysfs_mkfile(gpu_dev, "irq", "11\n");
       sysfs_mkfile(gpu_dev, "enable", "1\n");
     }
 

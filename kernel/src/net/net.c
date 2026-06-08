@@ -15,10 +15,10 @@
 #include "net/tcp.h"
 #include "net/udp.h"
 
+#include "console/klog.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-
 // RX packet ring buffer
 // Single-producer (IRQ handler) / single-consumer (net_poll) ring buffer.
 // No lock needed because head is only written by producer and tail by consumer.
@@ -115,12 +115,14 @@ void net_init(void) {
   // Initialize DHCP and negotiate
   dhcp_init();
   if (!dhcp_negotiate()) {
-    console_puts("[DHCP] Falling back to static IP 10.0.2.15.\n");
+    console_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET
+                              " DHCP: Falling back to static IP 10.0.2.15.\n");
     netif_configure(IP4(10, 0, 2, 15), IP4(10, 0, 2, 2), IP4(255, 255, 255, 0));
   }
 
   // Initialize IPv6 (link-local address from MAC)
   ipv6_init();
 
-  console_puts("[OK] Network stack initialized.\n");
+  console_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET
+                              " Network stack initialized.\n");
 }

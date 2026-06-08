@@ -122,14 +122,6 @@ void process_do_exit(uint64_t status) {
       if (current->fds[i]) {
         vfs_node_t *node = current->fds[i];
         current->fds[i] = NULL;
-
-        // Dedup: check if same node pointer appears at a higher index
-        for (int j = i + 1; j < MAX_FDS; j++) {
-          if (current->fds[j] == node) {
-            current->fds[j] = NULL;
-          }
-        }
-
         vfs_close(node);
       }
     }

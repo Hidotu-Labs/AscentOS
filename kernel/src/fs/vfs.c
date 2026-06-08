@@ -11,6 +11,8 @@ vfs_node_t *fs_root = 0;
 typedef struct vfs_mount_entry {
   vfs_node_t *mountpoint;
   vfs_node_t *target;
+  char dev_name[64];
+  char fs_type[32];
   struct vfs_mount_entry *next;
 } vfs_mount_entry_t;
 
@@ -20,36 +22,6 @@ uint32_t vfs_read(vfs_node_t *node, uint32_t offset, uint32_t size,
                   uint8_t *buffer) {
   if (!node)
     return 0;
-
-  // For regular files, try to serve from page cache first
-  if ((node->flags & FS_TYPE_MASK) == FS_FILE) {
-    uint32_t bytes_read = 0;
-    while (bytes_read < size) {
-      uint32_t file_offset = offset + bytes_read;
-      if (file_offset >= node->length)
-        break;
-      uint32_t page_off = file_offset % 4096;
-      uint32_t page_base = file_offset - page_off;
-      uint32_t avail_in_file = node->length - file_offset;
-      uint32_t to_copy = 4096 - page_off;
-      if (to_copy > (size - bytes_read))
-        to_copy = size - bytes_read;
-      if (to_copy > avail_in_file)
-        to_copy = avail_in_file;
-
-      vfs_page_t *page = vfs_cache_lookup(node, page_base);
-      if (page) {
-        memcpy(buffer + bytes_read,
-               (uint8_t *)PHYS_TO_VIRT(page->frame_phys) + page_off, to_copy);
-        bytes_read += to_copy;
-      } else {
-        // Cache miss: fall back to filesystem read for the rest
-        break;
-      }
-    }
-    if (bytes_read > 0)
-      return bytes_read;
-  }
 
   if (node->read) {
     return node->read(node, offset, size, buffer);
@@ -62,45 +34,8 @@ uint32_t vfs_write(vfs_node_t *node, uint32_t offset, uint32_t size,
   if (!node)
     return 0;
 
-  // Write-back path: buffer writes in page cache for regular files
-  if ((node->flags & FS_TYPE_MASK) == FS_FILE) {
-    uint32_t bytes_written = 0;
-    while (bytes_written < size) {
-      uint32_t file_offset = offset + bytes_written;
-      uint32_t page_off = file_offset % 4096;
-      uint32_t page_base = file_offset - page_off;
-      uint32_t to_copy = 4096 - page_off;
-      if (to_copy > (size - bytes_written))
-        to_copy = size - bytes_written;
-
-      vfs_page_t *page = vfs_cache_get_or_create(node, page_base);
-      if (page) {
-        memcpy((uint8_t *)PHYS_TO_VIRT(page->frame_phys) + page_off,
-               buffer + bytes_written, to_copy);
-        page->dirty = true;
-        bytes_written += to_copy;
-      } else {
-        // Fallback to direct write if cache allocation fails
-        break;
-      }
-    }
-
-    if (bytes_written > 0) {
-      // Update file length if we wrote past the end
-      if (offset + bytes_written > node->length) {
-        node->length = offset + bytes_written;
-      }
-      return bytes_written;
-    }
-  }
-
-  // Direct write fallback (non-file nodes, or cache alloc failure)
   if (node->write) {
-    uint32_t written = node->write(node, offset, size, buffer);
-    if (written > 0 && (node->flags & FS_TYPE_MASK) == FS_FILE) {
-      vfs_cache_invalidate_range(node, offset, written);
-    }
-    return written;
+    return node->write(node, offset, size, buffer);
   }
   return 0;
 }
@@ -117,10 +52,11 @@ void vfs_open(vfs_node_t *node) {
 void vfs_close(vfs_node_t *node) {
   if (!node)
     return;
+
+  bool is_pipe = (node->flags & FS_TYPE_MASK) == FS_PIPE;
+  void *wq = node->wait_queue;
+
   if (--node->refcount == 0) {
-    if ((node->flags & FS_TYPE_MASK) == FS_FILE) {
-      vfs_cache_sync(node);
-    }
     if (node->close) {
       node->close(node);
     }
@@ -128,6 +64,15 @@ void vfs_close(vfs_node_t *node) {
     if (!(node->flags & FS_PERSISTENT)) {
       kfree(node);
     }
+    return;
+  }
+
+  // For pipes, wake blocked readers/writers AFTER decrementing refcount,
+  // so they re-check and detect EOF (refcount <= 1).
+  // Only do this when refcount > 0 (node is still alive).
+  if (is_pipe && wq) {
+    extern void wait_queue_wake_all(void *wq);
+    wait_queue_wake_all(wq);
   }
 }
 
@@ -146,9 +91,11 @@ vfs_node_t *vfs_finddir(vfs_node_t *node, char *name) {
 
     vfs_mount_entry_t *curr = vfs_mount_list;
     while (curr) {
-      if (curr->mountpoint->inode == res->inode &&
+      if (curr->mountpoint && curr->mountpoint->inode == res->inode &&
           curr->mountpoint->device == res->device) {
         if (curr->target != res) {
+          vfs_close(res);
+          vfs_open(curr->target);
           return curr->target;
         }
       }
@@ -232,11 +179,7 @@ int vfs_mknod(vfs_node_t *node, char *name, uint16_t permission, uint32_t flags,
 
 int vfs_truncate(vfs_node_t *node, uint32_t size) {
   if (node && node->truncate) {
-    int res = node->truncate(node, size);
-    if (res == 0 && (node->flags & FS_TYPE_MASK) == FS_FILE) {
-      vfs_cache_invalidate_range(node, size, node->length - size + 4096);
-    }
-    return res;
+    return node->truncate(node, size);
   }
   return -1;
 }
@@ -272,13 +215,14 @@ vfs_node_t *vfs_resolve_path_at(vfs_node_t *dir, const char *path) {
   path_buf[511] = '\0';
 
   vfs_node_t *current = (path[0] == '/') ? fs_root : (dir ? dir : fs_root);
+  vfs_open(current); // Reference for 'current'
+
   int symlink_depth = 0;
   char *p = path_buf;
 
 #define VFS_PARENT_STACK_DEPTH 32
   vfs_node_t *parent_stack[VFS_PARENT_STACK_DEPTH];
-  int stack_top = 0;
-  parent_stack[0] = current;
+  int stack_top = -1; // Stack is empty initially
 
   if (path_buf[0] == '/') {
     while (*p == '/')
@@ -300,14 +244,11 @@ vfs_node_t *vfs_resolve_path_at(vfs_node_t *dir, const char *path) {
     comp[i] = '\0';
 
     if (strcmp(comp, "..") == 0) {
-      if (stack_top > 0) {
-        vfs_node_t *to_free = current;
-        stack_top--;
+      if (stack_top >= 0) {
+        vfs_close(current);
         current = parent_stack[stack_top];
-        if (to_free != fs_root && to_free != dir && to_free != current &&
-            !(to_free->flags & FS_PERSISTENT)) {
-          kfree(to_free);
-        }
+        stack_top--;
+        // Ownership transferred from stack to 'current'
       }
       continue;
     }
@@ -317,122 +258,82 @@ vfs_node_t *vfs_resolve_path_at(vfs_node_t *dir, const char *path) {
 
     vfs_node_t *next = vfs_finddir(current, comp);
     if (!next) {
-      for (int j = 1; j <= stack_top; j++) {
-        if (parent_stack[j] != fs_root && parent_stack[j] != dir &&
-            !(parent_stack[j]->flags & FS_PERSISTENT)) {
-          kfree(parent_stack[j]);
-        }
+      for (int j = 0; j <= stack_top; j++) {
+        vfs_close(parent_stack[j]);
       }
+      vfs_close(current);
       kfree(path_buf);
       return 0;
     }
 
     if ((next->flags & FS_TYPE_MASK) == FS_SYMLINK) {
       if (++symlink_depth > MAX_SYMLINK_DEPTH) {
-        if (!(next->flags & FS_PERSISTENT))
-          kfree(next);
-        for (int j = 1; j <= stack_top; j++) {
-          if (parent_stack[j] != fs_root && parent_stack[j] != dir &&
-              !(parent_stack[j]->flags & FS_PERSISTENT)) {
-            kfree(parent_stack[j]);
-          }
-        }
-        kfree(path_buf);
-        return 0;
+        vfs_close(next);
+        goto fail;
       }
 
       char link_target[512];
       int len = vfs_readlink(next, link_target, 511);
-      if (!(next->flags & FS_PERSISTENT))
-        kfree(next);
+      vfs_close(next);
 
-      if (len < 0) {
-        for (int j = 1; j <= stack_top; j++) {
-          if (parent_stack[j] != fs_root && parent_stack[j] != dir &&
-              !(parent_stack[j]->flags & FS_PERSISTENT)) {
-            kfree(parent_stack[j]);
-          }
-        }
-        kfree(path_buf);
-        return 0;
-      }
+      if (len < 0) goto fail;
       link_target[len] = '\0';
 
       char *next_path = kmalloc(512);
-      if (!next_path) {
-        for (int j = 1; j <= stack_top; j++) {
-          if (parent_stack[j] != fs_root && parent_stack[j] != dir &&
-              !(parent_stack[j]->flags & FS_PERSISTENT)) {
-            kfree(parent_stack[j]);
-          }
-        }
-        kfree(path_buf);
-        return 0;
-      }
+      if (!next_path) goto fail;
       strcpy(next_path, link_target);
 
       if (*p) {
         int cur_len = (int)strlen(next_path);
         if (cur_len < 510) {
-          bool target_ends_in_slash =
-              (cur_len > 0 && next_path[cur_len - 1] == '/');
-          bool p_starts_with_slash = (*p == '/');
-
-          if (!target_ends_in_slash && !p_starts_with_slash) {
-            strcat(next_path, "/");
-          } else if (target_ends_in_slash && p_starts_with_slash) {
-            p++;
-          }
+          bool target_ends_in_slash = (cur_len > 0 && next_path[cur_len - 1] == '/');
+          if (!target_ends_in_slash && *p != '/') strcat(next_path, "/");
+          else if (target_ends_in_slash && *p == '/') p++;
           strncat(next_path, p, 511 - strlen(next_path));
         }
       }
       next_path[511] = '\0';
-
       strcpy(path_buf, next_path);
       kfree(next_path);
       p = path_buf;
 
       if (path_buf[0] == '/') {
-        for (int j = 1; j <= stack_top; j++) {
-          if (parent_stack[j] != fs_root && parent_stack[j] != dir &&
-              !(parent_stack[j]->flags & FS_PERSISTENT)) {
-            kfree(parent_stack[j]);
-          }
-        }
+        vfs_close(current);
+        for (int j = 0; j <= stack_top; j++) vfs_close(parent_stack[j]);
+        stack_top = -1;
         current = fs_root;
-        stack_top = 0;
-        parent_stack[0] = fs_root;
-        while (*p == '/')
-          p++;
+        vfs_open(current);
+        while (*p == '/') p++;
       }
       continue;
     }
 
-    current = next;
+    // Descent
     if (stack_top < VFS_PARENT_STACK_DEPTH - 1) {
       stack_top++;
       parent_stack[stack_top] = current;
+      current = next;
+      // 'current' reference transferred to stack, 'next' becomes new 'current'
     } else {
-      // Stack overflow - just replace current and lose parent history
-      // This is better than crashing or leaking.
-      // We free the previous current if it was transient.
-      vfs_node_t *prev = parent_stack[stack_top];
-      if (prev != fs_root && prev != dir && !(prev->flags & FS_PERSISTENT)) {
-        kfree(prev);
-      }
-      parent_stack[stack_top] = current;
+      // Stack overflow - just swap current and lose history
+      vfs_close(current);
+      current = next;
     }
   }
 
-  for (int j = 1; j < stack_top; j++) {
-    if (parent_stack[j] != current && parent_stack[j] != fs_root &&
-        parent_stack[j] != dir && !(parent_stack[j]->flags & FS_PERSISTENT)) {
-      kfree(parent_stack[j]);
-    }
+  // Cleanup stack
+  for (int j = 0; j <= stack_top; j++) {
+    vfs_close(parent_stack[j]);
   }
 
   kfree(path_buf);
   return current;
+
+fail:
+  for (int j = 0; j <= stack_top; j++) vfs_close(parent_stack[j]);
+  vfs_close(current);
+  kfree(path_buf);
+  return 0;
 }
 
 vfs_node_t *vfs_resolve_path(const char *path) {
@@ -452,8 +353,8 @@ void vfs_node_init(vfs_node_t *node) {
   node->refcount = 1;
 }
 
-int vfs_mount(vfs_node_t *mountpoint, vfs_node_t *target) {
-  if (!mountpoint || !target)
+int vfs_mount_ex(vfs_node_t *mountpoint, vfs_node_t *target, const char *dev_name, const char *fs_type) {
+  if (!target)
     return -1;
 
   vfs_mount_entry_t *entry = kmalloc(sizeof(vfs_mount_entry_t));
@@ -461,11 +362,77 @@ int vfs_mount(vfs_node_t *mountpoint, vfs_node_t *target) {
     return -1;
   entry->mountpoint = mountpoint;
   entry->target = target;
+  strncpy(entry->dev_name, dev_name ? dev_name : "none", 63);
+  strncpy(entry->fs_type, fs_type ? fs_type : "unknown", 31);
   entry->next = vfs_mount_list;
   vfs_mount_list = entry;
 
-  mountpoint->flags |= FS_MOUNTPOINT | FS_PERSISTENT;
-  mountpoint->ptr = target;
+  target->flags |= FS_PERSISTENT;
+
+  if (mountpoint) {
+    mountpoint->flags |= FS_MOUNTPOINT | FS_PERSISTENT;
+    mountpoint->ptr = target;
+  }
 
   return 0;
+}
+
+int vfs_mount(vfs_node_t *mountpoint, vfs_node_t *target) {
+  return vfs_mount_ex(mountpoint, target, "none", "unknown");
+}
+
+int vfs_statfs(vfs_node_t *node, void *buf) {
+  if (node && node->statfs) {
+    return node->statfs(node, buf);
+  }
+  return -1;
+}
+
+int vfs_get_mounts(vfs_mount_info_t *buffer, int max_count) {
+  int count = 0;
+
+  // Add root if it exists
+  if (fs_root && max_count > 0) {
+    // Try to find if root is in the mount list first
+    bool found = false;
+    vfs_mount_entry_t *c = vfs_mount_list;
+    while(c) {
+        if (!c->mountpoint || (c->mountpoint && strcmp(c->mountpoint->name, "/") == 0)) {
+            found = true;
+            break;
+        }
+        c = c->next;
+    }
+
+    if (!found) {
+        strcpy(buffer[count].mountpoint, "/");
+        strcpy(buffer[count].target, "/");
+        strcpy(buffer[count].dev_name, "none");
+        strcpy(buffer[count].fs_type, "ext3"); // Common default for this OS
+        count++;
+    }
+  }
+
+  vfs_mount_entry_t *curr = vfs_mount_list;
+  while (curr && count < max_count) {
+    if (curr->mountpoint) {
+        strncpy(buffer[count].mountpoint, curr->mountpoint->name, 127);
+        buffer[count].mountpoint[127] = '\0';
+    } else {
+        strcpy(buffer[count].mountpoint, "/");
+    }
+    
+    strncpy(buffer[count].target, curr->target->name, 127);
+    buffer[count].target[127] = '\0';
+
+    strncpy(buffer[count].dev_name, curr->dev_name, 63);
+    buffer[count].dev_name[63] = '\0';
+
+    strncpy(buffer[count].fs_type, curr->fs_type, 31);
+    buffer[count].fs_type[31] = '\0';
+
+    count++;
+    curr = curr->next;
+  }
+  return count;
 }

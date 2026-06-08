@@ -38,17 +38,17 @@ static int nvme_probe(struct device *dev) {
   if (nvme_count >= NVME_MAX_CONTROLLERS)
     return -1;
 
-  klog_puts("[NVME] Probing controller...\n");
+  klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " Probing NVMe controller...\n");
 
   // Find the PCI device for this generic device manager node
   struct pci_device *pdev =
       pci_find_device_by_id(dev->vendor_id, dev->device_id);
   if (!pdev) {
-    klog_puts("[ERR] NVMe: Could not find associated PCI device.\n");
+    klog_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " NVMe: Could not find associated PCI device.\n");
     return -1;
   }
 
-  klog_puts("[NVME] PCI ID: ");
+  klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " NVMe PCI ID: ");
   klog_hex32(pdev->vendor_id);
   klog_puts(":");
   klog_hex32(pdev->device_id);
@@ -100,7 +100,7 @@ static int nvme_probe(struct device *dev) {
   uint32_t version = nvme->regs->vs;
   uint64_t cap = nvme->regs->cap;
 
-  klog_puts("[NVME] Version: ");
+  klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " NVMe Version: ");
   klog_uint64((version >> 16) & 0xFFFF);
   klog_puts(".");
   klog_uint64((version >> 8) & 0xFF);
@@ -108,13 +108,13 @@ static int nvme_probe(struct device *dev) {
   klog_uint64(version & 0xFF);
   klog_puts("\n");
 
-  klog_puts("[NVME] Cap: ");
+  klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " NVMe Cap: ");
   klog_uint64(cap);
   klog_puts("\n");
 
   nvme->db_stride = 1 << (2 + ((cap >> 32) & 0xF));
 
-  klog_puts("[NVME] Doorbell Stride: ");
+  klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " NVMe Doorbell Stride: ");
   klog_uint64(nvme->db_stride);
   klog_puts(" bytes\n");
 
@@ -165,10 +165,10 @@ static int nvme_init_controller(struct nvme_controller *nvme) {
   }
 
   if (!nvme_wait_ready(nvme, false)) {
-    klog_puts("[ERR] NVMe: Controller reset timeout (RDY stayed 1).\n");
+    klog_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " NVMe: Controller reset timeout (RDY stayed 1).\n");
     return -1;
   }
-  klog_puts("[NVME]   Controller disabled/reset.\n");
+  klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " NVMe Controller disabled/reset.\n");
 
 
   struct pci_device *pdev =
@@ -191,7 +191,7 @@ static int nvme_init_controller(struct nvme_controller *nvme) {
   memset((void *)(acq_phys + pmm_get_hhdm_offset()), 0, 4096);
 
   // 3. Configure Admin Queue Attributes
-  klog_puts("[NVME]   Configuring Admin Queues...\n");
+  klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " Configuring NVMe Admin Queues...\n");
   uint32_t aqa = (255 << 16) | 63;
   nvme->regs->aqa = aqa;
   nvme->regs->asq = asq_phys;
@@ -203,10 +203,10 @@ static int nvme_init_controller(struct nvme_controller *nvme) {
   nvme->regs->cc = cc | 1; // Set EN = 1
 
   if (!nvme_wait_ready(nvme, true)) {
-    klog_puts("[ERR] NVMe: Controller enable timeout (RDY stayed 0).\n");
+    klog_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " NVMe: Controller enable timeout (RDY stayed 0).\n");
     return -1;
   }
-  klog_puts("[NVME]   Controller READY.\n");
+  klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " NVMe Controller READY.\n");
 
   nvme->admin_sq_tail = 0;
   nvme->admin_cq_head = 0;
@@ -270,7 +270,7 @@ static int nvme_identify(struct nvme_controller *nvme) {
   cmd.cd10 = 1; // CNS: Identify Controller
 
   if (nvme_submit_admin_cmd(nvme, &cmd, NULL) != 0) {
-    klog_puts("[ERR] NVMe: Identify Controller failed.\n");
+    klog_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " NVMe: Identify Controller failed.\n");
     pmm_free(phys_buf);
     return -1;
   }
@@ -296,7 +296,7 @@ static int nvme_identify(struct nvme_controller *nvme) {
   cmd.cd10 = 0; // CNS: Identify Namespace
 
   if (nvme_submit_admin_cmd(nvme, &cmd, NULL) != 0) {
-    klog_puts("[ERR] NVMe: Identify Namespace failed.\n");
+    klog_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " NVMe: Identify Namespace failed.\n");
     pmm_free(phys_buf);
     return -1;
   }
@@ -340,7 +340,7 @@ static int nvme_create_io_queues(struct nvme_controller *nvme) {
   cmd.cd11 = 1;               // PC=1 (Physically Contiguous)
 
   if (nvme_submit_admin_cmd(nvme, &cmd, NULL) != 0) {
-    klog_puts("[ERR] NVMe: Create IO CQ failed.\n");
+    klog_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " NVMe: Create IO CQ failed.\n");
     return -1;
   }
 
@@ -352,7 +352,7 @@ static int nvme_create_io_queues(struct nvme_controller *nvme) {
   cmd.cd11 = (1 << 16) | 1;  // CQID=1, PC=1
 
   if (nvme_submit_admin_cmd(nvme, &cmd, NULL) != 0) {
-    klog_puts("[ERR] NVMe: Create IO SQ failed.\n");
+    klog_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " NVMe: Create IO SQ failed.\n");
     return -1;
   }
 
@@ -479,9 +479,9 @@ void nvme_init(void) {
 }
 
 void nvme_self_test(void) {
-  klog_puts("[TEST] NVMe Phase 6: MSI-X Interrupts\n");
+  klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " NVMe Phase 6: MSI-X Interrupts starting...\n");
   if (nvme_count == 0) {
-    klog_puts("       No NVMe controllers detected. FAIL.\n");
+    klog_puts("       No NVMe controllers detected. " KLOG_CLR_RED "FAIL" KLOG_CLR_RESET ".\n");
     return;
   }
 
@@ -492,32 +492,32 @@ void nvme_self_test(void) {
         if (nvme_create_io_queues(nvme) == 0) {
           klog_puts("       Controller ");
           klog_uint64(i);
-          klog_puts(": IO Queues established. SUCCESS.\n");
+          klog_puts(": IO Queues established. " KLOG_CLR_GREEN "SUCCESS" KLOG_CLR_RESET ".\n");
 
           // Final Test: Read LBA 0
           uint8_t buffer[512];
           if (nvme_block_read(&nvme->bdev, 0, 1, buffer) == 0) {
-            klog_puts("       LBA 0 Read Test: SUCCESS. Signature: ");
+            klog_puts("       LBA 0 Read Test: " KLOG_CLR_GREEN "SUCCESS" KLOG_CLR_RESET ". Signature: ");
             klog_hex32(
                 *(uint32_t *)&buffer[510]); // Should be 0xAA55 if partitioned
             klog_puts("\n");
           } else {
-            klog_puts("       LBA 0 Read Test: FAILED.\n");
+            klog_puts("       LBA 0 Read Test: " KLOG_CLR_RED "FAILED" KLOG_CLR_RESET ".\n");
           }
         } else {
           klog_puts("       Controller ");
           klog_uint64(i);
-          klog_puts(": IO Queue setup FAILED.\n");
+          klog_puts(": IO Queue setup " KLOG_CLR_RED "FAILED" KLOG_CLR_RESET ".\n");
         }
       } else {
         klog_puts("       Controller ");
         klog_uint64(i);
-        klog_puts(": Identification FAILED.\n");
+        klog_puts(": Identification " KLOG_CLR_RED "FAILED" KLOG_CLR_RESET ".\n");
       }
     } else {
       klog_puts("       Controller ");
       klog_uint64(i);
-      klog_puts(": Initialization FAILED.\n");
+      klog_puts(": Initialization " KLOG_CLR_RED "FAILED" KLOG_CLR_RESET ".\n");
     }
   }
   klog_puts("[TEST] NVMe Phase 6 complete.\n\n");

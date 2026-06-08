@@ -21,13 +21,13 @@ void usb_init(void) {
   if (usb_initialized)
     return;
   usb_initialized = true;
-  klog_puts("[USB] Subsystem initialized.\n");
+  klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " USB: Subsystem initialized.\n");
   for (int i = 0; i < MAX_USB_DEVICES; i++)
     devices[i] = NULL;
 }
 
 void usb_device_discovered(struct usb_hcd *hcd, uint8_t port, bool low_speed) {
-  klog_puts("[USB] New device detected on port ");
+  klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " USB: New device detected on port ");
   klog_uint64(port + 1);
   klog_puts(low_speed ? " (Low-Speed)\n" : " (Full-Speed)\n");
 
@@ -51,7 +51,7 @@ void usb_device_discovered(struct usb_hcd *hcd, uint8_t port, bool low_speed) {
 }
 
 void usb_enumerate_device(struct usb_device *dev) {
-  klog_puts("[USB] Enumerating device...\n");
+  klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " USB: Enumerating device...\n");
 
   struct usb_control_request req;
 
@@ -65,11 +65,11 @@ void usb_enumerate_device(struct usb_device *dev) {
   int res = dev->hcd->control_transfer(dev->hcd, 0, &req, &dev->desc, 8,
                                        dev->low_speed);
   if (res < 0) {
-    klog_puts("[USB] Failed to get device descriptor (8 bytes)\n");
+    klog_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " USB: Failed to get device descriptor (8 bytes)\n");
     return;
   }
 
-  klog_puts("[USB] Max Packet Size: ");
+  klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " USB: Max Packet Size: ");
   klog_uint64(dev->desc.max_packet_size);
   klog_puts("\n");
 
@@ -83,7 +83,7 @@ void usb_enumerate_device(struct usb_device *dev) {
 
   res = dev->hcd->control_transfer(dev->hcd, 0, &req, NULL, 0, dev->low_speed);
   if (res < 0) {
-    klog_puts("[USB] Failed to set address\n");
+    klog_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " USB: Failed to set address\n");
     return;
   }
 
@@ -101,11 +101,11 @@ void usb_enumerate_device(struct usb_device *dev) {
   res = dev->hcd->control_transfer(dev->hcd, dev->address, &req, &dev->desc, 18,
                                    dev->low_speed);
   if (res < 0) {
-    klog_puts("[USB] Failed to get full device descriptor\n");
+    klog_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " USB: Failed to get full device descriptor\n");
     return;
   }
 
-  klog_puts("[USB] Device Vendor: ");
+  klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " USB: Device Vendor: ");
   klog_hex32(dev->desc.vendor_id);
   klog_puts(" Product: ");
   klog_hex32(dev->desc.product_id);
@@ -113,8 +113,8 @@ void usb_enumerate_device(struct usb_device *dev) {
 
 
   if (usb_kbd_probe(dev)) {
-    klog_puts("[USB] USB Keyboard driver attached\n");
+    klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " USB: Keyboard driver attached\n");
   } else if (usb_mouse_probe(dev)) {
-    klog_puts("[USB] USB Mouse driver attached\n");
+    klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " USB: Mouse driver attached\n");
   }
 }

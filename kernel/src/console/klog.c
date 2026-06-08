@@ -13,6 +13,24 @@ static uint32_t screen_y = 0;
 #define KLOG_FG 0x00FFFFFF
 #define KLOG_BG 0x00000000
 
+static uint32_t klog_fg = KLOG_FG;
+
+static bool esc = false;
+static int esc_state = 0;
+static char esc_buffer[32];
+static int esc_idx = 0;
+
+static uint32_t klog_ansi_colors[8] = {
+    0x00000000, // Black
+    0x00FF0000, // Red
+    0x0000FF00, // Green
+    0x00FFFF00, // Yellow
+    0x000000FF, // Blue
+    0x00FF00FF, // Magenta
+    0x0000FFFF, // Cyan
+    0x00FFFFFF  // White
+};
+
 void klog_set_screen_logging(bool enabled) {
   spinlock_acquire(&klog_lock);
   screen_logging_enabled = enabled;
@@ -22,6 +40,54 @@ void klog_set_screen_logging(bool enabled) {
 static void klog_putchar_screen(char c) {
   if (!screen_logging_enabled)
     return;
+
+  if (esc) {
+    if (esc_state == 0) {
+      if (c == '[') {
+        esc_state = 1;
+      } else {
+        esc = false;
+      }
+    } else if (esc_state == 1) {
+      if (c >= '0' && c <= '9' || c == ';') {
+        if (esc_idx < 31)
+          esc_buffer[esc_idx++] = c;
+      } else if (c == 'm') {
+        esc_buffer[esc_idx] = '\0';
+        int code = 0;
+        for (int i = 0; esc_buffer[i]; i++) {
+          if (esc_buffer[i] == ';') {
+            // Very basic: just take the last one or handle multiple?
+            // Let's just handle single codes for now.
+            code = 0;
+            continue;
+          }
+          code = code * 10 + (esc_buffer[i] - '0');
+        }
+
+        if (code == 0) {
+          klog_fg = KLOG_FG;
+        } else if (code >= 30 && code <= 37) {
+          klog_fg = klog_ansi_colors[code - 30];
+        } else if (code >= 90 && code <= 97) {
+            // Bright colors
+            klog_fg = klog_ansi_colors[code - 90]; // Just use same for now or brighten?
+        }
+
+        esc = false;
+      } else {
+        esc = false;
+      }
+    }
+    return;
+  }
+
+  if (c == '\x1b') {
+    esc = true;
+    esc_state = 0;
+    esc_idx = 0;
+    return;
+  }
 
   uint32_t w = fb_get_width();
   uint32_t h = fb_get_height();
@@ -45,7 +111,7 @@ static void klog_putchar_screen(char c) {
 
     const uint8_t *glyph = font_get_glyph(c);
     for (uint32_t gy = 0; gy < FONT_HEIGHT; gy++) {
-      fb_draw_glyph_scanline(screen_x, screen_y + gy, glyph[gy], KLOG_FG,
+      fb_draw_glyph_scanline(screen_x, screen_y + gy, glyph[gy], klog_fg,
                              KLOG_BG);
     }
     screen_x += FONT_WIDTH;

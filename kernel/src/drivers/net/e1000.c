@@ -418,7 +418,7 @@ static void e1000_irq_handler(struct registers *regs) {
 
   if (icr & ICR_LSC) {
     uint32_t status = e1000_read(E1000_STATUS);
-    console_puts("[E1000] Link status changed: ");
+    console_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " Link status changed: ");
     console_puts((status & STATUS_LU) ? "UP\n" : "DOWN\n");
   }
 }
@@ -429,7 +429,7 @@ static int e1000_probe(struct device *dev) {
   // Use resources from 'dev' instead of global scanning
   // For now, we'll keep using the existing logic but wrapped in match
 
-  console_puts("[E1000] Probing device ");
+  console_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " Probing e1000 device ");
   console_puts(dev->name);
   console_puts("\n");
 
@@ -492,7 +492,7 @@ static int e1000_probe(struct device *dev) {
     timeout--;
   }
   if (timeout == 0) {
-    console_puts("[ERR] e1000 reset timed out!\n");
+    console_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " e1000 reset timed out!\n");
     return -1;
   }
 
@@ -519,7 +519,7 @@ static int e1000_probe(struct device *dev) {
 
   // Step 8: Read MAC address
   if (!e1000_read_mac()) {
-    console_puts("[ERR] e1000: failed to read MAC address.\n");
+    console_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " e1000: failed to read MAC address.\n");
     return -1;
   }
 
@@ -541,7 +541,7 @@ static int e1000_probe(struct device *dev) {
 
   // Step 9: Initialize RX ring
   if (!e1000_init_rx()) {
-    console_puts("[ERR] e1000: failed to initialize RX ring.\n");
+    console_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " e1000: failed to initialize RX ring.\n");
     return -1;
   }
   console_puts("     RX ring initialized (");
@@ -550,7 +550,7 @@ static int e1000_probe(struct device *dev) {
 
   // Step 10: Initialize TX ring
   if (!e1000_init_tx()) {
-    console_puts("[ERR] e1000: failed to initialize TX ring.\n");
+    console_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " e1000: failed to initialize TX ring.\n");
     return -1;
   }
   console_puts("     TX ring initialized (");
@@ -578,7 +578,7 @@ static int e1000_probe(struct device *dev) {
   console_puts("     Link: ");
   console_puts((status & STATUS_LU) ? "UP\n" : "DOWN\n");
 
-  console_puts("[OK] Intel e1000 driver initialized.\n\n");
+  console_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " Intel e1000 driver initialized.\n\n");
   return 0; // Success
 }
 

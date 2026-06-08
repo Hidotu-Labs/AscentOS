@@ -41,6 +41,13 @@ static uint32_t dsp_sample_rate = 8000;
 static uint8_t dsp_channels = 1;
 static uint8_t dsp_bits = 8;
 
+#define SB16_RING_SIZE 65536
+static uint8_t sb16_ring[SB16_RING_SIZE];
+static volatile uint32_t ring_head = 0;
+static volatile uint32_t ring_tail = 0;
+static volatile uint32_t ring_count = 0;
+static volatile bool sb16_is_playing = false;
+
 // DMA buffer (64KB-aligned within ISA 16MB)
 static uint8_t *sb16_dma_buf = 0;
 static uint64_t sb16_dma_phys = 0;
@@ -299,6 +306,33 @@ uint8_t sb16_get_bits(void) { return dsp_bits; }
 int sb16_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
   (void)node;
   switch (request) {
+  case 0x5000: // SNDCTL_DSP_RESET
+  {
+    asm volatile("cli");
+    ring_head = ring_tail = ring_count = 0;
+    sb16_is_playing = false;
+    dsp_write(0xD0);
+    dsp_write(0xD5);
+    asm volatile("sti");
+    return 0;
+  }
+  case 0xC004500A: // SNDCTL_DSP_SETFRAGMENT
+    return 0;
+  case 0x8010500C: // SNDCTL_DSP_GETOSPACE
+  {
+    struct {
+      int fragments;
+      int fragstotal;
+      int fragsize;
+      int bytes;
+    } *info = (void *)arg;
+    if (!info) return -14;
+    info->fragsize = 2048;
+    info->fragstotal = SB16_RING_SIZE / 2048;
+    info->bytes = SB16_RING_SIZE - ring_count;
+    info->fragments = info->bytes / 2048;
+    return 0;
+  }
   case SNDCTL_DSP_SPEED: {
     uint32_t *rate = (uint32_t *)arg;
     if (!rate)
@@ -338,11 +372,6 @@ int sb16_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
 }
 
 #define SB16_RING_SIZE 65536
-static uint8_t sb16_ring[SB16_RING_SIZE];
-static volatile uint32_t ring_head = 0;
-static volatile uint32_t ring_tail = 0;
-static volatile uint32_t ring_count = 0;
-static volatile bool sb16_is_playing = false;
 
 static void sb16_pump_audio(void) {
   if (ring_count == 0) {
