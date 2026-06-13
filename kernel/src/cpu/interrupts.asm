@@ -76,11 +76,21 @@ ISR_NOERRCODE 49
 ISR_NOERRCODE 255
 
 isr_common_stub:
-    ; Hardware has already switched RSP to the kernel stack (via TSS) if coming from Ring 3.
-    ; First, check if we came from user mode (Ring 3) to decide if swapgs is needed.
-    ; Interrupt frame on stack: SS, RSP, RFLAGS, CS, RIP, ERR, INT
-    ; RSP points to INT. CS is at [RSP + 24].
-    test qword [rsp + 24], 3
+    ; Stack at entry:
+    ;   [rsp+0]  = int_no   (pushed by ISR macro)
+    ;   [rsp+8]  = err_code (pushed by CPU or macro)
+    ;   [rsp+16] = rip      (CPU)
+    ;   [rsp+24] = cs       (CPU)
+    ;   [rsp+32] = rflags   (CPU)
+    ;   --- ring-3 only (CPU only saves RSP/SS on privilege change): ---
+    ;   [rsp+40] = rsp      (user, CPU)
+    ;   [rsp+48] = ss       (user, CPU)
+    ;
+    ; NOTE: for ring-0 exceptions [rsp+40] and [rsp+48] are NOT pushed by CPU.
+    ; The struct registers rsp/ss fields will contain garbage in that case.
+    ; isr_panic() compensates by reading RSP directly via inline asm for ring-0.
+
+    test qword [rsp + 24], 3    ; check CPL bits in saved CS
     jz .skip_swapgs
     swapgs
 .skip_swapgs:
@@ -104,10 +114,10 @@ isr_common_stub:
 
     ; Call C handler
     mov rdi, rsp           ; First parameter: pointer to struct registers
-    mov rbp, rsp           ; Save original RSP
+    mov rbp, rsp           ; Save RSP for restoring after alignment
     and rsp, -16           ; Align stack to 16 bytes for System V AMD64 ABI
     call isr_handler
-    mov rsp, rbp           ; Restore original RSP
+    mov rsp, rbp           ; Restore RSP
 
     ; Pop all general purpose registers
     pop r15
@@ -126,11 +136,11 @@ isr_common_stub:
     pop rbx
     pop rax
 
-    ; Swap GS back if we came from user mode
+    ; Swap GS back if returning to user mode
     test qword [rsp + 24], 3
     jz .skip_swapgs_exit
     swapgs
 .skip_swapgs_exit:
 
-    add rsp, 16 ; remove error code and int number
+    add rsp, 16             ; remove int_no + err_code
     iretq

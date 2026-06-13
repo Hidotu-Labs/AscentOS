@@ -448,11 +448,48 @@ static void isr_panic(struct registers *regs, const char *msg) {
   console_puts("\n\n");
 
   print_context_summary(regs);
-  console_puts("RIP: ");
-  print_hex(regs->rip);
-  console_puts(" RSP: ");
-  print_hex(regs->rsp);
-  console_puts("\n");
+
+  // RIP is always valid (CPU saves it for all exceptions).
+  // RSP/SS are only pushed by the CPU on a privilege-level change (ring-3 → ring-0).
+  // For ring-0 exceptions, regs->rsp and regs->ss are garbage from adjacent
+  // stack memory.  In that case, grab a live RSP snapshot via inline asm —
+  // it won't be the exact pre-fault RSP, but it's in the right ballpark.
+  uint8_t cpl = regs->cs & 0x3;
+  uint64_t display_rsp;
+  if (cpl == 0) {
+    __asm__ volatile("mov %%rsp, %0" : "=r"(display_rsp));
+    console_puts("RIP: ");
+    print_hex(regs->rip);
+    console_puts("\nRSP: ");
+    print_hex(display_rsp);
+    console_puts(" (live snapshot; fault RSP not saved by CPU for ring-0)\n");
+  } else {
+    console_puts("RIP: ");
+    print_hex(regs->rip);
+    console_puts(" RSP: ");
+    print_hex(regs->rsp);
+    console_puts("\n");
+  }
+
+  // General-purpose registers
+  console_puts("\nGENERAL PURPOSE REGISTERS:\n");
+  print_reg_line("  RAX", regs->rax);
+  print_reg_line("  RBX", regs->rbx);
+  print_reg_line("  RCX", regs->rcx);
+  print_reg_line("  RDX", regs->rdx);
+  print_reg_line("  RSI", regs->rsi);
+  print_reg_line("  RDI", regs->rdi);
+  print_reg_line("  RBP", regs->rbp);
+  print_reg_line("  R8 ", regs->r8);
+  print_reg_line("  R9 ", regs->r9);
+  print_reg_line("  R10", regs->r10);
+  print_reg_line("  R11", regs->r11);
+  print_reg_line("  R12", regs->r12);
+  print_reg_line("  R13", regs->r13);
+  print_reg_line("  R14", regs->r14);
+  print_reg_line("  R15", regs->r15);
+
+  print_rflags_decoded(regs->rflags);
 
   if (regs->int_no == 13) {
     print_gp_error_details(regs->err_code);
