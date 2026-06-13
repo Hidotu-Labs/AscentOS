@@ -19,9 +19,6 @@
 static struct list_head unix_bound_list;
 static spinlock_t unix_bound_lock;
 
-/**
- * Find an AF_UNIX socket bound to a specific address.
- */
 unix_sock_t *unix_find_socket_by_addr(struct sockaddr_un *addr, int addrlen) {
   struct list_head *pos;
 
