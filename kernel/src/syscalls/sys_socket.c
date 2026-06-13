@@ -1,6 +1,5 @@
 // Socket Syscalls: socket, socketpair, bind, connect, listen, accept, etc.
 
-
 #include "../console/klog.h"
 #include "../fs/vfs.h"
 #include "../lib/string.h"
@@ -36,10 +35,11 @@ static uint64_t sys_socket(uint64_t domain, uint64_t type, uint64_t protocol,
   if (!sock) {
     // Determine error - extract base type for comparison
     int base = typ & ~SOCK_NONBLOCK & ~SOCK_CLOEXEC;
-    if (dom != AF_UNIX && dom != AF_INET && dom != AF_INET6 && dom != AF_NETLINK)
+    if (dom != AF_UNIX && dom != AF_INET && dom != AF_INET6 &&
+        dom != AF_NETLINK)
       return (uint64_t)-EAFNOSUPPORT;
-    if (base != SOCK_STREAM && base != SOCK_DGRAM &&
-        base != SOCK_RAW && base != SOCK_SEQPACKET)
+    if (base != SOCK_STREAM && base != SOCK_DGRAM && base != SOCK_RAW &&
+        base != SOCK_SEQPACKET)
       return (uint64_t)-EPROTONOSUPPORT;
     return (uint64_t)-12; // ENOMEM
   }
@@ -49,7 +49,8 @@ static uint64_t sys_socket(uint64_t domain, uint64_t type, uint64_t protocol,
   struct thread *t = sched_get_current();
   if (fd < 0) {
     klog_puts("[SOCKET] tid=");
-    if (t) klog_uint64(t->tid);
+    if (t)
+      klog_uint64(t->tid);
     klog_puts(" alloc_fd failed: ");
     klog_uint64((uint64_t)fd);
     klog_puts("\n");
@@ -58,7 +59,8 @@ static uint64_t sys_socket(uint64_t domain, uint64_t type, uint64_t protocol,
   }
 
   klog_puts("[SOCKET] tid=");
-  if (t) klog_uint64(t->tid);
+  if (t)
+    klog_uint64(t->tid);
   klog_puts(" domain=");
   klog_uint64(domain);
   klog_puts(" type=");
@@ -138,7 +140,8 @@ static uint64_t sys_bind(uint64_t sockfd, uint64_t addr_ptr, uint64_t addrlen,
   struct thread *t = sched_get_current();
   if (!sock) {
     klog_puts("[BIND] tid=");
-    if (t) klog_uint64(t->tid);
+    if (t)
+      klog_uint64(t->tid);
     klog_puts(" EBADF: invalid fd=");
     klog_uint64(fd);
     klog_puts("\n");
@@ -146,7 +149,8 @@ static uint64_t sys_bind(uint64_t sockfd, uint64_t addr_ptr, uint64_t addrlen,
   }
 
   klog_puts("[BIND] tid=");
-  if (t) klog_uint64(t->tid);
+  if (t)
+    klog_uint64(t->tid);
   klog_puts(" fd=");
   klog_uint64(fd);
   klog_puts(" addrlen=");
@@ -185,7 +189,8 @@ static uint64_t sys_connect(uint64_t sockfd, uint64_t addr_ptr,
 
   struct thread *t = sched_get_current();
   klog_puts("[CONNECT] tid=");
-  if (t) klog_uint64(t->tid);
+  if (t)
+    klog_uint64(t->tid);
   klog_puts(" fd=");
   klog_uint64(fd);
   klog_puts(" addr_ptr=");
@@ -247,7 +252,8 @@ static uint64_t sys_listen(uint64_t sockfd, uint64_t backlog, uint64_t _arg2,
   socket_t *sock = socket_from_fd(fd);
   if (!sock) {
     klog_puts("[LISTEN] tid=");
-    if (t) klog_uint64(t->tid);
+    if (t)
+      klog_uint64(t->tid);
     klog_puts(" EBADF: invalid fd=");
     klog_uint64(fd);
     klog_puts("\n");
@@ -255,7 +261,8 @@ static uint64_t sys_listen(uint64_t sockfd, uint64_t backlog, uint64_t _arg2,
   }
 
   klog_puts("[LISTEN] tid=");
-  if (t) klog_uint64(t->tid);
+  if (t)
+    klog_uint64(t->tid);
   klog_puts(" fd=");
   klog_uint64(fd);
   klog_puts(" backlog=");
@@ -281,7 +288,8 @@ static uint64_t sys_accept(uint64_t sockfd, uint64_t addr_ptr,
   socket_t *sock = socket_from_fd(fd);
   if (!sock) {
     klog_puts("[ACCEPT] tid=");
-    if (t) klog_uint64(t->tid);
+    if (t)
+      klog_uint64(t->tid);
     klog_puts(" EBADF: invalid fd=");
     klog_uint64(fd);
     klog_puts("\n");
@@ -289,7 +297,8 @@ static uint64_t sys_accept(uint64_t sockfd, uint64_t addr_ptr,
   }
 
   klog_puts("[ACCEPT] tid=");
-  if (t) klog_uint64(t->tid);
+  if (t)
+    klog_uint64(t->tid);
   klog_puts(" fd=");
   klog_uint64(fd);
   klog_puts("\n");
@@ -338,7 +347,8 @@ static uint64_t sys_accept(uint64_t sockfd, uint64_t addr_ptr,
   }
 
   klog_puts("[ACCEPT] tid=");
-  if (t) klog_uint64(t->tid);
+  if (t)
+    klog_uint64(t->tid);
   klog_puts(" returned newfd=");
   klog_uint64((uint64_t)newfd);
   klog_puts("\n");
@@ -414,7 +424,6 @@ static uint64_t sys_recvfrom(uint64_t sockfd, uint64_t buf_ptr, uint64_t len,
 }
 
 // Structures for recvmsg/sendmsg
-
 
 // Syscall: sendmsg(int sockfd, struct msghdr *msg, int flags)
 static uint64_t sys_sendmsg(uint64_t sockfd, uint64_t msg_ptr, uint64_t flags,
@@ -538,7 +547,8 @@ static uint64_t sys_recvmsg(uint64_t sockfd, uint64_t msg_ptr, uint64_t flags,
    * Pull the first iovec as the data buffer and use recvfrom. */
   struct sockaddr *src_addr = NULL;
   int src_addrlen = 0;
-  if (msg->msg_name && msg->msg_namelen > 0 && is_user_ptr((uint64_t)msg->msg_name)) {
+  if (msg->msg_name && msg->msg_namelen > 0 &&
+      is_user_ptr((uint64_t)msg->msg_name)) {
     src_addr = (struct sockaddr *)msg->msg_name;
     src_addrlen = (int)msg->msg_namelen;
   }
@@ -557,9 +567,10 @@ static uint64_t sys_recvmsg(uint64_t sockfd, uint64_t msg_ptr, uint64_t flags,
     ssize_t ret;
     if (i == 0 && src_addr) {
       /* First buffer: use recvfrom to capture source address */
-      ret = socket_recvfrom(sock, iov->iov_base, iov->iov_len,
-                            (int)flags | (sock->flags & SOCK_NONBLOCK ? MSG_DONTWAIT : 0),
-                            src_addr, &src_addrlen);
+      ret = socket_recvfrom(
+          sock, iov->iov_base, iov->iov_len,
+          (int)flags | (sock->flags & SOCK_NONBLOCK ? MSG_DONTWAIT : 0),
+          src_addr, &src_addrlen);
       if (ret >= 0)
         msg->msg_namelen = (uint32_t)src_addrlen;
     } else {
@@ -615,13 +626,14 @@ static uint64_t sys_shutdown(uint64_t sockfd, uint64_t how, uint64_t _arg2,
 
 // Syscall: getsockopt(int sockfd, int level, int optname, ...)
 static uint64_t sys_getsockopt(uint64_t sockfd, uint64_t level,
-                                uint64_t optname, uint64_t optval_ptr,
-                                uint64_t optlen_ptr, uint64_t _arg5) {
+                               uint64_t optname, uint64_t optval_ptr,
+                               uint64_t optlen_ptr, uint64_t _arg5) {
   (void)_arg5;
 
   int fd = (int)sockfd;
   socket_t *sock = socket_from_fd(fd);
-  if (!sock) return (uint64_t)-9;
+  if (!sock)
+    return (uint64_t)-9;
 
   if (!is_user_ptr(optval_ptr) || !is_user_ptr(optlen_ptr))
     return (uint64_t)-14;
@@ -701,7 +713,8 @@ static uint64_t sys_setsockopt(uint64_t sockfd, uint64_t level,
 
   klog_puts("[SETSOCKOPT] tid=");
   struct thread *_curr = sched_get_current();
-  if (_curr) klog_uint64(_curr->tid);
+  if (_curr)
+    klog_uint64(_curr->tid);
   klog_puts(" fd=");
   klog_uint64(fd);
   klog_puts(" level=");
@@ -763,24 +776,24 @@ static uint64_t sys_setsockopt(uint64_t sockfd, uint64_t level,
   // IPPROTO_TCP options (level=6)
   if ((int)level == 6 /* IPPROTO_TCP */) {
     switch ((int)optname) {
-    case 1:  // TCP_NODELAY
-    case 2:  // TCP_MAXSEG
-    case 3:  // TCP_CORK
-    case 4:  // TCP_KEEPIDLE
-    case 5:  // TCP_KEEPINTVL
-    case 6:  // TCP_KEEPCNT
-    case 7:  // TCP_SYNCNT
-    case 8:  // TCP_LINGER2
-    case 9:  // TCP_DEFER_ACCEPT
-    case 10: // TCP_WINDOW_CLAMP
-    case 11: // TCP_INFO
-    case 12: // TCP_QUICKACK
-    case 23: // TCP_FASTOPEN
-    case 24: // TCP_TIMESTAMP
-    case 25: // TCP_NOTSENT_LOWAT
-    case 26: // TCP_CC_INFO
-    case 27: // TCP_SAVE_SYN
-    case 28: // TCP_SAVED_SYN
+    case 1:     // TCP_NODELAY
+    case 2:     // TCP_MAXSEG
+    case 3:     // TCP_CORK
+    case 4:     // TCP_KEEPIDLE
+    case 5:     // TCP_KEEPINTVL
+    case 6:     // TCP_KEEPCNT
+    case 7:     // TCP_SYNCNT
+    case 8:     // TCP_LINGER2
+    case 9:     // TCP_DEFER_ACCEPT
+    case 10:    // TCP_WINDOW_CLAMP
+    case 11:    // TCP_INFO
+    case 12:    // TCP_QUICKACK
+    case 23:    // TCP_FASTOPEN
+    case 24:    // TCP_TIMESTAMP
+    case 25:    // TCP_NOTSENT_LOWAT
+    case 26:    // TCP_CC_INFO
+    case 27:    // TCP_SAVE_SYN
+    case 28:    // TCP_SAVED_SYN
       return 0; // Stub success
     default:
       return 0; // Accept all unknown TCP options silently
@@ -790,19 +803,19 @@ static uint64_t sys_setsockopt(uint64_t sockfd, uint64_t level,
   // IPPROTO_IP options (level=0)
   if ((int)level == 0 /* IPPROTO_IP */) {
     switch ((int)optname) {
-    case 1:  // IP_TOS
-    case 2:  // IP_TTL
-    case 3:  // IP_HDRINCL
-    case 4:  // IP_OPTIONS
-    case 9:  // IP_ROUTER_ALERT
-    case 10: // IP_RECVOPTS
-    case 11: // IP_RETOPTS
-    case 12: // IP_PKTINFO
-    case 14: // IP_MTU_DISCOVER
-    case 15: // IP_RECVERR
-    case 16: // IP_RECVTTL
-    case 17: // IP_RECVTOS
-    case 35: // IP_FREEBIND
+    case 1:     // IP_TOS
+    case 2:     // IP_TTL
+    case 3:     // IP_HDRINCL
+    case 4:     // IP_OPTIONS
+    case 9:     // IP_ROUTER_ALERT
+    case 10:    // IP_RECVOPTS
+    case 11:    // IP_RETOPTS
+    case 12:    // IP_PKTINFO
+    case 14:    // IP_MTU_DISCOVER
+    case 15:    // IP_RECVERR
+    case 16:    // IP_RECVTTL
+    case 17:    // IP_RECVTOS
+    case 35:    // IP_FREEBIND
       return 0; // Stub success
     default:
       return 0; // Accept all unknown IP options silently

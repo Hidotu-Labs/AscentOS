@@ -153,18 +153,28 @@ static void init_thread_entry(void) {
   klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " Console cleared, starting session...\n");
 
   while (1) {
-    const char *bash_argv[] = {"/bin/bash", NULL};
+    // Launch booter in the background then exec into bash.
+    // Using sh -c lets the shell fork() booter without blocking the session.
+    const char *sh_argv[] = {
+        "/bin/sh", "-c",
+        "/bin/booter /boot.wav & exec /bin/bash",
+        NULL
+    };
 
     struct thread *current = sched_get_current();
     if (current) {
       current->is_main_session = true;
     }
 
-    if (!process_exec_argv(bash_argv)) {
-      klog_puts("\n" KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " Failed to start Bash. Falling back to shell.\n");
-      shell_init();
-      shell_run();
-      break;
+    if (!process_exec_argv(sh_argv)) {
+      // Fallback: try bash directly if sh failed
+      const char *bash_argv[] = {"/bin/bash", NULL};
+      if (!process_exec_argv(bash_argv)) {
+        klog_puts("\n" KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " Failed to start Bash. Falling back to shell.\n");
+        shell_init();
+        shell_run();
+        break;
+      }
     }
   }
 }

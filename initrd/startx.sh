@@ -4,7 +4,6 @@
 
 echo "X server başlatılıyor..."
 
-
 rm -f "/tmp/.X0-lock"
 
 # X server'ı arka planda başlat
