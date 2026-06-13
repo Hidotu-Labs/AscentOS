@@ -244,7 +244,7 @@ disk.img: assets/boot.wav assets/test.wav assets/jane.mp3 assets/mc9.mp3 assets/
 		echo "rm bin/test_tsc_manual"; \
 		echo "write userland/test_tsc_manual.elf bin/test_tsc_manual"; \
 		echo "rm doom1.wad"; \
-		echo "write doomu.wad doom1.wad"; \
+		echo "write assets/doomu.wad doom1.wad"; \
 		echo "rm bin/wget"; \
 		echo "write userland/wget.elf bin/wget"; \
 		echo "rm bin/test_unix_sock"; \
