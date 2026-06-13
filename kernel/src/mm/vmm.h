@@ -109,4 +109,22 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
 // and covered by one or more VMAs).
 bool vmm_is_user_addr_range_valid(uint64_t addr, size_t size);
 
+// Maps the signal return trampoline page into a PML4 at the canonical
+// user-space stub address.
+void vmm_map_signal_trampoline(uint64_t *pml4);
+
+// ---- Internal helpers used across vmm_*.c modules -----------------------
+// (not part of the public kernel API — do not call from outside mm/)
+
+#include "../lock/spinlock.h"
+
+// Returns a pointer to the VMM spinlock owned by vmm_map.c.
+spinlock_t *vmm_get_lock(void);
+
+// Returns the physical address of the permanent kernel PML4.
+uint64_t *vmm_get_kernel_pml4(void);
+
+// Sets the permanent kernel PML4 (called once from vmm_init).
+void vmm_set_kernel_pml4(uint64_t *pml4_phys);
+
 #endif

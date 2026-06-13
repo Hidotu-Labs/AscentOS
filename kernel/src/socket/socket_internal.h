@@ -58,6 +58,7 @@ typedef struct unix_sock {
   bool write_shutdown;    // SHUT_WR - write side shutdown
   bool orphaned;          // Client closed before accept - pending cleanup
   bool accepted_orphaned; // Accepted socket whose peer closed before accept
+  bool was_connected;     // Ever reached SS_CONNECTED (survives peer teardown)
 
 
   bool passcred;   // SO_PASSCRED - pass credentials in recvmsg
