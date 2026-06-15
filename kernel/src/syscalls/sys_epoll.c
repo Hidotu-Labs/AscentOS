@@ -42,10 +42,6 @@ static uint64_t sys_epoll_create(uint64_t size, uint64_t a1, uint64_t a2,
     return (uint64_t)-24; // EMFILE
   }
 
-  klog_puts("[OK] epoll_create: created epoll instance fd=");
-  klog_uint64(fd);
-  klog_puts("\n");
-
   return (uint64_t)fd;
 }
 
@@ -61,29 +57,20 @@ static uint64_t sys_epoll_create1(uint64_t flags, uint64_t a1, uint64_t a2,
   (void)a4;
   (void)a5;
 
-  klog_puts("[EPOLL] epoll_create1 called with flags=");
-  klog_uint64(flags);
-  klog_puts("\n");
-
   // Validate flags — only EPOLL_CLOEXEC (0x80000) is valid
   if (flags & ~EPOLL_CLOEXEC) {
-    klog_puts("[EPOLL] epoll_create1: invalid flags\n");
     return (uint64_t)-22; // EINVAL
   }
 
   // Create epoll instance
   eventpoll_t *ep = epoll_create();
   if (!ep) {
-    klog_puts("[EPOLL] epoll_create1: epoll_create failed\n");
     return (uint64_t)-12; // ENOMEM
   }
 
   // Allocate FD
   int fd = epoll_alloc_fd(ep);
   if (fd < 0) {
-    klog_puts("[EPOLL] epoll_create1: epoll_alloc_fd failed with ");
-    klog_uint64((uint64_t)(int64_t)fd);
-    klog_puts("\n");
     epoll_put(ep);
     return (uint64_t)-24; // EMFILE
   }
@@ -96,10 +83,6 @@ static uint64_t sys_epoll_create1(uint64_t flags, uint64_t a1, uint64_t a2,
       t->fd_flags[fd] |= EPOLL_FD_FLAGS_CLOEXEC_BIT;
     }
   }
-
-  klog_puts("[OK] epoll_create1: created epoll instance fd=");
-  klog_uint64(fd);
-  klog_puts("\n");
 
   return (uint64_t)fd;
 }

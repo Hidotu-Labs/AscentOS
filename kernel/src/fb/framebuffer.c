@@ -558,17 +558,9 @@ static uint32_t console_vfs_read(struct vfs_node *node, uint32_t offset,
     return to_copy;
   } else {
     // Non-canonical mode (raw-ish)
-    klog_puts("[CONSOLE] vfs_read: non-canonical mode, size=");
-    klog_uint64(size);
-    klog_puts(" keyboard_has_char=");
-    klog_uint64(keyboard_has_char() ? 1 : 0);
-    klog_puts("\n");
     uint32_t count = 0;
     while (count < size) {
       char c = keyboard_get_char();
-      klog_puts("[CONSOLE] vfs_read: got char 0x");
-      klog_hex64((unsigned char)c);
-      klog_puts("\n");
 
       // ICRNL: Map CR to NL on input
       if (c == '\r' && (console_termios.c_iflag & ICRNL))
@@ -584,9 +576,6 @@ static uint32_t console_vfs_read(struct vfs_node *node, uint32_t offset,
       if (!keyboard_has_char())
         break;
     }
-    klog_puts("[CONSOLE] vfs_read: returning count=");
-    klog_uint64(count);
-    klog_puts("\n");
     return count;
   }
 }

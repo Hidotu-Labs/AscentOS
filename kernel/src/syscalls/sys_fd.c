@@ -26,13 +26,9 @@
 int alloc_fd(struct thread *t) {
     for (int i = 0; i < MAX_FDS; i++) {
         if (t->fds[i] == NULL) {
-            klog_puts("[SYSCALL] alloc_fd: found empty fd=");
-            klog_uint64(i);
-            klog_puts("\n");
             return i;
         }
     }
-    klog_puts("[SYSCALL] alloc_fd: EMFILE (all FDs full)\n");
     return -1;
 }
 
@@ -75,8 +71,7 @@ static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags,
     klog_uint64(t->tid);
     klog_puts("\n");
 
-    vfs_node_t *base_dir = fs_root;
-    if (path[0] != '/') {
+    vfs_node_t *base_dir = fs_root;    if (path[0] != '/') {
         if (dirfd == AT_FDCWD) {
             base_dir = t->cwd_node ? t->cwd_node : fs_root;
         } else {
@@ -161,9 +156,6 @@ static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags,
             if (ct && ct->ctty) {
                 node = ct->ctty;
                 vfs_open(node);
-                klog_puts("[SYSCALL] /dev/tty -> ctty for tid=");
-                klog_uint64(ct->tid);
-                klog_puts("\n");
                 goto open_done;
             }
         }
@@ -229,11 +221,6 @@ static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags,
         node->length = 0;
 
 open_done:
-    klog_puts("[SYSCALL] open_done BEFORE: fd=");
-    klog_uint64(fd);
-    klog_puts(" fds[4]=");
-    klog_uint64((uint64_t)t->fds[4]);
-    klog_puts("\n");
     vfs_open(node);
     t->fds[fd]        = node;
     t->fd_offsets[fd] = 0;
@@ -256,16 +243,6 @@ open_done:
         }
         t->fd_paths[fd][sizeof(t->fd_paths[fd]) - 1] = '\0';
     }
-
-    klog_puts("[SYSCALL] open_done AFTER: fd=");
-    klog_uint64(fd);
-    klog_puts(" node=");
-    klog_uint64((uint64_t)node);
-    klog_puts(" fds[fd]=");
-    klog_uint64((uint64_t)t->fds[fd]);
-    klog_puts(" fds[4]=");
-    klog_uint64((uint64_t)t->fds[4]);
-    klog_puts("\n");
 
     return fd;
 }
@@ -299,8 +276,7 @@ static uint64_t sys_close(uint64_t fd, uint64_t a1, uint64_t a2, uint64_t a3,
     klog_puts(" tid=");
     klog_uint64(t->tid);
     klog_puts("\n");
-    vfs_close(t->fds[fd]);
-    t->fds[fd] = NULL;
+    vfs_close(t->fds[fd]);    t->fds[fd] = NULL;
     return 0;
 }
 
@@ -373,12 +349,6 @@ static uint64_t sys_read(uint64_t fd, uint64_t buf, uint64_t count,
                           uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a3; (void)a4; (void)a5;
     struct thread *t = sched_get_current();
-    if (t) {
-        klog_puts("[READ] tid="); klog_uint64(t->tid);
-        klog_puts(" fd=");        klog_uint64(fd);
-        klog_puts(" count=");     klog_uint64(count);
-        klog_puts("\n");
-    }
     if (!is_user_ptr(buf) || !vmm_is_user_addr_range_valid(buf, count))
         return (uint64_t)-14;
     if (!t || fd >= MAX_FDS || !t->fds[fd])
@@ -390,26 +360,12 @@ static uint64_t sys_read(uint64_t fd, uint64_t buf, uint64_t count,
     if (bytes_read > 0)
         t->fd_offsets[fd] += (uint32_t)bytes_read;
 
-    if (t) {
-        klog_puts("[READ] tid="); klog_uint64(t->tid);
-        klog_puts(" fd=");        klog_uint64(fd);
-        klog_puts(" returned bytes=");
-        klog_uint64((uint64_t)(int64_t)bytes_read);
-        klog_puts("\n");
-    }
     return (uint64_t)(int64_t)bytes_read;
 }
 
 static uint64_t sys_write(uint64_t fd, uint64_t buf, uint64_t count,
                            uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a3; (void)a4; (void)a5;
-    struct thread *t = sched_get_current();
-    if (t) {
-        klog_puts("[WRITE] tid="); klog_uint64((uint64_t)t->tid);
-        klog_puts(" fd=");         klog_uint64(fd);
-        klog_puts(" count=");      klog_uint64(count);
-        klog_puts("\n");
-    }
     if (!is_user_ptr(buf) || !vmm_is_user_addr_range_valid(buf, count))
         return (uint64_t)-14;
     return (uint64_t)fd_write((int)fd, (const void *)buf, (size_t)count);
@@ -418,11 +374,6 @@ static uint64_t sys_write(uint64_t fd, uint64_t buf, uint64_t count,
 static uint64_t sys_readv(uint64_t fd, uint64_t iov_u, uint64_t iovcnt,
                            uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a3; (void)a4; (void)a5;
-    struct thread *t = sched_get_current();
-    klog_puts("[SYSCALL] readv ENTER tid="); klog_uint64(t->tid);
-    klog_puts(" fd="); klog_uint64(fd);
-    klog_puts(" iovcnt="); klog_uint64(iovcnt);
-    klog_puts("\n");
 
     if (iovcnt == 0)   return 0;
     if (iovcnt > 1024) return (uint64_t)-22;
@@ -463,13 +414,6 @@ static uint64_t sys_writev(uint64_t fd, uint64_t iov_u, uint64_t iovcnt,
     if (iovcnt > 1024) return (uint64_t)-22;
 
     struct user_iovec *iov = (struct user_iovec *)iov_u;
-    struct thread *t = sched_get_current();
-    if (t) {
-        klog_puts("[SYSCALL] writev tid="); klog_uint64(t->tid);
-        klog_puts(" fd="); klog_uint64(fd);
-        klog_puts(" iovcnt="); klog_uint64(iovcnt);
-        klog_puts("\n");
-    }
 
     size_t total = 0;
     for (uint64_t i = 0; i < iovcnt; i++) {
@@ -477,32 +421,12 @@ static uint64_t sys_writev(uint64_t fd, uint64_t iov_u, uint64_t iovcnt,
         uint64_t len  = iov[i].iov_len;
         if (len == 0) continue;
 
-        if ((fd == 2 || fd == 3) && t) {
-            char log_buf[256];
-            size_t to_log = (len < 255) ? len : 255;
-            memcpy(log_buf, (const void *)base, to_log);
-            log_buf[to_log] = '\0';
-            klog_puts(fd == 2 ? "[STDERR] " : "[WESTON] ");
-            klog_puts(log_buf);
-            klog_puts("\n");
-        }
-
         int64_t w = fd_write((int)fd, (const void *)base, (size_t)len);
         if (w < 0) {
-            if (t) {
-                klog_puts("[SYSCALL] writev tid="); klog_uint64(t->tid);
-                klog_puts(" RETURN ERROR="); klog_uint64((uint64_t)(-w));
-                klog_puts("\n");
-            }
             return (uint64_t)w;
         }
         total += (size_t)w;
         if ((size_t)w != len) break;
-    }
-    if (t) {
-        klog_puts("[SYSCALL] writev tid="); klog_uint64(t->tid);
-        klog_puts(" RETURN="); klog_uint64(total);
-        klog_puts("\n");
     }
     return total;
 }

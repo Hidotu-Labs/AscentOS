@@ -97,10 +97,6 @@ eventpoll_t *epoll_create(void) {
 
   epoll_table[idx] = ep;
 
-  klog_puts("[EPOLL] Created epoll instance=");
-  klog_uint64((uint64_t)ep);
-  klog_puts("\n");
-
   epoll_get(ep);
   return ep;
 }
@@ -226,14 +222,6 @@ int epoll_ctl_add(eventpoll_t *ep, int fd, struct epoll_event *event) {
   if (!ep || !event)
     return -22; // EINVAL
 
-  klog_puts("[EPOLL_CTL_ADD] fd=");
-  klog_uint64(fd);
-  klog_puts(" epoll_fd=");
-  klog_uint64(ep->fd);
-  klog_puts(" events=0x");
-  klog_hex32(event->events);
-  klog_puts("\n");
-
   if (fd < 0 || fd >= EPOLL_MAX_WATCHED)
     return -9; // EBADF
 
@@ -243,23 +231,10 @@ int epoll_ctl_add(eventpoll_t *ep, int fd, struct epoll_event *event) {
     return -1;
 
   if (fd >= MAX_FDS || !t->fds[fd]) {
-    klog_puts("[EPOLL_CTL_ADD] EBADF: fd=");
-    klog_uint64(fd);
-    klog_puts(" does not exist in process\n");
     return -9; // EBADF
   }
 
   vfs_node_t *node = t->fds[fd];
-
-  klog_puts("[EPOLL_CTL_ADD] fd=");
-  klog_uint64(fd);
-  klog_puts(" node=");
-  klog_puts(node->name[0] ? node->name : "?");
-  klog_puts(" flags=0x");
-  klog_hex32(node->flags);
-  klog_puts(" node_ptr=");
-  klog_uint64((uint64_t)node);
-  klog_puts("\n");
 
   // Check if already registered for the same node
   if (ep->items[fd]) {
@@ -284,7 +259,6 @@ int epoll_ctl_add(eventpoll_t *ep, int fd, struct epoll_event *event) {
   // Create epitem
   epitem_t *epi = epitem_alloc();
   if (!epi) {
-    klog_puts("[EPOLL_CTL_ADD] ENOMEM: failed to alloc epitem\n");
     return -12; // ENOMEM
   }
 
@@ -323,10 +297,6 @@ int epoll_ctl_add(eventpoll_t *ep, int fd, struct epoll_event *event) {
     ep_add_to_ready_list(ep, epi);
   }
 
-  klog_puts("[EPOLL_CTL_ADD] finished fd=");
-  klog_uint64(fd);
-  klog_puts("\n");
-
   return 0;
 }
 
@@ -359,10 +329,6 @@ int epoll_ctl_del(eventpoll_t *ep, int fd) {
 
   // Free epitem
   epitem_free(epi);
-
-  klog_puts("[EPOLL_CTL_DEL] finished fd=");
-  klog_uint64(fd);
-  klog_puts("\n");
 
   return 0;
 }
@@ -401,10 +367,6 @@ int epoll_ctl_mod(eventpoll_t *ep, int fd, struct epoll_event *event) {
     ep_add_to_ready_list(ep, epi);
   }
 
-  klog_puts("[EPOLL_CTL_MOD] finished fd=");
-  klog_uint64(fd);
-  klog_puts("\n");
-
   return 0;
 }
 
@@ -417,14 +379,6 @@ int epoll_wait_impl(eventpoll_t *ep, struct epoll_event *events, int maxevents,
 
   int returned = 0;
   struct thread *current = sched_get_current();
-
-  klog_puts("[EPOLL_WAIT] tid=");
-  klog_uint64(current->tid);
-  klog_puts(" epoll_fd=");
-  klog_uint64(ep->fd);
-  klog_puts(" timeout=");
-  klog_uint64((uint64_t)timeout_ms);
-  klog_puts("\n");
 
   // Add to wait queue once for the duration of the wait
   wait_queue_entry_t entry;
@@ -452,12 +406,6 @@ int epoll_wait_impl(eventpoll_t *ep, struct epoll_event *events, int maxevents,
         if (current_events) {
           events[returned].events = current_events;
           events[returned].data.u64 = epi->event.data.u64;
-
-          klog_puts("[EPOLL_EVENT] returned fd=");
-          klog_uint64(epi->fd);
-          klog_puts(" events=0x");
-          klog_hex32(current_events);
-          klog_puts("\n");
 
           returned++;
 
@@ -582,10 +530,6 @@ int epoll_wait_impl(eventpoll_t *ep, struct epoll_event *events, int maxevents,
   wait_queue_remove(&ep->wq, &entry);
   current->state = THREAD_RUNNING;
   current->wakeup_ticks = 0;
-
-  klog_puts("[EPOLL_WAIT] returned count=");
-  klog_uint64(returned);
-  klog_puts("\n");
 
   return returned;
 }
@@ -757,16 +701,6 @@ void epoll_notify_event(struct vfs_node *node, uint32_t events) {
   if (node->ep_watchers.next == NULL)
     return;
 
-  klog_puts("[EPOLL_NOTIFY] node=");
-  klog_uint64((uint64_t)node);
-  klog_puts(" events=0x");
-  klog_hex32(events);
-  klog_puts(" watchers_next=");
-  klog_uint64((uint64_t)node->ep_watchers.next);
-  klog_puts(" self=");
-  klog_uint64((uint64_t)&node->ep_watchers);
-  klog_puts("\n");
-
   /* Try-acquire the lock. If it's held, we skip this notification
      rather than risk a deadlock in IRQ context or spinning. 
      This is acceptable because level-triggered events will be 
@@ -805,12 +739,6 @@ void epoll_notify_event(struct vfs_node *node, uint32_t events) {
 void epoll_notify_socket(int fd, uint32_t events) {
   if (fd < 0)
     return;
-
-  klog_puts("[EPOLL] notify_socket: fd=");
-  klog_uint64(fd);
-  klog_puts(" events=");
-  klog_uint64(events);
-  klog_puts("\n");
 
   // Find all epoll instances watching this FD
   for (int i = 0; i < EPOLL_MAX_INSTANCES; i++) {

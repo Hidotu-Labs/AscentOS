@@ -511,19 +511,6 @@ static uint64_t sys_recvmsg(uint64_t sockfd, uint64_t msg_ptr, uint64_t flags,
 
   struct msghdr *msg = (struct msghdr *)msg_ptr;
 
-  klog_puts("[RECVMSG] tid=");
-  {
-    struct thread *_t = sched_get_current();
-    klog_uint64(_t ? (uint64_t)_t->tid : 0);
-  }
-  klog_puts(" fd=");
-  klog_uint64((uint64_t)fd);
-  klog_puts(" iovlen=");
-  klog_uint64((uint64_t)msg->msg_iovlen);
-  klog_puts(" controllen=");
-  klog_uint64((uint64_t)msg->msg_controllen);
-  klog_puts("\n");
-
   // Validate iovec array (only if iovlen > 0)
   if (msg->msg_iovlen > 0 && !is_user_ptr((uint64_t)msg->msg_iov)) {
     return (uint64_t)-14; // EFAULT
@@ -532,11 +519,6 @@ static uint64_t sys_recvmsg(uint64_t sockfd, uint64_t msg_ptr, uint64_t flags,
   // Use family-specific recvmsg if available
   if (sock->ops && sock->ops->recvmsg) {
     ssize_t r = sock->ops->recvmsg(sock, msg, (int)flags);
-    klog_puts("[RECVMSG] fd=");
-    klog_uint64((uint64_t)fd);
-    klog_puts(" ret=");
-    klog_uint64((uint64_t)r);
-    klog_puts("\n");
     return (uint64_t)r;
   }
 

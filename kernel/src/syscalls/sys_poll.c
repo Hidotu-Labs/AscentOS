@@ -49,15 +49,6 @@ static int poll_check_fds(struct pollfd *fds, uint64_t nfds, struct thread *t) {
 static uint64_t do_poll(struct pollfd *fds, uint64_t nfds,
                         uint64_t timeout_ms) {
   struct thread *t = sched_get_current();
-  if (t) {
-    klog_puts("[POLL] ENTER tid=");
-    klog_uint64(t->tid);
-    klog_puts(" nfds=");
-    klog_uint64(nfds);
-    klog_puts(" timeout=");
-    klog_uint64(timeout_ms);
-    klog_puts("\n");
-  }
   if (!t)
     return (uint64_t)-1;
 
@@ -100,13 +91,6 @@ static uint64_t do_poll(struct pollfd *fds, uint64_t nfds,
   }
 
 done:
-  if (t) {
-    klog_puts("[POLL] RETURN tid=");
-    klog_uint64(t->tid);
-    klog_puts(" ready=");
-    klog_uint64((uint64_t)ready);
-    klog_puts("\n");
-  }
   return (uint64_t)ready;
 }
 

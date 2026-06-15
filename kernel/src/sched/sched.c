@@ -105,7 +105,8 @@ void sched_init(void) {
     cpu->idle_thread = idle_thread;
     cpu->current_thread = idle_thread;
     idle_thread->cpu_affinity = (1ULL << count) - 1;
-    if (count == 64) idle_thread->cpu_affinity = ~0ULL;
+    if (count == 64)
+      idle_thread->cpu_affinity = ~0ULL;
     spinlock_release(&tid_lock);
 
     spinlock_release(&cpu->queue_lock);
@@ -225,7 +226,8 @@ struct thread *sched_create_kernel_thread(void (*entry)(void),
 
   uint32_t cpu_count = cpu_get_count();
   t->cpu_affinity = (1ULL << cpu_count) - 1;
-  if (cpu_count == 64) t->cpu_affinity = ~0ULL;
+  if (cpu_count == 64)
+    t->cpu_affinity = ~0ULL;
 
   spinlock_acquire(&tid_lock);
   t->tid = next_tid++;

@@ -276,19 +276,24 @@ vfs_node_t *vfs_resolve_path_at(vfs_node_t *dir, const char *path) {
       int len = vfs_readlink(next, link_target, 511);
       vfs_close(next);
 
-      if (len < 0) goto fail;
+      if (len < 0)
+        goto fail;
       link_target[len] = '\0';
 
       char *next_path = kmalloc(512);
-      if (!next_path) goto fail;
+      if (!next_path)
+        goto fail;
       strcpy(next_path, link_target);
 
       if (*p) {
         int cur_len = (int)strlen(next_path);
         if (cur_len < 510) {
-          bool target_ends_in_slash = (cur_len > 0 && next_path[cur_len - 1] == '/');
-          if (!target_ends_in_slash && *p != '/') strcat(next_path, "/");
-          else if (target_ends_in_slash && *p == '/') p++;
+          bool target_ends_in_slash =
+              (cur_len > 0 && next_path[cur_len - 1] == '/');
+          if (!target_ends_in_slash && *p != '/')
+            strcat(next_path, "/");
+          else if (target_ends_in_slash && *p == '/')
+            p++;
           strncat(next_path, p, 511 - strlen(next_path));
         }
       }
@@ -299,11 +304,13 @@ vfs_node_t *vfs_resolve_path_at(vfs_node_t *dir, const char *path) {
 
       if (path_buf[0] == '/') {
         vfs_close(current);
-        for (int j = 0; j <= stack_top; j++) vfs_close(parent_stack[j]);
+        for (int j = 0; j <= stack_top; j++)
+          vfs_close(parent_stack[j]);
         stack_top = -1;
         current = fs_root;
         vfs_open(current);
-        while (*p == '/') p++;
+        while (*p == '/')
+          p++;
       }
       continue;
     }
@@ -330,7 +337,8 @@ vfs_node_t *vfs_resolve_path_at(vfs_node_t *dir, const char *path) {
   return current;
 
 fail:
-  for (int j = 0; j <= stack_top; j++) vfs_close(parent_stack[j]);
+  for (int j = 0; j <= stack_top; j++)
+    vfs_close(parent_stack[j]);
   vfs_close(current);
   kfree(path_buf);
   return 0;
@@ -353,7 +361,8 @@ void vfs_node_init(vfs_node_t *node) {
   node->refcount = 1;
 }
 
-int vfs_mount_ex(vfs_node_t *mountpoint, vfs_node_t *target, const char *dev_name, const char *fs_type) {
+int vfs_mount_ex(vfs_node_t *mountpoint, vfs_node_t *target,
+                 const char *dev_name, const char *fs_type) {
   if (!target)
     return -1;
 
@@ -396,32 +405,33 @@ int vfs_get_mounts(vfs_mount_info_t *buffer, int max_count) {
     // Try to find if root is in the mount list first
     bool found = false;
     vfs_mount_entry_t *c = vfs_mount_list;
-    while(c) {
-        if (!c->mountpoint || (c->mountpoint && strcmp(c->mountpoint->name, "/") == 0)) {
-            found = true;
-            break;
-        }
-        c = c->next;
+    while (c) {
+      if (!c->mountpoint ||
+          (c->mountpoint && strcmp(c->mountpoint->name, "/") == 0)) {
+        found = true;
+        break;
+      }
+      c = c->next;
     }
 
     if (!found) {
-        strcpy(buffer[count].mountpoint, "/");
-        strcpy(buffer[count].target, "/");
-        strcpy(buffer[count].dev_name, "none");
-        strcpy(buffer[count].fs_type, "ext3"); // Common default for this OS
-        count++;
+      strcpy(buffer[count].mountpoint, "/");
+      strcpy(buffer[count].target, "/");
+      strcpy(buffer[count].dev_name, "none");
+      strcpy(buffer[count].fs_type, "ext3"); // Common default for this OS
+      count++;
     }
   }
 
   vfs_mount_entry_t *curr = vfs_mount_list;
   while (curr && count < max_count) {
     if (curr->mountpoint) {
-        strncpy(buffer[count].mountpoint, curr->mountpoint->name, 127);
-        buffer[count].mountpoint[127] = '\0';
+      strncpy(buffer[count].mountpoint, curr->mountpoint->name, 127);
+      buffer[count].mountpoint[127] = '\0';
     } else {
-        strcpy(buffer[count].mountpoint, "/");
+      strcpy(buffer[count].mountpoint, "/");
     }
-    
+
     strncpy(buffer[count].target, curr->target->name, 127);
     buffer[count].target[127] = '\0';
 
