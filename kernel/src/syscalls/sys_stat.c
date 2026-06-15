@@ -388,7 +388,7 @@ static uint64_t sys_statfs(uint64_t path_ptr, uint64_t buf_ptr, uint64_t a3,
         buf->f_frsize  = 4096;
         buf->f_flags   = 0;
     }
-    if (!(node->flags & FS_PERSISTENT)) kfree(node);
+    vfs_close(node);
     return 0;
 }
 
