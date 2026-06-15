@@ -66,6 +66,37 @@ static ext2_mount_t *ext2_init_mount(struct block_device *dev) {
   return mnt;
 }
 
+// ── ext2_statfs ───────────────────────────────────────────────────────────────
+
+static int ext2_statfs_impl(vfs_node_t *node, struct statfs_buf *buf) {
+  ext2_mount_t *mnt = (ext2_mount_t *)node->device;
+  if (!mnt)
+    return -1;
+
+  // Re-read the superblock so free block/inode counts are fresh
+  uint8_t sb_buf[1024];
+  if (mnt->dev->read_sectors(mnt->dev, 2, 2, sb_buf) == 0)
+    memcpy(&mnt->sb, sb_buf, sizeof(ext2_superblock_t));
+
+  uint64_t block_size = (uint64_t)(1024 << mnt->sb.s_log_block_size);
+
+  buf->f_type    = 0xEF53; // EXT2_SUPER_MAGIC
+  buf->f_bsize   = block_size;
+  buf->f_blocks  = (uint64_t)mnt->sb.s_blocks_count;
+  buf->f_bfree   = (uint64_t)mnt->sb.s_free_blocks_count;
+  buf->f_bavail  = (uint64_t)(mnt->sb.s_free_blocks_count > mnt->sb.s_r_blocks_count
+                      ? mnt->sb.s_free_blocks_count - mnt->sb.s_r_blocks_count
+                      : 0);
+  buf->f_files   = (uint64_t)mnt->sb.s_inodes_count;
+  buf->f_ffree   = (uint64_t)mnt->sb.s_free_inodes_count;
+  buf->f_fsid[0] = 0;
+  buf->f_fsid[1] = 0;
+  buf->f_namelen = 255;
+  buf->f_frsize  = (int64_t)block_size;
+  buf->f_flags   = 0;
+  return 0;
+}
+
 // ── ext2_mount ────────────────────────────────────────────────────────────────
 
 int ext2_mount(struct block_device *dev, vfs_node_t *mountpoint) {
@@ -122,10 +153,9 @@ int ext2_mount(struct block_device *dev, vfs_node_t *mountpoint) {
   mountpoint->rename  = ext2_rename_impl;
   mountpoint->chmod   = ext2_chmod_impl;
   mountpoint->chown   = ext2_chown_impl;
+  mountpoint->statfs  = ext2_statfs_impl;
 
   ext3_init_journal(mnt);
-
-  klog_puts("[OK] Ext2/3 filesystem mounted on /mnt\n");
   return 0;
 }
 
@@ -169,6 +199,7 @@ int ext2_mount_root(struct block_device *dev) {
 
   strcpy(root_vfs->name, "/");
   mnt->root_node = root_vfs;
+  root_vfs->statfs = ext2_statfs_impl;
 
   // Replace fs_root with the ext2 root
   fs_root = root_vfs;

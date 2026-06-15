@@ -13,6 +13,263 @@
 #include "../smp/cpu.h"
 #include "socket_internal.h"
 
+// ---------------------------------------------------------------------------
+// Network interface ioctl constants (from linux/sockios.h)
+// ---------------------------------------------------------------------------
+#define SIOCGIFCONF     0x8912  // Get interface list
+#define SIOCGIFFLAGS    0x8913  // Get interface flags
+#define SIOCSIFFLAGS    0x8914  // Set interface flags
+#define SIOCGIFADDR     0x8915  // Get interface address
+#define SIOCGIFDSTADDR  0x8917  // Get destination address
+#define SIOCGIFBRDADDR  0x8919  // Get broadcast address
+#define SIOCGIFNETMASK  0x891b  // Get netmask
+#define SIOCGIFMTU      0x8921  // Get MTU
+#define SIOCGIFHWADDR   0x8927  // Get hardware address
+#define SIOCGIFINDEX    0x8933  // Get interface index
+
+// Interface flags
+#define IFF_UP        0x1
+#define IFF_BROADCAST 0x2
+#define IFF_LOOPBACK  0x8
+#define IFF_RUNNING   0x40
+#define IFF_MULTICAST 0x1000
+
+#define IFNAMSIZ 16
+
+struct ifreq_addr {
+    uint16_t sa_family;
+    char     sa_data[14];
+};
+
+struct ifreq {
+    union {
+        char ifrn_name[IFNAMSIZ];
+    } ifr_ifrn;
+    union {
+        struct ifreq_addr ifru_addr;
+        struct ifreq_addr ifru_dstaddr;
+        struct ifreq_addr ifru_broadaddr;
+        struct ifreq_addr ifru_netmask;
+        struct ifreq_addr ifru_hwaddr;
+        short             ifru_flags;
+        int               ifru_ivalue;
+        int               ifru_mtu;
+        char              ifru_slave[IFNAMSIZ];
+        char              ifru_newname[IFNAMSIZ];
+    } ifr_ifru;
+};
+
+#define ifr_name    ifr_ifrn.ifrn_name
+#define ifr_flags   ifr_ifru.ifru_flags
+#define ifr_addr    ifr_ifru.ifru_addr
+#define ifr_dstaddr ifr_ifru.ifru_dstaddr
+#define ifr_broadaddr ifr_ifru.ifru_broadaddr
+#define ifr_netmask ifr_ifru.ifru_netmask
+#define ifr_hwaddr  ifr_ifru.ifru_hwaddr
+#define ifr_mtu     ifr_ifru.ifru_mtu
+#define ifr_ifindex ifr_ifru.ifru_ivalue
+
+struct ifconf {
+    int   ifc_len;
+    union {
+        char       *ifc_buf;
+        struct ifreq *ifc_req;
+    } ifc_ifcu;
+};
+
+#define ifc_buf ifc_ifcu.ifc_buf
+#define ifc_req ifc_ifcu.ifc_req
+
+// ---------------------------------------------------------------------------
+// Helper: fill a sockaddr with an IPv4 address
+// ---------------------------------------------------------------------------
+static void fill_sockaddr_in(struct ifreq_addr *sa, uint32_t ip_host_order) {
+    memset(sa, 0, sizeof(*sa));
+    sa->sa_family = 2; // AF_INET
+    // sa_data: port(2) + addr(4) in network byte order
+    uint32_t ip_net = htonl(ip_host_order);
+    sa->sa_data[0] = 0; // port hi
+    sa->sa_data[1] = 0; // port lo
+    sa->sa_data[2] = (char)((ip_net >> 24) & 0xFF);
+    sa->sa_data[3] = (char)((ip_net >> 16) & 0xFF);
+    sa->sa_data[4] = (char)((ip_net >>  8) & 0xFF);
+    sa->sa_data[5] = (char)( ip_net        & 0xFF);
+}
+
+// ---------------------------------------------------------------------------
+// AF_INET ioctl — handles network interface query ioctls used by glibc/GIO
+// ---------------------------------------------------------------------------
+static int inet_ioctl(socket_t *sock, uint32_t request, uint64_t arg) {
+    (void)sock;
+
+    netif_t *nif = netif_get();
+
+    switch (request) {
+    case SIOCGIFCONF: {
+        // Returns list of configured interfaces.
+        // GIO uses this to enumerate network interfaces.
+        struct ifconf *ifc = (struct ifconf *)arg;
+        if (!ifc)
+            return -22; // EINVAL
+
+        struct ifreq *req = (struct ifreq *)(uintptr_t)ifc->ifc_buf;
+        int max_count = ifc->ifc_len / (int)sizeof(struct ifreq);
+
+        if (!req || max_count <= 0) {
+            // Just report needed buffer size
+            ifc->ifc_len = 2 * (int)sizeof(struct ifreq); // lo + eth0
+            return 0;
+        }
+
+        int count = 0;
+
+        // Loopback interface
+        if (count < max_count) {
+            memset(&req[count], 0, sizeof(struct ifreq));
+            strcpy(req[count].ifr_name, "lo");
+            fill_sockaddr_in(&req[count].ifr_addr, 0x7F000001); // 127.0.0.1
+            count++;
+        }
+
+        // Physical interface (if configured)
+        if (count < max_count && nif && nif->up && nif->ip != 0) {
+            memset(&req[count], 0, sizeof(struct ifreq));
+            strcpy(req[count].ifr_name, "eth0");
+            fill_sockaddr_in(&req[count].ifr_addr, nif->ip);
+            count++;
+        }
+
+        ifc->ifc_len = count * (int)sizeof(struct ifreq);
+        return 0;
+    }
+
+    case SIOCGIFFLAGS: {
+        struct ifreq *ifr = (struct ifreq *)arg;
+        if (!ifr)
+            return -22;
+
+        if (strcmp(ifr->ifr_name, "lo") == 0) {
+            ifr->ifr_flags = (short)(IFF_UP | IFF_LOOPBACK | IFF_RUNNING);
+        } else if (strcmp(ifr->ifr_name, "eth0") == 0) {
+            if (nif && nif->up)
+                ifr->ifr_flags = (short)(IFF_UP | IFF_BROADCAST | IFF_RUNNING | IFF_MULTICAST);
+            else
+                ifr->ifr_flags = 0;
+        } else {
+            return -19; // ENODEV
+        }
+        return 0;
+    }
+
+    case SIOCGIFADDR: {
+        struct ifreq *ifr = (struct ifreq *)arg;
+        if (!ifr)
+            return -22;
+
+        if (strcmp(ifr->ifr_name, "lo") == 0) {
+            fill_sockaddr_in(&ifr->ifr_addr, 0x7F000001); // 127.0.0.1
+        } else if (strcmp(ifr->ifr_name, "eth0") == 0) {
+            uint32_t ip = (nif && nif->up) ? nif->ip : 0;
+            fill_sockaddr_in(&ifr->ifr_addr, ip);
+        } else {
+            return -19; // ENODEV
+        }
+        return 0;
+    }
+
+    case SIOCGIFNETMASK: {
+        struct ifreq *ifr = (struct ifreq *)arg;
+        if (!ifr)
+            return -22;
+
+        if (strcmp(ifr->ifr_name, "lo") == 0) {
+            fill_sockaddr_in(&ifr->ifr_netmask, 0xFF000000); // 255.0.0.0
+        } else if (strcmp(ifr->ifr_name, "eth0") == 0) {
+            uint32_t mask = (nif && nif->up) ? nif->netmask : 0xFFFFFF00;
+            fill_sockaddr_in(&ifr->ifr_netmask, mask);
+        } else {
+            return -19; // ENODEV
+        }
+        return 0;
+    }
+
+    case SIOCGIFBRDADDR: {
+        struct ifreq *ifr = (struct ifreq *)arg;
+        if (!ifr)
+            return -22;
+
+        if (strcmp(ifr->ifr_name, "lo") == 0) {
+            fill_sockaddr_in(&ifr->ifr_broadaddr, 0x7FFFFFFF); // 127.255.255.255
+        } else if (strcmp(ifr->ifr_name, "eth0") == 0) {
+            uint32_t bcast = 0;
+            if (nif && nif->up)
+                bcast = (nif->ip & nif->netmask) | (~nif->netmask);
+            fill_sockaddr_in(&ifr->ifr_broadaddr, bcast);
+        } else {
+            return -19; // ENODEV
+        }
+        return 0;
+    }
+
+    case SIOCGIFMTU: {
+        struct ifreq *ifr = (struct ifreq *)arg;
+        if (!ifr)
+            return -22;
+
+        if (strcmp(ifr->ifr_name, "lo") == 0)
+            ifr->ifr_mtu = 65536;
+        else if (strcmp(ifr->ifr_name, "eth0") == 0)
+            ifr->ifr_mtu = 1500;
+        else
+            return -19; // ENODEV
+        return 0;
+    }
+
+    case SIOCGIFHWADDR: {
+        struct ifreq *ifr = (struct ifreq *)arg;
+        if (!ifr)
+            return -22;
+
+        memset(&ifr->ifr_hwaddr, 0, sizeof(ifr->ifr_hwaddr));
+        ifr->ifr_hwaddr.sa_family = 1; // ARPHRD_ETHER
+
+        if (strcmp(ifr->ifr_name, "lo") == 0) {
+            // loopback has all-zero MAC
+        } else if (strcmp(ifr->ifr_name, "eth0") == 0) {
+            if (nif)
+                memcpy(ifr->ifr_hwaddr.sa_data, nif->mac, 6);
+        } else {
+            return -19; // ENODEV
+        }
+        return 0;
+    }
+
+    case SIOCGIFINDEX: {
+        struct ifreq *ifr = (struct ifreq *)arg;
+        if (!ifr)
+            return -22;
+
+        if (strcmp(ifr->ifr_name, "lo") == 0)
+            ifr->ifr_ifindex = 1;
+        else if (strcmp(ifr->ifr_name, "eth0") == 0)
+            ifr->ifr_ifindex = 2;
+        else
+            return -19; // ENODEV
+        return 0;
+    }
+
+    case SIOCSIFFLAGS:
+        // Silently accept flag changes (we don't actually configure anything)
+        return 0;
+
+    default:
+        klog_puts("[INET_IOCTL] unhandled request=0x");
+        klog_hex32(request);
+        klog_puts("\n");
+        return -25; // ENOTTY
+    }
+}
+
 // TCP ↔ AF_INET Mapping
 static inet_sock_t *tcp_inet_map[MAX_TCP_SOCKETS];
 
@@ -137,7 +394,7 @@ static sock_ops_t inet_stream_ops = {
     .setsockopt = NULL,
     .shutdown = NULL,
     .poll = inet_poll,
-    .ioctl = NULL,
+    .ioctl = inet_ioctl,
     .getsockname = inet_getsockname,
     .getpeername = inet_getpeername,
     .destroy = inet_destroy,
@@ -156,7 +413,7 @@ static sock_ops_t inet_dgram_ops = {
     .setsockopt = NULL,
     .shutdown = NULL,
     .poll = inet_poll,
-    .ioctl = NULL,
+    .ioctl = inet_ioctl,
     .getsockname = inet_getsockname,
     .getpeername = inet_getpeername,
     .destroy = inet_destroy,

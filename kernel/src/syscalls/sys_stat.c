@@ -375,11 +375,14 @@ static uint64_t sys_statfs(uint64_t path_ptr, uint64_t buf_ptr, uint64_t a3,
 
     int ret = vfs_statfs(node, buf);
     if (ret != 0) {
+        /* Fallback: 2 GiB total disk, ~200 MiB used (rough estimate).
+         * f_bsize = 4096, f_blocks = 2 GiB / 4096 = 524288 blocks
+         * f_bfree / f_bavail = (2 GiB - 200 MiB) / 4096 ~ 471040 blocks */
         buf->f_type    = 0x61657673;
         buf->f_bsize   = 4096;
-        buf->f_blocks  = 1024 * 256;
-        buf->f_bfree   = 1024 * 128;
-        buf->f_bavail  = 1024 * 128;
+        buf->f_blocks  = 524288;   /* 2 GiB total */
+        buf->f_bfree   = 471040;   /* ~1.8 GiB free */
+        buf->f_bavail  = 471040;
         buf->f_files   = 10000;
         buf->f_ffree   = 5000;
         buf->f_fsid[0] = 1;
@@ -403,11 +406,14 @@ static uint64_t sys_fstatfs(uint64_t fd, uint64_t buf_ptr, uint64_t a3,
     vfs_node_t        *node = t->fds[fd];
     int ret = vfs_statfs(node, buf);
     if (ret != 0) {
+        /* Fallback: 2 GiB total disk, ~200 MiB used (rough estimate).
+         * f_bsize = 4096, f_blocks = 2 GiB / 4096 = 524288 blocks
+         * f_bfree / f_bavail = (2 GiB - 200 MiB) / 4096 ~ 471040 blocks */
         buf->f_type    = 0x61657673;
         buf->f_bsize   = 4096;
-        buf->f_blocks  = 1024 * 256;
-        buf->f_bfree   = 1024 * 128;
-        buf->f_bavail  = 1024 * 128;
+        buf->f_blocks  = 524288;   /* 2 GiB total */
+        buf->f_bfree   = 471040;   /* ~1.8 GiB free */
+        buf->f_bavail  = 471040;
         buf->f_files   = 10000;
         buf->f_ffree   = 5000;
         buf->f_fsid[0] = 1;
