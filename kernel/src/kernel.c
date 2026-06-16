@@ -51,6 +51,7 @@
 #include "mm/pmm.h"
 #include "mm/shm.h"
 #include "mm/slab_cache.h"
+#include "mm/tlb_shootdown.h"
 #include "mm/vmm.h"
 #include "net/net.h"
 #include "sched/sched.h"
@@ -362,7 +363,11 @@ void kmain_high_half(void) {
       klog_puts(KLOG_CLR_BLUE "[ INFO ]" KLOG_CLR_RESET " HPET available as backup timer.\n");
     }
 
-    // 5i. Wake up Application Processors
+    // 5i. Register TLB shootdown IPI handler before waking APs so it is
+    //     already in the IDT when the first AP comes online.
+    tlb_shootdown_init();
+
+    // 5j. Wake up Application Processors
     // This is done AFTER lapic_timer_init because APs need the calibrated
     // ticks_per_ms value to initialize their own timers.
     cpu_init_aps();

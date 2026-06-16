@@ -1,6 +1,7 @@
 #include "vmm.h"
 #include "../lock/spinlock.h"
 #include "pmm.h"
+#include "tlb_shootdown.h"
 #include "vma.h"
 #include <stddef.h>
 #include <stdint.h>
@@ -93,7 +94,10 @@ static uint64_t *clone_table_vma(uint64_t *src_table_phys, int level,
           if (src_virt[i] & PAGE_FLAG_RW) {
             src_virt[i] &= ~PAGE_FLAG_RW;
             src_virt[i] |= PAGE_FLAG_COW;
-            vmm_flush_tlb(page_vaddr); // flush parent's TLB
+            // Flush the parent's stale RW TLB entry on ALL CPUs.
+            // Without this, remote CPUs that cached the old RW entry
+            // can still write through it, bypassing CoW.
+            tlb_shootdown_page(page_vaddr);
           }
           pmm_incref((void *)phys);
         }

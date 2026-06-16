@@ -72,6 +72,9 @@ ISR_NOERRCODE 48
 ; Reschedule IPI vector
 ISR_NOERRCODE 49
 
+; TLB shootdown IPI vector
+ISR_NOERRCODE 50
+
 ; LAPIC spurious interrupt vector
 ISR_NOERRCODE 255
 

@@ -398,6 +398,11 @@ static void inorder_gather(struct vma *node, struct vma **array, int *index) {
   inorder_gather(node->right, array, index);
 }
 
+// Stack-local capacity for vma_find_gap and vma_merge_adjacent.
+// Covers the vast majority of processes without any heap allocation.
+// Falls back to kmalloc only when a process has more VMAs than this.
+#define VMA_STACK_CAP 64
+
 uint64_t vma_find_gap(struct vma_list *list, uint64_t length,
                       uint64_t base_addr, uint64_t limit_addr) {
   if (list->count == 0) {
@@ -406,14 +411,26 @@ uint64_t vma_find_gap(struct vma_list *list, uint64_t length,
     return 0;
   }
 
-  struct vma **arr = kmalloc(sizeof(struct vma *) * list->count);
-  if (!arr)
-    return 0;
+  // Fast path: use a stack-local array for the common case.
+  // Avoids a kmalloc/kfree round-trip on every mmap syscall when the
+  // process has fewer than VMA_STACK_CAP mappings.
+  struct vma *stack_arr[VMA_STACK_CAP];
+  struct vma **arr;
+  bool heap_used = false;
+
+  if (list->count <= VMA_STACK_CAP) {
+    arr = stack_arr;
+  } else {
+    arr = kmalloc(sizeof(struct vma *) * list->count);
+    if (!arr)
+      return 0;
+    heap_used = true;
+  }
 
   int idx = 0;
   inorder_gather(list->root, arr, &idx);
 
-  uint64_t current = base_addr;
+  uint64_t current  = base_addr;
   uint64_t gap_start = 0;
 
   for (int i = 0; i < idx; i++) {
@@ -430,7 +447,8 @@ uint64_t vma_find_gap(struct vma_list *list, uint64_t length,
     current = MAX(current, arr[i]->end);
   }
 
-  kfree(arr);
+  if (heap_used)
+    kfree(arr);
 
   if (gap_start != 0)
     return gap_start;
@@ -445,46 +463,111 @@ void vma_merge_adjacent(struct vma_list *list) {
   if (list->count < 2)
     return;
 
-  bool merged = true;
-  while (merged) {
-    merged = false;
+  // Single-pass O(n) merge replacing the old O(n²) while(merged) loop.
+  //
+  // Old approach: re-allocated the array and re-scanned the whole tree
+  // after every single merge, giving O(n²) tree operations plus O(n)
+  // heap allocations per call.
+  //
+  // New approach:
+  //   1. Gather all nodes into a sorted array once — O(n).
+  //   2. Walk the array linearly, accumulating merge runs in-place.
+  //      When a pair is mergeable, extend the current run's end; when not,
+  //      emit the accumulated region and start a new run.
+  //   3. Destroy the tree and rebuild it from the merged array — O(n log n)
+  //      total, same as before but with a constant factor of 1 instead of n.
 
-    struct vma **arr = kmalloc(sizeof(struct vma *) * list->count);
+  struct vma *stack_arr[VMA_STACK_CAP];
+  struct vma **arr;
+  bool heap_used = false;
+
+  if (list->count <= VMA_STACK_CAP) {
+    arr = stack_arr;
+  } else {
+    arr = kmalloc(sizeof(struct vma *) * list->count);
     if (!arr)
       return;
-
-    int idx = 0;
-    inorder_gather(list->root, arr, &idx);
-
-    for (int i = 0; i < idx - 1; i++) {
-      struct vma *cur = arr[i];
-      struct vma *nxt = arr[i + 1];
-
-      if (cur->end == nxt->start && cur->prot == nxt->prot &&
-          cur->flags == nxt->flags && (cur->fd == -1 && nxt->fd == -1)) {
-
-        uint64_t old_start = cur->start;
-        uint64_t old_end = nxt->end;
-        uint64_t prot = cur->prot;
-        uint64_t flags = cur->flags;
-
-        // Save nxt boundaries BEFORE any tree modification.
-        // The first vma_remove may free nxt's tree node (AVL
-        // copy-up during two-child deletion), making nxt a
-        // dangling pointer.
-        uint64_t nxt_start = nxt->start;
-        uint64_t nxt_end = nxt->end;
-
-        vma_remove(list, cur->start, cur->end);
-        vma_remove(list, nxt_start, nxt_end);
-
-        vma_add(list, old_start, old_end, prot, flags, -1, 0, NULL);
-
-        merged = true;
-        break;
-      }
-    }
-
-    kfree(arr);
+    heap_used = true;
   }
+
+  int idx = 0;
+  inorder_gather(list->root, arr, &idx);
+
+  // Collect merged intervals into a flat temporary list.
+  // Stores all fields needed to reconstruct each VMA after the merge.
+  struct vma_merged_entry {
+    uint64_t start, end, prot, flags, offset;
+    int      fd;
+    void    *file_node;
+  };
+
+  struct vma_merged_entry merged_stack[VMA_STACK_CAP];
+  struct vma_merged_entry *merged;
+  bool merged_heap = false;
+
+  if (idx <= VMA_STACK_CAP) {
+    merged = merged_stack;
+  } else {
+    merged = kmalloc(sizeof(*merged) * idx);
+    if (!merged) {
+      if (heap_used) kfree(arr);
+      return;
+    }
+    merged_heap = true;
+  }
+
+  int m = 0; // number of output regions
+
+  // Seed with the first entry — copy all fields.
+  merged[0].start     = arr[0]->start;
+  merged[0].end       = arr[0]->end;
+  merged[0].prot      = arr[0]->prot;
+  merged[0].flags     = arr[0]->flags;
+  merged[0].offset    = arr[0]->offset;
+  merged[0].fd        = arr[0]->fd;
+  merged[0].file_node = arr[0]->file_node;
+  m = 1;
+
+  for (int i = 1; i < idx; i++) {
+    struct vma *cur              = arr[i];
+    struct vma_merged_entry *prev = &merged[m - 1];
+
+    // Only merge anonymous (fd == -1) adjacent regions with identical prot
+    // and flags.  File-backed VMAs are never merged — their file_node and
+    // offset fields are non-trivial and must be preserved exactly.
+    bool can_merge = (prev->end   == cur->start) &&
+                     (prev->prot  == cur->prot)   &&
+                     (prev->flags == cur->flags)   &&
+                     (prev->fd    == -1)            &&
+                     (cur->fd     == -1);
+
+    if (can_merge) {
+      prev->end = cur->end; // extend the current run
+    } else {
+      // Carry the VMA through unchanged — preserve every field.
+      merged[m].start     = cur->start;
+      merged[m].end       = cur->end;
+      merged[m].prot      = cur->prot;
+      merged[m].flags     = cur->flags;
+      merged[m].offset    = cur->offset;
+      merged[m].fd        = cur->fd;
+      merged[m].file_node = cur->file_node;
+      m++;
+    }
+  }
+
+  // Only rebuild the tree if at least one merge actually happened.
+  if (m < idx) {
+    vma_list_destroy(list); // frees all nodes, resets root + count
+    for (int i = 0; i < m; i++) {
+      vma_add(list,
+              merged[i].start, merged[i].end,
+              merged[i].prot,  merged[i].flags,
+              merged[i].fd,    merged[i].offset,
+              merged[i].file_node);
+    }
+  }
+
+  if (merged_heap) kfree(merged);
+  if (heap_used)   kfree(arr);
 }

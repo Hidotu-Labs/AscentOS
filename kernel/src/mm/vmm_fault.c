@@ -331,24 +331,25 @@ bool vmm_is_user_addr_range_valid(uint64_t addr, size_t size) {
     return false;
 
   uint64_t start_page = addr & ~0xFFFULL;
-  uint64_t end_page = (addr + size + 0xFFF) & ~0xFFFULL;
+  uint64_t end_page   = (addr + size + 0xFFF) & ~0xFFFULL;
 
-  for (uint64_t page = start_page; page < end_page; page += 0x1000) {
-    spinlock_acquire(&current->mm->lock);
+  // Acquire the MM lock once for the entire range scan instead of once per
+  // page.  For a 1 MB buffer (256 pages) the old code did 256 lock/unlock
+  // round-trips; now it does one.
+  //
+  // Additionally, when a VMA covers multiple pages we jump straight to its
+  // end boundary rather than re-querying vma_find for every page inside it.
+  // This reduces AVL tree lookups from O(pages) to O(distinct VMAs in range),
+  // which for a normal process is typically 1-3 for any contiguous buffer.
+  spinlock_acquire(&current->mm->lock);
+
+  uint64_t page = start_page;
+  while (page < end_page) {
     struct vma *v = vma_find(&current->mm->vmas, page);
     if (!v)
       v = vma_find_growdown(&current->mm->vmas, page, 8 * 1024 * 1024);
 
-    if (v) {
-      if (v->prot == PROT_NONE) {
-        klog_puts("[VMM] Range validation failed (PROT_NONE) at 0x");
-        klog_uint64(page);
-        klog_puts("\n");
-        spinlock_release(&current->mm->lock);
-        return false;
-      }
-      spinlock_release(&current->mm->lock);
-    } else {
+    if (!v) {
       klog_puts("[VMM] Range validation failed (No VMA) at ");
       klog_hex64(page);
       klog_puts(" in thread ");
@@ -357,7 +358,20 @@ bool vmm_is_user_addr_range_valid(uint64_t addr, size_t size) {
       spinlock_release(&current->mm->lock);
       return false;
     }
+
+    if (v->prot == PROT_NONE) {
+      klog_puts("[VMM] Range validation failed (PROT_NONE) at 0x");
+      klog_uint64(page);
+      klog_puts("\n");
+      spinlock_release(&current->mm->lock);
+      return false;
+    }
+
+    // Skip to the end of this VMA — every page inside it has the same prot.
+    // Clamp to end_page so we don't overshoot on the last VMA.
+    page = v->end < end_page ? v->end : end_page;
   }
 
+  spinlock_release(&current->mm->lock);
   return true;
 }
