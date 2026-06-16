@@ -138,11 +138,10 @@ build_bash() {
         --prefix=/opt/bash \
         --disable-nls \
         --without-bash-malloc \
-        --enable-static-link \
         --disable-progcomp \
         --disable-net-redirections \
-        CFLAGS="-static -O2 -fno-stack-protector -I$PREFIX/include" \
-        LDFLAGS="-static -L$PREFIX/lib"
+        CFLAGS=" -O2 -fno-stack-protector -I$PREFIX/include" \
+        LDFLAGS="-L$PREFIX/lib"
 
     echo "Building Bash (this may take a while) ..."
     make -j"$JOBS"
