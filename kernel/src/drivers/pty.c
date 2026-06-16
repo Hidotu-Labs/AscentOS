@@ -286,8 +286,29 @@ uint32_t ptmx_write(struct vfs_node *node, uint32_t offset, uint32_t size,
   }
 
   // Fast path for raw mode (no input/output processing, no echo)
+  // Even in raw mode we must still check ISIG control characters.
   if (!(pty->termios.c_lflag & (ICANON | ECHO)) &&
       !(pty->termios.c_iflag & ICRNL)) {
+    if (pty->termios.c_lflag & ISIG) {
+      // Scan for signal characters before bulk-writing
+      for (uint32_t i = 0; i < size; i++) {
+        uint8_t c = buffer[i];
+        if (c == pty->termios.c_cc[0] && pty->pgid != 0) { // VINTR -> SIGINT
+          uint32_t pgid = pty->pgid;
+          spinlock_release(&pty->lock);
+          extern void signal_send_pgid(uint32_t pgid, int sig);
+          signal_send_pgid(pgid, 2); // SIGINT
+          return (uint32_t)size; // consumed
+        }
+        if (c == pty->termios.c_cc[1] && pty->pgid != 0) { // VQUIT -> SIGQUIT
+          uint32_t pgid = pty->pgid;
+          spinlock_release(&pty->lock);
+          extern void signal_send_pgid(uint32_t pgid, int sig);
+          signal_send_pgid(pgid, 3); // SIGQUIT
+          return (uint32_t)size;
+        }
+      }
+    }
     written = ring_write(pty->master_to_slave, &pty->m2s_head, pty->m2s_tail,
                          buffer, size);
     if (written > 0)
@@ -300,6 +321,30 @@ uint32_t ptmx_write(struct vfs_node *node, uint32_t offset, uint32_t size,
       // Input processing: ICRNL (map \r to \n)
       if (c == '\r' && (pty->termios.c_iflag & ICRNL)) {
         c = '\n';
+      }
+
+      // ISIG: check for signal-generating characters (VINTR, VQUIT)
+      if (pty->termios.c_lflag & ISIG) {
+        if (c == pty->termios.c_cc[0] && pty->pgid != 0) { // VINTR -> SIGINT
+          uint32_t pgid = pty->pgid;
+          spinlock_release(&pty->lock);
+          klog_puts("[PTY] ISIG: sending SIGINT to pgid=");
+          klog_uint64(pgid);
+          klog_puts("\n");
+          extern void signal_send_pgid(uint32_t pgid, int sig);
+          signal_send_pgid(pgid, 2); // SIGINT
+          return (uint32_t)(i + 1); // consumed up to and including this char
+        }
+        if (c == pty->termios.c_cc[1] && pty->pgid != 0) { // VQUIT -> SIGQUIT
+          uint32_t pgid = pty->pgid;
+          spinlock_release(&pty->lock);
+          klog_puts("[PTY] ISIG: sending SIGQUIT to pgid=");
+          klog_uint64(pgid);
+          klog_puts("\n");
+          extern void signal_send_pgid(uint32_t pgid, int sig);
+          signal_send_pgid(pgid, 3); // SIGQUIT
+          return (uint32_t)(i + 1);
+        }
       }
 
       // Support for canonical mode backspace (VERASE)
@@ -869,9 +914,20 @@ int pty_slave_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     break;
   }
 
-  case 0x540E: // TIOCSCTTY
+  case 0x540E: { // TIOCSCTTY — make this PTY the controlling terminal
+    struct thread *t = sched_get_current();
+    if (t) {
+      t->ctty = node;
+      // Also set the PTY's foreground pgid to the caller's pgid if not set
+      if (pty->pgid == 0)
+        pty->pgid = t->pgid;
+      klog_puts("[PTY] TIOCSCTTY: set ctty for tid=");
+      klog_uint64(t->tid);
+      klog_puts("\n");
+    }
     ret = 0;
     break;
+  }
 
   default:
     ret = -25; // ENOTTY

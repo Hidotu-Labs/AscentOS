@@ -40,8 +40,20 @@ static uint64_t *get_next_level(uint64_t *current_level, size_t index,
 
 // Map a single page without acquiring the lock.
 // Must only be called while vmm_lock is already held.
+//
+// flush_tlb controls whether invlpg is issued after writing the PTE.
+//
+// Pass flush_tlb=false when installing a brand-new mapping (non-present →
+// present). The x86 architecture guarantees that the CPU will not use a
+// stale TLB entry for an address it has never successfully translated, so
+// no invalidation is required for fresh mappings. Issuing invlpg anyway
+// wastes 40-100 cycles per page and serialises the pipeline.
+//
+// Pass flush_tlb=true when *replacing* an existing present mapping (e.g.
+// CoW break, permission change) to evict the old cached translation.
 static bool vmm_map_page_nolock(uint64_t *pml4, uint64_t virtual_addr,
-                                uint64_t physical_addr, uint64_t flags) {
+                                uint64_t physical_addr, uint64_t flags,
+                                bool flush_tlb) {
   size_t pml4_index = (virtual_addr >> 39) & 0x1FF;
   size_t pdpt_index = (virtual_addr >> 30) & 0x1FF;
   size_t pd_index   = (virtual_addr >> 21) & 0x1FF;
@@ -78,7 +90,10 @@ static bool vmm_map_page_nolock(uint64_t *pml4, uint64_t virtual_addr,
   pd_virt[pd_index] |= propagate_flags;
 
   pt_virt[pt_index] = (physical_addr & PAGE_MASK) | flags | PAGE_FLAG_PRESENT;
-  vmm_flush_tlb(virtual_addr);
+
+  if (flush_tlb)
+    vmm_flush_tlb(virtual_addr);
+
   return true;
 }
 
@@ -89,7 +104,9 @@ static bool vmm_map_page_nolock(uint64_t *pml4, uint64_t virtual_addr,
 bool vmm_map_page(uint64_t *pml4, uint64_t virtual_addr, uint64_t physical_addr,
                   uint64_t flags) {
   spinlock_acquire(&vmm_lock);
-  bool ok = vmm_map_page_nolock(pml4, virtual_addr, physical_addr, flags);
+  // Always flush: public callers may be replacing an existing mapping
+  // (CoW break, mprotect, remap), so we must evict any stale TLB entry.
+  bool ok = vmm_map_page_nolock(pml4, virtual_addr, physical_addr, flags, true);
   spinlock_release(&vmm_lock);
   return ok;
 }
@@ -136,6 +153,14 @@ unlock:
 // Now the lock is taken once, all PTEs are written in the inner loop via
 // vmm_map_page_nolock, and the lock is released once at the end.
 // The spinlock overhead drops from O(pages) to O(1) regardless of range size.
+//
+// Additionally, invlpg is suppressed per-page (flush_tlb=false).  Every
+// address in the range was previously non-present: the CPU cannot have a
+// cached translation for it, so no TLB invalidation is required.  A single
+// memory barrier (implicit in the spinlock release MFENCE) is sufficient to
+// ensure the new PTEs are visible to this CPU before the caller touches the
+// mapped memory.  This saves 40-100 cycles × N pages — roughly 20,000-50,000
+// cycles for a typical 512-page (2 MB) mmap region.
 bool vmm_map_range(uint64_t *pml4, uint64_t virtual_addr,
                    uint64_t physical_addr, size_t pages, uint64_t flags) {
   if (pages == 0)
@@ -144,10 +169,12 @@ bool vmm_map_range(uint64_t *pml4, uint64_t virtual_addr,
   spinlock_acquire(&vmm_lock);
 
   for (size_t i = 0; i < pages; i++) {
+    // flush_tlb=false: these are fresh (non-present → present) mappings.
+    // No stale TLB entry can exist for addresses the CPU never translated.
     if (!vmm_map_page_nolock(pml4,
                              virtual_addr  + (i * 4096),
                              physical_addr + (i * 4096),
-                             flags)) {
+                             flags, false)) {
       spinlock_release(&vmm_lock);
       return false;
     }

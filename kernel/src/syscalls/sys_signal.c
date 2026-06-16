@@ -157,7 +157,14 @@ void signal_deliver(struct registers *regs) {
   if (sa->sa_handler == (void *)SIG_IGN)
     return;
   if (sa->sa_handler == (void *)SIG_DFL) {
+    // Signals whose default action is "ignore"
     if (sig == SIGCHLD || sig == SIGURG || sig == SIGWINCH)
+      return;
+    // SIGTTIN (21) and SIGTTOU (22): default action is STOP.
+    // We don't have a full STOP/CONT implementation yet, so we ignore these
+    // rather than terminating the process. This lets bash open job control
+    // without being killed when it reads from the controlling terminal.
+    if (sig == 21 || sig == 22)
       return;
     klog_puts("[SIGNAL] Default action (terminate) for sig ");
     klog_uint64(sig);
@@ -395,6 +402,10 @@ void signal_send_pgid(uint32_t pgid, int sig) {
   while (t) {
     if (t->pgid == pgid) {
       t->pending_signals |= (1ULL << (sig - 1));
+      // Wake the thread if it is blocked/sleeping so it can deliver the signal
+      if (t->state == THREAD_SLEEPING || t->state == THREAD_BLOCKED) {
+        t->state = THREAD_READY;
+      }
     }
     t = t->global_next;
   }

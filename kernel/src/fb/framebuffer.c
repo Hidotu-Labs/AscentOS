@@ -494,6 +494,23 @@ static uint32_t console_vfs_read(struct vfs_node *node, uint32_t offset,
   if (size == 0)
     return 0;
 
+  // Helper: check ISIG and send signal for a character.
+  // Returns true if the character was consumed as a signal (don't buffer it).
+  extern void signal_send_pgid(uint32_t pgid, int sig);
+#define CONSOLE_CHECK_ISIG(c)                                                  \
+  do {                                                                         \
+    if (console_termios.c_lflag & ISIG) {                                      \
+      if ((uint8_t)(c) == console_termios.c_cc[0] && console_pgid != 0) {     \
+        signal_send_pgid(console_pgid, 2); /* SIGINT */                        \
+        return (uint32_t)-4; /* EINTR */                                       \
+      }                                                                        \
+      if ((uint8_t)(c) == console_termios.c_cc[1] && console_pgid != 0) {     \
+        signal_send_pgid(console_pgid, 3); /* SIGQUIT */                       \
+        return (uint32_t)-4; /* EINTR */                                       \
+      }                                                                        \
+    }                                                                          \
+  } while (0)
+
   if (console_termios.c_lflag & ICANON) {
     // If we have data in the canon buffer, return it first
     if (canon_pos < canon_len) {
@@ -519,6 +536,9 @@ static uint32_t console_vfs_read(struct vfs_node *node, uint32_t offset,
       // ICRNL: Map CR to NL on input
       if (c == '\r' && (console_termios.c_iflag & ICRNL))
         c = '\n';
+
+      // ISIG: check for signal-generating characters (VINTR, VQUIT)
+      CONSOLE_CHECK_ISIG(c);
 
       // Handle erasing (Backspace or Delete)
       if (c == '\b' || c == 0x7F) {
@@ -566,6 +586,9 @@ static uint32_t console_vfs_read(struct vfs_node *node, uint32_t offset,
       if (c == '\r' && (console_termios.c_iflag & ICRNL))
         c = '\n';
 
+      // ISIG: check for signal-generating characters (VINTR, VQUIT)
+      CONSOLE_CHECK_ISIG(c);
+
       // ECHO: Echo input characters
       if (console_termios.c_lflag & ECHO) {
         console_putchar(c);
@@ -578,6 +601,7 @@ static uint32_t console_vfs_read(struct vfs_node *node, uint32_t offset,
     }
     return count;
   }
+#undef CONSOLE_CHECK_ISIG
 }
 
 static int console_vfs_poll(struct vfs_node *node, int events) {

@@ -136,7 +136,6 @@ build_bash() {
     ./configure \
         --host=x86_64-linux-musl \
         --prefix=/opt/bash \
-        --disable-job-control \
         --disable-nls \
         --without-bash-malloc \
         --enable-static-link \

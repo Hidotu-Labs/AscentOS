@@ -652,6 +652,9 @@ uint64_t sys_fork(struct syscall_regs *regs) {
     child->sgid = parent->sgid;
     child->ctty = parent->ctty; // Inherit controlling terminal
 
+    // Inherit comm name — forked child keeps the parent's name until exec
+    memcpy(child->comm, parent->comm, sizeof(child->comm));
+
     // Inherit alternate signal stack
     child->ss_sp = parent->ss_sp;
     child->ss_size = parent->ss_size;
@@ -852,6 +855,9 @@ static uint64_t sys_clone(struct syscall_regs *regs) {
   child->ss_sp = parent->ss_sp;
   child->ss_size = parent->ss_size;
   child->ss_flags = parent->ss_flags;
+
+  // Inherit comm name — cloned child keeps the parent's name until exec
+  memcpy(child->comm, parent->comm, sizeof(child->comm));
 
   // NOTE: sched_create_kernel_thread already added the child to the parent's
   // children list. Adding it again here would create a circular list and
