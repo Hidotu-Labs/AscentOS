@@ -1,4 +1,5 @@
 #include "vma.h"
+#include "../fs/vfs.h"
 #include "../lib/string.h"
 #include "heap.h"
 #include "slab_cache.h"
@@ -16,6 +17,21 @@ static inline void vma_node_free(struct vma *v) {
     kmem_cache_free(vma_cache, v);
   else
     kfree(v);
+}
+
+static inline void vma_file_ref(void *file_node) {
+  if (file_node)
+    ((vfs_node_t *)file_node)->refcount++;
+}
+
+static inline void vma_file_unref(void *file_node) {
+  if (file_node)
+    vfs_close((vfs_node_t *)file_node);
+}
+
+static inline void vma_drop_file_ref(struct vma *v) {
+  if (v && v->file_node)
+    vma_file_unref(v->file_node);
 }
 
 // Helper macros
@@ -129,17 +145,23 @@ static struct vma *delete_node(struct vma *node, uint64_t start,
     if (!node->left || !node->right) {
       struct vma *temp = node->left ? node->left : node->right;
       if (!temp) {
+        vma_drop_file_ref(node);
         vma_node_free(node);
         node = NULL;
       } else {
         struct vma *unlinked = node;
         node = temp;
+        vma_drop_file_ref(unlinked);
         vma_node_free(unlinked);
       }
     } else {
       // Node with two children: Get the inorder successor (smallest in the
       // right subtree)
       struct vma *temp = min_value_node(node->right);
+
+      // The deleted node's file reference goes away, while the successor's
+      // reference moves into this node with the copied payload below.
+      vma_drop_file_ref(node);
 
       // Copy the inorder successor's data to this node
       node->start = temp->start;
@@ -149,6 +171,7 @@ static struct vma *delete_node(struct vma *node, uint64_t start,
       node->offset = temp->offset;
       node->fd = temp->fd;
       node->file_node = temp->file_node;
+      temp->file_node = NULL;
 
       // Delete the inorder successor
       node->right = delete_node(node->right, temp->start, deleted);
@@ -194,6 +217,7 @@ static void vma_destroy_recursive(struct vma *node) {
     return;
   vma_destroy_recursive(node->left);
   vma_destroy_recursive(node->right);
+  vma_drop_file_ref(node);
   vma_node_free(node);
 }
 
@@ -221,6 +245,7 @@ int vma_add(struct vma_list *list, uint64_t start, uint64_t end, uint64_t prot,
   new_node->offset = offset;
   new_node->fd = fd;
   new_node->file_node = file_node;
+  vma_file_ref(file_node);
   new_node->height = 1;
   new_node->left = NULL;
   new_node->right = NULL;
@@ -246,6 +271,7 @@ bool vma_remove(struct vma_list *list, uint64_t start, uint64_t end) {
     int fd = v->fd;
     uint64_t offset = v->offset;
     void *vma_file_node = v->file_node;
+    vma_file_ref(vma_file_node);
 
     bool deleted = false;
     list->root = delete_node(list->root, v->start, &deleted);
@@ -269,6 +295,8 @@ bool vma_remove(struct vma_list *list, uint64_t start, uint64_t end) {
     else if (end >= v_end && start > v_start && start < v_end) {
       vma_add(list, v_start, start, prot, flags, fd, offset, vma_file_node);
     }
+
+    vma_file_unref(vma_file_node);
   }
 
   return overall_removed;
@@ -298,6 +326,7 @@ int vma_mprotect(struct vma_list *list, uint64_t start, uint64_t end,
     uint64_t offset = v->offset;
     void *vma_file_node = v->file_node;
     uint64_t original_start = v->start;
+    vma_file_ref(vma_file_node);
 
     // Remove the overlapping part. vma_remove handles splitting the original
     // VMA.
@@ -307,6 +336,7 @@ int vma_mprotect(struct vma_list *list, uint64_t start, uint64_t end,
     // this segment started relative to the original VMA.
     vma_add(list, m_start, m_end, new_prot, flags, fd,
             offset + (m_start - original_start), vma_file_node);
+    vma_file_unref(vma_file_node);
 
     curr = m_end;
   }
@@ -558,6 +588,8 @@ void vma_merge_adjacent(struct vma_list *list) {
 
   // Only rebuild the tree if at least one merge actually happened.
   if (m < idx) {
+    for (int i = 0; i < m; i++)
+      vma_file_ref(merged[i].file_node);
     vma_list_destroy(list); // frees all nodes, resets root + count
     for (int i = 0; i < m; i++) {
       vma_add(list,
@@ -565,6 +597,7 @@ void vma_merge_adjacent(struct vma_list *list) {
               merged[i].prot,  merged[i].flags,
               merged[i].fd,    merged[i].offset,
               merged[i].file_node);
+      vma_file_unref(merged[i].file_node);
     }
   }
 

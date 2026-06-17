@@ -33,6 +33,9 @@ typedef struct {
   uint64_t p_align;
 } __attribute__((packed)) Elf64_Phdr;
 
+#define ET_EXEC 2
+#define ET_DYN 3
+
 #define PT_LOAD 1
 #define PT_DYNAMIC 2
 #define PT_INTERP 3
@@ -68,6 +71,7 @@ typedef struct {
 // ELF metadata passed from loader to stack builder
 typedef struct {
   uint64_t entry;        // e_entry
+  uint64_t load_base;    // Load bias for ET_DYN main executables
   uint64_t phdr;         // virtual address of program headers
   uint16_t phentsize;    // e_phentsize
   uint16_t phnum;        // e_phnum

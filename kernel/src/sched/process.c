@@ -126,8 +126,11 @@ void process_jump_usermode(uint64_t rip, uint64_t user_rsp, uint64_t pml4) {
 }
 
 #define PAGE_SIZE 4096
+#define ELF_PIE_BASE 0x0000000000400000ULL
+#define ELF_INTERP_BASE 0x0000400000000000ULL
 
-static bool do_elf_load(const char *path, uint64_t *pml4, uint64_t load_base,
+static bool do_elf_load(const char *path, uint64_t *pml4,
+                        uint64_t requested_base, bool is_interp,
                         elf_info_t *out_info, char *interp_path,
                         size_t interp_max_len) {
   struct thread *current_thread = sched_get_current();
@@ -151,6 +154,15 @@ static bool do_elf_load(const char *path, uint64_t *pml4, uint64_t load_base,
       ehdr.e_ident[4] != 2) {
     return false;
   }
+  if (ehdr.e_type != ET_EXEC && ehdr.e_type != ET_DYN) {
+    klog_puts("[PROC] ELF load failed: unsupported ELF type\n");
+    return false;
+  }
+
+  uint64_t load_base = requested_base;
+  if (!is_interp && ehdr.e_type == ET_DYN && load_base == 0) {
+    load_base = ELF_PIE_BASE;
+  }
 
   uint64_t phdr_vaddr = 0;
   uint64_t hhdm = pmm_get_hhdm_offset();
@@ -170,8 +182,11 @@ static bool do_elf_load(const char *path, uint64_t *pml4, uint64_t load_base,
       interp_path[len] = '\0';
     }
 
-    if (phdr.p_type == PT_LOAD && ehdr.e_phoff >= phdr.p_offset &&
-        ehdr.e_phoff < phdr.p_offset + phdr.p_filesz) {
+    if (phdr.p_type == PT_PHDR) {
+      phdr_vaddr = load_base + phdr.p_vaddr;
+    } else if (phdr.p_type == PT_LOAD && phdr_vaddr == 0 &&
+               ehdr.e_phoff >= phdr.p_offset &&
+               ehdr.e_phoff < phdr.p_offset + phdr.p_filesz) {
       phdr_vaddr = load_base + phdr.p_vaddr + (ehdr.e_phoff - phdr.p_offset);
     }
   }
@@ -187,12 +202,12 @@ static bool do_elf_load(const char *path, uint64_t *pml4, uint64_t load_base,
       continue;
 
     uint64_t vaddr = load_base + phdr.p_vaddr;
-    uint32_t filesz = phdr.p_filesz;
-    uint32_t memsz = phdr.p_memsz;
+    uint64_t filesz = phdr.p_filesz;
+    uint64_t memsz = phdr.p_memsz;
     uint32_t file_offset = phdr.p_offset;
 
-    // Track uppermost loaded address for brk base.
-    if (load_base == 0 && current_thread && current_thread->mm) {
+    // Track uppermost loaded address for the main program brk base.
+    if (!is_interp && current_thread && current_thread->mm) {
       uint64_t seg_end = vaddr + memsz;
       if (seg_end > current_thread->mm->brk_base) {
         current_thread->mm->brk_base = seg_end;
@@ -216,17 +231,15 @@ static bool do_elf_load(const char *path, uint64_t *pml4, uint64_t load_base,
         }
       }
 
-      // Register segment in VMA list
-      // This is critical for syscall validation (vmm_is_user_addr_range_valid)
+      // Register segment in VMA list. This is critical for syscall validation.
       if (current_thread && current_thread->mm) {
-        // Derive PROT flags from ELF phdr flags
         uint64_t prot = 0;
-        if (phdr.p_flags & 0x4)
-          prot |= 0x1; // PF_R -> PROT_READ
-        if (phdr.p_flags & 0x2)
-          prot |= 0x2; // PF_W -> PROT_WRITE
-        if (phdr.p_flags & 0x1)
-          prot |= 0x4; // PF_X -> PROT_EXEC
+        if (phdr.p_flags & PF_R)
+          prot |= 0x1;
+        if (phdr.p_flags & PF_W)
+          prot |= 0x2;
+        if (phdr.p_flags & PF_X)
+          prot |= 0x4;
 
         vma_add(&current_thread->mm->vmas, start_page, end_page, prot,
                 MAP_PRIVATE, -1, 0, NULL);
@@ -236,12 +249,6 @@ static bool do_elf_load(const char *path, uint64_t *pml4, uint64_t load_base,
         vfs_read(file, file_offset, filesz, (uint8_t *)vaddr);
       }
 
-      // Explicitly zero the BSS portion
-      // The ELF spec requires [vaddr+filesz, vaddr+memsz) to be zero.
-      // Pages were pre-zeroed above, but vfs_read may have written file
-      // data into the BSS region if the linker set filesz larger than
-      // the actual non-BSS content (TCC does this).  Re-zero the BSS
-      // portion through the HHDM to guarantee correctness.
       if (memsz > filesz) {
         uint64_t bss_start = vaddr + filesz;
         uint64_t bss_end = vaddr + memsz;
@@ -264,14 +271,15 @@ static bool do_elf_load(const char *path, uint64_t *pml4, uint64_t load_base,
   }
 
   if (out_info) {
-    if (load_base == 0) {
-      out_info->entry = ehdr.e_entry;
+    if (is_interp) {
+      out_info->interp_base = load_base;
+      out_info->interp_entry = load_base + ehdr.e_entry;
+    } else {
+      out_info->entry = load_base + ehdr.e_entry;
+      out_info->load_base = load_base;
       out_info->phdr = phdr_vaddr;
       out_info->phentsize = ehdr.e_phentsize;
       out_info->phnum = ehdr.e_phnum;
-    } else {
-      out_info->interp_base = load_base;
-      out_info->interp_entry = load_base + ehdr.e_entry;
     }
   }
 
@@ -288,7 +296,8 @@ bool elf_load(const char *path, uint64_t *pml4, elf_info_t *out_info) {
   char interp_path[256];
   memset(interp_path, 0, sizeof(interp_path));
 
-  if (!do_elf_load(path, pml4, 0, out_info, interp_path, sizeof(interp_path))) {
+  if (!do_elf_load(path, pml4, 0, false, out_info, interp_path,
+                   sizeof(interp_path))) {
     return false;
   }
 
@@ -296,8 +305,8 @@ bool elf_load(const char *path, uint64_t *pml4, elf_info_t *out_info) {
     klog_puts("[PROC] PT_INTERP found: ");
     klog_puts(interp_path);
     klog_puts("\n");
-    // Load interpreter at 0x400000000000
-    if (!do_elf_load(interp_path, pml4, 0x400000000000ULL, out_info, NULL, 0)) {
+    if (!do_elf_load(interp_path, pml4, ELF_INTERP_BASE, true, out_info,
+                     NULL, 0)) {
       klog_puts("[PROC] Failed to load interpreter\n");
       return false;
     }
@@ -538,8 +547,10 @@ uint64_t process_build_initial_stack(uint64_t stack_top, const char *path,
 //   offset 8: size_t *auxv              ← we populate this
 //   ...
 static void process_fixup_libc_auxv(const char *path, uint64_t *pml4,
-                                    uint64_t user_sp) {
+                                    uint64_t user_sp,
+                                    const elf_info_t *elf_info) {
   uint64_t hhdm = pmm_get_hhdm_offset();
+  uint64_t load_base = elf_info ? elf_info->load_base : 0;
   vfs_node_t *file = vfs_resolve_path(path);
   if (!file)
     return;
@@ -556,7 +567,7 @@ static void process_fixup_libc_auxv(const char *path, uint64_t *pml4,
     if (vfs_read(file, off, sizeof(phdr), (uint8_t *)&phdr) != sizeof(phdr))
       continue;
     if (phdr.p_type == PT_DYNAMIC) {
-      dyn_vaddr = phdr.p_vaddr;
+      dyn_vaddr = load_base + phdr.p_vaddr;
       dyn_memsz = phdr.p_memsz;
       break;
     }
@@ -580,9 +591,9 @@ static void process_fixup_libc_auxv(const char *path, uint64_t *pml4,
     if (d_tag == 0)
       break; // DT_NULL
     if (d_tag == 6)
-      symtab_va = d_val; // DT_SYMTAB
+      symtab_va = load_base + d_val; // DT_SYMTAB
     if (d_tag == 5)
-      strtab_va = d_val; // DT_STRTAB
+      strtab_va = load_base + d_val; // DT_STRTAB
     if (d_tag == 11)
       syment = d_val; // DT_SYMENT
   }
@@ -634,7 +645,7 @@ static void process_fixup_libc_auxv(const char *path, uint64_t *pml4,
       uint64_t auxv_user_addr = user_sp + idx * sizeof(uint64_t);
 
       // Write auxv pointer into __libc + 8
-      uint64_t libc_auxv_va = st_value + 8;
+      uint64_t libc_auxv_va = load_base + st_value + 8;
       uint64_t libc_phys = vmm_virt_to_phys(pml4, libc_auxv_va & ~0xFFFULL);
       if (!libc_phys)
         return;
@@ -719,7 +730,7 @@ bool process_exec_argv(const char **argv) {
   // Fix up __libc.auxv for binaries whose _start skips __libc_start_main
   // (e.g. TCC-compiled programs). Without this, musl's malloc crashes
   // trying to walk a NULL auxv to find AT_RANDOM.
-  process_fixup_libc_auxv(argv[0], pml4, user_rsp);
+  process_fixup_libc_auxv(argv[0], pml4, user_rsp, &elf_info);
 
   // Initialize File Descriptors for the main thread
   struct thread *current_thread = sched_get_current();

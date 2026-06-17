@@ -145,21 +145,40 @@ build_forkit() {
 Linker wrapper for building Forkit (Rust/SDL2) against musl targeting AscentOS.
 
 Key transforms applied to the gcc/ld argv:
+  - Rewrite rcrt1.o/crt1.o to Scrt1.o so the output uses dynamic-PIE startup
+  - Replace -static-pie with -pie and drop full-static flags
   - Inject -L<rootfs/usr/lib> and -L<rootfs/lib> before first -Wl,-Bstatic
   - Inject -Wl,--allow-shlib-undefined before first -Wl,-Bstatic so transitive
     deps of SDL2 .so files (freetype, harfbuzz, glib, musl libc) are not
     required to be resolvable at cross-compile time (they exist at runtime)
-  - Wrap each -lSDL2{,_ttf,_image,_mixer} in-place with
-    -Wl,-Bdynamic / -Wl,-Bstatic so they link against the .so files
-  - Append -Wl,-rpath,/usr/lib:/lib for runtime .so discovery on AscentOS
+  - Keep SDL2, libgcc_s, and libc in dynamic mode so they resolve as .so files
+  - End in -Wl,-Bdynamic and append -Wl,-rpath,/usr/lib:/lib for runtime lookup
 """
 import sys, subprocess
 
 SDL2_LIBS   = {"-lSDL2", "-lSDL2_ttf", "-lSDL2_image", "-lSDL2_mixer"}
 SDL2_LIBDIR = "${SDL2_LIB}"
 ALPINE_LIBDIR = "${ALPINE_LIB}"
+TOOLCHAIN_LIBDIR = "${ROOT_DIR}/toolchain/x86_64-linux-musl/x86_64-linux-musl/lib"
 INTERP      = "/lib/ld-musl-x86_64.so.1"
 REAL_GCC    = "${MUSL_GCC_CMD}"
+
+COMMON_LINK_ARGS = [
+    "-L" + SDL2_LIBDIR,
+    "-L" + ALPINE_LIBDIR,
+    "-L" + TOOLCHAIN_LIBDIR,
+    "-Wl,-rpath-link," + SDL2_LIBDIR,
+    "-Wl,-rpath-link," + ALPINE_LIBDIR,
+    "-Wl,-rpath-link," + TOOLCHAIN_LIBDIR,
+    "-Wl,--allow-shlib-undefined",
+    "-Wl,--dynamic-linker," + INTERP,
+]
+
+def rewrite_crt_arg(arg):
+    for old, new in (("rcrt1.o", "Scrt1.o"), ("crt1.o", "Scrt1.o")):
+        if arg == old or arg.endswith("/" + old):
+            return arg[:-len(old)] + new
+    return arg
 
 args = sys.argv[1:]
 out  = []
@@ -167,16 +186,17 @@ injected_prefix = False
 pie_added = False
 
 for i, a in enumerate(args):
-    # Replace -static-pie with -pie so the output is a proper DYN (PIE)
-    # executable that ld-musl can relocate, not a fixed-address EXEC.
-    # Also drop -nodefaultlibs since we need the default libc for the
-    # dynamic Rust stdlib.
+    a = rewrite_crt_arg(a)
+
+    # Replace -static-pie with -pie so the output is a normal dynamic PIE.
+    # Also drop full-static mode and -nodefaultlibs since we need libc and
+    # libgcc from the dynamic musl toolchain path.
     if a == "-static-pie":
         if not pie_added:
             out.append("-pie")
             pie_added = True
         continue
-    if a == "-nodefaultlibs":
+    if a in ("-static", "-Wl,-static", "-nodefaultlibs"):
         continue
 
     # Before the first -Wl,-Bstatic, inject:
@@ -186,31 +206,24 @@ for i, a in enumerate(args):
     #     be resolvable at cross-compile time — they exist at runtime
     #   --dynamic-linker so the binary gets a proper PT_INTERP
     if not injected_prefix and a == "-Wl,-Bstatic":
-        out += [
-            "-L" + SDL2_LIBDIR,
-            "-L" + ALPINE_LIBDIR,
-            "-Wl,-rpath-link," + SDL2_LIBDIR,
-            "-Wl,-rpath-link," + ALPINE_LIBDIR,
-            "-Wl,--allow-shlib-undefined",
-            "-Wl,--dynamic-linker," + INTERP,
-        ]
+        out += COMMON_LINK_ARGS
         injected_prefix = True
 
     if a in SDL2_LIBS:
-        # Wrap each SDL2 lib in-place with a -Bdynamic/-Bstatic bracket so it
-        # resolves against the .so instead of demanding a static .a
+        # SDL2 and the following runtime libs (-lgcc_s/-lc) must stay dynamic.
         prev = out[-1] if out else ""
         if prev != "-Wl,-Bdynamic":
             out.append("-Wl,-Bdynamic")
         out.append(a)
-        nxt = args[i + 1] if i + 1 < len(args) else ""
-        if nxt not in SDL2_LIBS:
-            out.append("-Wl,-Bstatic")
     else:
         out.append(a)
 
-# Runtime rpath: SDL2 lives in /usr/lib, Alpine musl libc in /lib
-out += ["-Wl,-rpath,/usr/lib:/lib"]
+if not injected_prefix:
+    out = COMMON_LINK_ARGS + out
+
+# Runtime rpath: SDL2 lives in /usr/lib, Alpine musl libc in /lib. Leave the
+# linker in dynamic mode so the default libc/libgcc search does not go static.
+out += ["-Wl,-Bdynamic", "-Wl,-rpath,/usr/lib:/lib"]
 
 sys.exit(subprocess.call([REAL_GCC] + out))
 WRAPPER_EOF
@@ -221,6 +234,7 @@ WRAPPER_EOF
     cat > .cargo/config.toml << EOF
 [target.${RUST_TARGET}]
 linker = "${WRAPPER_DIR}/musl-ld-wrapper"
+rustflags = ["-C", "target-feature=-crt-static"]
 
 [build]
 target = "${RUST_TARGET}"
