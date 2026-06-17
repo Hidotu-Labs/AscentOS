@@ -1,4 +1,5 @@
 #include "isr.h"
+#include "fault.h"
 #include "../console/console.h"
 #include "../console/klog.h"
 #include "../mm/pmm.h"
@@ -513,9 +514,27 @@ static void isr_panic(struct registers *regs, const char *msg) {
 
 static void isr_report_user_fault(struct registers *regs, int sig,
                                   uint64_t addr) {
-  (void)addr;
   struct thread *current = sched_get_current();
   if (current) {
+    // 1. Log detailed report to kernel console
+    klog_puts("\n" KLOG_CLR_RED "[ USER FAULT ]" KLOG_CLR_RESET " process '");
+    klog_puts(current->comm);
+    klog_puts("' (tid=");
+    klog_uint64(current->tid);
+    klog_puts(") signal ");
+    klog_uint64(sig);
+    klog_puts("\n          RIP: ");
+    klog_hex64(regs->rip);
+    klog_puts("  CR2: ");
+    klog_hex64(addr);
+    klog_puts("  ERR: ");
+    klog_hex64(regs->err_code);
+    klog_puts("\n");
+
+    // 2. Add to /dev/faults for userland monitors
+    fault_log_add(regs, sig, addr);
+
+    // 3. Mark signal for delivery
     current->pending_signals |= (1ULL << (sig - 1));
   } else {
     isr_panic(regs, "User fault with no thread context");
@@ -537,6 +556,75 @@ static void page_fault_handler(struct registers *regs) {
 
 static void gpf_handler(struct registers *regs) {
   if ((regs->cs & 0x3) == 0x3) {
+    klog_puts("[GPF] User-mode GPF at RIP=");
+    klog_hex64(regs->rip);
+    klog_puts(" Err=");
+    klog_hex64(regs->err_code);
+    klog_puts(" tid=");
+    klog_uint64(sched_get_current()->tid);
+    klog_puts("\nRAX=");
+    klog_hex64(regs->rax);
+    klog_puts(" RBX=");
+    klog_hex64(regs->rbx);
+    klog_puts(" RCX=");
+    klog_hex64(regs->rcx);
+    klog_puts(" RDX=");
+    klog_hex64(regs->rdx);
+    klog_puts("\nRSI=");
+    klog_hex64(regs->rsi);
+    klog_puts(" RDI=");
+    klog_hex64(regs->rdi);
+    klog_puts(" RBP=");
+    klog_hex64(regs->rbp);
+    klog_puts(" RSP=");
+    klog_hex64(regs->rsp);
+    klog_puts("\nR8=");
+    klog_hex64(regs->r8);
+    klog_puts(" R9=");
+    klog_hex64(regs->r9);
+    klog_puts(" R10=");
+    klog_hex64(regs->r10);
+    klog_puts(" R11=");
+    klog_hex64(regs->r11);
+    klog_puts("\nR12=");
+    klog_hex64(regs->r12);
+    klog_puts(" R13=");
+    klog_hex64(regs->r13);
+    klog_puts(" R14=");
+    klog_hex64(regs->r14);
+    klog_puts(" R15=");
+    klog_hex64(regs->r15);
+    klog_puts("\nFS_BASE=");
+    klog_hex64(rdmsr(0xC0000100)); // IA32_FS_BASE
+    klog_puts(" Ker_GS=");
+    klog_hex64(rdmsr(0xC0000102)); // IA32_KERNEL_GS_BASE
+    klog_puts("\nRIP CODE: ");
+    {
+      const char *_h = "0123456789ABCDEF";
+      uint64_t *pml4 = vmm_get_active_pml4();
+      if (vmm_virt_to_phys(pml4, regs->rip & ~0xFFFULL)) {
+        uint8_t *code_ptr = (uint8_t *)vmm_virt_to_phys(pml4, regs->rip & ~0xFFFULL);
+        /* work through HHDM so we read actual physical bytes */
+        uint64_t hhdm_rip = vmm_virt_to_phys(pml4, regs->rip & ~0xFFFULL)
+                            + pmm_get_hhdm_offset() + (regs->rip & 0xFFF);
+        uint8_t *rip_bytes = (uint8_t *)hhdm_rip;
+        for (int i = 0; i < 8; i++) {
+          klog_putchar(_h[(rip_bytes[i] >> 4) & 0xF]);
+          klog_putchar(_h[rip_bytes[i] & 0xF]);
+          klog_putchar(' ');
+        }
+        (void)code_ptr;
+      } else {
+        klog_puts("<unmapped>");
+      }
+    }
+    klog_puts("\n");
+    print_user_stack_words(regs->rsp, 8);
+    klog_puts("SYS_STAR=");
+    klog_hex64(rdmsr(0xC0000081));
+    klog_puts(" LSTAR=");
+    klog_hex64(rdmsr(0xC0000082));
+    klog_puts("\n");
     isr_report_user_fault(regs, SIGSEGV, 0);
   } else {
     isr_panic(regs, "Unhandled General Protection Fault");

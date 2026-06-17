@@ -137,6 +137,7 @@ struct thread {
   vfs_node_t *cwd_node;        // Current working directory VFS node
   struct mm_struct *mm;        // Shared memory management state
   uint64_t fs_base;            // User FS_BASE (TLS) — inherited across fork
+  uint64_t gs_base;            // User GS_BASE (TLS) — inherited across fork
   uint32_t uid;                // User ID
   uint32_t gid;                // Group ID
   uint32_t euid;               // Effective User ID

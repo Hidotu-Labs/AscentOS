@@ -355,6 +355,19 @@ install_apk "gvfs-archive" "community"
 install_apk "gvfs-fuse" "community"
 install_apk "file" "main"
 
+# SDL2 and related libraries
+echo "[*] Installing SDL2 and related libraries..."
+install_apk "sdl2" "community"
+install_apk "sdl2-dev" "community"
+install_apk "sdl2_image" "community"
+install_apk "sdl2_image-dev" "community"
+install_apk "sdl2_ttf" "community"
+install_apk "sdl2_ttf-dev" "community"
+install_apk "sdl2_mixer" "community"
+install_apk "sdl2_mixer-dev" "community"
+install_apk "sdl2_net" "community"
+install_apk "sdl2_net-dev" "community"
+
 # NetSurf Web Browser
 echo "[*] Installing NetSurf and dependencies..."
 install_apk "netsurf" "community" "edge"
@@ -528,6 +541,12 @@ cat > "${ROOTFS_DIR}/etc/xdg/openbox/menu.xml" << 'EOF'
   <menu id="root-menu" label="AscentOS">
     <item label="Terminal (st)">
       <action name="Execute"><execute>st</execute></action>
+    </item>
+    <item label="Forkit Browser">
+      <action name="Execute"><execute>forkit</execute></action>
+    </item>
+    <item label="NetSurf Browser">
+      <action name="Execute"><execute>netsurf-gtk</execute></action>
     </item>
     <item label="File Manager">
       <action name="Execute"><execute>pcmanfm</execute></action>

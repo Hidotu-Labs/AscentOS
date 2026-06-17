@@ -12,6 +12,9 @@
 #include "../syscalls/syscall.h"
 #include "elf.h"
 #include "sched.h"
+#include "../mm/pmm.h"
+#include "../mm/vmm.h"
+#include "../cpu/isr.h"
 
 static void process_copy_to_user(uint64_t *pml4, uint64_t dest_user_va,
                                  const void *src_kern_va, size_t size) {
@@ -77,6 +80,11 @@ void process_jump_usermode(uint64_t rip, uint64_t user_rsp, uint64_t pml4) {
   // Reset user TLS to 0
   wrmsr(IA32_KERNEL_GS_BASE, 0);
   wrmsr(IA32_FS_BASE, 0);
+  struct thread *cur = sched_get_current();
+  if (cur) {
+    cur->fs_base = 0;
+    cur->gs_base = 0;
+  }
 
   register uint64_t asm_rip asm("rcx") = rip;
   register uint64_t asm_rflags asm("r11") = 0x202;
@@ -748,4 +756,97 @@ bool process_exec_argv(const char **argv) {
       elf_info.interp_base ? elf_info.interp_entry : elf_info.entry;
   process_jump_usermode(actual_entry, user_rsp, (uint64_t)pml4);
   return true;
+}
+
+// ---- Core Dump System ----------------------------------------------------
+
+static void dump_vma_recursive(struct vma *v, vfs_node_t *file, uint64_t cr3) {
+  if (!v)
+    return;
+
+  dump_vma_recursive(v->left, file, cr3);
+
+  // Skip device mappings or guards (PROT_NONE)
+  if (v->prot != 0 && !(v->flags & MAP_SHARED)) {
+    uint64_t hhdm = pmm_get_hhdm_offset();
+    for (uint64_t addr = v->start; addr < v->end; addr += PAGE_SIZE) {
+      uint64_t phys = vmm_virt_to_phys((uint64_t *)cr3, addr);
+      if (phys != 0) {
+        // Write the page content to the core file.
+        // We write it at the offset corresponding to its virtual address.
+        // (Simplified core format: file offset == virtual address)
+        vfs_write(file, (uint32_t)addr, PAGE_SIZE, (uint8_t *)(phys + hhdm));
+      }
+    }
+  }
+
+  dump_vma_recursive(v->right, file, cr3);
+}
+
+void process_dump_core(struct thread *t, struct registers *regs, int sig) {
+  if (!t || !t->mm)
+    return;
+
+  char path[64];
+  strcpy(path, "/tmp/core.");
+  char tid_str[16];
+  // Simple itoa for tid
+  uint32_t val = t->tid;
+  int i = 0;
+  if (val == 0) tid_str[i++] = '0';
+  else {
+    while (val > 0) {
+      tid_str[i++] = (val % 10) + '0';
+      val /= 10;
+    }
+  }
+  tid_str[i] = '\0';
+  // Reverse tid_str
+  for (int j = 0; j < i / 2; j++) {
+    char tmp = tid_str[j];
+    tid_str[j] = tid_str[i - j - 1];
+    tid_str[i - j - 1] = tmp;
+  }
+  strcat(path, tid_str);
+
+  klog_puts("[CORE] Dumping to ");
+  klog_puts(path);
+  klog_puts("...\n");
+
+  vfs_node_t *tmp_dir = vfs_resolve_path("/tmp");
+  if (!tmp_dir)
+    return;
+
+  if (vfs_create(tmp_dir, &path[5], 0644) != 0) {
+    klog_puts("[CORE] Failed to create core file\n");
+    return;
+  }
+
+  vfs_node_t *file = vfs_resolve_path(path);
+  if (!file)
+    return;
+
+  // 1. Write Header / Metadata (Simplified)
+  struct {
+    uint32_t magic;
+    uint32_t sig;
+    uint32_t tid;
+    char comm[16];
+  } header;
+  header.magic = 0x45524F43; // "CORE"
+  header.sig = (uint32_t)sig;
+  header.tid = t->tid;
+  memcpy(header.comm, t->comm, 16);
+  vfs_write(file, 0, sizeof(header), (uint8_t *)&header);
+
+  // 2. Write Register State
+  vfs_write(file, sizeof(header), sizeof(struct registers), (uint8_t *)regs);
+
+  // 3. Write Memory Regions
+  // We use a simplified format where we write page data at its virtual address 
+  // as the file offset. This makes it sparse but very easy to read.
+  dump_vma_recursive(t->mm->vmas.root, file, t->cr3);
+
+  vfs_close(file);
+  klog_puts("[CORE] Dump complete.\n");
 }

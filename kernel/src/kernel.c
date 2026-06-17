@@ -11,6 +11,7 @@
 #include "cpu/isr.h"
 #include "cpu/pic.h"
 #include "cpu/tsc.h"
+#include "cpu/fault.h"
 #include "drivers/audio/ac97.h"
 #include "drivers/audio/audio_dsp.h"
 #include "drivers/audio/hda.h"
@@ -467,6 +468,7 @@ mount_success:
   ramfs_mount_at("/dev");
   ramfs_mount_at("/tmp");
   ramfs_mount_at("/run");
+  fault_init();
 
   extern void sysfs_init(void);
   sysfs_init();

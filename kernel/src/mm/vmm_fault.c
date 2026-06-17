@@ -70,6 +70,31 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
     if (!(*pte & PAGE_FLAG_PRESENT))
       return -1;
 
+    if (*pte & PAGE_FLAG_RW) {
+      // Stale TLB: Another thread in this process already broke CoW on this
+      // page.
+      vmm_flush_tlb(virt);
+      return 0;
+    }
+
+    if (!(*pte & PAGE_FLAG_COW)) {
+      // Not marked COW yet. Is it a MAP_PRIVATE VMA that's now writable?
+      // (This can happen if it was first mapped read-only and then mprotected).
+      spinlock_acquire(&current->mm->lock);
+      struct vma *v = vma_find(&current->mm->vmas, cr2);
+      if (v) {
+        if (v->flags & MAP_PRIVATE) {
+          // If it's a private mapping (MAP_PRIVATE), we ALWAYS allow COW
+          // on write fault, even if the VMA says Read-only.
+          // This allows dynamic linkers to perform late relocations and
+          // allows features like software breakpoints (gdb) and RELRO fixups
+          // without requiring complex mprotect/mmap state synchronization.
+          *pte |= PAGE_FLAG_COW;
+        }
+      }
+      spinlock_release(&current->mm->lock);
+    }
+
     if (*pte & PAGE_FLAG_COW) {
       uint64_t old_phys = *pte & PAGE_MASK;
       uint16_t refs = pmm_get_ref((void *)old_phys);
@@ -95,6 +120,36 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
       vmm_flush_tlb(virt);
       return 0; // fault handled
     }
+
+    // Present page, write fault, no COW flag → genuine write protection
+    // violation.
+    if (user_mode) {
+      klog_puts("[VMM] Write-protect fault at CR2=");
+      klog_hex64(cr2);
+      klog_puts(" RIP=");
+      klog_hex64(regs->rip);
+      klog_puts(" tid=");
+      klog_uint64(current->tid);
+      klog_puts(" RSP=");
+      klog_hex64(regs->rsp);
+      klog_puts("\n");
+      return -1;
+    }
+  }
+
+  // If we reach here for a PRESENT page, it means it's an unhandled protection
+  // fault (e.g. executing a non-executable page, or a kernel RO violation).
+  if (present_bit) {
+    if (user_mode) {
+      klog_puts("[VMM] Protection fault on present page at CR2=");
+      klog_hex64(cr2);
+      klog_puts(" RIP=");
+      klog_hex64(regs->rip);
+      klog_puts(" err=");
+      klog_hex64(error_code);
+      klog_puts("\n");
+    }
+    return -1;
   }
 
   // A present page with no CoW flag → real protection violation.
@@ -148,6 +203,7 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
   }
 
   uint64_t vma_prot = 0;
+  uint64_t vma_flags = 0;
   int vma_fd = -1;
   uint64_t vma_offset = 0;
   uint64_t vma_start = 0;
@@ -155,6 +211,7 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
   void *vma_file_node = NULL;
   if (vma) {
     vma_prot = vma->prot;
+    vma_flags = vma->flags;
     vma_fd = vma->fd;
     (void)vma_fd; // captured for future use (e.g. close-on-exec logic)
     vma_offset = vma->offset;
@@ -166,20 +223,70 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
 
   if (!vma) {
     // No VMA covers this address — genuine segfault.
-    if (!user_mode && cr2 <= USER_SPACE_LIMIT) {
-      klog_puts("\n" KLOG_CLR_RED "[ FATAL ]" KLOG_CLR_RESET " KERNEL-MODE FAULT on user address\n");
-      klog_puts("          CR2:  "); klog_hex64(cr2); klog_puts("\n");
-      klog_puts("          RIP:  "); klog_hex64(regs->rip); klog_puts("\n");
-      klog_puts("          TID:  "); klog_uint64(current->tid); klog_puts("\n\n");
+    if (user_mode) {
+      klog_puts("[VMM] No VMA for CR2=");
+      klog_hex64(cr2);
+      klog_puts(" RIP=");
+      klog_hex64(regs->rip);
+      klog_puts(" tid=");
+      klog_uint64(current->tid);
+      klog_puts("\n");
+      return -1;
+    }
 
-      klog_puts("      RAX: "); klog_hex64(regs->rax); klog_puts(" RBX: "); klog_hex64(regs->rbx); klog_puts("\n");
-      klog_puts("      RCX: "); klog_hex64(regs->rcx); klog_puts(" RDX: "); klog_hex64(regs->rdx); klog_puts("\n");
-      klog_puts("      RSI: "); klog_hex64(regs->rsi); klog_puts(" RDI: "); klog_hex64(regs->rdi); klog_puts("\n");
-      klog_puts("      RBP: "); klog_hex64(regs->rbp); klog_puts(" RSP: "); klog_hex64(regs->rsp); klog_puts("\n");
-      klog_puts("      R8:  "); klog_hex64(regs->r8);  klog_puts(" R9:  "); klog_hex64(regs->r9);  klog_puts("\n");
-      klog_puts("      R10: "); klog_hex64(regs->r10); klog_puts(" R11: "); klog_hex64(regs->r11); klog_puts("\n");
-      klog_puts("      R12: "); klog_hex64(regs->r12); klog_puts(" R13: "); klog_hex64(regs->r13); klog_puts("\n");
-      klog_puts("      R14: "); klog_hex64(regs->r14); klog_puts(" R15: "); klog_hex64(regs->r15); klog_puts("\n");
+    if (!user_mode && cr2 <= USER_SPACE_LIMIT) {
+      klog_puts("\n" KLOG_CLR_RED "[ FATAL ]" KLOG_CLR_RESET
+                " KERNEL-MODE FAULT on user address\n");
+      klog_puts("          CR2:  ");
+      klog_hex64(cr2);
+      klog_puts("\n");
+      klog_puts("          RIP:  ");
+      klog_hex64(regs->rip);
+      klog_puts("\n");
+      klog_puts("          TID:  ");
+      klog_uint64(current->tid);
+      klog_puts("\n\n");
+
+      klog_puts("      RAX: ");
+      klog_hex64(regs->rax);
+      klog_puts(" RBX: ");
+      klog_hex64(regs->rbx);
+      klog_puts("\n");
+      klog_puts("      RCX: ");
+      klog_hex64(regs->rcx);
+      klog_puts(" RDX: ");
+      klog_hex64(regs->rdx);
+      klog_puts("\n");
+      klog_puts("      RSI: ");
+      klog_hex64(regs->rsi);
+      klog_puts(" RDI: ");
+      klog_hex64(regs->rdi);
+      klog_puts("\n");
+      klog_puts("      RBP: ");
+      klog_hex64(regs->rbp);
+      klog_puts(" RSP: ");
+      klog_hex64(regs->rsp);
+      klog_puts("\n");
+      klog_puts("      R8:  ");
+      klog_hex64(regs->r8);
+      klog_puts(" R9:  ");
+      klog_hex64(regs->r9);
+      klog_puts("\n");
+      klog_puts("      R10: ");
+      klog_hex64(regs->r10);
+      klog_puts(" R11: ");
+      klog_hex64(regs->r11);
+      klog_puts("\n");
+      klog_puts("      R12: ");
+      klog_hex64(regs->r12);
+      klog_puts(" R13: ");
+      klog_hex64(regs->r13);
+      klog_puts("\n");
+      klog_puts("      R14: ");
+      klog_hex64(regs->r14);
+      klog_puts(" R15: ");
+      klog_hex64(regs->r15);
+      klog_puts("\n");
 
       process_do_exit(11); // SIGSEGV
     }
@@ -264,6 +371,10 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
     //    same 64 KB window to avoid redundant faults for the same library.
     uint64_t cluster_vstart = cr2 & ~0xFFFFULL;
     uint64_t pt_flags = dp_build_flags(vma_prot);
+    if ((vma_flags & MAP_PRIVATE) && (pt_flags & PAGE_FLAG_RW)) {
+      pt_flags &= ~PAGE_FLAG_RW;
+      pt_flags |= PAGE_FLAG_COW;
+    }
 
     for (int ci = 0; ci < 16; ci++) {
       uint64_t vpage = cluster_vstart + (uint64_t)(ci * 4096);
@@ -297,6 +408,10 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
   // ---- Map the faulting page ----------------------------------------------
 
   uint64_t flags = dp_build_flags(vma_prot);
+  if (node && (vma_flags & MAP_PRIVATE) && (flags & PAGE_FLAG_RW)) {
+    flags &= ~PAGE_FLAG_RW;
+    flags |= PAGE_FLAG_COW;
+  }
 
   if (!vmm_map_page((uint64_t *)target_cr3, cr2 & ~0xFFFULL, (uint64_t)frame,
                     flags)) {
@@ -331,7 +446,7 @@ bool vmm_is_user_addr_range_valid(uint64_t addr, size_t size) {
     return false;
 
   uint64_t start_page = addr & ~0xFFFULL;
-  uint64_t end_page   = (addr + size + 0xFFF) & ~0xFFFULL;
+  uint64_t end_page = (addr + size + 0xFFF) & ~0xFFFULL;
 
   // Acquire the MM lock once for the entire range scan instead of once per
   // page.  For a 1 MB buffer (256 pages) the old code did 256 lock/unlock

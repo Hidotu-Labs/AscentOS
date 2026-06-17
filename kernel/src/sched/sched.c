@@ -558,7 +558,9 @@ void sched_yield(void) {
 
     // Save/Restore TLS MSRs
     prev->fs_base = rdmsr(0xC0000100);
+    prev->gs_base = rdmsr(0xC0000102);
     wrmsr(0xC0000100, next_t->fs_base);
+    wrmsr(0xC0000102, next_t->gs_base);
 
     spinlock_release(&cpu->queue_lock);
     switch_context(prev, next_t);

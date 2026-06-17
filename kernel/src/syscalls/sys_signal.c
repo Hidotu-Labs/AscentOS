@@ -131,6 +131,7 @@ static uint64_t sys_rt_sigreturn(struct syscall_regs *sregs) {
 }
 
 // Signal Delivery
+extern void process_dump_core(struct thread *t, struct registers *regs, int sig);
 
 void signal_deliver(struct registers *regs) {
   struct thread *current = sched_get_current();
@@ -169,6 +170,13 @@ void signal_deliver(struct registers *regs) {
     klog_puts("[SIGNAL] Default action (terminate) for sig ");
     klog_uint64(sig);
     klog_puts("\n");
+
+    // DUMP CORE for relevant signals
+    if (sig == SIGQUIT || sig == SIGILL || sig == SIGTRAP || sig == SIGABRT ||
+        sig == SIGFPE || sig == SIGSEGV || sig == SIGBUS || sig == SIGSYS) {
+      process_dump_core(current, regs, sig);
+    }
+
     process_do_exit(128 + sig);
     return;
   }

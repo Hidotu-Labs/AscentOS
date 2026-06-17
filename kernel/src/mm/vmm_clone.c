@@ -1,15 +1,15 @@
-#include "vmm.h"
 #include "../lock/spinlock.h"
 #include "pmm.h"
 #include "tlb_shootdown.h"
 #include "vma.h"
+#include "vmm.h"
 #include <stddef.h>
 #include <stdint.h>
 
 #define PHYS_TO_VIRT(p) ((void *)((uint64_t)(p) + pmm_get_hhdm_offset()))
 
-static uint64_t *clone_table(uint64_t *src_table_phys, int level,
-                              size_t start, size_t end) {
+static uint64_t *clone_table(uint64_t *src_table_phys, int level, size_t start,
+                             size_t end) {
   void *new_table_phys = pmm_alloc();
   if (!new_table_phys)
     return NULL;
@@ -41,8 +41,7 @@ static uint64_t *clone_table(uint64_t *src_table_phys, int level,
           ((uint64_t)new_page_phys & PAGE_MASK) | (src_virt[i] & ~PAGE_MASK);
     } else {
       uint64_t *child_src_phys = (uint64_t *)(src_virt[i] & PAGE_MASK);
-      uint64_t *child_new_phys =
-          clone_table(child_src_phys, level - 1, 0, 512);
+      uint64_t *child_new_phys = clone_table(child_src_phys, level - 1, 0, 512);
       if (!child_new_phys)
         return NULL;
 
@@ -63,8 +62,8 @@ static bool is_shared_vma(struct vma_list *vmas, uint64_t vaddr) {
 }
 
 static uint64_t *clone_table_vma(uint64_t *src_table_phys, int level,
-                                  size_t start, size_t end,
-                                  struct vma_list *vmas, uint64_t base_addr) {
+                                 size_t start, size_t end,
+                                 struct vma_list *vmas, uint64_t base_addr) {
   void *new_table_phys = pmm_alloc();
   if (!new_table_phys)
     return NULL;
@@ -104,7 +103,7 @@ static uint64_t *clone_table_vma(uint64_t *src_table_phys, int level,
         new_virt[i] = src_virt[i];
       }
     } else {
-      int      shift      = 12 + 9 * (level - 1);
+      int shift = 12 + 9 * (level - 1);
       uint64_t child_base = base_addr | ((uint64_t)i << shift);
 
       uint64_t *child_src_phys = (uint64_t *)(src_virt[i] & PAGE_MASK);
@@ -120,7 +119,6 @@ static uint64_t *clone_table_vma(uint64_t *src_table_phys, int level,
 
   return (uint64_t *)new_table_phys;
 }
-
 
 uint64_t vmm_clone_user_mappings(uint64_t *src_pml4_phys) {
   spinlock_t *lock = vmm_get_lock();
@@ -152,8 +150,8 @@ uint64_t vmm_clone_user_mappings(uint64_t *src_pml4_phys) {
       return 0;
     }
 
-    new_pml4_virt[i] =
-        ((uint64_t)child_new_phys & PAGE_MASK) | (src_pml4_virt[i] & ~PAGE_MASK);
+    new_pml4_virt[i] = ((uint64_t)child_new_phys & PAGE_MASK) |
+                       (src_pml4_virt[i] & ~PAGE_MASK);
   }
 
   // Shallow-copy kernel half (256-511): shared between parent and child.
@@ -201,8 +199,8 @@ uint64_t vmm_clone_user_mappings_vma(uint64_t *src_pml4_phys,
       return 0;
     }
 
-    new_pml4_virt[i] =
-        ((uint64_t)child_new_phys & PAGE_MASK) | (src_pml4_virt[i] & ~PAGE_MASK);
+    new_pml4_virt[i] = ((uint64_t)child_new_phys & PAGE_MASK) |
+                       (src_pml4_virt[i] & ~PAGE_MASK);
   }
 
   // Shallow-copy kernel half.

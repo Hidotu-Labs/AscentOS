@@ -52,7 +52,15 @@ static uint64_t sys_arch_prctl(uint64_t code, uint64_t addr, uint64_t a2,
     }
     klog_puts("[ARCH_PRCTL] SET_FS = ");
     klog_uint64(addr);
-    klog_puts("\n");
+    klog_puts(" (MSR readback=");
+    klog_hex64(rdmsr(IA32_FS_BASE));
+    klog_puts(", thread->fs_base=");
+    {
+      extern struct thread *sched_get_current(void);
+      struct thread *cur2 = sched_get_current();
+      klog_hex64(cur2 ? cur2->fs_base : 0);
+    }
+    klog_puts(")\n");
     return 0;
 
   case ARCH_GET_FS:
@@ -74,6 +82,12 @@ static uint64_t sys_arch_prctl(uint64_t code, uint64_t addr, uint64_t a2,
     // For user GS, we write to KERNEL_GS_BASE (swapgs swaps it in/out).
     // After sysret + swapgs, this becomes the active GS for userspace.
     wrmsr(IA32_KERNEL_GS_BASE, addr);
+    {
+      extern struct thread *sched_get_current(void);
+      struct thread *cur = sched_get_current();
+      if (cur)
+        cur->gs_base = addr;
+    }
     klog_puts("[ARCH_PRCTL] SET_GS = ");
     klog_uint64(addr);
     klog_puts("\n");

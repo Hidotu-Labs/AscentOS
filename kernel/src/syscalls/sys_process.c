@@ -435,6 +435,7 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
   // Reset memory management state for the new program
   mm_reset_mmap_state(current);
   current->fs_base = 0;
+  current->gs_base = 0;
 
   // Reset signal handlers to SIG_DFL after exec (POSIX requirement).
   // Stale handler addresses pointing into the old address space would
@@ -509,6 +510,11 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
   // Reset TLS Bases for this process
   wrmsr(IA32_KERNEL_GS_BASE, 0);
   wrmsr(IA32_FS_BASE, 0);
+  struct thread *ct = sched_get_current();
+  if (ct) {
+    ct->fs_base = 0;
+    ct->gs_base = 0;
+  }
 
   // Set the return registers for the syscall exit handler to jump to!
   regs->rip = actual_entry;
@@ -530,7 +536,13 @@ static void fork_child_entry(void) {
 
   klog_puts("[FORK] Child thread ");
   klog_uint64(self->tid);
-  klog_puts(" entering userspace\n");
+  klog_puts(" entering userspace regs: rip=");
+  klog_hex64(child_regs->rip);
+  klog_puts(" rsp=");
+  klog_hex64(child_regs->rsp);
+  klog_puts(" rflags=");
+  klog_hex64(child_regs->rflags);
+  klog_puts("\n");
 
   // Switch to the child's cloned address space
   __asm__ volatile("mov %0, %%cr3" ::"r"(self->cr3) : "memory");
@@ -540,7 +552,7 @@ static void fork_child_entry(void) {
   tss_set_rsp0(cpu_get_current()->stack_top);
 
   // Restore user TLS bases — child inherits parent's FS_BASE (musl needs TLS)
-  wrmsr(IA32_KERNEL_GS_BASE, 0);
+  wrmsr(IA32_KERNEL_GS_BASE, self->gs_base);
   wrmsr(IA32_FS_BASE, self->fs_base);
 
   // Jump to userspace — this never returns
@@ -643,6 +655,7 @@ uint64_t sys_fork(struct syscall_regs *regs) {
     memcpy(child->signal_handlers, parent->signal_handlers,
            sizeof(child->signal_handlers));
     child->fs_base = parent->fs_base;
+    child->gs_base = parent->gs_base;
     child->umask = parent->umask;
     child->uid = parent->uid;
     child->gid = parent->gid;
@@ -793,6 +806,7 @@ static uint64_t sys_clone(struct syscall_regs *regs) {
   } else {
     child->fs_base = parent->fs_base;
   }
+  child->gs_base = parent->gs_base;
 
   // Handle TID placement
   if (flags & CLONE_PARENT_SETTID) {
