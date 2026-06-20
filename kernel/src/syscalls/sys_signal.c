@@ -131,7 +131,8 @@ static uint64_t sys_rt_sigreturn(struct syscall_regs *sregs) {
 }
 
 // Signal Delivery
-extern void process_dump_core(struct thread *t, struct registers *regs, int sig);
+extern void process_dump_core(struct thread *t, struct registers *regs,
+                              int sig);
 
 void signal_deliver(struct registers *regs) {
   struct thread *current = sched_get_current();

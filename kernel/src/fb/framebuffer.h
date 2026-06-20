@@ -88,6 +88,7 @@ void *fb_get_base(void);
 uint32_t fb_get_pitch(void);
 uint16_t fb_get_bpp(void);
 int fb_get_kd_mode(void);
+void fb_set_kd_mode(int mode);
 
 void fb_set_backbuffer_mode(bool enabled);
 bool fb_is_backbuffer_enabled(void);

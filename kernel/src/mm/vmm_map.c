@@ -2,6 +2,7 @@
 #include "../console/klog.h"
 #include "../lock/spinlock.h"
 #include "pmm.h"
+#include "tlb_shootdown.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -92,7 +93,7 @@ static bool vmm_map_page_nolock(uint64_t *pml4, uint64_t virtual_addr,
   pt_virt[pt_index] = (physical_addr & PAGE_MASK) | flags | PAGE_FLAG_PRESENT;
 
   if (flush_tlb)
-    vmm_flush_tlb(virtual_addr);
+    tlb_shootdown_page(virtual_addr);
 
   return true;
 }
@@ -135,7 +136,7 @@ bool vmm_map_huge_page(uint64_t *pml4, uint64_t virtual_addr,
 
   pd_virt[pd_index] =
       (physical_addr & PAGE_MASK) | flags | PAGE_FLAG_PRESENT | PAGE_FLAG_PS;
-  vmm_flush_tlb(virtual_addr);
+  tlb_shootdown_page(virtual_addr);
   success = true;
 
 unlock:
@@ -218,7 +219,7 @@ void vmm_free_empty_tables(uint64_t *pml4, uint64_t virtual_addr) {
 
   if (pt_empty) {
     pd_virt[pd_index] = 0;
-    vmm_flush_tlb(virtual_addr);
+    tlb_shootdown_page(virtual_addr);
     pmm_free_page((void *)pt_phys);
 
     bool pd_empty = true;
@@ -231,7 +232,7 @@ void vmm_free_empty_tables(uint64_t *pml4, uint64_t virtual_addr) {
 
     if (pd_empty) {
       pdpt_virt[pdpt_index] = 0;
-      vmm_flush_tlb(virtual_addr);
+      tlb_shootdown_page(virtual_addr);
       pmm_free_page((void *)pd_phys);
 
       bool pdpt_empty = true;
@@ -244,7 +245,7 @@ void vmm_free_empty_tables(uint64_t *pml4, uint64_t virtual_addr) {
 
       if (pdpt_empty) {
         pml4_virt[pml4_index] = 0;
-        vmm_flush_tlb(virtual_addr);
+        tlb_shootdown_page(virtual_addr);
         pmm_free_page((void *)pdpt_phys);
       }
     }
@@ -281,7 +282,7 @@ void vmm_unmap_page(uint64_t *pml4, uint64_t virtual_addr) {
 
   uint64_t *pt_virt = (uint64_t *)PHYS_TO_VIRT(pd_entry & PAGE_MASK);
   pt_virt[pt_index] = 0;
-  vmm_flush_tlb(virtual_addr);
+  tlb_shootdown_page(virtual_addr);
 
   if (pml4_index < 256 ||
       (pml4_index >= 256 && virtual_addr < KERNEL_HEAP_BASE)) {

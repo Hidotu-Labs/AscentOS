@@ -1295,6 +1295,7 @@ void console_refresh_cursor(void) {
 }
 
 void console_clear(void) {
+  fb_set_kd_mode(KD_TEXT);
   spinlock_acquire(&console_lock);
   console_wipe_history_unlocked();
   spinlock_release(&console_lock);

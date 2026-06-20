@@ -500,13 +500,13 @@ static uint32_t console_vfs_read(struct vfs_node *node, uint32_t offset,
 #define CONSOLE_CHECK_ISIG(c)                                                  \
   do {                                                                         \
     if (console_termios.c_lflag & ISIG) {                                      \
-      if ((uint8_t)(c) == console_termios.c_cc[0] && console_pgid != 0) {     \
+      if ((uint8_t)(c) == console_termios.c_cc[0] && console_pgid != 0) {      \
         signal_send_pgid(console_pgid, 2); /* SIGINT */                        \
-        return (uint32_t)-4; /* EINTR */                                       \
+        return (uint32_t)-4;               /* EINTR */                         \
       }                                                                        \
-      if ((uint8_t)(c) == console_termios.c_cc[1] && console_pgid != 0) {     \
+      if ((uint8_t)(c) == console_termios.c_cc[1] && console_pgid != 0) {      \
         signal_send_pgid(console_pgid, 3); /* SIGQUIT */                       \
-        return (uint32_t)-4; /* EINTR */                                       \
+        return (uint32_t)-4;               /* EINTR */                         \
       }                                                                        \
     }                                                                          \
   } while (0)
@@ -944,30 +944,7 @@ static int tty0_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     return 0;
   }
   case KDSETMODE: {
-    current_kd_mode = (int)arg;
-    if (current_kd_mode == KD_GRAPHICS) {
-      // 1. Flush all caches to RAM
-      __asm__ volatile("wbinvd" ::: "memory");
-
-      // 2. Full TLB flush via CR3 reload
-      {
-        uint64_t cr3;
-        __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
-        __asm__ volatile("mov %0, %%cr3" ::"r"(cr3) : "memory");
-      }
-
-      // 3. Clear the physical framebuffer via volatile access
-      if (fb && fb->address) {
-        volatile uint32_t *target = (volatile uint32_t *)fb->address;
-        uint32_t size = (fb->height * fb->pitch) / 4;
-        for (uint32_t i = 0; i < size; i++) {
-          target[i] = 0x00000000;
-        }
-      }
-
-      // 3. Final flush to ensure zeroing reached RAM
-      __asm__ volatile("wbinvd" ::: "memory");
-    }
+    fb_set_kd_mode((int)arg);
     return 0;
   }
   case KDGKBMODE: {
@@ -1013,21 +990,33 @@ static int tty0_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     return 0;
   }
   case TCGETS: {
-    struct termios *term = (struct termios *)arg;
-    if (!term)
+    if (!arg)
       return -14;
     extern struct termios console_termios;
-    *term = console_termios;
+    struct kernel_termios kt;
+    kt.c_iflag = console_termios.c_iflag;
+    kt.c_oflag = console_termios.c_oflag;
+    kt.c_cflag = console_termios.c_cflag;
+    kt.c_lflag = console_termios.c_lflag;
+    kt.c_line = console_termios.c_line;
+    memcpy(kt.c_cc, console_termios.c_cc, KERNEL_NCCS);
+    memcpy((void *)arg, &kt, sizeof(struct kernel_termios));
     return 0;
   }
   case TCSETS:
   case TCSETSW:
   case TCSETSF: {
-    const struct termios *term = (const struct termios *)arg;
-    if (!term)
+    if (!arg)
       return -14;
     extern struct termios console_termios;
-    console_termios = *term;
+    struct kernel_termios kt;
+    memcpy(&kt, (const void *)arg, sizeof(struct kernel_termios));
+    console_termios.c_iflag = kt.c_iflag;
+    console_termios.c_oflag = kt.c_oflag;
+    console_termios.c_cflag = kt.c_cflag;
+    console_termios.c_lflag = kt.c_lflag;
+    console_termios.c_line = kt.c_line;
+    memcpy(console_termios.c_cc, kt.c_cc, KERNEL_NCCS);
     return 0;
   }
   case TIOCGETD: {
@@ -1225,6 +1214,33 @@ void fb_draw_glyph_scanline(uint32_t x, uint32_t y, uint8_t bits, uint32_t fg,
   } else {
     // Mark dirty only when backbuffering is active
     fb_mark_dirty(x, y, 8, 1);
+  }
+}
+
+void fb_set_kd_mode(int mode) {
+  current_kd_mode = mode;
+  if (current_kd_mode == KD_GRAPHICS) {
+    // 1. Flush all caches to RAM
+    __asm__ volatile("wbinvd" ::: "memory");
+
+    // 2. Full TLB flush via CR3 reload
+    {
+      uint64_t cr3;
+      __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
+      __asm__ volatile("mov %0, %%cr3" ::"r"(cr3) : "memory");
+    }
+
+    // 3. Clear the physical framebuffer via volatile access
+    if (fb && fb->address) {
+      volatile uint32_t *target = (volatile uint32_t *)fb->address;
+      uint32_t size = (fb->height * fb->pitch) / 4;
+      for (uint32_t i = 0; i < size; i++) {
+        target[i] = 0x00000000;
+      }
+    }
+
+    // 3. Final flush to ensure zeroing reached RAM
+    __asm__ volatile("wbinvd" ::: "memory");
   }
 }
 

@@ -20,6 +20,21 @@ struct termios {
   speed_t __c_ospeed;
 };
 
+// Linux kernel ABI-compatible termios for TCGETS/TCSETS (ioctls 0x5401-0x5404).
+// The Linux kernel uses NCCS=19 and no speed fields → 36 bytes total.
+// glibc's __tcgetattr allocates exactly this size on the stack; writing more
+// bytes would corrupt the stack and cause a crash.
+#define KERNEL_NCCS 19
+
+struct kernel_termios {
+  tcflag_t c_iflag;
+  tcflag_t c_oflag;
+  tcflag_t c_cflag;
+  tcflag_t c_lflag;
+  cc_t c_line;
+  cc_t c_cc[KERNEL_NCCS];
+};
+
 // termios flags (x86_64 Linux/Musl compatible)
 #define ISIG 0000001
 #define ICANON 0000002

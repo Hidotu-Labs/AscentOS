@@ -831,11 +831,17 @@ int pty_slave_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
 
   switch (request) {
   case TCGETS: {
-    struct termios *term = (struct termios *)arg;
-    if (!term || !vmm_is_user_addr_range_valid(arg, sizeof(struct termios))) {
+    if (!arg || !vmm_is_user_addr_range_valid(arg, sizeof(struct kernel_termios))) {
       ret = -14;
     } else {
-      *term = pty->termios;
+      struct kernel_termios kt;
+      kt.c_iflag = pty->termios.c_iflag;
+      kt.c_oflag = pty->termios.c_oflag;
+      kt.c_cflag = pty->termios.c_cflag;
+      kt.c_lflag = pty->termios.c_lflag;
+      kt.c_line  = pty->termios.c_line;
+      memcpy(kt.c_cc, pty->termios.c_cc, KERNEL_NCCS);
+      memcpy((void *)arg, &kt, sizeof(struct kernel_termios));
       ret = 0;
     }
     break;
@@ -844,19 +850,25 @@ int pty_slave_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
   case TCSETS:
   case TCSETSW:
   case TCSETSF: {
-    const struct termios *term = (const struct termios *)arg;
-    if (!term || !vmm_is_user_addr_range_valid(arg, sizeof(struct termios))) {
+    if (!arg || !vmm_is_user_addr_range_valid(arg, sizeof(struct kernel_termios))) {
       ret = -14;
     } else {
+      struct kernel_termios kt;
+      memcpy(&kt, (const void *)arg, sizeof(struct kernel_termios));
       bool old_icanon = (pty->termios.c_lflag & ICANON);
       klog_puts("[PTY] slave_ioctl TCSETS: old ICANON=");
       klog_uint64(old_icanon ? 1 : 0);
       klog_puts(" new ICANON=");
-      klog_uint64(term->c_lflag & ICANON ? 1 : 0);
+      klog_uint64(kt.c_lflag & ICANON ? 1 : 0);
       klog_puts(" new ECHO=");
-      klog_uint64(term->c_lflag & ECHO ? 1 : 0);
+      klog_uint64(kt.c_lflag & ECHO ? 1 : 0);
       klog_puts("\n");
-      pty->termios = *term;
+      pty->termios.c_iflag = kt.c_iflag;
+      pty->termios.c_oflag = kt.c_oflag;
+      pty->termios.c_cflag = kt.c_cflag;
+      pty->termios.c_lflag = kt.c_lflag;
+      pty->termios.c_line  = kt.c_line;
+      memcpy(pty->termios.c_cc, kt.c_cc, KERNEL_NCCS);
       if (!old_icanon && (pty->termios.c_lflag & ICANON)) {
         pty_rescan_newlines(pty);
       }

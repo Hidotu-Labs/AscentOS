@@ -1466,6 +1466,193 @@ static uint64_t sys_sched_getaffinity(uint64_t pid, uint64_t len,
   return sizeof(uint64_t);
 }
 
+static uint64_t sys_sched_setparam(uint64_t pid, uint64_t param_ptr,
+                                    uint64_t a2, uint64_t a3, uint64_t a4,
+                                    uint64_t a5) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+
+  struct thread *current = sched_get_current();
+  struct thread *target =
+      pid == 0 ? current : sched_get_thread_by_tid((uint32_t)pid);
+  if (!target)
+    return (uint64_t)-3; // ESRCH
+
+  if (!param_ptr || !vmm_is_user_addr_range_valid(param_ptr, sizeof(int)))
+    return (uint64_t)-14; // EFAULT
+
+  // Stub: accept any priority change silently
+  return 0;
+}
+
+static uint64_t sys_sched_getparam(uint64_t pid, uint64_t param_ptr,
+                                   uint64_t a2, uint64_t a3, uint64_t a4,
+                                   uint64_t a5) {
+  (void)pid;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+
+  if (!param_ptr || !vmm_is_user_addr_range_valid(param_ptr, sizeof(int))) {
+    return (uint64_t)-14; // EFAULT
+  }
+
+  // struct sched_param { int sched_priority; };
+  *(int *)param_ptr = 0;
+  return 0;
+}
+
+static uint64_t sys_sched_get_priority_max(uint64_t policy, uint64_t a1,
+                                           uint64_t a2, uint64_t a3,
+                                           uint64_t a4, uint64_t a5) {
+  (void)policy;
+  (void)a1;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  return 0;
+}
+
+static uint64_t sys_sched_get_priority_min(uint64_t policy, uint64_t a1,
+                                           uint64_t a2, uint64_t a3,
+                                           uint64_t a4, uint64_t a5) {
+  (void)policy;
+  (void)a1;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  return 0;
+}
+
+// sys_sched_getscheduler (syscall 145)
+// Returns the scheduling policy of the given process.
+// We always use SCHED_OTHER (0) since we don't support real-time schedulers.
+#define SCHED_OTHER 0
+
+static uint64_t sys_sched_getscheduler(uint64_t pid, uint64_t a1, uint64_t a2,
+                                       uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a1;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+
+  struct thread *current = sched_get_current();
+  struct thread *target =
+      pid == 0 ? current : sched_get_thread_by_tid((uint32_t)pid);
+  if (!target)
+    return (uint64_t)-3; // ESRCH
+
+  return SCHED_OTHER;
+}
+
+// sys_sched_setscheduler (syscall 144)
+// Sets the scheduling policy and parameters for a process.
+// Stub: we accept SCHED_OTHER and reject real-time policies.
+static uint64_t sys_sched_setscheduler(uint64_t pid, uint64_t policy,
+                                       uint64_t param_ptr, uint64_t a3,
+                                       uint64_t a4, uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+
+  struct thread *current = sched_get_current();
+  struct thread *target =
+      pid == 0 ? current : sched_get_thread_by_tid((uint32_t)pid);
+  if (!target)
+    return (uint64_t)-3; // ESRCH
+
+  if (!param_ptr || !vmm_is_user_addr_range_valid(param_ptr, sizeof(int)))
+    return (uint64_t)-14; // EFAULT
+
+  // Only SCHED_OTHER (0) is supported
+  if (policy != SCHED_OTHER)
+    return (uint64_t)-22; // EINVAL
+
+  return 0;
+}
+
+// sys_setpriority (syscall 141)
+// Sets the scheduling priority for a process, process group, or user.
+// Stub: accepts silently since we don't track nice values.
+#define PRIO_PROCESS 0
+#define PRIO_PGRP 1
+#define PRIO_USER 2
+
+static uint64_t sys_setpriority(uint64_t which, uint64_t who, uint64_t prio,
+                                uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+
+  if (which > PRIO_USER)
+    return (uint64_t)-22; // EINVAL
+
+  // Validate the target exists
+  if (which == PRIO_PROCESS && who != 0) {
+    struct thread *target = sched_get_thread_by_tid((uint32_t)who);
+    if (!target)
+      return (uint64_t)-3; // ESRCH
+  }
+
+  // Stub: accept any priority change silently
+  return 0;
+}
+
+// sys_getpriority (syscall 140)
+// Returns 20 - nice_value (Linux convention: returns value in range 1..40).
+// Since we always have nice=0, we return 20.
+static uint64_t sys_getpriority(uint64_t which, uint64_t who, uint64_t a2,
+                                uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+
+  if (which > PRIO_USER)
+    return (uint64_t)-22; // EINVAL
+
+  // Validate the target exists
+  if (which == PRIO_PROCESS && who != 0) {
+    struct thread *target = sched_get_thread_by_tid((uint32_t)who);
+    if (!target)
+      return (uint64_t)-3; // ESRCH
+  }
+
+  // Linux returns 20 - nice. Nice defaults to 0, so return 20.
+  return 20;
+}
+
+static uint64_t sys_set_robust_list(uint64_t head, uint64_t len, uint64_t a2,
+                                    uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)head;
+  (void)len;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  // Stub for glibc compatibility
+  return 0;
+}
+
+static uint64_t sys_rseq(uint64_t rseq, uint64_t rseq_len, uint64_t flags,
+                         uint64_t sig, uint64_t a4, uint64_t a5) {
+  (void)rseq;
+  (void)rseq_len;
+  (void)flags;
+  (void)sig;
+  (void)a4;
+  (void)a5;
+  // Stub for glibc compatibility. Return -ENOSYS to indicate we don't support it.
+  // Glibc will fall back to other mechanisms.
+  return (uint64_t)-38; // -ENOSYS
+}
+
 void syscall_register_process(void) {
   syscall_register(SYS_EXIT, sys_exit);
   syscall_register(SYS_EXIT_GROUP, sys_exit_group);
@@ -1506,4 +1693,14 @@ void syscall_register_process(void) {
   syscall_register(SYS_SCHED_YIELD, sys_sched_yield);
   syscall_register(SYS_SCHED_GETAFFINITY, sys_sched_getaffinity);
   syscall_register(SYS_SCHED_SETAFFINITY, sys_sched_setaffinity);
+  syscall_register(SYS_SCHED_GETPARAM, sys_sched_getparam);
+  syscall_register(SYS_SCHED_SETPARAM, sys_sched_setparam);
+  syscall_register(SYS_SCHED_GET_PRIORITY_MAX, sys_sched_get_priority_max);
+  syscall_register(SYS_SCHED_GET_PRIORITY_MIN, sys_sched_get_priority_min);
+  syscall_register(SYS_SCHED_GETSCHEDULER, sys_sched_getscheduler);
+  syscall_register(SYS_SCHED_SETSCHEDULER, sys_sched_setscheduler);
+  syscall_register(SYS_SETPRIORITY, sys_setpriority);
+  syscall_register(SYS_GETPRIORITY, sys_getpriority);
+  syscall_register(SYS_SET_ROBUST_LIST, sys_set_robust_list);
+  syscall_register(SYS_RSEQ, sys_rseq);
 }

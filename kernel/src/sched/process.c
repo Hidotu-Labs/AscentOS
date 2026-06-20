@@ -1,6 +1,7 @@
 #include "../console/console.h"
 #include "../console/klog.h"
 #include "../cpu/gdt.h"
+#include "../cpu/isr.h"
 #include "../cpu/msr.h"
 #include "../fb/framebuffer.h"
 #include "../fs/vfs.h"
@@ -12,9 +13,6 @@
 #include "../syscalls/syscall.h"
 #include "elf.h"
 #include "sched.h"
-#include "../mm/pmm.h"
-#include "../mm/vmm.h"
-#include "../cpu/isr.h"
 
 static void process_copy_to_user(uint64_t *pml4, uint64_t dest_user_va,
                                  const void *src_kern_va, size_t size) {
@@ -305,8 +303,8 @@ bool elf_load(const char *path, uint64_t *pml4, elf_info_t *out_info) {
     klog_puts("[PROC] PT_INTERP found: ");
     klog_puts(interp_path);
     klog_puts("\n");
-    if (!do_elf_load(interp_path, pml4, ELF_INTERP_BASE, true, out_info,
-                     NULL, 0)) {
+    if (!do_elf_load(interp_path, pml4, ELF_INTERP_BASE, true, out_info, NULL,
+                     0)) {
       klog_puts("[PROC] Failed to load interpreter\n");
       return false;
     }
@@ -366,38 +364,50 @@ uint64_t process_build_initial_stack(uint64_t stack_top, const char *path,
   }
 
   int argc = 0;
-  if (argv)
-    while (argv[argc])
-      argc++;
+  while (argv && argv[argc])
+    argc++;
 
   int envc = 0;
-  if (envp)
-    while (envp[envc])
-      envc++;
+  while (envp && envp[envc])
+    envc++;
 
-  // Calculate total string size
-  size_t total_size = 0;
+  // 1. Calculate total string size (including AT_RANDOM and AT_PLATFORM)
+  size_t string_bytes = 0;
   for (int i = 0; i < argc; i++)
-    total_size += strlen(argv[i]) + 1;
+    string_bytes += strlen(argv[i]) + 1;
   for (int i = 0; i < envc; i++)
-    total_size += strlen(envp[i]) + 1;
+    string_bytes += strlen(envp[i]) + 1;
 
-  // Reserve 32 bytes for AT_RANDOM data (16 bytes) and AT_PLATFORM string
-  // ("x86_64", 7+1 bytes)
-  total_size += 32;
+  // Space for AT_RANDOM (16 bytes) and AT_PLATFORM ("x86_64\0", 8 bytes)
+  // Add extra padding to ensure alignment can be satisfied
+  string_bytes += 32 + 32;
 
-  // Align total_size up to 16 bytes to ensure the string area start is aligned
-  total_size = (total_size + 15) & ~15ULL;
+  // 2. Determine number of stack entries (argc, argv ptrs, envp ptrs, auxv
+  // pairs) Auxv entries (18 real pairs + 1 NULL pair)
+  size_t auxv_pairs = elf_info ? 18 : 1;
+  size_t stack_entry_count =
+      1 + (size_t)argc + 1 + (size_t)envc + 1 + auxv_pairs * 2;
+  size_t pointer_bytes = stack_entry_count * sizeof(uint64_t);
 
-  uint64_t string_area = stack_top - total_size;
-  string_area &= ~0xFULL;
+  // 3. Layout the areas from high to low address:
+  // [stack_top]
+  // Strings Area (aligned)
+  // Pointers/Auxv Area (aligned)
+  // [final_sp]
 
-  // Maintain 16-byte alignment for the stack pointer itself
+  uint64_t string_area_top = stack_top;
+  uint64_t string_area_bottom = string_area_top - string_bytes;
+  string_area_bottom &= ~0xFULL; // Align string area start
 
-  size_t argv_ptr_count = (argc > 0) ? (size_t)argc : 1;
-  size_t envp_ptr_count = (envc > 0) ? (size_t)envc : 1;
-  uint64_t *argv_ptrs = kmalloc(argv_ptr_count * sizeof(uint64_t));
-  uint64_t *envp_ptrs = kmalloc(envp_ptr_count * sizeof(uint64_t));
+  uint64_t pointer_area_top = string_area_bottom;
+  uint64_t pointer_area_bottom = pointer_area_top - pointer_bytes;
+  pointer_area_bottom &= ~0xFULL; // Align RSP
+
+  uint64_t final_sp = pointer_area_bottom;
+
+  // 4. Copy strings to the Strings Area and collect their addresses
+  uint64_t *argv_ptrs = kmalloc((argc > 0 ? argc : 1) * sizeof(uint64_t));
+  uint64_t *envp_ptrs = kmalloc((envc > 0 ? envc : 1) * sizeof(uint64_t));
   if (!argv_ptrs || !envp_ptrs) {
     if (argv_ptrs)
       kfree(argv_ptrs);
@@ -406,55 +416,47 @@ uint64_t process_build_initial_stack(uint64_t stack_top, const char *path,
     return 0;
   }
 
-  uint64_t current = string_area;
+  uint64_t current_string = string_area_bottom;
+  // Note: We copy in order from lowest to highest address within the area
   for (int i = 0; i < argc; i++) {
-    argv_ptrs[i] = current;
+    argv_ptrs[i] = current_string;
     size_t len = strlen(argv[i]) + 1;
-    process_copy_to_user(vmm_get_active_pml4(), current, argv[i], len);
-    current += len;
+    process_copy_to_user(vmm_get_active_pml4(), current_string, argv[i], len);
+    current_string += len;
   }
   for (int i = 0; i < envc; i++) {
-    envp_ptrs[i] = current;
+    envp_ptrs[i] = current_string;
     size_t len = strlen(envp[i]) + 1;
-    process_copy_to_user(vmm_get_active_pml4(), current, envp[i], len);
-    current += len;
+    process_copy_to_user(vmm_get_active_pml4(), current_string, envp[i], len);
+    current_string += len;
   }
 
-  // Write 16 bytes of pseudo-random data for AT_RANDOM
-  uint64_t at_random_addr = current;
+  // AT_RANDOM data (16 bytes)
+  current_string = (current_string + 15) & ~15ULL;
+  uint64_t at_random_addr = current_string;
   {
     uint8_t rnd[16];
     for (int i = 0; i < 16; i++)
       rnd[i] = (uint8_t)(i * 7 + 0xA5);
-    process_copy_to_user(vmm_get_active_pml4(), current, rnd, 16);
-    current += 16;
+    process_copy_to_user(vmm_get_active_pml4(), current_string, rnd, 16);
+    current_string += 16;
   }
 
-  // Build stack below copied strings to avoid overlap corruption.
-  uint64_t stack_ptr = string_area;
+  // AT_PLATFORM string ("x86_64")
+  current_string = (current_string + 15) & ~15ULL;
+  uint64_t at_platform_addr = current_string;
+  process_copy_to_user(vmm_get_active_pml4(), at_platform_addr, "x86_64", 7);
+  current_string += 8;
 
-  // Layout: argc, argv[argc], NULL, envp[envc], NULL, auxv pairs..., AT_NULL, 0
-  // Auxv entries (16 pairs):
-  // 1-10: basic ones
-  // 11. AT_RANDOM
-  // 12. AT_BASE (0)
-  // 13. AT_FLAGS (0)
-  // 14. AT_HWCAP (0)
-  // 15. AT_CLKTCK (100)
-  // 16. AT_EXECFN (argv[0])
-  // 17. AT_NULL
-  // 17 real pairs + 1 NULL pair
-  size_t auxv_pairs = elf_info ? 18 : 1;
-  size_t stack_entry_count =
-      1 + (size_t)argc + 1 + (size_t)envc + 1 + auxv_pairs * 2;
+  // 5. Build the Pointers/Auxv Area
   uint64_t *stack_entries = kmalloc(stack_entry_count * sizeof(uint64_t));
   if (!stack_entries) {
     kfree(argv_ptrs);
     kfree(envp_ptrs);
     return 0;
   }
-  int idx = 0;
 
+  int idx = 0;
   stack_entries[idx++] = (uint64_t)argc;
   for (int i = 0; i < argc; i++)
     stack_entries[idx++] = argv_ptrs[i];
@@ -463,12 +465,7 @@ uint64_t process_build_initial_stack(uint64_t stack_top, const char *path,
     stack_entries[idx++] = envp_ptrs[i];
   stack_entries[idx++] = 0; // end envp
 
-  // Auxiliary vector
   if (elf_info) {
-    // Copy AT_PLATFORM string ("x86_64")
-    process_copy_to_user(vmm_get_active_pml4(), at_random_addr + 16, "x86_64",
-                         7);
-
     stack_entries[idx++] = AT_PAGESZ;
     stack_entries[idx++] = PAGE_SIZE;
     stack_entries[idx++] = AT_PHDR;
@@ -492,7 +489,7 @@ uint64_t process_build_initial_stack(uint64_t stack_top, const char *path,
     stack_entries[idx++] = AT_RANDOM;
     stack_entries[idx++] = at_random_addr;
     stack_entries[idx++] = AT_PLATFORM;
-    stack_entries[idx++] = at_random_addr + 16; // Use buffer after random data
+    stack_entries[idx++] = at_platform_addr;
     stack_entries[idx++] = AT_BASE;
     stack_entries[idx++] = elf_info->interp_base;
     stack_entries[idx++] = AT_FLAGS;
@@ -507,27 +504,18 @@ uint64_t process_build_initial_stack(uint64_t stack_top, const char *path,
   stack_entries[idx++] = AT_NULL;
   stack_entries[idx++] = 0;
 
-  // Calculate where the final stack pointer will be
-  size_t stack_bytes = idx * sizeof(uint64_t);
-  uint64_t final_sp = stack_ptr - stack_bytes;
-  final_sp &=
-      ~0xFULL; // Maintain 16-byte alignment for the stack pointer itself
+  // 6. Copy Pointers/Auxv to user space at final_sp
+  process_copy_to_user(vmm_get_active_pml4(), final_sp, stack_entries,
+                       idx * sizeof(uint64_t));
 
-  klog_puts("[PROC] Final stack layout:\n");
+  klog_puts("[PROC] Stack built:\n");
   klog_puts("  argc=");
   klog_uint64(argc);
-  klog_puts("  argv[0]=");
-  klog_uint64(argv_ptrs[0]);
   klog_puts("  random_addr=");
   klog_uint64(at_random_addr);
   klog_puts("  final_sp=");
   klog_uint64(final_sp);
-  klog_puts("  stack_bytes=");
-  klog_uint64(stack_bytes);
   klog_puts("\n");
-
-  process_copy_to_user(vmm_get_active_pml4(), final_sp, stack_entries,
-                       stack_bytes);
 
   kfree(argv_ptrs);
   kfree(envp_ptrs);
@@ -627,6 +615,11 @@ static void process_fixup_libc_auxv(const char *path, uint64_t *pml4,
     // Check for "__libc" (6 chars + NUL)
     if (name[0] == '_' && name[1] == '_' && name[2] == 'l' && name[3] == 'i' &&
         name[4] == 'b' && name[5] == 'c' && name[6] == '\0') {
+
+      klog_puts("[PROC] Found '__libc' symbol at value: ");
+      klog_uint64(st_value);
+      klog_puts("\n");
+
       // Found __libc at st_value. Compute auxv address from the stack.
       // Stack layout at user_sp: argc, argv[0..argc-1], NULL, envp[], NULL,
       // auxv[] Read through HHDM.
@@ -646,6 +639,13 @@ static void process_fixup_libc_auxv(const char *path, uint64_t *pml4,
 
       // Write auxv pointer into __libc + 8
       uint64_t libc_auxv_va = load_base + st_value + 8;
+
+      klog_puts("[PROC] Fixed __libc.auxv at ");
+      klog_uint64(libc_auxv_va);
+      klog_puts(" -> ");
+      klog_uint64(auxv_user_addr);
+      klog_puts("\n");
+
       uint64_t libc_phys = vmm_virt_to_phys(pml4, libc_auxv_va & ~0xFFFULL);
       if (!libc_phys)
         return;
@@ -653,11 +653,6 @@ static void process_fixup_libc_auxv(const char *path, uint64_t *pml4,
           (uint64_t *)(libc_phys + hhdm + (libc_auxv_va & 0xFFF));
       *libc_auxv = auxv_user_addr;
 
-      klog_puts("[PROC] Fixed __libc.auxv at ");
-      klog_uint64(libc_auxv_va);
-      klog_puts(" → ");
-      klog_uint64(auxv_user_addr);
-      klog_puts("\n");
       return;
     }
   }
@@ -804,7 +799,8 @@ void process_dump_core(struct thread *t, struct registers *regs, int sig) {
   // Simple itoa for tid
   uint32_t val = t->tid;
   int i = 0;
-  if (val == 0) tid_str[i++] = '0';
+  if (val == 0)
+    tid_str[i++] = '0';
   else {
     while (val > 0) {
       tid_str[i++] = (val % 10) + '0';
@@ -854,7 +850,7 @@ void process_dump_core(struct thread *t, struct registers *regs, int sig) {
   vfs_write(file, sizeof(header), sizeof(struct registers), (uint8_t *)regs);
 
   // 3. Write Memory Regions
-  // We use a simplified format where we write page data at its virtual address 
+  // We use a simplified format where we write page data at its virtual address
   // as the file offset. This makes it sparse but very easy to read.
   dump_vma_recursive(t->mm->vmas.root, file, t->cr3);
 

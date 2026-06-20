@@ -1,11 +1,11 @@
 #include "isr.h"
-#include "fault.h"
 #include "../console/console.h"
 #include "../console/klog.h"
 #include "../mm/pmm.h"
 #include "../mm/vmm.h"
 #include "../sched/sched.h"
 #include "apic/lapic.h"
+#include "fault.h"
 #include "msr.h"
 #include "pic.h"
 
@@ -451,10 +451,10 @@ static void isr_panic(struct registers *regs, const char *msg) {
   print_context_summary(regs);
 
   // RIP is always valid (CPU saves it for all exceptions).
-  // RSP/SS are only pushed by the CPU on a privilege-level change (ring-3 → ring-0).
-  // For ring-0 exceptions, regs->rsp and regs->ss are garbage from adjacent
-  // stack memory.  In that case, grab a live RSP snapshot via inline asm —
-  // it won't be the exact pre-fault RSP, but it's in the right ballpark.
+  // RSP/SS are only pushed by the CPU on a privilege-level change (ring-3 →
+  // ring-0). For ring-0 exceptions, regs->rsp and regs->ss are garbage from
+  // adjacent stack memory.  In that case, grab a live RSP snapshot via inline
+  // asm — it won't be the exact pre-fault RSP, but it's in the right ballpark.
   uint8_t cpl = regs->cs & 0x3;
   uint64_t display_rsp;
   if (cpl == 0) {
@@ -531,6 +531,55 @@ static void isr_report_user_fault(struct registers *regs, int sig,
     klog_hex64(regs->err_code);
     klog_puts("\n");
 
+    // Print all General Purpose Registers
+    klog_puts("RAX="); klog_hex64(regs->rax); klog_puts(" RBX="); klog_hex64(regs->rbx);
+    klog_puts(" RCX="); klog_hex64(regs->rcx); klog_puts(" RDX="); klog_hex64(regs->rdx);
+    klog_puts("\nRSI="); klog_hex64(regs->rsi); klog_puts(" RDI="); klog_hex64(regs->rdi);
+    klog_puts(" RBP="); klog_hex64(regs->rbp); klog_puts(" RSP="); klog_hex64(regs->rsp);
+    klog_puts("\nR8 ="); klog_hex64(regs->r8);  klog_puts(" R9 ="); klog_hex64(regs->r9);
+    klog_puts(" R10="); klog_hex64(regs->r10); klog_puts(" R11="); klog_hex64(regs->r11);
+    klog_puts("\nR12="); klog_hex64(regs->r12); klog_puts(" R13="); klog_hex64(regs->r13);
+    klog_puts(" R14="); klog_hex64(regs->r14); klog_puts(" R15="); klog_hex64(regs->r15);
+    klog_puts("FS_BASE="); klog_hex64(rdmsr(0xC0000100)); // IA32_FS_BASE
+    if (current->mm) {
+        klog_puts("  BRK="); klog_hex64(current->mm->brk_current);
+    }
+    klog_puts("\nCR3="); klog_hex64((uint64_t)vmm_get_active_pml4());
+    klog_puts("\n");
+
+    // Hex dump of code at RIP
+    klog_puts("RIP CODE: ");
+    uint64_t *pml4 = vmm_get_active_pml4();
+    if (vmm_virt_to_phys(pml4, regs->rip & ~0xFFFULL)) {
+      uint64_t hhdm_rip = vmm_virt_to_phys(pml4, regs->rip & ~0xFFFULL) +
+                          pmm_get_hhdm_offset() + (regs->rip & 0xFFF);
+      uint8_t *rip_bytes = (uint8_t *)hhdm_rip;
+      const char *_h = "0123456789ABCDEF";
+      for (int i = 0; i < 8; i++) {
+        klog_putchar(_h[(rip_bytes[i] >> 4) & 0xF]);
+        klog_putchar(_h[rip_bytes[i] & 0xF]);
+        klog_putchar(' ');
+      }
+    } else {
+      klog_puts("<unmapped>");
+    }
+    klog_puts("\n");
+
+    // Stack Snapshot
+    klog_puts("USER STACK (RSP): ");
+    for (int i = 0; i < 4; i++) {
+        uint64_t saddr = regs->rsp + (i * 8);
+        uint64_t phys = vmm_virt_to_phys(pml4, saddr);
+        if (phys != 0) {
+            uint64_t hhdm_saddr = phys + pmm_get_hhdm_offset();
+            klog_hex64(*(uint64_t*)hhdm_saddr);
+            klog_puts(" ");
+        } else {
+            klog_puts("<unmapped> ");
+        }
+    }
+    klog_puts("\n");
+
     // 2. Add to /dev/faults for userland monitors
     fault_log_add(regs, sig, addr);
 
@@ -556,78 +605,17 @@ static void page_fault_handler(struct registers *regs) {
 
 static void gpf_handler(struct registers *regs) {
   if ((regs->cs & 0x3) == 0x3) {
-    klog_puts("[GPF] User-mode GPF at RIP=");
-    klog_hex64(regs->rip);
-    klog_puts(" Err=");
-    klog_hex64(regs->err_code);
-    klog_puts(" tid=");
-    klog_uint64(sched_get_current()->tid);
-    klog_puts("\nRAX=");
-    klog_hex64(regs->rax);
-    klog_puts(" RBX=");
-    klog_hex64(regs->rbx);
-    klog_puts(" RCX=");
-    klog_hex64(regs->rcx);
-    klog_puts(" RDX=");
-    klog_hex64(regs->rdx);
-    klog_puts("\nRSI=");
-    klog_hex64(regs->rsi);
-    klog_puts(" RDI=");
-    klog_hex64(regs->rdi);
-    klog_puts(" RBP=");
-    klog_hex64(regs->rbp);
-    klog_puts(" RSP=");
-    klog_hex64(regs->rsp);
-    klog_puts("\nR8=");
-    klog_hex64(regs->r8);
-    klog_puts(" R9=");
-    klog_hex64(regs->r9);
-    klog_puts(" R10=");
-    klog_hex64(regs->r10);
-    klog_puts(" R11=");
-    klog_hex64(regs->r11);
-    klog_puts("\nR12=");
-    klog_hex64(regs->r12);
-    klog_puts(" R13=");
-    klog_hex64(regs->r13);
-    klog_puts(" R14=");
-    klog_hex64(regs->r14);
-    klog_puts(" R15=");
-    klog_hex64(regs->r15);
-    klog_puts("\nFS_BASE=");
-    klog_hex64(rdmsr(0xC0000100)); // IA32_FS_BASE
-    klog_puts(" Ker_GS=");
-    klog_hex64(rdmsr(0xC0000102)); // IA32_KERNEL_GS_BASE
-    klog_puts("\nRIP CODE: ");
-    {
-      const char *_h = "0123456789ABCDEF";
-      uint64_t *pml4 = vmm_get_active_pml4();
-      if (vmm_virt_to_phys(pml4, regs->rip & ~0xFFFULL)) {
-        uint8_t *code_ptr = (uint8_t *)vmm_virt_to_phys(pml4, regs->rip & ~0xFFFULL);
-        /* work through HHDM so we read actual physical bytes */
-        uint64_t hhdm_rip = vmm_virt_to_phys(pml4, regs->rip & ~0xFFFULL)
-                            + pmm_get_hhdm_offset() + (regs->rip & 0xFFF);
-        uint8_t *rip_bytes = (uint8_t *)hhdm_rip;
-        for (int i = 0; i < 8; i++) {
-          klog_putchar(_h[(rip_bytes[i] >> 4) & 0xF]);
-          klog_putchar(_h[rip_bytes[i] & 0xF]);
-          klog_putchar(' ');
-        }
-        (void)code_ptr;
-      } else {
-        klog_puts("<unmapped>");
-      }
-    }
-    klog_puts("\n");
-    print_user_stack_words(regs->rsp, 8);
-    klog_puts("SYS_STAR=");
-    klog_hex64(rdmsr(0xC0000081));
-    klog_puts(" LSTAR=");
-    klog_hex64(rdmsr(0xC0000082));
-    klog_puts("\n");
     isr_report_user_fault(regs, SIGSEGV, 0);
   } else {
     isr_panic(regs, "Unhandled General Protection Fault");
+  }
+}
+
+static void invalid_opcode_handler(struct registers *regs) {
+  if ((regs->cs & 0x3) == 0x3) {
+    isr_report_user_fault(regs, SIGILL, 0);
+  } else {
+    isr_panic(regs, "Unhandled Invalid Opcode");
   }
 }
 
@@ -640,6 +628,7 @@ static void stack_fault_handler(struct registers *regs) {
 }
 
 void isr_init_exceptions(void) {
+  register_interrupt_handler(6, invalid_opcode_handler);
   register_interrupt_handler(12, stack_fault_handler);
   register_interrupt_handler(13, gpf_handler);
   register_interrupt_handler(14, page_fault_handler);
