@@ -2,6 +2,7 @@
 #include "../console/console.h"
 #include "../console/klog.h"
 #include "../mm/pmm.h"
+#include "../mm/vma.h"
 #include "../mm/vmm.h"
 #include "../sched/sched.h"
 #include "apic/lapic.h"
@@ -579,6 +580,11 @@ static void isr_report_user_fault(struct registers *regs, int sig,
         }
     }
     klog_puts("\n");
+    
+    // Virtual Memory Area (VMA) Dump
+    klog_puts("PROCESS VMAs:\n");
+    vma_dump(&current->mm->vmas);
+    klog_puts("\n");
 
     // 2. Add to /dev/faults for userland monitors
     fault_log_add(regs, sig, addr);
@@ -596,8 +602,10 @@ static void page_fault_handler(struct registers *regs) {
 
   if (vmm_handle_page_fault(cr2, regs->err_code, regs) != 0) {
     if ((regs->cs & 0x3) == 0x3) {
+      klog_puts("[VMM] User-mode fault could not be handled by paging engine.\n");
       isr_report_user_fault(regs, SIGSEGV, cr2);
     } else {
+      klog_puts("[VMM] KERNEL-mode fault could not be handled by paging engine!\n");
       isr_panic(regs, "Unhandled Kernel Page Fault");
     }
   }

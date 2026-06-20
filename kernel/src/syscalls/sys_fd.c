@@ -371,6 +371,36 @@ static uint64_t sys_write(uint64_t fd, uint64_t buf, uint64_t count,
     return (uint64_t)fd_write((int)fd, (const void *)buf, (size_t)count);
 }
 
+static uint64_t sys_pread64(uint64_t fd, uint64_t buf, uint64_t count,
+                            uint64_t offset, uint64_t a4, uint64_t a5) {
+    (void)a4; (void)a5;
+    struct thread *t = sched_get_current();
+    if (!is_user_ptr(buf) || !vmm_is_user_addr_range_valid(buf, count))
+        return (uint64_t)-14;
+    if (!t || fd >= MAX_FDS || !t->fds[fd])
+        return (uint64_t)-9;
+
+    vfs_node_t *node = t->fds[fd];
+    int32_t bytes_read =
+        (int32_t)vfs_read(node, (uint32_t)offset, count, (uint8_t *)buf);
+    return (uint64_t)(int64_t)bytes_read;
+}
+
+static uint64_t sys_pwrite64(uint64_t fd, uint64_t buf, uint64_t count,
+                             uint64_t offset, uint64_t a4, uint64_t a5) {
+    (void)a4; (void)a5;
+    struct thread *t = sched_get_current();
+    if (!is_user_ptr(buf) || !vmm_is_user_addr_range_valid(buf, count))
+        return (uint64_t)-14;
+    if (!t || fd >= MAX_FDS || !t->fds[fd])
+        return (uint64_t)-9;
+
+    vfs_node_t *node = t->fds[fd];
+    int32_t bytes_written =
+        (int32_t)vfs_write(node, (uint32_t)offset, count, (uint8_t *)buf);
+    return (uint64_t)(int64_t)bytes_written;
+}
+
 static uint64_t sys_readv(uint64_t fd, uint64_t iov_u, uint64_t iovcnt,
                            uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a3; (void)a4; (void)a5;
@@ -673,6 +703,8 @@ static uint64_t sys_fadvise64(uint64_t fd, uint64_t offset, uint64_t len,
 void syscall_register_fd(void) {
     syscall_register(SYS_READ,      sys_read);
     syscall_register(SYS_WRITE,     sys_write);
+    syscall_register(SYS_PREAD64,   sys_pread64);
+    syscall_register(SYS_PWRITE64,  sys_pwrite64);
     syscall_register(SYS_READV,     sys_readv);
     syscall_register(SYS_WRITEV,    sys_writev);
     syscall_register(SYS_OPEN,      sys_open);

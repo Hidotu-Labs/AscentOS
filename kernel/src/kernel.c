@@ -158,8 +158,7 @@ static void init_thread_entry(void) {
   while (1) {
     // Launch booter in the background then exec into bash.
     // Using sh -c lets the shell fork() booter without blocking the session.
-    const char *sh_argv[] = {"/bin/sh", "-c",
-                             "/bin/booter /boot.wav & exec /bin/bash", NULL};
+    const char *sh_argv[] = {"/bin/sh", "-c", "exec /bin/bash", NULL};
 
     struct thread *current = sched_get_current();
     if (current) {

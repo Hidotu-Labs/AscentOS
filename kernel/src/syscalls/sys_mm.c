@@ -1,5 +1,4 @@
 // Memory Management Syscalls: mmap, munmap, brk
-#include "../console/klog.h"
 #include "../fs/vfs.h"
 #include "../lib/string.h"
 #include "../mm/pmm.h"
@@ -126,44 +125,33 @@ uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot, uint64_t flags,
   bool is_private = (flags & MAP_PRIVATE) != 0;
 
   if (!is_shared && !is_private) {
-    klog_puts("[MMAP] Error: must specify MAP_SHARED or MAP_PRIVATE\n");
-    return MAP_FAILED;
+    return E_INVAL;
   }
   if (is_shared && is_private) {
-    klog_puts(
-        "[MMAP] Error: MAP_SHARED and MAP_PRIVATE are mutually exclusive\n");
-    return MAP_FAILED;
+    return E_INVAL;
   }
   if (length == 0) {
-    klog_puts("[MMAP] Error: length == 0\n");
-    return MAP_FAILED;
+    return E_INVAL;
   }
 
   // Determine virtual address
   uint64_t aligned_len = PAGE_ALIGN_UP(length);
   struct thread *current_thread = sched_get_current();
+
+
   uint64_t *pml4 = vmm_get_active_pml4();
   uint64_t vaddr = 0;
 
   if (flags & MAP_FIXED) {
     if (addr == 0 || (addr & (PAGE_SIZE - 1))) {
-      klog_puts(
-          "[MMAP] Error: MAP_FIXED requires non-null page-aligned addr\n");
-      return MAP_FAILED;
+      return E_INVAL;
     }
     if (!is_user_pointer(addr) || !is_user_pointer(addr + aligned_len - 1)) {
-      klog_puts("[MMAP] Error: MAP_FIXED addr outside user range\n");
-      return MAP_FAILED;
+      return E_INVAL;
     }
     vaddr = addr;
 
     // Tear down any existing mappings in the target range
-    klog_puts("[MMAP] MAP_FIXED teardown [");
-    klog_uint64(vaddr);
-    klog_puts(", ");
-    klog_uint64(vaddr + aligned_len);
-    klog_puts(")\n");
-
     teardown_range(pml4, current_thread, vaddr, aligned_len,
                    "MAP_FIXED teardown");
     if (current_thread && current_thread->mm) {
@@ -175,10 +163,23 @@ uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot, uint64_t flags,
     // Non-fixed: allocate dynamically utilizing AVL Interval Gap Finding
     if (current_thread && current_thread->mm) {
       spinlock_acquire(&current_thread->mm->lock);
-      vaddr = vma_find_gap(&current_thread->mm->vmas, aligned_len,
-                           MMAP_REGION_BASE, MMAP_REGION_LIMIT);
+
+      // Try addr as a hint if provided and aligned
+      if (addr != 0 && (addr & (PAGE_SIZE - 1)) == 0 &&
+          is_user_pointer(addr) && is_user_pointer(addr + aligned_len - 1) &&
+          addr >= MMAP_REGION_BASE && addr + aligned_len <= MMAP_REGION_LIMIT) {
+        if (!vma_find_overlap(&current_thread->mm->vmas, addr, addr + aligned_len)) {
+          vaddr = addr;
+        }
+      }
+
+      if (vaddr == 0) {
+        vaddr = vma_find_gap(&current_thread->mm->vmas, aligned_len,
+                             MMAP_REGION_BASE, MMAP_REGION_LIMIT);
+      }
       spinlock_release(&current_thread->mm->lock);
     }
+
     if (vaddr == 0) {
       // Fallback to legacy allocator if AVL gap finding fails or thread context
       // missing
@@ -186,28 +187,25 @@ uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot, uint64_t flags,
     }
 
     if (vaddr == 0 || vaddr + aligned_len > MMAP_REGION_LIMIT) {
-      klog_puts("[MMAP] Error: mmap region exhausted\n");
-      return MAP_FAILED;
+      return E_NOMEM;
     }
   }
 
   // File-backed mapping
   if (!(flags & MAP_ANONYMOUS) && (int64_t)fd != -1) {
     if (!current_thread || fd >= MAX_FDS || !current_thread->fds[fd]) {
-      klog_puts("[MMAP] Error: invalid fd\n");
-      return MAP_FAILED;
+      return E_BADF;
     }
     vfs_node_t *node = current_thread->fds[fd];
     if (!node->mmap) {
-      klog_puts("[MMAP] Error: device does not support mmap\n");
-      return MAP_FAILED;
+      return E_INVAL;
     }
 
     // Pass MAP_FIXED to internal handler to ensure it respects our vaddr
     uint64_t result =
         node->mmap(node, vaddr, length, prot, flags | MAP_FIXED, offset);
     if (result == MAP_FAILED || result == (uint64_t)-1)
-      return MAP_FAILED;
+      return E_NOMEM;
 
     if (current_thread && current_thread->mm) {
       spinlock_acquire(&current_thread->mm->lock);
@@ -216,7 +214,7 @@ uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot, uint64_t flags,
                   flags, (int)fd, offset, node);
       spinlock_release(&current_thread->mm->lock);
       if (vma_idx < 0) {
-        klog_puts("[MMAP] Warning: failed to register VMA for file mapping\n");
+        return E_NOMEM;
       }
     }
 
@@ -225,8 +223,7 @@ uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot, uint64_t flags,
 
   // Reject non-anonymous mappings with no fd
   if (!(flags & MAP_ANONYMOUS)) {
-    klog_puts("[MMAP] Error: non-anonymous mapping requires a valid fd\n");
-    return MAP_FAILED;
+    return E_BADF;
   }
 
   // Anonymous mapping
@@ -238,9 +235,6 @@ uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot, uint64_t flags,
   // record the VMA so the address range is reserved, but leave the pages
   // non-present.  Any access will page-fault, which is the correct
   // PROT_NONE behaviour.
-  if (prot == PROT_NONE) {
-    klog_puts("[MMAP] PROT_NONE: reserving VMA only (no PTEs)\n");
-  }
 
   // Demand Paging: register VMA only, no physical allocation
   // For anonymous mappings we simply record the VMA.  Physical frames are
@@ -253,24 +247,17 @@ uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot, uint64_t flags,
     spinlock_acquire(&current_thread->mm->lock);
     int vma_idx = vma_add(&current_thread->mm->vmas, vaddr, vaddr + aligned_len,
                           prot, flags, -1, 0, NULL);
+    if (vma_idx < 0) {
+      spinlock_release(&current_thread->mm->lock);
+      return E_NOMEM;
+    }
 
     // Update the mmap bump pointer if we were using the old-style allocator
     // range
     current_thread->mm->mmap_next_addr =
         MAX(current_thread->mm->mmap_next_addr, vaddr + aligned_len);
     spinlock_release(&current_thread->mm->lock);
-
-    if (vma_idx < 0) {
-      klog_puts("[MMAP] Warning: failed to register anonymous VMA\n");
-    }
   }
-
-  klog_puts("[MMAP] ");
-  klog_uint64(aligned_len);
-  klog_puts(" bytes at ");
-  klog_uint64(vaddr);
-  klog_puts((flags & MAP_SHARED) ? " SHARED" : " PRIVATE");
-  klog_puts(" (demand-paged)\n");
 
   return vaddr;
 }
@@ -297,32 +284,18 @@ uint64_t sys_munmap(uint64_t addr, uint64_t length, uint64_t a2, uint64_t a3,
   if (!current)
     return E_INVAL;
 
-  // Require the base address to be tracked.  This prevents userspace from
-  // using munmap to tear down ELF segments or the stack by passing an
-  // arbitrary address.
-  spinlock_acquire(&current->mm->lock);
-  if (!vma_find(&current->mm->vmas, addr)) {
-    klog_puts("[MUNMAP] addr not in VMA list\n");
-    spinlock_release(&current->mm->lock);
-    return E_INVAL;
-  }
+
+  // Linux munmap is permissive: it unmaps whatever is in the range.
+  // It does not require a VMA to exist at 'addr'.
 
   uint64_t aligned_len = PAGE_ALIGN_UP(length);
   uint64_t *pml4 = vmm_get_active_pml4();
 
-  // Capture the MAP_SHARED flag from the first VMA for the log message.
-  // Capture mapping attributes for log
-  struct vma *first_vma = vma_find(&current->mm->vmas, addr);
+  spinlock_acquire(&current->mm->lock);
+  struct vma *first_vma = vma_find_overlap(&current->mm->vmas, addr, addr + aligned_len);
   bool is_shared = first_vma && (first_vma->flags & MAP_SHARED);
   spinlock_release(&current->mm->lock);
 
-  /*
-    klog_puts("[MUNMAP] [");
-    klog_hex64(addr);
-    klog_puts(", ");
-    klog_hex64(addr + aligned_len);
-    klog_puts(")\n");
-  */
 
   // Unmap and free
   // teardown_range handles the unmap-before-free ordering and guards.
@@ -334,12 +307,6 @@ uint64_t sys_munmap(uint64_t addr, uint64_t length, uint64_t a2, uint64_t a3,
   vma_remove(&current->mm->vmas, addr, addr + aligned_len);
   vma_merge_adjacent(&current->mm->vmas);
   spinlock_release(&current->mm->lock);
-
-  klog_puts("[MUNMAP] Done ");
-  klog_uint64(aligned_len);
-  klog_puts(" bytes at ");
-  klog_uint64(addr);
-  klog_puts(is_shared ? " SHARED\n" : " PRIVATE\n");
 
   return 0;
 }
@@ -358,6 +325,7 @@ static uint64_t sys_brk(uint64_t addr, uint64_t a1, uint64_t a2, uint64_t a3,
   struct thread *current = sched_get_current();
   if (!current)
     return 0;
+
 
   // Linux ABI: brk(0) returns current break.
   spinlock_acquire(&current->mm->lock);
@@ -381,8 +349,15 @@ static uint64_t sys_brk(uint64_t addr, uint64_t a1, uint64_t a2, uint64_t a3,
     uint64_t new_end = PAGE_ALIGN_UP(addr);
 
     if (new_end > old_end) {
-      vma_add(&current->mm->vmas, old_end, new_end, PROT_READ | PROT_WRITE,
-              MAP_PRIVATE | MAP_ANONYMOUS, -1, 0, NULL);
+      if (vma_find_overlap(&current->mm->vmas, old_end, new_end)) {
+        spinlock_release(&current->mm->lock);
+        return current->mm->brk_current; // Overlap with existing VMA
+      }
+      if (vma_add(&current->mm->vmas, old_end, new_end, PROT_READ | PROT_WRITE,
+                  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0, NULL) < 0) {
+        spinlock_release(&current->mm->lock);
+        return current->mm->brk_current;
+      }
     }
 
     current->mm->brk_current = addr;
@@ -467,20 +442,20 @@ static uint64_t sys_mremap(uint64_t old_addr, uint64_t old_size,
   (void)a5;
 
   if (old_addr == 0 || old_size == 0 || new_size == 0)
-    return MAP_FAILED;
+    return E_INVAL;
   if (old_addr & (PAGE_SIZE - 1))
-    return MAP_FAILED;
+    return E_INVAL;
   if (!is_user_pointer(old_addr))
-    return MAP_FAILED;
+    return E_INVAL;
 
   // We only support MREMAP_MAYMOVE for now (the common musl realloc path).
   // MREMAP_FIXED is rarely used and complex to implement.
   if (flags & MREMAP_FIXED)
-    return MAP_FAILED;
+    return E_INVAL;
 
   struct thread *current = sched_get_current();
   if (!current)
-    return MAP_FAILED;
+    return E_INVAL;
 
   uint64_t aligned_old = PAGE_ALIGN_UP(old_size);
   uint64_t aligned_new = PAGE_ALIGN_UP(new_size);
@@ -524,7 +499,7 @@ static uint64_t sys_mremap(uint64_t old_addr, uint64_t old_size,
   struct vma *orig_vma = vma_find(&current->mm->vmas, old_addr);
   if (!orig_vma) {
     spinlock_release(&current->mm->lock);
-    return MAP_FAILED;
+    return E_INVAL;
   }
   uint64_t prot = orig_vma->prot;
   uint64_t vma_flags = orig_vma->flags;
@@ -536,12 +511,12 @@ static uint64_t sys_mremap(uint64_t old_addr, uint64_t old_size,
       void *phys = pmm_alloc();
       if (!phys) {
         spinlock_release(&current->mm->lock);
-        return MAP_FAILED; // OOM — leave partial state; not ideal but safe.
+        return E_NOMEM; // OOM — leave partial state; not ideal but safe.
       }
       if (!vmm_map_page(pml4, va, (uint64_t)phys, page_flags)) {
         pmm_free(phys);
         spinlock_release(&current->mm->lock);
-        return MAP_FAILED;
+        return E_NOMEM;
       }
       void *kva = (void *)((uint64_t)phys + HHDM_OFFSET);
       memset(kva, 0, PAGE_SIZE);
@@ -558,14 +533,14 @@ static uint64_t sys_mremap(uint64_t old_addr, uint64_t old_size,
   // copy old data, and unmap the old region.
   if (!(flags & MREMAP_MAYMOVE)) {
     spinlock_release(&current->mm->lock);
-    return MAP_FAILED;
+    return E_NOMEM; // Actually Linux returns ENOMEM here if it can't grow in-place and MAYMOVE not set.
   }
 
   uint64_t new_addr = vma_find_gap(&current->mm->vmas, aligned_new,
                                    MMAP_REGION_BASE, MMAP_REGION_LIMIT);
   if (new_addr == 0 || new_addr + aligned_new > MMAP_REGION_LIMIT) {
     spinlock_release(&current->mm->lock);
-    return MAP_FAILED;
+    return E_NOMEM;
   }
 
   // Allocate and map new pages.
@@ -573,13 +548,13 @@ static uint64_t sys_mremap(uint64_t old_addr, uint64_t old_size,
     void *phys = pmm_alloc();
     if (!phys) {
       spinlock_release(&current->mm->lock);
-      return MAP_FAILED;
+      return E_NOMEM;
     }
     if (!vmm_map_page(pml4, new_addr + i * PAGE_SIZE, (uint64_t)phys,
                       page_flags)) {
       pmm_free(phys);
       spinlock_release(&current->mm->lock);
-      return MAP_FAILED;
+      return E_NOMEM;
     }
     void *kva = (void *)((uint64_t)phys + HHDM_OFFSET);
     memset(kva, 0, PAGE_SIZE);

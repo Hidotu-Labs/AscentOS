@@ -1,6 +1,6 @@
 #include "vma.h"
+#include "../console/klog.h"
 #include "../fs/vfs.h"
-#include "../lib/string.h"
 #include "heap.h"
 #include "slab_cache.h"
 
@@ -230,7 +230,7 @@ void vma_list_destroy(struct vma_list *list) {
 int vma_add(struct vma_list *list, uint64_t start, uint64_t end, uint64_t prot,
             uint64_t flags, int fd, uint64_t offset, void *file_node) {
   if (vma_find_overlap(list, start, end)) {
-    return -1; // Overlapping regions rejected securely
+    return -1; // Overlapping regions rejected
   }
 
   struct vma *new_node = vma_node_alloc();
@@ -252,6 +252,7 @@ int vma_add(struct vma_list *list, uint64_t start, uint64_t end, uint64_t prot,
 
   list->root = insert_node(list->root, new_node);
   list->count++;
+
   return 0; // Success
 }
 
@@ -565,11 +566,14 @@ void vma_merge_adjacent(struct vma_list *list) {
     // Only merge anonymous (fd == -1) adjacent regions with identical prot
     // and flags.  File-backed VMAs are never merged — their file_node and
     // offset fields are non-trivial and must be preserved exactly.
+    // Additionally, we avoid merging GROWSDOWN VMAs (stack) to preserve their 
+    // identity for the fault handler's growth logic.
     bool can_merge = (prev->end   == cur->start) &&
                      (prev->prot  == cur->prot)   &&
                      (prev->flags == cur->flags)   &&
                      (prev->fd    == -1)            &&
-                     (cur->fd     == -1);
+                     (cur->fd     == -1)           &&
+                     !((prev->flags | cur->flags) & MAP_GROWSDOWN);
 
     if (can_merge) {
       prev->end = cur->end; // extend the current run
@@ -603,4 +607,52 @@ void vma_merge_adjacent(struct vma_list *list) {
 
   if (merged_heap) kfree(merged);
   if (heap_used)   kfree(arr);
+}
+
+static void vma_dump_recursive(struct vma *node) {
+  if (!node)
+    return;
+  // Inorder traversal to print in address order
+  vma_dump_recursive(node->left);
+
+  klog_puts("  0x");
+  klog_hex64(node->start);
+  klog_puts(" - 0x");
+  klog_hex64(node->end);
+  klog_puts(" ");
+
+  // Permissions
+  klog_puts((node->prot & 0x1) ? "r" : "-");
+  klog_puts((node->prot & 0x2) ? "w" : "-");
+  klog_puts((node->prot & 0x4) ? "x" : "-");
+  klog_puts(" ");
+
+  // Flags
+  if (node->flags & MAP_SHARED)
+    klog_puts("shared ");
+  if (node->flags & MAP_PRIVATE)
+    klog_puts("private ");
+  if (node->flags & MAP_ANONYMOUS)
+    klog_puts("anon ");
+  if (node->flags & MAP_GROWSDOWN)
+    klog_puts("stack ");
+
+  if (node->fd != -1) {
+    klog_puts("fd=");
+    klog_uint64((uint64_t)node->fd);
+    klog_puts(" off=0x");
+    klog_hex64(node->offset);
+  }
+
+  klog_puts("\n");
+
+  vma_dump_recursive(node->right);
+}
+
+void vma_dump(struct vma_list *list) {
+  if (!list || !list->root) {
+    klog_puts("  (none)\n");
+    return;
+  }
+  vma_dump_recursive(list->root);
 }

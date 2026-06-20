@@ -33,6 +33,8 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
   bool user_mode = (error_code & 0x4) != 0;
   bool write_fault = (error_code & 0x2) != 0;
   bool present_bit = (error_code & 0x1) != 0;
+  bool exec_fault = (error_code & 0x10) != 0;
+
 
   struct thread *current = sched_get_current();
   if (!current)
@@ -230,7 +232,8 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
       klog_hex64(regs->rip);
       klog_puts(" tid=");
       klog_uint64(current->tid);
-      klog_puts("\n");
+      klog_puts("\n[VMM] Active VMAs:\n");
+      vma_dump(&current->mm->vmas);
       return -1;
     }
 
@@ -292,7 +295,8 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
     }
     klog_puts("[VMM] Segmentation fault at CR2=");
     klog_hex64(cr2);
-    klog_puts("\n");
+    klog_puts("\n[VMM] Active VMAs:\n");
+    vma_dump(&current->mm->vmas);
     return -1;
   }
 
@@ -469,7 +473,8 @@ bool vmm_is_user_addr_range_valid(uint64_t addr, size_t size) {
       klog_hex64(page);
       klog_puts(" in thread ");
       klog_uint64(current->tid);
-      klog_puts("\n");
+      klog_puts("\n[VMM] Active VMAs:\n");
+      vma_dump(&current->mm->vmas);
       spinlock_release(&current->mm->lock);
       return false;
     }

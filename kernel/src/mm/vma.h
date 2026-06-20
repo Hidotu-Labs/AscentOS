@@ -75,4 +75,7 @@ void vma_merge_adjacent(struct vma_list *list);
 // Clone VMA list for fork (shared mappings stay shared, private get copied)
 void vma_list_clone(struct vma_list *dst, struct vma_list *src);
 
+// Dump VMA list to klog for debugging
+void vma_dump(struct vma_list *list);
+
 #endif // VMA_H

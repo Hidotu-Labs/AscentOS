@@ -401,7 +401,8 @@ uint64_t process_build_initial_stack(uint64_t stack_top, const char *path,
 
   uint64_t pointer_area_top = string_area_bottom;
   uint64_t pointer_area_bottom = pointer_area_top - pointer_bytes;
-  pointer_area_bottom &= ~0xFULL; // Align RSP
+  pointer_area_bottom &=
+      ~0xFULL; // Ensure pointer area starts on 16-byte boundary
 
   uint64_t final_sp = pointer_area_bottom;
 
