@@ -150,8 +150,21 @@ disk.img: assets/boot.wav assets/test.wav assets/jane.mp3 assets/mc9.mp3 assets/
 		echo "mkdir lib64"; \
 		echo "rm lib64/libc.so.6"; \
 		echo "write toolchain/glibc-sysroot/lib/libc.so.6 lib64/libc.so.6"; \
+		echo "rm lib64/libm.so.6"; \
+		echo "write toolchain/glibc-sysroot/lib/libm.so.6 lib64/libm.so.6"; \
 		echo "rm lib64/ld-linux-x86-64.so.2"; \
 		echo "write toolchain/glibc-sysroot/lib/ld-linux-x86-64.so.2 lib64/ld-linux-x86-64.so.2"; \
+	} | debugfs -w ./part.img >/dev/null 2>&1 || true
+	@if [ -d toolchain/glibc-sysroot/usr/include ]; then \
+		echo "Installing GLIBC headers into disk image..."; \
+		./scripts/populate-ext2-dir.sh ./part.img toolchain/glibc-sysroot/usr/include usr/include; \
+	fi
+	@if [ -d toolchain/glibc-sysroot/usr/lib ]; then \
+		echo "Installing GLIBC libs into /usr/lib64..."; \
+		./scripts/populate-ext2-dir.sh ./part.img toolchain/glibc-sysroot/usr/lib usr/lib64; \
+	fi
+	@{ \
+		echo "cd /"; \
 		echo "rm bin/test_syscalls"; \
 		echo "write userland/test_syscalls.elf bin/test_syscalls"; \
 		echo "rm bin/test_kilo_syscalls"; \
@@ -368,10 +381,28 @@ disk.img: assets/boot.wav assets/test.wav assets/jane.mp3 assets/mc9.mp3 assets/
 		echo "Populating Alpine Linux rootfs into disk image..."; \
 		./scripts/populate-ext2-dir.sh ./part.img build/alpine/rootfs /; \
 	fi
+	@echo "Fixing up glibc/musl library coexistence..."
+	@{ \
+		echo "cd /lib"; \
+		echo "rm libc.so.6"; \
+		echo "rm libm.so.6"; \
+		echo "rm libpthread.so.0"; \
+		echo "rm ld-linux-x86-64.so.2"; \
+		echo "rm libresolv.so.2"; \
+		echo "rm librt.so.1"; \
+		echo "rm libutil.so.1"; \
+	} | debugfs -w ./part.img >/dev/null 2>&1 || true
 	@echo "Populating root filesystem with additional tools..."
 
-	@if [ -d toolchain/musl-sysroot/opt/tcc ]; then \
-		echo "Installing TCC into disk image..."; \
+	@if [ -d build/tcc-glibc-install/opt/tcc ]; then \
+		echo "Installing GLIBC TCC into disk image..."; \
+		./scripts/populate-ext2-dir.sh ./part.img build/tcc-glibc-install/opt/tcc opt/tcc; \
+		debugfs -w -R "rm bin/tcc" ./part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write build/tcc-glibc-install/opt/tcc/bin/tcc bin/tcc" ./part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "rm lib64/libtcc.so" ./part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write build/tcc-glibc-install/opt/tcc/lib/libtcc.so lib64/libtcc.so" ./part.img >/dev/null 2>&1 || true; \
+	elif [ -d toolchain/musl-sysroot/opt/tcc ]; then \
+		echo "Installing MUSL TCC into disk image..."; \
 		./scripts/populate-ext2-dir.sh ./part.img toolchain/musl-sysroot/opt/tcc opt/tcc; \
 		debugfs -w -R "write toolchain/musl-sysroot/opt/tcc/bin/tcc bin/tcc" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "write toolchain/musl-sysroot/lib/libc.a libc.a" ./part.img >/dev/null 2>&1 || true; \
@@ -380,8 +411,11 @@ disk.img: assets/boot.wav assets/test.wav assets/jane.mp3 assets/mc9.mp3 assets/
 		debugfs -w -R "write toolchain/musl-sysroot/lib/crtn.o crtn.o" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "write toolchain/musl-sysroot/opt/tcc/lib/tcc/libtcc1.a libtcc1.a" ./part.img >/dev/null 2>&1 || true; \
 	fi
-	@if [ -d toolchain/musl-sysroot/opt/coreutils ]; then \
-		echo "Installing coreutils into disk image..."; \
+	@if [ -d toolchain/glibc-sysroot/opt/coreutils ]; then \
+		echo "Installing glibc coreutils into disk image..."; \
+		./scripts/populate-ext2-dir.sh ./part.img toolchain/glibc-sysroot/opt/coreutils opt/coreutils; \
+	elif [ -d toolchain/musl-sysroot/opt/coreutils ]; then \
+		echo "Installing musl coreutils into disk image..."; \
 		./scripts/populate-ext2-dir.sh ./part.img toolchain/musl-sysroot/opt/coreutils opt/coreutils; \
 	fi
 	@if [ -d toolchain/musl-sysroot/opt/bash ]; then \
@@ -580,6 +614,7 @@ clean-all: clean-musl clean-doom clean-coreutils clean-wolfssl clean-tar
 clean-coreutils:
 	rm -rf build/coreutils-9.5
 	rm -rf toolchain/musl-sysroot/opt/coreutils
+	rm -rf toolchain/glibc-sysroot/opt/coreutils
 
 .PHONY: clean-tar
 clean-tar:

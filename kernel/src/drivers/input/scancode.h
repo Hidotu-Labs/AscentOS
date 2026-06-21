@@ -87,6 +87,8 @@
 #define SCANCODE_KP3        0x51
 #define SCANCODE_KP0        0x52
 #define SCANCODE_KPDOT      0x53
+#define SCANCODE_F11        0x57
+#define SCANCODE_F12        0x58
 
 // Extended scancodes (with 0xE0 prefix)
 #define SCANCODE_KPENTER    0x1C  // preceded by 0xE0

@@ -362,7 +362,6 @@ static uint32_t scroll_bottom(void) {
              : max_rows - 1;
 }
 
-
 static void console_process_escape_sequence(void) {
   if (terminal_escape_len == 0)
     return;
@@ -556,9 +555,9 @@ static void console_process_escape_sequence(void) {
     if (question) {
       if (value == 25)
         console_set_cursor_visible_unlocked(true);
-      // ?7h = DECAWM enable (autowrap on — default, no-op since we always do deferred wrap)
-      // ?1049h = alternate screen (no-op, we don't have a separate screen buffer)
-      // ?2004h = bracketed paste mode (no-op)
+      // ?7h = DECAWM enable (autowrap on — default, no-op since we always do
+      // deferred wrap) ?1049h = alternate screen (no-op, we don't have a
+      // separate screen buffer) ?2004h = bracketed paste mode (no-op)
     }
     break;
   case 'l':
@@ -566,9 +565,9 @@ static void console_process_escape_sequence(void) {
       if (value == 25)
         console_set_cursor_visible_unlocked(false);
       // ?7l = DECAWM disable — disable the deferred autowrap
-      // (we leave wrap_pending as-is; full-screen apps manage line endings themselves)
-      // ?1049l = alternate screen exit (no-op)
-      // ?2004l = bracketed paste mode off (no-op)
+      // (we leave wrap_pending as-is; full-screen apps manage line endings
+      // themselves) ?1049l = alternate screen exit (no-op) ?2004l = bracketed
+      // paste mode off (no-op)
     }
     break;
 
@@ -753,7 +752,8 @@ static void console_process_escape_sequence(void) {
     break;
   }
 
-  case 'X': { // ECH — Erase Character (paint N cells with bg, don't move cursor)
+  case 'X': { // ECH — Erase Character (paint N cells with bg, don't move
+              // cursor)
     int n = (value > 0) ? value : 1;
     uint32_t row = console_history_row(cursor_y);
     for (int i = 0; i < n && cursor_x + (uint32_t)i < max_cols; i++) {
@@ -803,9 +803,11 @@ static void console_process_escape_sequence(void) {
     uint32_t row = console_history_row(cursor_y);
     for (uint32_t x = max_cols - 1; x >= cursor_x + (uint32_t)n; x--) {
       history[row][x] = history[row][x - (uint32_t)n];
-      if (x == cursor_x) break;
+      if (x == cursor_x)
+        break;
     }
-    for (uint32_t x = cursor_x; x < cursor_x + (uint32_t)n && x < max_cols; x++) {
+    for (uint32_t x = cursor_x; x < cursor_x + (uint32_t)n && x < max_cols;
+         x++) {
       history[row][x].c = 0;
       history[row][x].fg = FG_COLOR;
       history[row][x].bg = BG_COLOR;
@@ -1005,12 +1007,13 @@ static void console_putchar_unlocked(char c) {
     // Two-character escape sequences: ESC followed by a single final byte
     // from 0x40–0x7E (but not '[' which starts CSI, and not intermediaries).
     // Intermediary bytes are 0x20–0x2F; they prefix a final byte.
-    // We terminate on the first byte in 0x40–0x7E that follows 0+ intermediaries,
-    // OR on any byte in 0x40–0x7E that is not '[' when it's the first byte.
+    // We terminate on the first byte in 0x40–0x7E that follows 0+
+    // intermediaries, OR on any byte in 0x40–0x7E that is not '[' when it's the
+    // first byte.
     if (terminal_escape_len == 1) {
       // First byte after ESC
-      if (c == '[') {
-        // CSI — accumulate until final byte
+      if (c == '[' || c == 'O') {
+        // CSI or SS3 — accumulate until final byte
         return;
       }
       // Single-byte intermediaries (0x20–0x2F): accumulate another byte
@@ -1052,8 +1055,10 @@ static void console_putchar_unlocked(char c) {
         case '8': // Restore cursor
           cursor_x = saved_cursor_x;
           cursor_y = saved_cursor_y;
-          if (cursor_x >= max_cols) cursor_x = max_cols - 1;
-          if (cursor_y >= max_rows) cursor_y = max_rows - 1;
+          if (cursor_x >= max_cols)
+            cursor_x = max_cols - 1;
+          if (cursor_y >= max_rows)
+            cursor_y = max_rows - 1;
           wrap_pending = false;
           break;
         case '=': // Keypad application mode — no-op
@@ -1068,20 +1073,22 @@ static void console_putchar_unlocked(char c) {
         terminal_escape_len = 0;
         return;
       }
-      // Non-final, non-intermediate byte (e.g. 0x30–0x3F numeric) - keep accumulating
-      // (shouldn't happen in well-formed VT but be safe)
+      // Non-final, non-intermediate byte (e.g. 0x30–0x3F numeric) - keep
+      // accumulating (shouldn't happen in well-formed VT but be safe)
       return;
     }
 
     // Second byte after ESC + one intermediary (e.g. ESC ( 0 or ESC ) B)
-    if (terminal_escape_len == 2 && terminal_escape_buffer[0] >= 0x20 && terminal_escape_buffer[0] <= 0x2F) {
+    if (terminal_escape_len == 2 && terminal_escape_buffer[0] >= 0x20 &&
+        terminal_escape_buffer[0] <= 0x2F) {
       // This is the final byte of a 3-char sequence like ESC ( 0
       char inter = terminal_escape_buffer[0];
-      char fin   = c;
-      // ESC ( 0 — designate G1 as VT100 line drawing (we track but render via acs_active)
-      // ESC ( B — designate G0/G1 as ASCII (no-op for us, just reset flag if needed)
-      // We don't differentiate G0/G1 designation internals beyond the SO/SI switching,
-      // so just silently accept all of them.
+      char fin = c;
+      // ESC ( 0 — designate G1 as VT100 line drawing (we track but render via
+      // acs_active) ESC ( B — designate G0/G1 as ASCII (no-op for us, just
+      // reset flag if needed) We don't differentiate G0/G1 designation
+      // internals beyond the SO/SI switching, so just silently accept all of
+      // them.
       (void)inter;
       (void)fin;
       terminal_escape = false;
@@ -1093,6 +1100,18 @@ static void console_putchar_unlocked(char c) {
     if (terminal_escape_buffer[0] == '[') {
       if (c >= '@' && c <= '~') {
         console_process_escape_sequence();
+        terminal_escape = false;
+        terminal_escape_len = 0;
+      }
+      return;
+    }
+
+    // SS3 sequence (starts with 'O'): terminate on final byte 0x40–0x7E
+    if (terminal_escape_buffer[0] == 'O') {
+      if (c >= '@' && c <= '~') {
+        // SS3 sequences are usually single-character commands like OP, OQ.
+        // We don't have any specific console-side handlers for SS3 input echo
+        // other than ignoring them as a full sequence instead of rendering them.
         terminal_escape = false;
         terminal_escape_len = 0;
       }

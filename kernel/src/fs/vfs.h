@@ -72,18 +72,18 @@ typedef int (*fallocate_type_t)(struct vfs_node *, int mode, uint32_t offset,
 // All fields are 'long' (8 bytes on x86_64).
 // f_fsid is __kernel_fsid_t = int[2] = exactly 8 bytes — NOT uint64_t[2].
 struct statfs_buf {
-  int64_t  f_type;
-  int64_t  f_bsize;
-  int64_t  f_blocks;
-  int64_t  f_bfree;
-  int64_t  f_bavail;
-  int64_t  f_files;
-  int64_t  f_ffree;
-  int32_t  f_fsid[2];   /* __kernel_fsid_t: two int32 = 8 bytes total */
-  int64_t  f_namelen;
-  int64_t  f_frsize;
-  int64_t  f_flags;
-  int64_t  f_spare[4];
+  int64_t f_type;
+  int64_t f_bsize;
+  int64_t f_blocks;
+  int64_t f_bfree;
+  int64_t f_bavail;
+  int64_t f_files;
+  int64_t f_ffree;
+  int32_t f_fsid[2]; /* __kernel_fsid_t: two int32 = 8 bytes total */
+  int64_t f_namelen;
+  int64_t f_frsize;
+  int64_t f_flags;
+  int64_t f_spare[4];
 };
 
 typedef int (*statfs_type_t)(struct vfs_node *, struct statfs_buf *buf);
@@ -121,8 +121,8 @@ typedef struct vfs_node {
   chmod_type_t chmod;
   chown_type_t chown;
   truncate_type_t truncate;
-  mmap_type_t mmap;   // Device-specific mmap handler
-  poll_type_t poll;   // Device-specific poll handler
+  mmap_type_t mmap; // Device-specific mmap handler
+  poll_type_t poll; // Device-specific poll handler
   statfs_type_t statfs;
   ioctl_type_t ioctl; // Device-specific ioctl handler
   fallocate_type_t fallocate;
@@ -167,7 +167,8 @@ int vfs_mknod(vfs_node_t *node, char *name, uint16_t permission, uint32_t flags,
 int vfs_poll(vfs_node_t *node, int events);
 void vfs_node_init(vfs_node_t *node);
 int vfs_mount(vfs_node_t *mountpoint, vfs_node_t *target);
-int vfs_mount_ex(vfs_node_t *mountpoint, vfs_node_t *target, const char *dev_name, const char *fs_type);
+int vfs_mount_ex(vfs_node_t *mountpoint, vfs_node_t *target,
+                 const char *dev_name, const char *fs_type);
 int vfs_statfs(vfs_node_t *node, void *buf);
 
 typedef struct vfs_mount_info {

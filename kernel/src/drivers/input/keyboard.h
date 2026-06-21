@@ -25,6 +25,19 @@ void keyboard_set_scancode_mode(bool enabled);
 bool keyboard_is_scancode_mode(void);
 void keyboard_push_scancode(uint8_t scancode, bool extended, bool release);
 
+#define KEY_F1 0x81
+#define KEY_F2 0x82
+#define KEY_F3 0x83
+#define KEY_F4 0x84
+#define KEY_F5 0x85
+#define KEY_F6 0x86
+#define KEY_F7 0x87
+#define KEY_F8 0x88
+#define KEY_F9 0x89
+#define KEY_F10 0x8A
+#define KEY_F11 0x8B
+#define KEY_F12 0x8C
+
 #define KEY_UP 0xE0
 #define KEY_DOWN 0xE1
 #define KEY_LEFT 0xE2

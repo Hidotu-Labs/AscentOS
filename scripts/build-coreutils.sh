@@ -16,21 +16,19 @@ COREUTILS_URL="https://ftp.gnu.org/gnu/coreutils/${COREUTILS_TARBALL}"
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 BUILD_DIR=${BUILD_DIR:-"$ROOT_DIR/build/coreutils-${COREUTILS_VERSION}"}
-PREFIX=${MUSL_SYSROOT:-"$ROOT_DIR/toolchain/musl-sysroot"}
+PREFIX=${GLIBC_SYSROOT:-"$ROOT_DIR/toolchain/glibc-sysroot"}
 COREUTILS_INSTALL="${PREFIX}/opt/coreutils"
 JOBS=$(nproc 2>/dev/null || echo 4)
 
 find_compiler() {
-    LOCAL_CC="$ROOT_DIR/toolchain/x86_64-linux-musl/bin/x86_64-linux-musl-gcc"
+    LOCAL_CC="$ROOT_DIR/toolchain/x86_64-linux-glibc/bin/x86_64-linux-gcc"
 
     if [ -x "$LOCAL_CC" ]; then
         CC="$LOCAL_CC"
-    elif command -v x86_64-linux-musl-gcc >/dev/null 2>&1; then
-        CC="x86_64-linux-musl-gcc"
-    elif command -v musl-gcc >/dev/null 2>&1; then
-        CC="musl-gcc"
+    elif command -v x86_64-linux-gnu-gcc >/dev/null 2>&1; then
+        CC="x86_64-linux-gnu-gcc"
     else
-        echo "Error: No musl compiler found. Run scripts/musl-toolchain.sh first." >&2
+        echo "Error: No glibc compiler found. Run scripts/glibc-toolchain.sh first." >&2
         exit 1
     fi
 
@@ -117,7 +115,7 @@ build_coreutils() {
     
     # Disable features not supported by AscentOS kernel
     ./configure \
-        --host=x86_64-linux-musl \
+        --host=x86_64-linux-gnu \
         --prefix=/opt/coreutils \
         --disable-nls \
         --disable-acl \
@@ -126,8 +124,8 @@ build_coreutils() {
         --disable-rpath \
         --enable-single-binary=symlinks \
         --enable-no-install-program=stdbuf,timeout,chroot \
-        CFLAGS="-static -O2 -fno-stack-protector -I$PREFIX/include" \
-        LDFLAGS="-static -L$PREFIX/lib"
+        CFLAGS="-O2 -fno-stack-protector -I$PREFIX/include" \
+        LDFLAGS="-L$PREFIX/lib"
     
     # Patch config.h to report "Ascent" instead of "GNU/Linux" in uname -o
     if [ -f lib/config.h ]; then
@@ -162,7 +160,7 @@ int main() {
     return 0;
 }
 EOF
-    "$CC" -static -O2 "$BUILD_DIR/clear.c" -o "$COREUTILS_INSTALL/bin/clear"
+    "$CC" -O2 "$BUILD_DIR/clear.c" -o "$COREUTILS_INSTALL/bin/clear"
     if command -v "$STRIP" >/dev/null 2>&1; then
         "$STRIP" "$COREUTILS_INSTALL/bin/clear"
     fi

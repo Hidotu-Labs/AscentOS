@@ -405,7 +405,6 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
   }
   k_envp[envc] = NULL;
 
-
   uint64_t *new_pml4 = vmm_create_pml4();
   if (!new_pml4) {
     kfree(path);
@@ -501,7 +500,6 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
 
   uint64_t actual_entry =
       elf_info.interp_base ? elf_info.interp_entry : elf_info.entry;
-
 
   // Store the basename of the executable as the thread's comm name
   {
@@ -1473,8 +1471,8 @@ static uint64_t sys_sched_getaffinity(uint64_t pid, uint64_t len,
 }
 
 static uint64_t sys_sched_setparam(uint64_t pid, uint64_t param_ptr,
-                                    uint64_t a2, uint64_t a3, uint64_t a4,
-                                    uint64_t a5) {
+                                   uint64_t a2, uint64_t a3, uint64_t a4,
+                                   uint64_t a5) {
   (void)a2;
   (void)a3;
   (void)a4;
@@ -1648,7 +1646,6 @@ static uint64_t sys_set_robust_list(uint64_t head, uint64_t len, uint64_t a2,
   // Stub for glibc compatibility
   return 0;
 }
-
 
 void syscall_register_process(void) {
   syscall_register(SYS_EXIT, sys_exit);
