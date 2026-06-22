@@ -5,6 +5,7 @@
         <Program icon="utilities-terminal" label="Terminal">st</Program>
         <Program icon="applications-games" label="Doom">doom_x11</Program>
         <Program icon="eyes" label="xeyes">xeyes</Program>
+        <Program icon="help-about" label="About AscentOS">about</Program>
         <Separator/>
         <Restart label="Restart JWM" icon="reload"/>
         <Exit label="Exit JWM" confirm="true" icon="exit"/>
