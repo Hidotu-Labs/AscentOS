@@ -107,11 +107,13 @@ void process_do_exit(uint64_t status) {
   // exit. We must check if the memory is actually mapped to avoid panicking
   // if the user unmapped it.
   if (current && current->tid_address) {
-    if (current->cr3) {
+    if (current->cr3 &&
+        vmm_is_user_addr_range_writable((uint64_t)current->tid_address,
+                                        sizeof(uint32_t))) {
       uint64_t phys = vmm_virt_to_phys((uint64_t *)current->cr3,
                                        (uint64_t)current->tid_address);
       if (phys != 0) {
-        *current->tid_address = 0;
+        *(uint32_t *)(phys + pmm_get_hhdm_offset()) = 0;
       }
     }
   }
@@ -200,6 +202,19 @@ static uint64_t sys_set_tid_address(uint64_t tidptr, uint64_t a1, uint64_t a2,
 
   // Return the current thread's ID
   return current->tid;
+}
+
+static uint64_t sys_gettid(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
+                           uint64_t a4, uint64_t a5) {
+  (void)a0;
+  (void)a1;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+
+  struct thread *current = sched_get_current();
+  return current ? current->tid : 0;
 }
 
 static uint64_t sys_getpid(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
@@ -785,16 +800,20 @@ static uint64_t sys_clone_internal(struct syscall_regs *regs, uint64_t flags,
 
   // Handle TID placement
   if (flags & CLONE_PARENT_SETTID) {
-    if (ptid && vmm_is_user_addr_range_valid(ptid, sizeof(uint32_t))) {
+    if (ptid && vmm_is_user_addr_range_writable(ptid, sizeof(uint32_t))) {
       *(uint32_t *)ptid = child->tid;
     }
   }
   if (flags & CLONE_CHILD_SETTID) {
     if (flags & CLONE_VM) {
-      if (ctid && vmm_is_user_addr_range_valid(ctid, sizeof(uint32_t))) {
+      if (ctid && vmm_is_user_addr_range_writable(ctid, sizeof(uint32_t))) {
         *(uint32_t *)ctid = child->tid;
       }
     }
+  }
+
+  if (flags & CLONE_CHILD_CLEARTID) {
+    child->tid_address = (uint64_t *)ctid;
   }
 
   // File descriptors
@@ -1600,12 +1619,7 @@ static uint64_t sys_setpriority(uint64_t which, uint64_t who, uint64_t prio,
   if (which > PRIO_USER)
     return (uint64_t)-22; // EINVAL
 
-  // Validate the target exists
-  if (which == PRIO_PROCESS && who != 0) {
-    struct thread *target = sched_get_thread_by_tid((uint32_t)who);
-    if (!target)
-      return (uint64_t)-3; // ESRCH
-  }
+  (void)who;
 
   // Stub: accept any priority change silently
   return 0;
@@ -1651,6 +1665,7 @@ void syscall_register_process(void) {
   syscall_register(SYS_EXIT, sys_exit);
   syscall_register(SYS_EXIT_GROUP, sys_exit_group);
   syscall_register(SYS_SET_TID_ADDRESS, sys_set_tid_address);
+  syscall_register(SYS_GETTID, sys_gettid);
   syscall_register(SYS_GETPID, sys_getpid);
   syscall_register(SYS_WAIT4, sys_wait4);
   syscall_register(SYS_UNAME, sys_uname);

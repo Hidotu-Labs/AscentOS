@@ -2,6 +2,18 @@
 
 #include "af_unix_internal.h"
 
+#define USER_ADDR_MAX 0x00007FFFFFFFFFFFULL
+
+static bool unix_user_range_valid(uint64_t addr, size_t len) {
+  if (!addr)
+    return false;
+  if (addr > USER_ADDR_MAX)
+    return false;
+  if (len && addr + len - 1 > USER_ADDR_MAX)
+    return false;
+  return vmm_is_user_addr_range_valid(addr, len);
+}
+
 ssize_t unix_send_impl(socket_t *sock, const void *buf, size_t len, int flags) {
   (void)flags;
   if (!sock || !sock->sk)
@@ -436,6 +448,13 @@ ssize_t unix_recvmsg_impl(socket_t *sock, struct msghdr *msg, int flags) {
 
   if (usk->scm_count > 0 && msg->msg_control &&
       msg->msg_controllen >= CMSG_SPACE(sizeof(int))) {
+    if (!unix_user_range_valid((uint64_t)(uintptr_t)msg->msg_control,
+                               msg->msg_controllen)) {
+      spinlock_release(&sock->lock);
+      spinlock_release(&usk->recv_lock);
+      return -14; // EFAULT
+    }
+
     struct cmsghdr *cmsg = (struct cmsghdr *)msg->msg_control;
     cmsg->cmsg_level = SOL_SOCKET;
     cmsg->cmsg_type  = SCM_RIGHTS;

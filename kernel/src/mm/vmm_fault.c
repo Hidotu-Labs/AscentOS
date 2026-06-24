@@ -85,12 +85,9 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
       spinlock_acquire(&current->mm->lock);
       struct vma *v = vma_find(&current->mm->vmas, cr2);
       if (v) {
-        if (v->flags & MAP_PRIVATE) {
-          // If it's a private mapping (MAP_PRIVATE), we ALWAYS allow COW
-          // on write fault, even if the VMA says Read-only.
-          // This allows dynamic linkers to perform late relocations and
-          // allows features like software breakpoints (gdb) and RELRO fixups
-          // without requiring complex mprotect/mmap state synchronization.
+        if ((v->flags & MAP_PRIVATE) && (v->prot & PROT_WRITE)) {
+          // Writable private mappings may have been remapped read-only for
+          // CoW. Read-only executable/file mappings must stay protected.
           *pte |= PAGE_FLAG_COW;
         }
       }
@@ -315,6 +312,7 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
   }
 
   void *frame = NULL;
+  bool frame_from_cache = false;
 
   vfs_node_t *node = (vfs_node_t *)vma_file_node;
   if (node && (node->flags & FS_TYPE_MASK) == FS_FILE) {
@@ -326,6 +324,7 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
     vfs_page_t *cached = vfs_cache_lookup(node, file_offset);
     if (cached) {
       frame = (void *)cached->frame_phys;
+      frame_from_cache = true;
     } else {
       // 2. Cache miss: read a 64 KB cluster to maximise disk throughput.
       uint32_t cluster_base = file_offset & ~0xFFFFU; // 64 KB aligned
@@ -359,8 +358,10 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
       }
 
       cached = vfs_cache_lookup(node, file_offset);
-      if (cached)
+      if (cached) {
         frame = (void *)cached->frame_phys;
+        frame_from_cache = true;
+      }
     }
 
     if (!frame) {
@@ -391,8 +392,13 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
 
       uint32_t foff = (uint32_t)(vma_offset + (vpage - vma_start));
       vfs_page_t *p = vfs_cache_lookup(node, foff);
-      if (p)
-        vmm_map_page((uint64_t *)target_cr3, vpage, p->frame_phys, pt_flags);
+      if (p) {
+        pmm_incref((void *)p->frame_phys);
+        if (!vmm_map_page((uint64_t *)target_cr3, vpage, p->frame_phys,
+                          pt_flags)) {
+          pmm_decref((void *)p->frame_phys);
+        }
+      }
     }
 
   } else {
@@ -415,6 +421,10 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
   if (node && (vma_flags & MAP_PRIVATE) && (flags & PAGE_FLAG_RW)) {
     flags &= ~PAGE_FLAG_RW;
     flags |= PAGE_FLAG_COW;
+  }
+
+  if (frame_from_cache) {
+    pmm_incref(frame);
   }
 
   if (!vmm_map_page((uint64_t *)target_cr3, cr2 & ~0xFFFULL, (uint64_t)frame,
@@ -490,6 +500,54 @@ bool vmm_is_user_addr_range_valid(uint64_t addr, size_t size) {
     // Skip to the end of this VMA — every page inside it has the same prot.
     // Clamp to end_page so we don't overshoot on the last VMA.
     page = v->end < end_page ? v->end : end_page;
+  }
+
+  spinlock_release(&current->mm->lock);
+  return true;
+}
+
+
+bool vmm_is_user_addr_range_writable(uint64_t addr, size_t size) {
+  if (size == 0)
+    return true;
+  if (addr > USER_SPACE_LIMIT || size > 0x800000000000ULL - addr)
+    return false;
+
+  struct thread *current = sched_get_current();
+  if (!current || !current->mm)
+    return false;
+
+  uint64_t cr3 = current->cr3;
+  if (cr3 == 0) {
+    __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
+    cr3 &= PAGE_MASK;
+  }
+
+  uint64_t start_page = addr & ~0xFFFULL;
+  uint64_t end_page = (addr + size + 0xFFF) & ~0xFFFULL;
+
+  spinlock_acquire(&current->mm->lock);
+
+  uint64_t page = start_page;
+  while (page < end_page) {
+    struct vma *v = vma_find(&current->mm->vmas, page);
+    if (!v)
+      v = vma_find_growdown(&current->mm->vmas, page, 8 * 1024 * 1024);
+
+    if (!v || !(v->prot & PROT_WRITE)) {
+      spinlock_release(&current->mm->lock);
+      return false;
+    }
+
+    uint64_t next = v->end < end_page ? v->end : end_page;
+    for (uint64_t p = page; p < next; p += PAGE_SIZE) {
+      if (vmm_virt_to_phys((uint64_t *)cr3, p) == 0) {
+        spinlock_release(&current->mm->lock);
+        return false;
+      }
+    }
+
+    page = next;
   }
 
   spinlock_release(&current->mm->lock);

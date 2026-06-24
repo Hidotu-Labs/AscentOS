@@ -164,6 +164,49 @@ static uint64_t sys_clock_getres(uint64_t clk_id, uint64_t tp_ptr, uint64_t a2,
   return 0;
 }
 
+static uint64_t clock_now_ms(uint64_t clk_id) {
+  uint64_t mono_ms = lapic_timer_get_ms();
+
+  switch (clk_id) {
+  case 0:  // CLOCK_REALTIME
+  case 4:  // CLOCK_REALTIME_COARSE
+    return rtc_get_boot_timestamp() * 1000ULL + mono_ms;
+  case 1:  // CLOCK_MONOTONIC
+  case 6:  // CLOCK_MONOTONIC_COARSE
+  case 7:  // CLOCK_BOOTTIME
+  case 11: // CLOCK_TAI
+  case 2:  // CLOCK_PROCESS_CPUTIME_ID
+  case 3:  // CLOCK_THREAD_CPUTIME_ID
+    return mono_ms;
+  default:
+    return UINT64_MAX;
+  }
+}
+
+static uint64_t sleep_for_timespec(uint64_t req_ptr) {
+  uint64_t *req = (uint64_t *)req_ptr;
+  uint64_t sec = req[0];
+  uint64_t nsec = req[1];
+
+  if (nsec >= 1000000000ULL)
+    return (uint64_t)-22; // EINVAL
+
+  uint64_t total_ms = sec * 1000 + nsec / 1000000;
+  if (total_ms == 0 && nsec > 0)
+    total_ms = 1;
+
+  if (total_ms > 0) {
+    struct thread *current = sched_get_current();
+    if (current) {
+      current->state = THREAD_SLEEPING;
+      current->wakeup_ticks = lapic_timer_get_ticks() + total_ms;
+      sched_yield();
+    }
+  }
+
+  return 0;
+}
+
 // nanosleep(req, rem) - sleep for specified time
 // req and rem are pointers to struct timespec { tv_sec, tv_nsec }
 static uint64_t sys_nanosleep(uint64_t req_ptr, uint64_t rem_ptr, uint64_t a2,
@@ -177,23 +220,49 @@ static uint64_t sys_nanosleep(uint64_t req_ptr, uint64_t rem_ptr, uint64_t a2,
   if (!req_ptr || !vmm_is_user_addr_range_valid(req_ptr, 16))
     return (uint64_t)-14; // EFAULT
 
-  // Non-busy sleep: mark thread as sleeping and yield
+  return sleep_for_timespec(req_ptr);
+}
+
+// clock_nanosleep(clockid, flags, req, rem) - syscall 230
+static uint64_t sys_clock_nanosleep(uint64_t clk_id, uint64_t flags,
+                                    uint64_t req_ptr, uint64_t rem_ptr,
+                                    uint64_t a4, uint64_t a5) {
+  (void)rem_ptr;
+  (void)a4;
+  (void)a5;
+
+  if (!req_ptr || !vmm_is_user_addr_range_valid(req_ptr, 16))
+    return (uint64_t)-14; // EFAULT
+
+  if (flags & ~1ULL)
+    return (uint64_t)-22; // EINVAL
+
+  if (!(flags & 1ULL))
+    return sleep_for_timespec(req_ptr);
+
+  uint64_t now_ms = clock_now_ms(clk_id);
+  if (now_ms == UINT64_MAX)
+    return (uint64_t)-22; // EINVAL
+
   uint64_t *req = (uint64_t *)req_ptr;
   uint64_t sec = req[0];
   uint64_t nsec = req[1];
+  if (nsec >= 1000000000ULL)
+    return (uint64_t)-22; // EINVAL
 
-  // Convert to milliseconds
-  uint64_t total_ms = sec * 1000 + nsec / 1000000;
-  if (total_ms == 0 && nsec > 0)
-    total_ms = 1; // Minimum 1ms
+  uint64_t target_ms = sec * 1000ULL + nsec / 1000000ULL;
+  if (target_ms <= now_ms)
+    return 0;
 
-  if (total_ms > 0) {
-    struct thread *current = sched_get_current();
-    if (current) {
-      current->state = THREAD_SLEEPING;
-      current->wakeup_ticks = lapic_timer_get_ticks() + total_ms;
-      sched_yield();
-    }
+  uint64_t sleep_ms = target_ms - now_ms;
+  if (nsec % 1000000ULL)
+    sleep_ms++;
+
+  struct thread *current = sched_get_current();
+  if (current) {
+    current->state = THREAD_SLEEPING;
+    current->wakeup_ticks = lapic_timer_get_ticks() + sleep_ms;
+    sched_yield();
   }
 
   return 0;
@@ -268,6 +337,7 @@ void syscall_register_arch(void) {
   syscall_register(SYS_ARCH_PRCTL, sys_arch_prctl);
   syscall_register(SYS_CLOCK_GETTIME, sys_clock_gettime);
   syscall_register(SYS_CLOCK_GETRES, sys_clock_getres);
+  syscall_register(SYS_CLOCK_NANOSLEEP, sys_clock_nanosleep);
   syscall_register(SYS_NANOSLEEP, sys_nanosleep);
   syscall_register(SYS_GETTIMEOFDAY, sys_gettimeofday);
   syscall_register(SYS_MLOCK, sys_mlock);

@@ -4,6 +4,7 @@
 #include "../fs/vfs.h"
 #include "../lib/string.h"
 #include "../mm/heap.h"
+#include "../mm/vmm.h"
 #include "../sched/sched.h"
 #include "../socket/af_inet.h"
 #include "../socket/af_inet6.h"
@@ -435,7 +436,8 @@ static uint64_t sys_sendmsg(uint64_t sockfd, uint64_t msg_ptr, uint64_t flags,
   int fd = (int)sockfd;
 
   // Validate msghdr pointer
-  if (!is_user_ptr(msg_ptr)) {
+  if (!is_user_ptr(msg_ptr) ||
+      !vmm_is_user_addr_range_valid(msg_ptr, sizeof(struct msghdr))) {
     return (uint64_t)-14; // EFAULT
   }
 
@@ -448,8 +450,20 @@ static uint64_t sys_sendmsg(uint64_t sockfd, uint64_t msg_ptr, uint64_t flags,
   struct msghdr *msg = (struct msghdr *)msg_ptr;
 
   // Validate iovec array
-  if (!is_user_ptr((uint64_t)msg->msg_iov)) {
+  if (msg->msg_iovlen > 0 &&
+      (!is_user_ptr((uint64_t)msg->msg_iov) ||
+       !vmm_is_user_addr_range_valid((uint64_t)msg->msg_iov,
+                                     msg->msg_iovlen * sizeof(struct iovec)))) {
     return (uint64_t)-14; // EFAULT
+  }
+
+  for (size_t i = 0; i < msg->msg_iovlen; i++) {
+    struct iovec *iov = &msg->msg_iov[i];
+    if (iov->iov_len > 0 &&
+        (!is_user_ptr((uint64_t)iov->iov_base) ||
+         !vmm_is_user_addr_range_valid((uint64_t)iov->iov_base, iov->iov_len))) {
+      return (uint64_t)-14; // EFAULT
+    }
   }
 
   // Use family-specific sendmsg if available
@@ -462,7 +476,8 @@ static uint64_t sys_sendmsg(uint64_t sockfd, uint64_t msg_ptr, uint64_t flags,
   for (size_t i = 0; i < msg->msg_iovlen; i++) {
     struct iovec *iov = &msg->msg_iov[i];
 
-    if (!is_user_ptr((uint64_t)iov->iov_base)) {
+    if (!is_user_ptr((uint64_t)iov->iov_base) ||
+        !vmm_is_user_addr_range_valid((uint64_t)iov->iov_base, iov->iov_len)) {
       return (uint64_t)-14; // EFAULT
     }
 
@@ -499,7 +514,8 @@ static uint64_t sys_recvmsg(uint64_t sockfd, uint64_t msg_ptr, uint64_t flags,
   int fd = (int)sockfd;
 
   // Validate msghdr pointer
-  if (!is_user_ptr(msg_ptr)) {
+  if (!is_user_ptr(msg_ptr) ||
+      !vmm_is_user_addr_range_valid(msg_ptr, sizeof(struct msghdr))) {
     return (uint64_t)-14; // EFAULT
   }
 
@@ -512,8 +528,20 @@ static uint64_t sys_recvmsg(uint64_t sockfd, uint64_t msg_ptr, uint64_t flags,
   struct msghdr *msg = (struct msghdr *)msg_ptr;
 
   // Validate iovec array (only if iovlen > 0)
-  if (msg->msg_iovlen > 0 && !is_user_ptr((uint64_t)msg->msg_iov)) {
+  if (msg->msg_iovlen > 0 &&
+      (!is_user_ptr((uint64_t)msg->msg_iov) ||
+       !vmm_is_user_addr_range_valid((uint64_t)msg->msg_iov,
+                                     msg->msg_iovlen * sizeof(struct iovec)))) {
     return (uint64_t)-14; // EFAULT
+  }
+
+  for (size_t i = 0; i < msg->msg_iovlen; i++) {
+    struct iovec *iov = &msg->msg_iov[i];
+    if (iov->iov_len > 0 &&
+        (!is_user_ptr((uint64_t)iov->iov_base) ||
+         !vmm_is_user_addr_range_valid((uint64_t)iov->iov_base, iov->iov_len))) {
+      return (uint64_t)-14; // EFAULT
+    }
   }
 
   // Use family-specific recvmsg if available
@@ -538,7 +566,8 @@ static uint64_t sys_recvmsg(uint64_t sockfd, uint64_t msg_ptr, uint64_t flags,
   for (size_t i = 0; i < msg->msg_iovlen; i++) {
     struct iovec *iov = &msg->msg_iov[i];
 
-    if (!is_user_ptr((uint64_t)iov->iov_base)) {
+    if (!is_user_ptr((uint64_t)iov->iov_base) ||
+        !vmm_is_user_addr_range_valid((uint64_t)iov->iov_base, iov->iov_len)) {
       return (uint64_t)-14; // EFAULT
     }
 

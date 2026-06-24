@@ -10,6 +10,7 @@
 #include "../lib/list.h"
 #include "../lib/string.h"
 #include "../mm/heap.h"
+#include "../mm/vmm.h"
 #include "../sched/sched.h"
 #include "epoll.h"
 #include "socket.h"

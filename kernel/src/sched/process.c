@@ -127,6 +127,33 @@ void process_jump_usermode(uint64_t rip, uint64_t user_rsp, uint64_t pml4) {
 #define ELF_PIE_BASE 0x0000000000400000ULL
 #define ELF_INTERP_BASE 0x0000400000000000ULL
 
+static uint64_t elf_page_flags(uint32_t p_flags) {
+  uint64_t flags = PAGE_FLAG_USER | PAGE_FLAG_PRESENT;
+  if (p_flags & PF_W)
+    flags |= PAGE_FLAG_RW;
+  if (!(p_flags & PF_X))
+    flags |= PAGE_FLAG_NX;
+  return flags;
+}
+
+static bool elf_apply_segment_permissions(uint64_t *pml4, uint64_t start_page,
+                                          uint64_t end_page,
+                                          uint32_t p_flags) {
+  uint64_t final_flags = elf_page_flags(p_flags);
+
+  for (uint64_t page = start_page; page < end_page; page += PAGE_SIZE) {
+    uint64_t phys = vmm_virt_to_phys(pml4, page);
+    if (!phys)
+      continue;
+
+    vmm_unmap_page(pml4, page);
+    if (!vmm_map_page(pml4, page, phys & PAGE_MASK, final_flags))
+      return false;
+  }
+
+  return true;
+}
+
 static bool do_elf_load(const char *path, uint64_t *pml4,
                         uint64_t requested_base, bool is_interp,
                         elf_info_t *out_info, char *interp_path,
@@ -265,6 +292,10 @@ static bool do_elf_load(const char *path, uint64_t *pml4,
           addr += chunk;
         }
       }
+
+      if (!elf_apply_segment_permissions(pml4, start_page, end_page,
+                                         phdr.p_flags))
+        return false;
     }
   }
 

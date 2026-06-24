@@ -38,7 +38,7 @@ static uint64_t sys_rt_sigaction(uint64_t signum, uint64_t act_ptr,
   uint64_t idx = signum - 1;
 
   if (oldact_ptr) {
-    if (!vmm_is_user_addr_range_valid(oldact_ptr, sizeof(struct k_sigaction)))
+    if (!vmm_is_user_addr_range_writable(oldact_ptr, sizeof(struct k_sigaction)))
       return (uint64_t)-14; // EFAULT
     struct k_sigaction *old = (struct k_sigaction *)oldact_ptr;
     *old = current->signal_handlers[idx];
@@ -68,7 +68,7 @@ static uint64_t sys_rt_sigprocmask(uint64_t how, uint64_t set_ptr,
     return (uint64_t)-1;
 
   if (oldset_ptr) {
-    if (!vmm_is_user_addr_range_valid(oldset_ptr, sizeof(uint64_t)))
+    if (!vmm_is_user_addr_range_writable(oldset_ptr, sizeof(uint64_t)))
       return (uint64_t)-14;
     *(uint64_t *)oldset_ptr = current->signal_mask;
   }
@@ -196,7 +196,7 @@ void signal_deliver(struct registers *regs) {
   rsp -= sizeof(struct sigframe);
   rsp &= ~0xFULL;
 
-  if (!vmm_is_user_addr_range_valid(rsp, sizeof(struct sigframe))) {
+  if (!vmm_is_user_addr_range_writable(rsp, sizeof(struct sigframe))) {
     klog_puts("[SIGNAL] Stack overflow/invalid during delivery\n");
     process_do_exit(11); // SIGSEGV
   }
@@ -210,7 +210,7 @@ void signal_deliver(struct registers *regs) {
 
   // Set up return
   rsp -= 8;
-  if (!vmm_is_user_addr_range_valid(rsp, 8)) {
+  if (!vmm_is_user_addr_range_writable(rsp, 8)) {
     klog_puts("[SIGNAL] Stack overflow during return setup\n");
     process_do_exit(11);
   }
@@ -381,7 +381,7 @@ static uint64_t sys_sigaltstack(uint64_t ss_ptr, uint64_t old_ss_ptr,
   return 0;
 }
 
-static uint64_t sys_sigprocmask(uint64_t how, uint64_t set_ptr,
+static uint64_t __attribute__((unused)) sys_sigprocmask(uint64_t how, uint64_t set_ptr,
                                 uint64_t oldset_ptr, uint64_t a3, uint64_t a4,
                                 uint64_t a5) {
   (void)a3;
@@ -686,7 +686,6 @@ static uint64_t sys_tkill(uint64_t tid, uint64_t sig, uint64_t a2, uint64_t a3,
 void syscall_register_signal(void) {
   syscall_register(SYS_RT_SIGACTION, sys_rt_sigaction);
   syscall_register(SYS_RT_SIGPROCMASK, sys_rt_sigprocmask);
-  syscall_register(SYS_SIGPROCMASK, sys_sigprocmask);
   syscall_register_raw(SYS_RT_SIGRETURN, sys_rt_sigreturn);
   syscall_register(SYS_SIGALTSTACK, sys_sigaltstack);
   syscall_register(SYS_TKILL, sys_tkill);
