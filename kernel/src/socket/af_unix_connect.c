@@ -41,22 +41,31 @@ int unix_connect_impl(socket_t *sock, struct sockaddr *addr, int addrlen) {
 
   struct sockaddr_un *sun = (struct sockaddr_un *)addr;
 
-  unix_sock_t *dusk = unix_find_socket_by_addr(sun, addrlen);
+  unix_sock_t *dusk = unix_find_socket_by_addr_ref(sun, addrlen);
   if (!dusk) {
     klog_puts("[WARN] unix_connect: destination not found\n");
     return -111; // ECONNREFUSED
   }
 
+  socket_t *listener_sock = dusk->parent;
+  if (!listener_sock || listener_sock->closing) {
+    if (listener_sock)
+      socket_put(listener_sock);
+    klog_puts("[WARN] unix_connect: destination is closing\n");
+    return -111; // ECONNREFUSED
+  }
+
   klog_puts("[UNIX_CONNECT] found listener fd=");
-  klog_uint64(dusk->parent->fd);
+  klog_uint64(listener_sock->fd);
   klog_puts(" is_abstract=");
   klog_uint64(dusk->is_abstract ? 1 : 0);
   klog_puts(" has_node=");
-  klog_uint64(dusk->parent->node ? 1 : 0);
+  klog_uint64(listener_sock->node ? 1 : 0);
   klog_puts("\n");
 
-  if (dusk->parent->state != SS_LISTENING) {
+  if (listener_sock->state != SS_LISTENING) {
     klog_puts("[WARN] unix_connect: destination is not listening\n");
+    socket_put(listener_sock);
     return -111; // ECONNREFUSED
   }
 
@@ -64,8 +73,10 @@ int unix_connect_impl(socket_t *sock, struct sockaddr *addr, int addrlen) {
   // before accept() is called.
   socket_t *server_sock =
       socket_create(sock->domain, sock->type, sock->protocol);
-  if (!server_sock)
+  if (!server_sock) {
+    socket_put(listener_sock);
     return -12; // ENOMEM
+  }
 
   unix_sock_t *server_usk = (unix_sock_t *)server_sock->sk;
 
@@ -77,14 +88,24 @@ int unix_connect_impl(socket_t *sock, struct sockaddr *addr, int addrlen) {
   usk->was_connected        = true;
   server_usk->was_connected = true;
 
-  spinlock_acquire(&dusk->parent->lock);
+  spinlock_acquire(&listener_sock->lock);
+
+  if (listener_sock->closing || listener_sock->state != SS_LISTENING) {
+    spinlock_release(&listener_sock->lock);
+    usk->peer = NULL;
+    server_usk->peer = NULL;
+    socket_put(server_sock);
+    socket_put(listener_sock);
+    return -111; // ECONNREFUSED
+  }
 
   if (dusk->accept_queue_len >= dusk->backlog) {
-    spinlock_release(&dusk->parent->lock);
+    spinlock_release(&listener_sock->lock);
     klog_puts("[WARN] unix_connect: listener backlog full\n");
     usk->peer        = NULL;
     server_usk->peer = NULL;
     socket_put(server_sock);
+    socket_put(listener_sock);
     return -111; // ECONNREFUSED
   }
 
@@ -102,13 +123,14 @@ int unix_connect_impl(socket_t *sock, struct sockaddr *addr, int addrlen) {
 
   // Notify listener
   if (dusk->is_abstract) {
-    epoll_notify_socket(dusk->parent->fd, POLLIN);
-  } else if (dusk->parent->node) {
-    epoll_notify_event(dusk->parent->node, POLLIN);
+    epoll_notify_socket(listener_sock->fd, POLLIN);
+  } else if (listener_sock->node) {
+    epoll_notify_event(listener_sock->node, POLLIN);
   }
   wait_queue_wake_all(dusk->wait);
 
-  spinlock_release(&dusk->parent->lock);
+  spinlock_release(&listener_sock->lock);
+  socket_put(listener_sock);
   return 0;
 }
 

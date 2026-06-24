@@ -373,17 +373,26 @@ static uint64_t sys_sendto(uint64_t sockfd, uint64_t buf_ptr, uint64_t len,
   if (!sock) {
     return (uint64_t)-9; // EBADF
   }
+  if (!socket_try_get(sock))
+    return (uint64_t)-9;
+  if (sock->closing) {
+    socket_put(sock);
+    return (uint64_t)-9;
+  }
 
   const void *buf = (const void *)buf_ptr;
   struct sockaddr *dest_addr = NULL;
   if (dest_addr_ptr) {
-    if (!is_user_ptr(dest_addr_ptr))
+    if (!is_user_ptr(dest_addr_ptr)) {
+      socket_put(sock);
       return (uint64_t)-14;
+    }
     dest_addr = (struct sockaddr *)dest_addr_ptr;
   }
 
   ssize_t ret =
       socket_sendto(sock, buf, len, (int)flags, dest_addr, (int)addrlen);
+  socket_put(sock);
   return (uint64_t)ret;
 }
 
@@ -403,24 +412,35 @@ static uint64_t sys_recvfrom(uint64_t sockfd, uint64_t buf_ptr, uint64_t len,
   if (!sock) {
     return (uint64_t)-9; // EBADF
   }
+  if (!socket_try_get(sock))
+    return (uint64_t)-9;
+  if (sock->closing) {
+    socket_put(sock);
+    return (uint64_t)-9;
+  }
 
   void *buf = (void *)buf_ptr;
   struct sockaddr *src_addr = NULL;
   int *addrlen = NULL;
 
   if (src_addr_ptr) {
-    if (!is_user_ptr(src_addr_ptr))
+    if (!is_user_ptr(src_addr_ptr)) {
+      socket_put(sock);
       return (uint64_t)-14;
+    }
     src_addr = (struct sockaddr *)src_addr_ptr;
   }
 
   if (addrlen_ptr) {
-    if (!is_user_ptr(addrlen_ptr))
+    if (!is_user_ptr(addrlen_ptr)) {
+      socket_put(sock);
       return (uint64_t)-14;
+    }
     addrlen = (int *)addrlen_ptr;
   }
 
   ssize_t ret = socket_recvfrom(sock, buf, len, (int)flags, src_addr, addrlen);
+  socket_put(sock);
   return (uint64_t)ret;
 }
 
@@ -449,11 +469,19 @@ static uint64_t sys_sendmsg(uint64_t sockfd, uint64_t msg_ptr, uint64_t flags,
 
   struct msghdr *msg = (struct msghdr *)msg_ptr;
 
+  if (!socket_try_get(sock))
+    return (uint64_t)-9;
+  if (sock->closing) {
+    socket_put(sock);
+    return (uint64_t)-9;
+  }
+
   // Validate iovec array
   if (msg->msg_iovlen > 0 &&
       (!is_user_ptr((uint64_t)msg->msg_iov) ||
        !vmm_is_user_addr_range_valid((uint64_t)msg->msg_iov,
                                      msg->msg_iovlen * sizeof(struct iovec)))) {
+    socket_put(sock);
     return (uint64_t)-14; // EFAULT
   }
 
@@ -462,13 +490,16 @@ static uint64_t sys_sendmsg(uint64_t sockfd, uint64_t msg_ptr, uint64_t flags,
     if (iov->iov_len > 0 &&
         (!is_user_ptr((uint64_t)iov->iov_base) ||
          !vmm_is_user_addr_range_valid((uint64_t)iov->iov_base, iov->iov_len))) {
+      socket_put(sock);
       return (uint64_t)-14; // EFAULT
     }
   }
 
   // Use family-specific sendmsg if available
   if (sock->ops && sock->ops->sendmsg) {
-    return (uint64_t)sock->ops->sendmsg(sock, msg, (int)flags);
+    ssize_t r = sock->ops->sendmsg(sock, msg, (int)flags);
+    socket_put(sock);
+    return (uint64_t)r;
   }
 
   // Fallback to simple send from iovec array
@@ -478,6 +509,7 @@ static uint64_t sys_sendmsg(uint64_t sockfd, uint64_t msg_ptr, uint64_t flags,
 
     if (!is_user_ptr((uint64_t)iov->iov_base) ||
         !vmm_is_user_addr_range_valid((uint64_t)iov->iov_base, iov->iov_len)) {
+      socket_put(sock);
       return (uint64_t)-14; // EFAULT
     }
 
@@ -488,8 +520,10 @@ static uint64_t sys_sendmsg(uint64_t sockfd, uint64_t msg_ptr, uint64_t flags,
     ssize_t ret = socket_send(sock, iov->iov_base, iov->iov_len, (int)flags);
     if (ret < 0) {
       if (total_sent > 0) {
+        socket_put(sock);
         return (uint64_t)total_sent;
       }
+      socket_put(sock);
       return (uint64_t)ret;
     }
 
@@ -501,6 +535,7 @@ static uint64_t sys_sendmsg(uint64_t sockfd, uint64_t msg_ptr, uint64_t flags,
     }
   }
 
+  socket_put(sock);
   return (uint64_t)total_sent;
 }
 
@@ -527,11 +562,19 @@ static uint64_t sys_recvmsg(uint64_t sockfd, uint64_t msg_ptr, uint64_t flags,
 
   struct msghdr *msg = (struct msghdr *)msg_ptr;
 
+  if (!socket_try_get(sock))
+    return (uint64_t)-9;
+  if (sock->closing) {
+    socket_put(sock);
+    return (uint64_t)-9;
+  }
+
   // Validate iovec array (only if iovlen > 0)
   if (msg->msg_iovlen > 0 &&
       (!is_user_ptr((uint64_t)msg->msg_iov) ||
        !vmm_is_user_addr_range_valid((uint64_t)msg->msg_iov,
                                      msg->msg_iovlen * sizeof(struct iovec)))) {
+    socket_put(sock);
     return (uint64_t)-14; // EFAULT
   }
 
@@ -540,6 +583,7 @@ static uint64_t sys_recvmsg(uint64_t sockfd, uint64_t msg_ptr, uint64_t flags,
     if (iov->iov_len > 0 &&
         (!is_user_ptr((uint64_t)iov->iov_base) ||
          !vmm_is_user_addr_range_valid((uint64_t)iov->iov_base, iov->iov_len))) {
+      socket_put(sock);
       return (uint64_t)-14; // EFAULT
     }
   }
@@ -547,6 +591,7 @@ static uint64_t sys_recvmsg(uint64_t sockfd, uint64_t msg_ptr, uint64_t flags,
   // Use family-specific recvmsg if available
   if (sock->ops && sock->ops->recvmsg) {
     ssize_t r = sock->ops->recvmsg(sock, msg, (int)flags);
+    socket_put(sock);
     return (uint64_t)r;
   }
 
@@ -568,6 +613,7 @@ static uint64_t sys_recvmsg(uint64_t sockfd, uint64_t msg_ptr, uint64_t flags,
 
     if (!is_user_ptr((uint64_t)iov->iov_base) ||
         !vmm_is_user_addr_range_valid((uint64_t)iov->iov_base, iov->iov_len)) {
+      socket_put(sock);
       return (uint64_t)-14; // EFAULT
     }
 
@@ -590,8 +636,10 @@ static uint64_t sys_recvmsg(uint64_t sockfd, uint64_t msg_ptr, uint64_t flags,
 
     if (ret < 0) {
       if (total_received > 0) {
+        socket_put(sock);
         return (uint64_t)total_received;
       }
+      socket_put(sock);
       return (uint64_t)ret;
     }
 
@@ -608,6 +656,7 @@ static uint64_t sys_recvmsg(uint64_t sockfd, uint64_t msg_ptr, uint64_t flags,
   msg->msg_controllen = 0;
   msg->msg_flags = 0;
 
+  socket_put(sock);
   return (uint64_t)total_received;
 }
 
@@ -626,12 +675,20 @@ static uint64_t sys_shutdown(uint64_t sockfd, uint64_t how, uint64_t _arg2,
   if (!sock) {
     return (uint64_t)-9; // EBADF
   }
+  if (!socket_try_get(sock))
+    return (uint64_t)-9;
+  if (sock->closing) {
+    socket_put(sock);
+    return (uint64_t)-9;
+  }
 
   if (!sock->ops || !sock->ops->shutdown) {
+    socket_put(sock);
     return (uint64_t)-95; // EOPNOTSUPP
   }
 
   int ret = sock->ops->shutdown(sock, (int)how);
+  socket_put(sock);
   return (uint64_t)ret;
 }
 
@@ -868,20 +925,30 @@ static uint64_t sys_getsockname(uint64_t sockfd, uint64_t addr_ptr,
   if (!sock) {
     return (uint64_t)-9; // EBADF
   }
+  if (!socket_try_get(sock))
+    return (uint64_t)-9;
+  if (sock->closing) {
+    socket_put(sock);
+    return (uint64_t)-9;
+  }
 
   // Validate user pointers
   if (!is_user_ptr(addr_ptr)) {
+    socket_put(sock);
     return (uint64_t)-14; // EFAULT
   }
 
   if (!is_user_ptr(addrlen_ptr)) {
+    socket_put(sock);
     return (uint64_t)-14; // EFAULT
   }
 
   int *addrlen = (int *)addrlen_ptr;
   struct sockaddr *addr = (struct sockaddr *)addr_ptr;
 
-  return (uint64_t)socket_getsockname(sock, addr, addrlen);
+  int ret = socket_getsockname(sock, addr, addrlen);
+  socket_put(sock);
+  return (uint64_t)ret;
 }
 
 // Syscall: getpeername(int sockfd, struct sockaddr *addr, ...)
@@ -899,20 +966,30 @@ static uint64_t sys_getpeername(uint64_t sockfd, uint64_t addr_ptr,
   if (!sock) {
     return (uint64_t)-9; // EBADF
   }
+  if (!socket_try_get(sock))
+    return (uint64_t)-9;
+  if (sock->closing) {
+    socket_put(sock);
+    return (uint64_t)-9;
+  }
 
   // Validate user pointers
   if (!is_user_ptr(addr_ptr)) {
+    socket_put(sock);
     return (uint64_t)-14; // EFAULT
   }
 
   if (!is_user_ptr(addrlen_ptr)) {
+    socket_put(sock);
     return (uint64_t)-14; // EFAULT
   }
 
   int *addrlen = (int *)addrlen_ptr;
   struct sockaddr *addr = (struct sockaddr *)addr_ptr;
 
-  return (uint64_t)socket_getpeername(sock, addr, addrlen);
+  int ret = socket_getpeername(sock, addr, addrlen);
+  socket_put(sock);
+  return (uint64_t)ret;
 }
 
 // Socket Syscall Registration

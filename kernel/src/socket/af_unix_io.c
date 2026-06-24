@@ -14,6 +14,33 @@ static bool unix_user_range_valid(uint64_t addr, size_t len) {
   return vmm_is_user_addr_range_valid(addr, len);
 }
 
+static socket_t *unix_get_live_peer(socket_t *sock, unix_sock_t **peer_out) {
+  if (peer_out)
+    *peer_out = NULL;
+  if (!sock || !peer_out)
+    return NULL;
+
+  spinlock_acquire(&sock->lock);
+  unix_sock_t *usk = (unix_sock_t *)sock->sk;
+  unix_sock_t *peer = usk ? usk->peer : NULL;
+  socket_t *peer_sock = peer ? peer->parent : NULL;
+
+  if (!peer_sock || !socket_try_get(peer_sock)) {
+    spinlock_release(&sock->lock);
+    return NULL;
+  }
+
+  if (peer_sock->closing || !peer_sock->sk) {
+    spinlock_release(&sock->lock);
+    socket_put(peer_sock);
+    return NULL;
+  }
+
+  *peer_out = (unix_sock_t *)peer_sock->sk;
+  spinlock_release(&sock->lock);
+  return peer_sock;
+}
+
 ssize_t unix_send_impl(socket_t *sock, const void *buf, size_t len, int flags) {
   (void)flags;
   if (!sock || !sock->sk)
@@ -21,11 +48,16 @@ ssize_t unix_send_impl(socket_t *sock, const void *buf, size_t len, int flags) {
 
   unix_sock_t *usk = (unix_sock_t *)sock->sk;
 
+  if (sock->closing)
+    return -32; // EPIPE
+
   if (sock->state != SS_CONNECTED && sock->state != SS_CONNECTING)
     return -107; // ENOTCONN
 
   // If still CONNECTING, block until peer is set by accept()
   while (usk->peer == NULL && sock->state == SS_CONNECTING) {
+    if (sock->closing)
+      return -32; // EPIPE
     if (usk->listener == NULL || usk->orphaned)
       return -107; // ENOTCONN
 
@@ -45,14 +77,18 @@ ssize_t unix_send_impl(socket_t *sock, const void *buf, size_t len, int flags) {
     current->state = THREAD_RUNNING;
   }
 
-  unix_sock_t *peer = usk->peer;
-  if (!peer)
+  unix_sock_t *peer = NULL;
+  socket_t *peer_sock = unix_get_live_peer(sock, &peer);
+  if (!peer_sock || !peer)
     return -107; // ENOTCONN
 
   size_t sent = 0;
   const uint8_t *src = (const uint8_t *)buf;
 
   while (sent < len) {
+    if (sock->closing || peer_sock->closing)
+      break;
+
     spinlock_acquire(&peer->recv_lock);
 
     size_t head  = peer->recv_buf_head;
@@ -66,8 +102,10 @@ ssize_t unix_send_impl(socket_t *sock, const void *buf, size_t len, int flags) {
       if (sent > 0)
         break; // Return what we've sent so far
 
-      if ((sock->flags & SOCK_NONBLOCK) || (flags & 0x40)) // MSG_DONTWAIT
+      if ((sock->flags & SOCK_NONBLOCK) || (flags & 0x40)) { // MSG_DONTWAIT
+        socket_put(peer_sock);
         return -11; // EAGAIN
+      }
 
       struct thread *current = sched_get_current();
       wait_queue_entry_t entry = {.thread = current, .next = NULL};
@@ -80,18 +118,24 @@ ssize_t unix_send_impl(socket_t *sock, const void *buf, size_t len, int flags) {
 
       if (space > 0) {
         current->state = THREAD_RUNNING;
-        spinlock_release(&peer->recv_lock);
       } else {
         spinlock_release(&peer->recv_lock);
         sched_yield();
-        spinlock_acquire(&peer->recv_lock);
       }
 
       wait_queue_remove(peer->wait, &entry);
       current->state = THREAD_RUNNING;
 
-      if (sock->error)
-        return -sock->error;
+      if (sock->closing || peer_sock->closing) {
+        socket_put(peer_sock);
+        return -32; // EPIPE
+      }
+
+      if (sock->error) {
+        int err = sock->error;
+        socket_put(peer_sock);
+        return -err;
+      }
       continue;
     }
 
@@ -124,6 +168,10 @@ ssize_t unix_send_impl(socket_t *sock, const void *buf, size_t len, int flags) {
     }
   }
 
+  bool closed = sock->closing || peer_sock->closing;
+  socket_put(peer_sock);
+  if (sent == 0 && closed)
+    return -32; // EPIPE
   return (ssize_t)sent;
 }
 
@@ -132,6 +180,9 @@ ssize_t unix_recv_impl(socket_t *sock, void *buf, size_t len, int flags) {
     return -9; // EBADF
 
   unix_sock_t *usk = (unix_sock_t *)sock->sk;
+
+  if (sock->closing && usk->recv_buf_head == usk->recv_buf_tail)
+    return 0; // EOF
 
   if (sock->state != SS_CONNECTED &&
       usk->recv_buf_head == usk->recv_buf_tail) {
@@ -155,6 +206,9 @@ ssize_t unix_recv_impl(socket_t *sock, void *buf, size_t len, int flags) {
       if (received > 0)
         break;
 
+      if (sock->closing)
+        return 0; // EOF
+
       if (sock->state != SS_CONNECTED) {
         usk->accepted_orphaned = false;
         return 0; // EOF
@@ -176,15 +230,15 @@ ssize_t unix_recv_impl(socket_t *sock, void *buf, size_t len, int flags) {
 
       if (available > 0 || sock->state != SS_CONNECTED) {
         current->state = THREAD_RUNNING;
-        spinlock_release(&usk->recv_lock);
       } else {
-        spinlock_release(&usk->recv_lock);
         sched_yield();
-        spinlock_acquire(&usk->recv_lock);
       }
 
       wait_queue_remove(usk->wait, &entry);
       current->state = THREAD_RUNNING;
+
+      if (sock->closing)
+        return 0; // EOF
 
       if (sock->error)
         return -sock->error;
@@ -208,8 +262,13 @@ ssize_t unix_recv_impl(socket_t *sock, void *buf, size_t len, int flags) {
 
   wait_queue_wake_all(usk->wait);
 
-  if (usk->peer && usk->peer->parent && usk->peer->parent->node)
-    epoll_notify_event(usk->peer->parent->node, EPOLLOUT | EPOLLWRNORM);
+  unix_sock_t *notify_peer = NULL;
+  socket_t *notify_peer_sock = unix_get_live_peer(sock, &notify_peer);
+  if (notify_peer_sock) {
+    if (notify_peer_sock->node)
+      epoll_notify_event(notify_peer_sock->node, EPOLLOUT | EPOLLWRNORM);
+    socket_put(notify_peer_sock);
+  }
 
   return (ssize_t)received;
 }
@@ -228,12 +287,13 @@ ssize_t unix_recvfrom_impl(socket_t *sock, void *buf, size_t len, int flags,
                            struct sockaddr *src_addr, int *addrlen) {
   ssize_t ret = unix_recv_impl(sock, buf, len, flags);
   if (ret >= 0 && src_addr && addrlen) {
-    unix_sock_t *usk = (unix_sock_t *)sock->sk;
-    if (usk->peer) {
-      int to_copy =
-          (usk->peer->addr_len < *addrlen) ? usk->peer->addr_len : *addrlen;
-      memcpy(src_addr, &usk->peer->addr, to_copy);
+    unix_sock_t *peer = NULL;
+    socket_t *peer_sock = unix_get_live_peer(sock, &peer);
+    if (peer_sock && peer) {
+      int to_copy = peer->addr_len < *addrlen ? peer->addr_len : *addrlen;
+      memcpy(src_addr, &peer->addr, to_copy);
       *addrlen = to_copy;
+      socket_put(peer_sock);
     } else {
       *addrlen = 0;
     }
@@ -247,15 +307,13 @@ ssize_t unix_sendmsg_impl(socket_t *sock, struct msghdr *msg, int flags) {
   unix_sock_t *usk = (unix_sock_t *)sock->sk;
   if (!usk)
     return -22;
+  if (sock->closing)
+    return -32; // EPIPE
 
-  spinlock_acquire(&sock->lock);
-  unix_sock_t *peer = usk->peer;
-  if (!peer) {
-    spinlock_release(&sock->lock);
+  unix_sock_t *peer = NULL;
+  socket_t *peer_sock = unix_get_live_peer(sock, &peer);
+  if (!peer_sock || !peer)
     return -107; // ENOTCONN
-  }
-  socket_get(peer->parent);
-  spinlock_release(&sock->lock);
 
   struct thread *current = sched_get_current();
 
@@ -287,7 +345,7 @@ ssize_t unix_sendmsg_impl(socket_t *sock, struct msghdr *msg, int flags) {
       spinlock_release(&peer->recv_lock);
 
       if ((sock->flags & SOCK_NONBLOCK) || (flags & 0x40)) {
-        socket_put(peer->parent);
+        socket_put(peer_sock);
         return -11; // EAGAIN
       }
 
@@ -299,6 +357,11 @@ ssize_t unix_sendmsg_impl(socket_t *sock, struct msghdr *msg, int flags) {
       wait_queue_remove(peer->wait, &entry);
       ct->state = THREAD_RUNNING;
 
+      if (sock->closing || peer_sock->closing) {
+        socket_put(peer_sock);
+        return -32; // EPIPE
+      }
+
       spinlock_acquire(&peer->recv_lock);
       continue;
     }
@@ -306,7 +369,7 @@ ssize_t unix_sendmsg_impl(socket_t *sock, struct msghdr *msg, int flags) {
   }
 
   // Deliver SCM_RIGHTS nodes atomically (lock order: recv_lock → parent->lock)
-  spinlock_acquire(&peer->parent->lock);
+  spinlock_acquire(&peer_sock->lock);
 
   struct cmsghdr *cmsg = CMSG_FIRSTHDR(msg);
   while (cmsg) {
@@ -338,7 +401,7 @@ ssize_t unix_sendmsg_impl(socket_t *sock, struct msghdr *msg, int flags) {
     cmsg = CMSG_NXTHDR(msg, cmsg);
   }
 
-  spinlock_release(&peer->parent->lock);
+  spinlock_release(&peer_sock->lock);
 
   // Write iovec data into peer's ring buffer
   ssize_t total_sent = 0;
@@ -387,7 +450,7 @@ ssize_t unix_sendmsg_impl(socket_t *sock, struct msghdr *msg, int flags) {
       epoll_notify_socket(peer->parent->fd, EPOLLIN);
   }
 
-  socket_put(peer->parent);
+  socket_put(peer_sock);
   return total_sent;
 }
 
@@ -397,6 +460,8 @@ ssize_t unix_recvmsg_impl(socket_t *sock, struct msghdr *msg, int flags) {
   unix_sock_t *usk = (unix_sock_t *)sock->sk;
   if (!usk)
     return -22;
+  if (sock->closing)
+    goto no_data;
 
   struct thread *current = sched_get_current();
 
@@ -414,7 +479,7 @@ ssize_t unix_recvmsg_impl(socket_t *sock, struct msghdr *msg, int flags) {
 
     spinlock_release(&usk->recv_lock);
 
-    if (sock->state != SS_CONNECTED)
+    if (sock->closing || sock->state != SS_CONNECTED)
       goto no_data;
 
     if ((sock->flags & SOCK_NONBLOCK) || (flags & 0x40))
@@ -427,6 +492,9 @@ ssize_t unix_recvmsg_impl(socket_t *sock, struct msghdr *msg, int flags) {
     sched_yield();
     wait_queue_remove(usk->wait, &entry);
     ct->state = THREAD_RUNNING;
+
+    if (sock->closing)
+      goto no_data;
 
     if (sock->error)
       return -(int)sock->error;
@@ -525,8 +593,14 @@ ssize_t unix_recvmsg_impl(socket_t *sock, struct msghdr *msg, int flags) {
   spinlock_release(&usk->recv_lock);
 
   wait_queue_wake_all(usk->wait);
-  if (usk->peer && usk->peer->parent && usk->peer->parent->node)
-    epoll_notify_event(usk->peer->parent->node, EPOLLOUT | EPOLLWRNORM);
+
+  unix_sock_t *notify_peer = NULL;
+  socket_t *notify_peer_sock = unix_get_live_peer(sock, &notify_peer);
+  if (notify_peer_sock) {
+    if (notify_peer_sock->node)
+      epoll_notify_event(notify_peer_sock->node, EPOLLOUT | EPOLLWRNORM);
+    socket_put(notify_peer_sock);
+  }
 
   msg->msg_flags &= ~MSG_TRUNC;
   return total_received;

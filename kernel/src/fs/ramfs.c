@@ -2,8 +2,38 @@
 #include "../console/klog.h"
 #include "../lib/string.h"
 #include "../mm/heap.h"
+#include "../mm/pmm.h"
 
 static uint32_t next_inode = 1;
+
+void ramfs_free_file_data(ramfs_file_t *file) {
+  if (!file || !file->data)
+    return;
+
+  if (file->data_is_pmm) {
+    uint64_t hhdm = pmm_get_hhdm_offset();
+    size_t pages = (file->capacity + 4095) / 4096;
+    klog_puts("[RAMFS] free PMM-backed data ptr=");
+    klog_hex64((uint64_t)file->data);
+    klog_puts(" capacity=");
+    klog_uint64(file->capacity);
+    klog_puts(" pages=");
+    klog_uint64(pages);
+    klog_puts("\n");
+    pmm_free_pages((void *)((uint64_t)file->data - hhdm), pages);
+  } else {
+    klog_puts("[RAMFS] free heap-backed data ptr=");
+    klog_hex64((uint64_t)file->data);
+    klog_puts(" capacity=");
+    klog_uint64(file->capacity);
+    klog_puts("\n");
+    kfree(file->data);
+  }
+
+  file->data = NULL;
+  file->capacity = 0;
+  file->data_is_pmm = 0;
+}
 
 static int ramfs_chmod(vfs_node_t *node, uint16_t permission);
 static int ramfs_chown(vfs_node_t *node, uint32_t uid, uint32_t gid);
@@ -46,10 +76,11 @@ uint32_t ramfs_write(vfs_node_t *node, uint32_t offset, uint32_t size,
 
     if (file->data) {
       memcpy(new_data, file->data, file->capacity);
-      kfree(file->data);
+      ramfs_free_file_data(file);
     }
     file->data = new_data;
     file->capacity = new_cap;
+    file->data_is_pmm = 0;
   }
 
   memcpy(file->data + offset, buffer, size);
@@ -67,9 +98,7 @@ int ramfs_truncate(vfs_node_t *node, uint32_t new_len) {
   ramfs_file_t *file = (ramfs_file_t *)node->device;
   if (new_len == 0) {
     if (file->data) {
-      kfree(file->data);
-      file->data = NULL;
-      file->capacity = 0;
+      ramfs_free_file_data(file);
     }
     node->length = 0;
     return 0;
@@ -82,12 +111,13 @@ int ramfs_truncate(vfs_node_t *node, uint32_t new_len) {
       return -1; // ENOMEM
     if (file->data) {
       memcpy(new_data, file->data, file->capacity);
-      kfree(file->data);
+      ramfs_free_file_data(file);
     }
     if (new_len > node->length)
       memset(new_data + node->length, 0, new_len - node->length);
     file->data = new_data;
     file->capacity = new_cap;
+    file->data_is_pmm = 0;
   } else if (new_len > node->length) {
     memset(file->data + node->length, 0, new_len - node->length);
   }
@@ -103,19 +133,38 @@ int ramfs_fallocate(vfs_node_t *node, int mode, uint32_t offset, uint32_t len) {
   ramfs_file_t *file = (ramfs_file_t *)node->device;
   uint32_t needed = offset + len;
 
+  klog_puts("[RAMFS] fallocate node=");
+  klog_puts(node->name);
+  klog_puts(" mode=");
+  klog_uint64(mode);
+  klog_puts(" offset=");
+  klog_uint64(offset);
+  klog_puts(" len=");
+  klog_uint64(len);
+  klog_puts(" old_len=");
+  klog_uint64(node->length);
+  klog_puts(" old_cap=");
+  klog_uint64(file->capacity);
+  klog_puts(" old_pmm=");
+  klog_uint64(file->data_is_pmm);
+  klog_puts(" needed=");
+  klog_uint64(needed);
+  klog_puts("\n");
+
   if (needed > file->capacity) {
     uint8_t *new_data = kmalloc(needed);
     if (!new_data)
       return -1;
     if (file->data) {
       memcpy(new_data, file->data, node->length);
-      kfree(file->data);
+      ramfs_free_file_data(file);
     }
     // Zero initialize new capacity range
     if (needed > node->length)
       memset(new_data + node->length, 0, needed - node->length);
     file->data = new_data;
     file->capacity = needed;
+    file->data_is_pmm = 0;
   }
 
   // mode 1 is FALLOC_FL_KEEP_SIZE
@@ -223,6 +272,7 @@ static vfs_node_t *ramfs_make_node(char *name, uint16_t perm, uint32_t type) {
     ramfs_file_t *f = kmalloc(sizeof(ramfs_file_t));
     f->data = 0;
     f->capacity = 0;
+    f->data_is_pmm = 0;
     n->device = f;
     n->read = ramfs_read;
     n->write = ramfs_write;
@@ -341,8 +391,7 @@ static int ramfs_unlink(vfs_node_t *node, char *name) {
       // Free the file data if it's a ramfs file
       if (curr->node->device && (curr->node->flags & FS_TYPE_MASK) == FS_FILE) {
         ramfs_file_t *file = (ramfs_file_t *)curr->node->device;
-        if (file->data)
-          kfree(file->data);
+        ramfs_free_file_data(file);
         kfree(file);
       }
       kfree(curr->node);

@@ -26,6 +26,7 @@ extern spinlock_t       unix_bound_lock;
 
 // af_unix_addr.c
 unix_sock_t *unix_find_socket_by_addr(struct sockaddr_un *addr, int addrlen);
+unix_sock_t *unix_find_socket_by_addr_ref(struct sockaddr_un *addr, int addrlen);
 
 // af_unix_bind.c  (unix_bind is the public ops entry — kept static there)
 

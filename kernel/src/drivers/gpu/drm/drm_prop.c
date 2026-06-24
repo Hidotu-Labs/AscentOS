@@ -135,6 +135,18 @@ int drm_ioctl_obj_getprops(struct drm_device *dev, uint64_t arg) {
   struct drm_mode_obj_get_properties *req =
       (struct drm_mode_obj_get_properties *)arg;
 
+  klog_puts("[DRM] OBJ_GETPROPS obj=");
+  klog_uint64(req->obj_id);
+  klog_puts(" type_in=0x");
+  klog_hex32(req->obj_type);
+  klog_puts(" count_in=");
+  klog_uint64(req->count_props);
+  klog_puts(" props_ptr=0x");
+  klog_hex64(req->props_ptr);
+  klog_puts(" vals_ptr=0x");
+  klog_hex64(req->prop_values_ptr);
+  klog_puts("\n");
+
   spinlock_acquire(&dev->lock);
   struct drm_mode_object *mobj = NULL;
   struct drm_mode_object *iter;
@@ -145,6 +157,9 @@ int drm_ioctl_obj_getprops(struct drm_device *dev, uint64_t arg) {
     }
   }
   if (!mobj) {
+    klog_puts("[DRM] OBJ_GETPROPS missing obj=");
+    klog_uint64(req->obj_id);
+    klog_puts("\n");
     spinlock_release(&dev->lock);
     return -2;
   } /* ENOENT */
@@ -159,6 +174,13 @@ int drm_ioctl_obj_getprops(struct drm_device *dev, uint64_t arg) {
     }
   }
   req->count_props = count;
+  klog_puts("[DRM] OBJ_GETPROPS out obj=");
+  klog_uint64(req->obj_id);
+  klog_puts(" type=0x");
+  klog_hex32(mobj->type);
+  klog_puts(" count=");
+  klog_uint64(count);
+  klog_puts("\n");
   spinlock_release(&dev->lock);
   return 0;
 }
@@ -177,6 +199,18 @@ int drm_ioctl_getproperty(struct drm_device *dev, uint64_t arg) {
     uint32_t count_enum_blobs;
   } *p = (void *)arg;
 
+  klog_puts("[DRM] GETPROPERTY id=");
+  klog_uint64(p->prop_id);
+  klog_puts(" values_ptr=0x");
+  klog_hex64(p->values_ptr);
+  klog_puts(" enum_ptr=0x");
+  klog_hex64(p->enum_blob_ptr);
+  klog_puts(" count_values_in=");
+  klog_uint64(p->count_values);
+  klog_puts(" count_enum_in=");
+  klog_uint64(p->count_enum_blobs);
+  klog_puts("\n");
+
   const struct drm_property_def *def = drm_prop_find_def(p->prop_id);
   if (!def) {
     /* Unknown property — return a harmless stub so userland doesn't crash */
@@ -184,6 +218,9 @@ int drm_ioctl_getproperty(struct drm_device *dev, uint64_t arg) {
     p->count_values = 0;
     p->count_enum_blobs = 0;
     strncpy(p->name, "Unknown", 32);
+    klog_puts("[DRM] GETPROPERTY unknown id=");
+    klog_uint64(p->prop_id);
+    klog_puts("\n");
     return 0;
   }
 
@@ -222,6 +259,17 @@ int drm_ioctl_getproperty(struct drm_device *dev, uint64_t arg) {
   } else {
     p->count_values = 0;
   }
+  klog_puts("[DRM] GETPROPERTY out id=");
+  klog_uint64(p->prop_id);
+  klog_puts(" name=");
+  klog_puts(p->name);
+  klog_puts(" flags=0x");
+  klog_hex32(p->flags);
+  klog_puts(" values=");
+  klog_uint64(p->count_values);
+  klog_puts(" enums=");
+  klog_uint64(p->count_enum_blobs);
+  klog_puts("\n");
   return 0;
 }
 

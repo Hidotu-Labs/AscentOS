@@ -494,7 +494,7 @@ static void pipe_close(vfs_node_t *node) {
     spinlock_acquire(&ctx->lock);
     wait_queue_wake_all(&ctx->wq);
     spinlock_release(&ctx->lock);
-    if (ctx->ramfs.data) kfree(ctx->ramfs.data);
+    ramfs_free_file_data(&ctx->ramfs);
     kfree(ctx);
     node->device = NULL;
 }
@@ -674,19 +674,35 @@ static uint64_t memfd_mmap(vfs_node_t *node, uint64_t addr, uint64_t length,
         if (new_cap < 4096) new_cap = 4096;
         new_cap = (new_cap + 0xFFF) & ~0xFFFU;
 
+        uint32_t old_cap = file->capacity;
+        uint8_t old_is_pmm = file->data_is_pmm;
         void *phys = pmm_alloc_pages(new_cap / PAGE_SIZE);
         if (!phys) return (uint64_t)-12;
         uint8_t *new_data = (uint8_t *)((uint64_t)phys + hhdm);
         memset(new_data, 0, new_cap);
         if (file->data && node->length > 0) {
             memcpy(new_data, file->data, node->length);
-            kfree(file->data);
+            ramfs_free_file_data(file);
         }
+        klog_puts("[MEMFD_MMAP] backing -> PMM ptr=");
+        klog_hex64((uint64_t)new_data);
+        klog_puts(" old_cap=");
+        klog_uint64(old_cap);
+        klog_puts(" old_pmm=");
+        klog_uint64(old_is_pmm);
+        klog_puts(" new_cap=");
+        klog_uint64(new_cap);
+        klog_puts(" needed=");
+        klog_uint64(needed);
+        klog_puts("\n");
         file->data     = new_data;
         file->capacity = new_cap;
+        file->data_is_pmm = 1;
     }
 
     if ((uint64_t)file->data & 0xFFF) {
+        uint32_t old_cap = file->capacity;
+        uint8_t old_is_pmm = file->data_is_pmm;
         uint32_t new_cap = (file->capacity + 0xFFF) & ~0xFFFU;
         if (new_cap < 4096) new_cap = 4096;
         void *phys = pmm_alloc_pages(new_cap / PAGE_SIZE);
@@ -696,10 +712,22 @@ static uint64_t memfd_mmap(vfs_node_t *node, uint64_t addr, uint64_t length,
         if (file->data && node->length > 0) {
             uint32_t copy_len = node->length < file->capacity ? node->length : file->capacity;
             memcpy(new_data, file->data, copy_len);
-            kfree(file->data);
+            ramfs_free_file_data(file);
         }
+        klog_puts("[MEMFD_MMAP] backing -> PMM ptr=");
+        klog_hex64((uint64_t)new_data);
+        klog_puts(" old_cap=");
+        klog_uint64(old_cap);
+        klog_puts(" old_pmm=");
+        klog_uint64(old_is_pmm);
+        klog_puts(" new_cap=");
+        klog_uint64(new_cap);
+        klog_puts(" needed=");
+        klog_uint64(needed);
+        klog_puts("\n");
         file->data     = new_data;
         file->capacity = new_cap;
+        file->data_is_pmm = 1;
     }
 
     if ((uint32_t)needed > node->length) node->length = (uint32_t)needed;
@@ -760,6 +788,7 @@ static uint64_t sys_memfd_create(uint64_t name_ptr, uint64_t flags_arg,
     if (!rfile) { kfree(node); return (uint64_t)-12; }
     rfile->data     = NULL;
     rfile->capacity = 0;
+    rfile->data_is_pmm = 0;
 
     node->device    = rfile;
     node->read      = ramfs_read;

@@ -47,7 +47,8 @@ extern int drm_prime_export(struct drm_gem_object *obj);
 extern struct drm_gem_object *drm_prime_import(int prime_fd);
 
 /* drm_fb.c */
-extern int drm_ioctl_addfb2(struct drm_device *dev, uint64_t arg);
+extern int drm_ioctl_addfb2(struct drm_file *file, struct drm_device *dev,
+                            uint64_t arg);
 
 /* ── Helper: get drm_file from node->device ──────────────────────────────── */
 /*
@@ -238,22 +239,22 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
       cap->value = 1;
       break;
     case DRM_CAP_ASYNC_PAGE_FLIP:
-      cap->value = 1;
+      cap->value = 0;
       break;
     case 0x12:
       cap->value = 1;
       break; /* CRTC_IN_VBLANK_EVENT */
     case 0x13:
-      cap->value = 1;
-      break; /* SYNCOBJ */
+      cap->value = 0;
+      break; /* SYNCOBJ not implemented */
     case 0x14:
-      cap->value = 1;
-      break; /* SYNCOBJ_TIMELINE */
+      cap->value = 0;
+      break; /* SYNCOBJ_TIMELINE not implemented */
     case 0x15:
-      cap->value = 1;
-      break; /* DRM_CAP_PAGE_FLIP_TARGET (stub) */
+      cap->value = 0;
+      break; /* DRM_CAP_PAGE_FLIP_TARGET not implemented */
     case DRM_CAP_ADDFB2_MODIFIERS:
-      cap->value = 1;
+      cap->value = 0;
       break;
     case DRM_CAP_CURSOR_WIDTH:
       cap->value = 64;
@@ -262,7 +263,7 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
       cap->value = 64;
       break;
     case DRM_CAP_ATOMIC:
-      cap->value = 1;
+      cap->value = 0;
       break;
     case 0x11:
       cap->value = 0;
@@ -283,11 +284,14 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     klog_puts(" val=");
     klog_uint64(cap->value);
     klog_puts("\n");
-    if (cap->capability == DRM_CLIENT_CAP_UNIVERSAL_PLANES && cap->value)
+    if (!cap->value)
+      return 0;
+    if (cap->capability == DRM_CLIENT_CAP_UNIVERSAL_PLANES) {
       file->client_caps |= (1 << 1);
-    else if (cap->capability == DRM_CLIENT_CAP_ATOMIC && cap->value)
-      file->client_caps |= (1 << 2);
-    return 0;
+      return 0;
+    }
+    klog_puts("[DRM] SET_CLIENT_CAP unsupported\n");
+    return -95; /* EOPNOTSUPP */
   }
   case DRM_IOCTL_SET_MASTER:
     file->is_master = 1;
@@ -322,6 +326,13 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
       return -12;
     }
     c->handle = local_h;
+    klog_puts("[DRM] GEM_CREATE size=");
+    klog_uint64(c->size);
+    klog_puts(" handle=");
+    klog_uint64(c->handle);
+    klog_puts(" phys=0x");
+    klog_hex64(obj->phys_addr);
+    klog_puts("\n");
     return 0;
   }
   case DRM_IOCTL_GEM_FREE: {
@@ -333,6 +344,15 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
   /* ── Dumb buffers (use per-client handle table) ───────────────────── */
   case DRM_IOCTL_MODE_CREATE_DUMB: {
     struct drm_mode_create_dumb *c = (struct drm_mode_create_dumb *)arg;
+    klog_puts("[DRM] CREATE_DUMB in width=");
+    klog_uint64(c->width);
+    klog_puts(" height=");
+    klog_uint64(c->height);
+    klog_puts(" bpp=");
+    klog_uint64(c->bpp);
+    klog_puts(" flags=0x");
+    klog_hex32(c->flags);
+    klog_puts("\n");
     c->pitch = (c->width * (c->bpp / 8) + 63) & ~63;
     c->size = (uint64_t)c->pitch * c->height;
     struct drm_gem_object *obj = drm_gem_object_create(dev, c->size);
@@ -344,14 +364,33 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
       return -12;
     }
     c->handle = local_h;
+    klog_puts("[DRM] CREATE_DUMB out handle=");
+    klog_uint64(c->handle);
+    klog_puts(" pitch=");
+    klog_uint64(c->pitch);
+    klog_puts(" size=");
+    klog_uint64(c->size);
+    klog_puts(" gem_phys=0x");
+    klog_hex64(obj->phys_addr);
+    klog_puts(" gem_virt=0x");
+    klog_hex64((uint64_t)obj->virt_addr);
+    klog_puts("\n");
     return 0;
   }
   case DRM_IOCTL_MODE_MAP_DUMB: {
     struct drm_mode_map_dumb *m = (struct drm_mode_map_dumb *)arg;
+    klog_puts("[DRM] MAP_DUMB handle=");
+    klog_uint64(m->handle);
+    klog_puts("\n");
     struct drm_gem_object *obj = drm_file_gem_lookup(file, m->handle);
     if (!obj)
       return -2; /* ENOENT */
     m->offset = obj->phys_addr | 0x1000000000000000ULL;
+    klog_puts("[DRM] MAP_DUMB out offset=0x");
+    klog_hex64(m->offset);
+    klog_puts(" size=");
+    klog_uint64(obj->size);
+    klog_puts("\n");
     return 0;
   }
   case DRM_IOCTL_MODE_DESTROY_DUMB: {
@@ -428,6 +467,11 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
       }
     }
     spinlock_release(&dev->lock);
+    klog_puts("[DRM] GETPLANERESOURCES count=");
+    klog_uint64(planes);
+    klog_puts(" ptr=0x");
+    klog_hex64(res->plane_id_ptr);
+    klog_puts("\n");
     res->count_planes = planes;
     return 0;
   }
@@ -437,6 +481,13 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
           count_formats;
       uint64_t format_type_ptr;
     } *p = (void *)arg;
+    klog_puts("[DRM] GETPLANE id=");
+    klog_uint64(p->plane_id);
+    klog_puts(" format_ptr=0x");
+    klog_hex64(p->format_type_ptr);
+    klog_puts(" count_in=");
+    klog_uint64(p->count_formats);
+    klog_puts("\n");
     spinlock_acquire(&dev->lock);
     struct drm_mode_object *mobj = drm_mode_object_find(dev, p->plane_id);
     if (!mobj || mobj->type != DRM_MODE_OBJECT_PLANE) {
@@ -451,6 +502,13 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     p->count_formats = 1;
     if (p->format_type_ptr)
       ((uint32_t *)p->format_type_ptr)[0] = 0x34325258;
+    klog_puts("[DRM] GETPLANE out id=");
+    klog_uint64(p->plane_id);
+    klog_puts(" possible_crtcs=0x");
+    klog_hex32(p->possible_crtcs);
+    klog_puts(" formats=");
+    klog_uint64(p->count_formats);
+    klog_puts("\n");
     spinlock_release(&dev->lock);
     return 0;
   }
@@ -565,6 +623,23 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
       if (c->encoders_ptr)
         ((uint32_t *)c->encoders_ptr)[0] = conn->encoder->base.id;
     }
+    klog_puts("[DRM] GETCONNECTOR out id=");
+    klog_uint64(c->connector_id);
+    klog_puts(" conn=");
+    klog_uint64(c->connection);
+    klog_puts(" enc=");
+    klog_uint64(c->encoder_id);
+    klog_puts(" modes=");
+    klog_uint64(c->count_modes);
+    klog_puts(" props=");
+    klog_uint64(c->count_props);
+    klog_puts(" encoders=");
+    klog_uint64(c->count_encoders);
+    klog_puts(" modes_ptr=0x");
+    klog_hex64(c->modes_ptr);
+    klog_puts(" props_ptr=0x");
+    klog_hex64(c->props_ptr);
+    klog_puts("\n");
     spinlock_release(&dev->lock);
     return 0;
   }
@@ -572,18 +647,42 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
   /* ── Framebuffer management ──────────────────────────────────────── */
   case DRM_IOCTL_MODE_ADDFB: {
     struct drm_mode_fb_cmd *cmd = (struct drm_mode_fb_cmd *)arg;
+    klog_puts("[DRM] ADDFB in handle=");
+    klog_uint64(cmd->handle);
+    klog_puts(" width=");
+    klog_uint64(cmd->width);
+    klog_puts(" height=");
+    klog_uint64(cmd->height);
+    klog_puts(" pitch=");
+    klog_uint64(cmd->pitch);
+    klog_puts(" bpp=");
+    klog_uint64(cmd->bpp);
+    klog_puts(" depth=");
+    klog_uint64(cmd->depth);
+    klog_puts("\n");
     /* Resolve local handle → global gem object */
     struct drm_gem_object *gem = drm_file_gem_lookup(file, cmd->handle);
-    if (!gem)
+    if (!gem) {
+      klog_puts("[DRM] ADDFB missing GEM handle=");
+      klog_uint64(cmd->handle);
+      klog_puts("\n");
       return -2; /* ENOENT */
+    }
     /* Temporarily patch handle to global for drm_framebuffer_create */
     uint32_t saved = cmd->handle;
     cmd->handle = gem->handle;
     struct drm_framebuffer *fb = drm_framebuffer_create(dev, cmd);
     cmd->handle = saved;
-    if (!fb)
+    if (!fb) {
+      klog_puts("[DRM] ADDFB framebuffer create failed\n");
       return -1;
+    }
     cmd->fb_id = fb->base.id;
+    klog_puts("[DRM] ADDFB out fb_id=");
+    klog_uint64(cmd->fb_id);
+    klog_puts(" gem_phys=0x");
+    klog_hex64(gem->phys_addr);
+    klog_puts("\n");
     return 0;
   }
   case DRM_IOCTL_MODE_RMFB: {
@@ -600,19 +699,35 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
   }
   case DRM_IOCTL_MODE_ADDFB2:
     /* Full multi-planar path — resolves handles via global gem list */
-    return drm_ioctl_addfb2(dev, arg);
+    return drm_ioctl_addfb2(file, dev, arg);
 
   /* ── Legacy modesetting ──────────────────────────────────────────── */
   case DRM_IOCTL_MODE_SETCRTC: {
     struct drm_mode_crtc *crtc_cmd = (struct drm_mode_crtc *)arg;
+    klog_puts("[DRM] SETCRTC crtc=");
+    klog_uint64(crtc_cmd->crtc_id);
+    klog_puts(" fb=");
+    klog_uint64(crtc_cmd->fb_id);
+    klog_puts(" connectors=");
+    klog_uint64(crtc_cmd->count_connectors);
+    klog_puts(" mode_valid=");
+    klog_uint64(crtc_cmd->mode_valid);
+    klog_puts(" mode=");
+    klog_uint64(crtc_cmd->mode.hdisplay);
+    klog_puts("x");
+    klog_uint64(crtc_cmd->mode.vdisplay);
+    klog_puts("\n");
     spinlock_acquire(&dev->lock);
     struct drm_mode_object *crtc_obj =
         drm_mode_object_find(dev, crtc_cmd->crtc_id);
     struct drm_mode_object *fb_obj = drm_mode_object_find(dev, crtc_cmd->fb_id);
     if (!crtc_obj || crtc_obj->type != DRM_MODE_OBJECT_CRTC) {
+      klog_puts("[DRM] SETCRTC bad crtc id\n");
       spinlock_release(&dev->lock);
       return -1;
     }
+    if (crtc_cmd->fb_id && (!fb_obj || fb_obj->type != DRM_MODE_OBJECT_FB))
+      klog_puts("[DRM] SETCRTC warning: fb id not found\n");
     struct drm_crtc *crtc = (struct drm_crtc *)crtc_obj;
     if (fb_obj && fb_obj->type == DRM_MODE_OBJECT_FB)
       crtc->fb = (struct drm_framebuffer *)fb_obj;
@@ -623,11 +738,21 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
   case DRM_IOCTL_MODE_PAGE_FLIP: {
     struct drm_mode_crtc_page_flip *flip =
         (struct drm_mode_crtc_page_flip *)arg;
+    klog_puts("[DRM] PAGE_FLIP crtc=");
+    klog_uint64(flip->crtc_id);
+    klog_puts(" fb=");
+    klog_uint64(flip->fb_id);
+    klog_puts(" flags=0x");
+    klog_hex32(flip->flags);
+    klog_puts(" user_data=0x");
+    klog_hex64(flip->user_data);
+    klog_puts("\n");
     spinlock_acquire(&dev->lock);
     struct drm_mode_object *crtc_obj = drm_mode_object_find(dev, flip->crtc_id);
     struct drm_mode_object *fb_obj = drm_mode_object_find(dev, flip->fb_id);
     if (!crtc_obj || crtc_obj->type != DRM_MODE_OBJECT_CRTC || !fb_obj ||
         fb_obj->type != DRM_MODE_OBJECT_FB) {
+      klog_puts("[DRM] PAGE_FLIP rejected: bad crtc or fb\n");
       spinlock_release(&dev->lock);
       return -1;
     }

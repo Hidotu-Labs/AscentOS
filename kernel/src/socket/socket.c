@@ -223,6 +223,7 @@ socket_t *socket_create(int domain, int type, int protocol) {
   sock->peer = NULL;
   sock->wait_queue = NULL;
   sock->refcount = 1;
+  sock->closing = false;
   spinlock_init(&sock->lock);
 
   // Allocate socket table slot
@@ -300,6 +301,20 @@ void socket_get(socket_t *sock) {
   if (!sock)
     return;
   __atomic_fetch_add(&sock->refcount, 1, __ATOMIC_ACQ_REL);
+}
+
+bool socket_try_get(socket_t *sock) {
+  if (!sock)
+    return false;
+
+  uint64_t refs = __atomic_load_n(&sock->refcount, __ATOMIC_ACQUIRE);
+  while (refs != 0) {
+    if (__atomic_compare_exchange_n(&sock->refcount, &refs, refs + 1, false,
+                                    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+      return true;
+  }
+
+  return false;
 }
 
 void socket_put(socket_t *sock) {
@@ -555,7 +570,15 @@ uint32_t socket_vfs_read(struct vfs_node *node, uint32_t offset, uint32_t size,
   if (!sock)
     return 0;
 
+  if (!socket_try_get(sock))
+    return 0;
+  if (sock->closing) {
+    socket_put(sock);
+    return 0;
+  }
+
   ssize_t ret = socket_recv(sock, buffer, size, 0);
+  socket_put(sock);
   return (uint32_t)ret;
 }
 
@@ -570,7 +593,15 @@ uint32_t socket_vfs_write(struct vfs_node *node, uint32_t offset, uint32_t size,
   if (!sock)
     return 0;
 
+  if (!socket_try_get(sock))
+    return (uint32_t)(int32_t)-9;
+  if (sock->closing) {
+    socket_put(sock);
+    return (uint32_t)(int32_t)-32;
+  }
+
   ssize_t ret = socket_send(sock, buffer, size, 0);
+  socket_put(sock);
   return (uint32_t)ret;
 }
 
@@ -585,9 +616,39 @@ void socket_vfs_open(struct vfs_node *node) {
 void socket_vfs_close(struct vfs_node *node) {
   if (!node)
     return;
+
   socket_t *sock = (socket_t *)node->device;
-  if (sock)
-    socket_put(sock);
+  if (!sock)
+    return;
+
+  socket_t *peer_sock = NULL;
+
+  spinlock_acquire(&sock->lock);
+  sock->closing = true;
+  if (sock->domain == AF_UNIX && sock->sk) {
+    unix_sock_t *usk = (unix_sock_t *)sock->sk;
+    if (usk->peer && usk->peer->parent && socket_try_get(usk->peer->parent))
+      peer_sock = usk->peer->parent;
+  }
+  spinlock_release(&sock->lock);
+
+  if (sock->wait_queue)
+    wait_queue_wake_all((wait_queue_t *)sock->wait_queue);
+
+  if (sock->domain == AF_UNIX && sock->sk) {
+    unix_sock_t *usk = (unix_sock_t *)sock->sk;
+    if (usk->wait)
+      wait_queue_wake_all(usk->wait);
+  }
+
+  if (peer_sock) {
+    unix_sock_t *peer = (unix_sock_t *)peer_sock->sk;
+    if (peer && peer->wait)
+      wait_queue_wake_all(peer->wait);
+    socket_put(peer_sock);
+  }
+
+  socket_put(sock);
 }
 
 int socket_vfs_poll(struct vfs_node *node, int events) {
@@ -598,8 +659,18 @@ int socket_vfs_poll(struct vfs_node *node, int events) {
   if (!sock)
     return POLLNVAL;
 
-  if (sock->ops && sock->ops->poll)
-    return sock->ops->poll(sock, events);
+  if (!socket_try_get(sock))
+    return POLLNVAL;
+  if (sock->closing) {
+    socket_put(sock);
+    return POLLHUP;
+  }
+
+  if (sock->ops && sock->ops->poll) {
+    int ret = sock->ops->poll(sock, events);
+    socket_put(sock);
+    return ret;
+  }
 
   // Default: socket is always writable if connected
   int revents = 0;
@@ -607,6 +678,7 @@ int socket_vfs_poll(struct vfs_node *node, int events) {
     if (events & POLLOUT)
       revents |= POLLOUT;
   }
+  socket_put(sock);
   return revents;
 }
 
@@ -618,9 +690,20 @@ int socket_vfs_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
   if (!sock)
     return -25; // ENOTTY
 
-  if (sock->ops && sock->ops->ioctl)
-    return sock->ops->ioctl(sock, request, arg);
+  if (!socket_try_get(sock))
+    return -9;
+  if (sock->closing) {
+    socket_put(sock);
+    return -9;
+  }
 
+  if (sock->ops && sock->ops->ioctl) {
+    int ret = sock->ops->ioctl(sock, request, arg);
+    socket_put(sock);
+    return ret;
+  }
+
+  socket_put(sock);
   return -25; // ENOTTY
 }
 

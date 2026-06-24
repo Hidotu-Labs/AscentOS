@@ -228,6 +228,7 @@ typedef struct socket {
   struct socket *peer;   // Connected peer (for socketpair)
   void *wait_queue;      // Wait queue for blocking operations
   uint64_t refcount;     // Reference count
+  volatile bool closing; // Last file reference was closed
   spinlock_t lock;       // Spinlock for synchronization
 } socket_t;
 
@@ -238,6 +239,7 @@ void socket_init(void);
 socket_t *socket_create(int domain, int type, int protocol);
 void socket_destroy(socket_t *sock);
 void socket_get(socket_t *sock); // Increment reference count
+bool socket_try_get(socket_t *sock); // Increment unless already destroying
 void socket_put(socket_t *sock); // Decrement reference count
 
 // Socket Operations

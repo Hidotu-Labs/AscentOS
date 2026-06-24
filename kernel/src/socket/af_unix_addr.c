@@ -45,6 +45,41 @@ unix_sock_t *unix_find_socket_by_addr(struct sockaddr_un *addr, int addrlen) {
   return NULL;
 }
 
+unix_sock_t *unix_find_socket_by_addr_ref(struct sockaddr_un *addr, int addrlen) {
+  struct list_head *pos;
+
+  spinlock_acquire(&unix_bound_lock);
+
+  list_for_each(pos, &unix_bound_list) {
+    unix_sock_t *usk = list_entry(pos, unix_sock_t, bind_node);
+    bool match = false;
+
+    if (usk->addr.sun_family != AF_UNIX)
+      continue;
+
+    if (usk->addr.sun_path[0] == '\0') {
+      if (usk->addr_len == addrlen &&
+          memcmp(usk->addr.sun_path, addr->sun_path,
+                 addrlen - offsetof(struct sockaddr_un, sun_path)) == 0)
+        match = true;
+    } else if (strcmp(usk->addr.sun_path, addr->sun_path) == 0) {
+      match = true;
+    }
+
+    if (match) {
+      socket_t *parent = usk->parent;
+      if (parent && socket_try_get(parent)) {
+        spinlock_release(&unix_bound_lock);
+        return usk;
+      }
+      break;
+    }
+  }
+
+  spinlock_release(&unix_bound_lock);
+  return NULL;
+}
+
 /**
  * Mark a socket's filesystem entry as unlinked.
  * Called when a socket file is unlinked via VFS.

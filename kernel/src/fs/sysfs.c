@@ -145,6 +145,7 @@ static void sysfs_mkfile(vfs_node_t *parent, const char *name,
   }
   rf->data = NULL;
   rf->capacity = 0;
+  rf->data_is_pmm = 0;
   f->device = rf;
   f->read = ramfs_read;
   f->write = ramfs_write;

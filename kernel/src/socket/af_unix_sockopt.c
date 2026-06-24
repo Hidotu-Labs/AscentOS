@@ -48,11 +48,23 @@ int unix_getpeername_impl(socket_t *sock, struct sockaddr *addr, int *addrlen) {
   if (!sock || !sock->sk || !addr || !addrlen)
     return -22; // EINVAL
 
-  unix_sock_t *usk   = (unix_sock_t *)sock->sk;
-  unix_sock_t *peer  = usk->peer;
+  unix_sock_t *usk = (unix_sock_t *)sock->sk;
+  socket_t *peer_sock = NULL;
 
-  if (!peer)
+  spinlock_acquire(&sock->lock);
+  unix_sock_t *peer = usk->peer;
+  if (peer && peer->parent && socket_try_get(peer->parent))
+    peer_sock = peer->parent;
+  spinlock_release(&sock->lock);
+
+  if (!peer_sock)
     return -107; // ENOTCONN
+
+  peer = (unix_sock_t *)peer_sock->sk;
+  if (!peer) {
+    socket_put(peer_sock);
+    return -107; // ENOTCONN
+  }
 
   if (peer->addr_len > 0) {
     int copy = peer->addr_len < *addrlen ? peer->addr_len : *addrlen;
@@ -69,6 +81,7 @@ int unix_getpeername_impl(socket_t *sock, struct sockaddr *addr, int *addrlen) {
     *addrlen = (int)sizeof(sa_family_t);
   }
 
+  socket_put(peer_sock);
   return 0;
 }
 

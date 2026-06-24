@@ -454,7 +454,7 @@ struct drm_file {
 #define DRM_MAX_FB_PLANES 4
 
 struct drm_framebuffer_full {
-    struct drm_mode_object base;
+    struct drm_framebuffer base_fb;
     uint32_t width, height;
     uint32_t pixel_format;  /* fourcc */
     uint64_t modifier;

@@ -48,8 +48,8 @@ static int unix_shutdown(socket_t *sock, int how) {
 
   // Only sockets that were ever connected can be shut down.
   // was_connected is set when SS_CONNECTED is first reached and never cleared,
-  // so it survives peer teardown (which resets state → SS_UNCONNECTED and
-  // peer → NULL).  A listening socket or a freshly-created socket that never
+  // so it survives peer teardown (which resets state -> SS_UNCONNECTED and
+  // peer -> NULL). A listening socket or a freshly-created socket that never
   // completed a connect gets ENOTCONN; a socket whose peer already called
   // close() succeeds as a no-op (matching Linux behaviour).
   if (!usk->was_connected) {
@@ -57,7 +57,19 @@ static int unix_shutdown(socket_t *sock, int how) {
     return -107; // ENOTCONN
   }
 
+  if (how != SHUT_RD && how != SHUT_WR && how != SHUT_RDWR) {
+    klog_puts("[WARN] unix_shutdown: invalid how=");
+    klog_uint64(how);
+    klog_puts("\n");
+    return -22; // EINVAL
+  }
+
+  socket_t *peer_sock = NULL;
+  spinlock_acquire(&sock->lock);
   unix_sock_t *peer = usk->peer; // may be NULL if peer already closed
+  if (peer && peer->parent && socket_try_get(peer->parent))
+    peer_sock = peer->parent;
+  spinlock_release(&sock->lock);
 
   switch (how) {
   case SHUT_RD:
@@ -68,29 +80,22 @@ static int unix_shutdown(socket_t *sock, int how) {
   case SHUT_WR:
     klog_puts("[OK] unix_shutdown: SHUT_WR\n");
     usk->write_shutdown = true;
-    if (peer) {
-      wait_queue_wake_all(peer->wait);
-      if (peer->parent && peer->parent->node)
-        epoll_notify_event(peer->parent->node, EPOLLIN | EPOLLHUP | EPOLLRDHUP);
-    }
     break;
 
   case SHUT_RDWR:
     klog_puts("[OK] unix_shutdown: SHUT_RDWR\n");
     usk->read_shutdown  = true;
     usk->write_shutdown = true;
-    if (peer) {
-      wait_queue_wake_all(peer->wait);
-      if (peer->parent && peer->parent->node)
-        epoll_notify_event(peer->parent->node, EPOLLIN | EPOLLHUP | EPOLLRDHUP);
-    }
     break;
+  }
 
-  default:
-    klog_puts("[WARN] unix_shutdown: invalid how=");
-    klog_uint64(how);
-    klog_puts("\n");
-    return -22; // EINVAL
+  if (peer_sock) {
+    peer = (unix_sock_t *)peer_sock->sk;
+    if (peer && peer->wait)
+      wait_queue_wake_all(peer->wait);
+    if (peer_sock->node)
+      epoll_notify_event(peer_sock->node, EPOLLIN | EPOLLHUP | EPOLLRDHUP);
+    socket_put(peer_sock);
   }
 
   return 0;
@@ -115,6 +120,16 @@ static int unix_poll(socket_t *sock, int events) {
   size_t available = (tail - head + size) % size;
   spinlock_release(&usk->recv_lock);
 
+  bool has_peer = false;
+  bool peer_write_shutdown = false;
+  spinlock_acquire(&sock->lock);
+  unix_sock_t *peer = usk->peer;
+  if (peer) {
+    has_peer = true;
+    peer_write_shutdown = peer->write_shutdown;
+  }
+  spinlock_release(&sock->lock);
+
   if (available > 0) {
     revents |= 0x001; // POLLIN
     revents |= 0x040; // POLLRDNORM
@@ -122,18 +137,18 @@ static int unix_poll(socket_t *sock, int events) {
 
   if (sock->state == SS_DISCONNECTING || sock->state == SS_UNCONNECTED ||
       (usk->read_shutdown && usk->write_shutdown) ||
-      (usk->peer == NULL && sock->state != SS_LISTENING)) {
+      (!has_peer && sock->state != SS_LISTENING)) {
     revents |= 0x010;  // POLLHUP
     revents |= 0x2000; // EPOLLRDHUP
     revents |= 0x001;  // POLLIN (EOF)
   }
 
-  if (usk->peer && usk->peer->write_shutdown && available == 0) {
+  if (has_peer && peer_write_shutdown && available == 0) {
     revents |= 0x010;  // POLLHUP
     revents |= 0x2000; // EPOLLRDHUP
   }
 
-  if (sock->state == SS_CONNECTED && usk->peer && !usk->write_shutdown) {
+  if (sock->state == SS_CONNECTED && has_peer && !usk->write_shutdown) {
     revents |= 0x004; // POLLOUT
     revents |= 0x100; // POLLWRNORM
   }
@@ -317,23 +332,36 @@ void unix_destroy(socket_t *sock) {
 
   klog_puts("[OK] Destroying AF_UNIX socket\n");
 
-  // Remove from bound list
+  // Remove from bound list.  New lookups cannot find this socket after this.
   spinlock_acquire(&unix_bound_lock);
   if (!list_empty(&usk->bind_node))
     list_del(&usk->bind_node);
   spinlock_release(&unix_bound_lock);
 
-  if (usk->recv_buf) {
-    kfree(usk->recv_buf);
-    usk->recv_buf = NULL;
+  // Detach the peer before freeing buffers so concurrent I/O stops seeing us.
+  if (usk->peer) {
+    unix_sock_t *peer = usk->peer;
+    socket_t *peer_parent = peer->parent;
+
+    if (peer_parent) {
+      spinlock_acquire(&peer_parent->lock);
+      if (peer->peer == usk)
+        peer->peer = NULL;
+      peer_parent->state = SS_UNCONNECTED;
+      peer_parent->error = 104; // ECONNRESET
+      spinlock_release(&peer_parent->lock);
+
+      if (peer_parent->wait_queue)
+        wait_queue_wake_all((wait_queue_t *)peer_parent->wait_queue);
+      if (peer_parent->node)
+        epoll_notify_event(peer_parent->node, EPOLLIN | EPOLLHUP | EPOLLRDHUP);
+    }
+
+    wait_queue_wake_all(peer->wait);
+    usk->peer = NULL;
   }
 
-  if (usk->send_buf) {
-    kfree(usk->send_buf);
-    usk->send_buf = NULL;
-  }
-
-  // Destroy pending accept-queue entries
+  // Destroy pending accept-queue entries.
   if (usk->is_listener) {
     unix_sock_t *curr = usk->accept_next;
     while (curr) {
@@ -344,27 +372,22 @@ void unix_destroy(socket_t *sock) {
     usk->accept_next = NULL;
   }
 
-  // Notify and disconnect peer
-  if (usk->peer) {
-    unix_sock_t *peer = usk->peer;
-
-    spinlock_acquire(&peer->parent->lock);
-    peer->peer = NULL;
-    if (peer->parent) {
-      peer->parent->state = SS_UNCONNECTED;
-      peer->parent->error = 104; // ECONNRESET
+  for (int i = 0; i < usk->scm_count; i++) {
+    if (usk->scm_nodes[i]) {
+      vfs_close(usk->scm_nodes[i]);
+      usk->scm_nodes[i] = NULL;
     }
-    spinlock_release(&peer->parent->lock);
+  }
+  usk->scm_count = 0;
 
-    wait_queue_wake_all(peer->wait);
+  if (usk->recv_buf) {
+    kfree(usk->recv_buf);
+    usk->recv_buf = NULL;
+  }
 
-    if (peer->parent && peer->parent->wait_queue)
-      wait_queue_wake_all((wait_queue_t *)peer->parent->wait_queue);
-
-    if (peer->parent && peer->parent->node)
-      epoll_notify_event(peer->parent->node, EPOLLIN | EPOLLHUP | EPOLLRDHUP);
-
-    usk->peer = NULL;
+  if (usk->send_buf) {
+    kfree(usk->send_buf);
+    usk->send_buf = NULL;
   }
 
   wait_queue_wake_all(usk->wait);
