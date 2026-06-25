@@ -5,6 +5,12 @@ export XDG_RUNTIME_DIR=/tmp/wayland
 mkdir -p $XDG_RUNTIME_DIR
 rm -f $XDG_RUNTIME_DIR/wayland-0*
 
+# Xwayland publishes its display sockets here. Weston creates the socket file
+# itself, but it expects the parent directory to already exist.
+mkdir -p /tmp/.X11-unix
+chmod 1777 /tmp /tmp/.X11-unix 2>/dev/null || true
+rm -f /tmp/.X11-unix/X0 /tmp/.X0-lock
+
 seatd -u root &
 sleep 1
 

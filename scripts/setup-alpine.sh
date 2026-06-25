@@ -435,6 +435,7 @@ install_apk "brotli-libs" "main" "edge"
 install_apk "ca-certificates" "main"
 install_apk "libbz2" "main"
 install_apk "zlib" "main"
+install_apk "libtirpc-nokrb" "main"
 install_apk "xwayland" "community" 
 install_apk "weston-xwayland" "community" 
 
