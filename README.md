@@ -1,6 +1,7 @@
 # AscentOS
 
 ![AscentOS Showcase](assets/showcase.png)
+![AscentOS Showcase2](assets/showcase2.png)
 
 AscentOS is a hobby operating system kernel for the x86_64 architecture, written in C and Assembly. It can run Linux programs. (I know it's not so special.)
 
