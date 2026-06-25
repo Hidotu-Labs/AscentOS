@@ -350,10 +350,14 @@ static int atomic_apply_prop(struct drm_device *dev,
       break;
     }
     case DRM_PROP_ID_CRTC_ID:
+      break;
+
     case DRM_PROP_ID_SRC_X:
     case DRM_PROP_ID_SRC_Y:
     case DRM_PROP_ID_SRC_W:
     case DRM_PROP_ID_SRC_H:
+      break;
+
     case DRM_PROP_ID_CRTC_X:
       plane->crtc_x = (int32_t)value;
       break;
@@ -361,7 +365,7 @@ static int atomic_apply_prop(struct drm_device *dev,
       plane->crtc_y = (int32_t)value;
       break;
     case DRM_PROP_ID_CRTC_W:
-      plane->crtc_w = (uint32_t)value;
+  plane->crtc_w = (uint32_t)value;
       break;
     case DRM_PROP_ID_CRTC_H:
       plane->crtc_h = (uint32_t)value;
