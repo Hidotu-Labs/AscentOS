@@ -4,10 +4,14 @@
 
 | Version | Supported          | Known Issues                                           |
 | ------- | ------------------ | ------------------------------------------------------ |
+| 2.x     | :warning:          | 300KB mem leak                                         |
 | 1.x     | :warning:          | PTY stopping, af_inet sockets unstable, 300KB mem leak |
-| < 1.0   | :x:                | End of support                               |
+| < 1.0   | :x:                | End of support                                         |
 
 ## Known Issues
+
+### Version 2.x
+- **Memory Leak**: Approximately 300KB memory leak detected during normal system operation.
 
 ### Version 1.x
 - **PTY Stopping Issue**: PTY (pseudo-terminal) processes may stop unexpectedly under certain conditions. Workaround: restart the terminal session.

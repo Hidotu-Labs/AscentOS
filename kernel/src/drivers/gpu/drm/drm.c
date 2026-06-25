@@ -178,6 +178,54 @@ static void drm_commit(struct drm_device *dev) {
             }
             __asm__ volatile("sfence" ::: "memory");
           }
+
+          struct drm_plane *cursor = crtc->cursor;
+          if (cursor && cursor->fb && cursor->fb->gem_obj &&
+              cursor->fb->gem_obj->virt_addr && cursor->fb->bpp == 32) {
+            int32_t cx = cursor->crtc_x;
+            int32_t cy = cursor->crtc_y;
+            uint32_t cw = cursor->crtc_w ? cursor->crtc_w : cursor->fb->width;
+            uint32_t ch = cursor->crtc_h ? cursor->crtc_h : cursor->fb->height;
+            if (cw > cursor->fb->width)
+              cw = cursor->fb->width;
+            if (ch > cursor->fb->height)
+              ch = cursor->fb->height;
+
+            uint8_t *src_base = (uint8_t *)cursor->fb->gem_obj->virt_addr;
+            uint8_t *dst_base = (uint8_t *)hw_fb;
+            for (uint32_t sy = 0; sy < ch; sy++) {
+              int32_t dy = cy + (int32_t)sy;
+              if (dy < 0 || dy >= (int32_t)height)
+                continue;
+              uint32_t *src = (uint32_t *)(src_base + sy * cursor->fb->pitch);
+              uint32_t *dst = (uint32_t *)(dst_base + (uint32_t)dy * hw_pitch);
+              for (uint32_t sx = 0; sx < cw; sx++) {
+                int32_t dx = cx + (int32_t)sx;
+                if (dx < 0 || dx >= (int32_t)width)
+                  continue;
+                uint32_t sp = src[sx];
+                uint32_t a = sp >> 24;
+                if (a == 0)
+                  continue;
+                if (a == 255) {
+                  dst[dx] = sp;
+                } else {
+                  uint32_t dp = dst[dx];
+                  uint32_t sr = (sp >> 16) & 0xff;
+                  uint32_t sg = (sp >> 8) & 0xff;
+                  uint32_t sb = sp & 0xff;
+                  uint32_t dr = (dp >> 16) & 0xff;
+                  uint32_t dg = (dp >> 8) & 0xff;
+                  uint32_t db = dp & 0xff;
+                  uint32_t r = (sr * a + dr * (255 - a)) / 255;
+                  uint32_t g = (sg * a + dg * (255 - a)) / 255;
+                  uint32_t b = (sb * a + db * (255 - a)) / 255;
+                  dst[dx] = 0xff000000 | (r << 16) | (g << 8) | b;
+                }
+              }
+            }
+            __asm__ volatile("sfence" ::: "memory");
+          }
         }
       }
     }
@@ -534,9 +582,22 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     p->fb_id = 0;
     p->possible_crtcs = plane->possible_crtcs;
     p->gamma_size = 0;
-    p->count_formats = 1;
-    if (p->format_type_ptr)
-      ((uint32_t *)p->format_type_ptr)[0] = 0x34325258;
+    uint64_t type_val = 0;
+if (drm_obj_get_prop(&plane->base, DRM_PROP_ID_TYPE, &type_val) != 0)
+  type_val = DRM_PLANE_TYPE_PRIMARY; /* fallback */
+
+uint32_t type = (uint32_t)type_val;
+    if (type == DRM_PLANE_TYPE_CURSOR) {
+      p->count_formats = 2;
+      if (p->format_type_ptr) {
+        ((uint32_t *)p->format_type_ptr)[0] = 0x34325241; /* ARGB8888 */
+        ((uint32_t *)p->format_type_ptr)[1] = 0x34325258; /* XRGB8888 */
+      }
+    } else {
+      p->count_formats = 1;
+      if (p->format_type_ptr)
+        ((uint32_t *)p->format_type_ptr)[0] = 0x34325258; /* XRGB8888 */
+    }
     klog_puts("[DRM] GETPLANE out id=");
     klog_uint64(p->plane_id);
     klog_puts(" possible_crtcs=0x");
@@ -869,10 +930,65 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     return 0;
   }
 
-  case DRM_IOCTL_MODE_CURSOR:
-  case DRM_IOCTL_MODE_CURSOR2:
-    klog_puts("[DRM] hardware cursor ioctl unsupported\n");
-    return -25; /* ENOTTY: force Weston to keep cursors in renderer path */
+  case DRM_IOCTL_WAIT_VBLANK: {
+    union drm_wait_vblank *vbl = (union drm_wait_vblank *)arg;
+    uint32_t type = vbl->request.type;
+    uint64_t user_data = vbl->request.signal;
+    uint64_t ms = lapic_timer_get_ms();
+    uint32_t seq = drm_event_sequence++;
+    klog_puts("[DRM] WAIT_VBLANK type=0x");
+    klog_hex32(type);
+    klog_puts(" seq_in=");
+    klog_uint64(vbl->request.sequence);
+    klog_puts("\n");
+    vbl->reply.type = type;
+    vbl->reply.sequence = seq;
+    vbl->reply.tval_sec = (long)(ms / 1000);
+    vbl->reply.tval_usec = (long)((ms % 1000) * 1000);
+    if (type & DRM_VBLANK_EVENT) {
+      struct drm_event_vblank ev = {0};
+      ev.base.type = DRM_EVENT_VBLANK;
+      ev.base.length = sizeof(ev);
+      ev.user_data = user_data;
+      ev.tv_sec = (uint32_t)vbl->reply.tval_sec;
+      ev.tv_usec = (uint32_t)vbl->reply.tval_usec;
+      ev.sequence = seq;
+      ev.crtc_id = 0;
+      drm_file_send_event(file, &ev, node);
+    }
+    return 0;
+  }
+
+  case DRM_IOCTL_MODE_CURSOR: {
+    struct drm_mode_cursor *cur = (struct drm_mode_cursor *)arg;
+    klog_puts("[DRM] MODE_CURSOR flags=0x");
+    klog_hex32(cur->flags);
+    klog_puts(" handle=");
+    klog_uint64(cur->handle);
+    klog_puts(" x=");
+    klog_uint64((uint32_t)cur->x);
+    klog_puts(" y=");
+    klog_uint64((uint32_t)cur->y);
+    klog_puts("\n");
+    return 0;
+  }
+  case DRM_IOCTL_MODE_CURSOR2: {
+    struct drm_mode_cursor2 *cur = (struct drm_mode_cursor2 *)arg;
+    klog_puts("[DRM] MODE_CURSOR2 flags=0x");
+    klog_hex32(cur->flags);
+    klog_puts(" handle=");
+    klog_uint64(cur->handle);
+    klog_puts(" x=");
+    klog_uint64((uint32_t)cur->x);
+    klog_puts(" y=");
+    klog_uint64((uint32_t)cur->y);
+    klog_puts(" hot=");
+    klog_uint64((uint32_t)cur->hot_x);
+    klog_puts(",");
+    klog_uint64((uint32_t)cur->hot_y);
+    klog_puts("\n");
+    return 0;
+  }
 
   case DRM_IOCTL_MODE_GETGAMMA:
   case DRM_IOCTL_MODE_SETGAMMA:

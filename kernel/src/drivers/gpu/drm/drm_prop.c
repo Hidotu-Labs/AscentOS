@@ -329,18 +329,21 @@ static int atomic_apply_prop(struct drm_device *dev,
           continue;
         struct drm_crtc *crtc = (struct drm_crtc *)cobj;
         if (crtc->primary == plane || crtc->cursor == plane) {
-          if (value == 0) {
-            crtc->fb = NULL;
-          } else {
+          struct drm_framebuffer *new_fb = NULL;
+          if (value != 0) {
             struct drm_mode_object *fbobj;
             list_for_each_entry(fbobj, &dev->kms_objects, list) {
               if (fbobj->type == DRM_MODE_OBJECT_FB &&
                   fbobj->id == (uint32_t)value) {
-                crtc->fb = (struct drm_framebuffer *)fbobj;
+                new_fb = (struct drm_framebuffer *)fbobj;
                 break;
               }
             }
           }
+          if (crtc->primary == plane)
+            crtc->fb = new_fb;
+          else if (crtc->cursor == plane)
+            plane->fb = new_fb;
           break;
         }
       }
@@ -352,10 +355,16 @@ static int atomic_apply_prop(struct drm_device *dev,
     case DRM_PROP_ID_SRC_W:
     case DRM_PROP_ID_SRC_H:
     case DRM_PROP_ID_CRTC_X:
+      plane->crtc_x = (int32_t)value;
+      break;
     case DRM_PROP_ID_CRTC_Y:
+      plane->crtc_y = (int32_t)value;
+      break;
     case DRM_PROP_ID_CRTC_W:
+      plane->crtc_w = (uint32_t)value;
+      break;
     case DRM_PROP_ID_CRTC_H:
-      /* Store in the object's property table */
+      plane->crtc_h = (uint32_t)value;
       break;
     default:
       return -1;

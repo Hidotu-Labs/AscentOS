@@ -125,15 +125,11 @@ disk.img: assets/boot.wav assets/test.wav assets/jane.mp3 assets/mc9.mp3 assets/
 	dd if=/dev/zero of=./part.img bs=1M count=2047
 	mkfs.ext3 -F -b 1024 -I 128 ./part.img
 	@echo "Populating root filesystem..."
-	@echo "Hello from AscentOS!" > /tmp/ascentos_hello.txt
-	@echo "This is a test document." > /tmp/ascentos_readme.txt
 	@{ \
 		echo "cd /"; \
 		echo "mkdir tmp"; \
 		echo "mkdir bin"; \
 		echo "mkdir lib"; \
-		echo "rm hello.txt"; \
-		echo "write /tmp/ascentos_hello.txt hello.txt"; \
 		echo "rm bin/startx.sh"; \
 		echo "write initrd/startx.sh bin/startx.sh"; \
 		echo "rm bin/startw.sh"; \
@@ -456,9 +452,9 @@ disk.img: assets/boot.wav assets/test.wav assets/jane.mp3 assets/mc9.mp3 assets/
 		debugfs -w -R "rm etc/passwd" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "write /tmp/passwd etc/passwd" ./part.img >/dev/null 2>&1 || true; \
 		echo "NAME=\"AscentOS\"" > /tmp/os-release; \
-		echo "PRETTY_NAME=\"AscentOS 0.1.0-alpha x86_64\"" >> /tmp/os-release; \
+		echo "PRETTY_NAME=\"AscentOS 2.0.0 Beta x86_64\"" >> /tmp/os-release; \
 		echo "ID=ascentos" >> /tmp/os-release; \
-		echo "VERSION_ID=0.1.0" >> /tmp/os-release; \
+		echo "VERSION_ID=2.0.0 Beta" >> /tmp/os-release; \
 		echo "HOME_URL=\"https://github.com/AscentOS\"" >> /tmp/os-release; \
 		debugfs -w -R "rm etc/os-release" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "write /tmp/os-release etc/os-release" ./part.img >/dev/null 2>&1 || true; \

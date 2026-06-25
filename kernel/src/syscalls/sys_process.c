@@ -959,21 +959,21 @@ static uint64_t sys_uname(uint64_t buf_ptr, uint64_t a1, uint64_t a2,
   if (!buf)
     return (uint64_t)-14; // EFAULT
 
-  strcpy(buf->sysname, "AscentOS");
-  strcpy(buf->nodename, "ascentos");
-  strcpy(buf->release, "0.1.0-alpha");
+  strcpy(buf->sysname, "Ascension");
+  strcpy(buf->nodename, "AscentOS");
+  strcpy(buf->release, "2.0.0 Beta");
 
   // Dynamic date/time from RTC
   char datetime[32];
   rtc_format_datetime(rtc_get_timestamp(), datetime, sizeof(datetime));
 
   char version[80];
-  strcpy(version, "#1 SMP PREEMPT ");
+  strcpy(version, "2.0.0 Beta ");
   strcat(version, datetime);
   strcpy(buf->version, version);
 
   strcpy(buf->machine, "x86_64");
-  strcpy(buf->domainname, "ascent-os.org");
+  strcpy(buf->domainname, "localhost");
 
   return 0;
 }

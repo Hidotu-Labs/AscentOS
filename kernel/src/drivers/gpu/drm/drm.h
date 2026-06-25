@@ -23,6 +23,7 @@
 #define DRM_IOCTL_GEM_CREATE 0xC0106401
 #define DRM_IOCTL_GEM_FREE 0x40086402
 #define DRM_IOCTL_GEM_MMAP 0xC0106403
+#define DRM_IOCTL_WAIT_VBLANK 0xC018643A
 
 #define DRM_IOCTL_SET_MASTER 0x0000641E
 #define DRM_IOCTL_DROP_MASTER 0x0000641F
@@ -38,7 +39,7 @@
 #define DRM_IOCTL_MODE_CURSOR2 0xC02464BB
 #define DRM_IOCTL_MODE_ADDFB 0xC01C64AE
 #define DRM_IOCTL_MODE_RMFB 0xC00464AF
-#define DRM_IOCTL_MODE_PAGE_FLIP 0x401864B0
+#define DRM_IOCTL_MODE_PAGE_FLIP 0xC01864B0
 #define DRM_IOCTL_MODE_CREATE_DUMB 0xC02064B2
 #define DRM_IOCTL_MODE_MAP_DUMB 0xC01064B3
 #define DRM_IOCTL_MODE_DESTROY_DUMB 0xC00464B4
@@ -49,7 +50,7 @@
 #define DRM_IOCTL_MODE_ATOMIC            0xC03864BC
 #define DRM_IOCTL_MODE_CREATEPROPBLOB    0xC01064BD
 #define DRM_IOCTL_MODE_DESTROYPROPBLOB   0xC00464BE
-#define DRM_IOCTL_MODE_ADDFB2            0xC04464B8
+#define DRM_IOCTL_MODE_ADDFB2            0xC06864B8
 #define DRM_IOCTL_MODE_CREATE_LEASE      0xC01864C6
 #define DRM_IOCTL_MODE_SETPROPERTY       0x401064AB
 #define DRM_IOCTL_MODE_DIRTYFB           0x401064B1
@@ -148,6 +149,47 @@ struct drm_mode_crtc_page_flip {
 };
 
 #define DRM_MODE_PAGE_FLIP_EVENT 0x01
+#define DRM_VBLANK_EVENT 0x04000000U
+
+struct drm_wait_vblank_request {
+  uint32_t type;
+  uint32_t sequence;
+  unsigned long signal;
+};
+
+struct drm_wait_vblank_reply {
+  uint32_t type;
+  uint32_t sequence;
+  long tval_sec;
+  long tval_usec;
+};
+
+union drm_wait_vblank {
+  struct drm_wait_vblank_request request;
+  struct drm_wait_vblank_reply reply;
+};
+
+struct drm_mode_cursor {
+  uint32_t flags;
+  uint32_t crtc_id;
+  int32_t x;
+  int32_t y;
+  uint32_t width;
+  uint32_t height;
+  uint32_t handle;
+};
+
+struct drm_mode_cursor2 {
+  uint32_t flags;
+  uint32_t crtc_id;
+  int32_t x;
+  int32_t y;
+  uint32_t width;
+  uint32_t height;
+  uint32_t handle;
+  int32_t hot_x;
+  int32_t hot_y;
+};
 
 struct drm_event {
   uint32_t type;
@@ -290,6 +332,11 @@ struct drm_plane {
   uint32_t possible_crtcs;
   uint32_t formats[8];
   int format_count;
+  struct drm_framebuffer *fb;
+  int32_t crtc_x;
+  int32_t crtc_y;
+  uint32_t crtc_w;
+  uint32_t crtc_h;
 };
 
 struct drm_crtc {

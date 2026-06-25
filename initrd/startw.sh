@@ -10,6 +10,10 @@ sleep 1
 
 # Disable hardware cursor — kernel DRM does not implement MODE_CURSOR ioctls
 export WLR_NO_HARDWARE_CURSORS=1
+export WESTON_FORCE_RENDERER=1
+export XCURSOR_THEME=default
+export XCURSOR_SIZE=24
+export XCURSOR_PATH=/usr/share/cursors/xorg-x11:/usr/share/icons
 
 # ── Wayland / Weston debug logging ──────────────────────────────────────────
 export WAYLAND_DEBUG=1

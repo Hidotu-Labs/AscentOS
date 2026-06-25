@@ -241,11 +241,50 @@ install_apk "libcap2" "main"
 install_apk "libpciaccess" "main"
 install_apk "gcompat" "main"
 install_apk "libucontext" "main"
+install_apk "libucontext-dev" "main"
+
+# Keep musl's runtime linker search path explicit inside AscentOS.
+# Some early userspace paths only reliably resolve shared objects from /lib.
+mkdir -p "${ROOTFS_DIR}/etc" "${ROOTFS_DIR}/lib"
+cat > "${ROOTFS_DIR}/etc/ld-musl-x86_64.path" <<'EOF'
+/lib
+/usr/local/lib
+/usr/lib
+EOF
+if [ -f "${ROOTFS_DIR}/usr/lib/libucontext.so.1" ]; then
+    cp "${ROOTFS_DIR}/usr/lib/libucontext.so.1" "${ROOTFS_DIR}/lib/libucontext.so.1"
+fi
+if [ -f "${ROOTFS_DIR}/usr/lib/libucontext_posix.so.1" ]; then
+    cp "${ROOTFS_DIR}/usr/lib/libucontext_posix.so.1" "${ROOTFS_DIR}/lib/libucontext_posix.so.1"
+fi
+
+# glibc-linked tools such as /opt/coreutils/bin/ls search lib64 paths.
+mkdir -p "${ROOTFS_DIR}/lib64" "${ROOTFS_DIR}/usr/lib64"
+if [ -f "${ROOTFS_DIR}/lib/libc.musl-x86_64.so.1" ]; then
+    cp "${ROOTFS_DIR}/lib/libc.musl-x86_64.so.1" "${ROOTFS_DIR}/lib64/libc.musl-x86_64.so.1"
+    cp "${ROOTFS_DIR}/lib/libc.musl-x86_64.so.1" "${ROOTFS_DIR}/usr/lib64/libc.musl-x86_64.so.1"
+fi
+if [ -f "${ROOTFS_DIR}/usr/lib/libucontext.so.1" ]; then
+    cp "${ROOTFS_DIR}/usr/lib/libucontext.so.1" "${ROOTFS_DIR}/lib64/libucontext.so.1"
+    cp "${ROOTFS_DIR}/usr/lib/libucontext.so.1" "${ROOTFS_DIR}/usr/lib64/libucontext.so.1"
+fi
+if [ -f "${ROOTFS_DIR}/usr/lib/libucontext_posix.so.1" ]; then
+    cp "${ROOTFS_DIR}/usr/lib/libucontext_posix.so.1" "${ROOTFS_DIR}/lib64/libucontext_posix.so.1"
+    cp "${ROOTFS_DIR}/usr/lib/libucontext_posix.so.1" "${ROOTFS_DIR}/usr/lib64/libucontext_posix.so.1"
+fi
+
 install_apk "mesa-glapi" "main"
 install_apk "llvm19-libs" "main"
 install_apk "libelf" "main"
 install_apk "zstd-libs" "main"
 install_apk "musl-obstack" "main"
+
+# glibc-linked coreutils also need musl-obstack in lib64 paths.
+if [ -f "${ROOTFS_DIR}/usr/lib/libobstack.so.1" ]; then
+    mkdir -p "${ROOTFS_DIR}/lib64" "${ROOTFS_DIR}/usr/lib64"
+    cp "${ROOTFS_DIR}/usr/lib/libobstack.so.1" "${ROOTFS_DIR}/lib64/libobstack.so.1"
+    cp "${ROOTFS_DIR}/usr/lib/libobstack.so.1" "${ROOTFS_DIR}/usr/lib64/libobstack.so.1"
+fi
 install_apk "libunwind" "main"
 install_apk "libva" "main"
 install_apk "xcb-util-wm" "community"
@@ -573,23 +612,49 @@ EOF
 # 4. Create weston.ini
 echo "[*] Creating /etc/weston.ini..."
 mkdir -p "${ROOTFS_DIR}/etc"
+mkdir -p "${ROOTFS_DIR}/usr/share/icons/default"
+if [ ! -d "${ROOTFS_DIR}/usr/share/icons/Breeze_Light" ] && [ -d "/run/host/usr/share/icons/Breeze_Light" ]; then
+    cp -a "/run/host/usr/share/icons/Breeze_Light" "${ROOTFS_DIR}/usr/share/icons/"
+fi
+cat > "${ROOTFS_DIR}/usr/share/icons/default/index.theme" <<'EOF'
+[Icon Theme]
+Name=Default
+Inherits=Breeze_Light
+EOF
+rm -rf "${ROOTFS_DIR}/usr/share/icons/default/cursors"
+ln -s ../Breeze_Light/cursors "${ROOTFS_DIR}/usr/share/icons/default/cursors"
+for alias in dnd-copy dnd-none; do
+    target="copy"
+    [ "" = "dnd-none" ] && target="no-drop"
+    if [ -f "${ROOTFS_DIR}/usr/share/icons/Breeze_Light/cursors/$target" ] && [ ! -e "${ROOTFS_DIR}/usr/share/icons/Breeze_Light/cursors/$alias" ]; then
+        ln -s "$target" "${ROOTFS_DIR}/usr/share/icons/Breeze_Light/cursors/$alias"
+    fi
+done
+
 cat > "${ROOTFS_DIR}/etc/weston.ini" <<EOF
 [core]
 backend=drm-backend.so
+shell=desktop-shell.so
 xwayland=true
 
 [shell]
 panel-position=top
 locking=false
-cursor-theme=Adwaita
+background-image=/assets/room.png
+background-type=scale
+cursor-theme=Breeze_Light
 cursor-size=24
 
 [launcher]
-icon=/usr/share/icons/Adwaita/16x16/mimetypes/application-x-executable.png
+icon=/usr/share/weston/icon_terminal.png
 path=/usr/bin/weston-terminal
 
+[launcher]
+icon=/usr/share/pixmaps/netsurf.xpm
+path=/usr/bin/netsurf
+
 [output]
-name=LVDS1
+name=HDMI-A-1
 mode=preferred
 EOF
 
