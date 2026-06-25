@@ -32,8 +32,10 @@
 #define DRM_IOCTL_MODE_SETCRTC 0xC06864A2
 #define DRM_IOCTL_MODE_GETCONNECTOR 0xC05064A7
 #define DRM_IOCTL_MODE_GETENCODER 0xC01464A6
-#define DRM_IOCTL_MODE_GETGAMMA 0xC01C64A3
-#define DRM_IOCTL_MODE_SETGAMMA 0xC01C64A4
+#define DRM_IOCTL_MODE_CURSOR 0xC01C64A3
+#define DRM_IOCTL_MODE_GETGAMMA 0xC02064A4
+#define DRM_IOCTL_MODE_SETGAMMA 0xC02064A5
+#define DRM_IOCTL_MODE_CURSOR2 0xC02464BB
 #define DRM_IOCTL_MODE_ADDFB 0xC01C64AE
 #define DRM_IOCTL_MODE_RMFB 0xC00464AF
 #define DRM_IOCTL_MODE_PAGE_FLIP 0x401864B0
@@ -52,8 +54,19 @@
 #define DRM_IOCTL_MODE_SETPROPERTY       0x401064AB
 #define DRM_IOCTL_MODE_DIRTYFB           0x401064B1
 
+#define DRM_CLIENT_CAP_STEREO_3D 1
 #define DRM_CLIENT_CAP_UNIVERSAL_PLANES 2
-#define DRM_CLIENT_CAP_ATOMIC           3
+#define DRM_CLIENT_CAP_ATOMIC 3
+#define DRM_CLIENT_CAP_ASPECT_RATIO 4
+#define DRM_CLIENT_CAP_WRITEBACK_CONNECTORS 5
+#define DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT 6
+
+#define DRM_FILE_CAP_STEREO_3D (1U << DRM_CLIENT_CAP_STEREO_3D)
+#define DRM_FILE_CAP_UNIVERSAL_PLANES (1U << DRM_CLIENT_CAP_UNIVERSAL_PLANES)
+#define DRM_FILE_CAP_ATOMIC (1U << DRM_CLIENT_CAP_ATOMIC)
+#define DRM_FILE_CAP_ASPECT_RATIO (1U << DRM_CLIENT_CAP_ASPECT_RATIO)
+#define DRM_FILE_CAP_WRITEBACK_CONNECTORS                                      \
+  (1U << DRM_CLIENT_CAP_WRITEBACK_CONNECTORS)
 
 #define DRM_CAP_DUMB_BUFFER 1
 #define DRM_CAP_VBLANK_HIGH_CRTC 2
@@ -150,7 +163,7 @@ struct drm_event_vblank {
   uint32_t tv_sec;
   uint32_t tv_usec;
   uint32_t sequence;
-  uint32_t reserved;
+  uint32_t crtc_id;
 };
 
 struct drm_mode_get_connector {
@@ -159,10 +172,10 @@ struct drm_mode_get_connector {
   uint64_t props_ptr;
   uint64_t prop_values_ptr;
   uint32_t count_modes;
-  uint32_t count_encoders;
   uint32_t count_props;
-  uint32_t connector_id;
+  uint32_t count_encoders;
   uint32_t encoder_id;
+  uint32_t connector_id;
   uint32_t connector_type;
   uint32_t connector_type_id;
   uint32_t connection;
@@ -313,14 +326,15 @@ struct drm_pending_event {
 
 /* ── Property system ─────────────────────────────────────────────────────── */
 
-#define DRM_PROP_TYPE_RANGE    (0 << 6)
-#define DRM_PROP_TYPE_ENUM     (1 << 6)
-#define DRM_PROP_TYPE_BLOB     (2 << 6)
-#define DRM_PROP_TYPE_BITMASK  (3 << 6)
-#define DRM_PROP_TYPE_OBJECT   (4 << 6)
-#define DRM_PROP_TYPE_SIGNED_RANGE (5 << 6)
-#define DRM_PROP_FLAG_IMMUTABLE (1 << 2)
-#define DRM_PROP_FLAG_ATOMIC    (1 << 3)
+#define DRM_PROP_TYPE_RANGE        (1U << 1)
+#define DRM_PROP_FLAG_IMMUTABLE    (1U << 2)
+#define DRM_PROP_TYPE_ENUM         (1U << 3)
+#define DRM_PROP_TYPE_BLOB         (1U << 4)
+#define DRM_PROP_TYPE_BITMASK      (1U << 5)
+#define DRM_PROP_TYPE_OBJECT       (1U << 6)
+#define DRM_PROP_TYPE_SIGNED_RANGE (2U << 6)
+#define DRM_PROP_EXTENDED_TYPE_MASK 0x0000ffc0U
+#define DRM_PROP_FLAG_ATOMIC       0x80000000U
 
 /* Well-known property IDs (fixed, so userland can hardcode them) */
 #define DRM_PROP_ID_CRTC_ID      1
@@ -440,7 +454,7 @@ struct drm_file {
     wait_queue_t     event_wq;
 
     /* Per-client capabilities */
-    uint32_t client_caps;   /* bit1=UNIVERSAL_PLANES, bit2=ATOMIC */
+    uint32_t client_caps;   /* DRM_FILE_CAP_* */
     uint32_t is_master;
 
     spinlock_t lock;

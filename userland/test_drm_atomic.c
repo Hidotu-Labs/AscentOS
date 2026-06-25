@@ -124,7 +124,7 @@ struct drm_mode_atomic {
 struct drm_event        { uint32_t type, length; };
 struct drm_event_vblank {
     struct drm_event base; uint64_t user_data;
-    uint32_t tv_sec, tv_usec, sequence, reserved;
+    uint32_t tv_sec, tv_usec, sequence, crtc_id;
 };
 #define DRM_EVENT_FLIP_COMPLETE 0x02
 struct plane_res { uint64_t plane_id_ptr; uint32_t count_planes; };

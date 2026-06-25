@@ -1,4 +1,5 @@
 #include "drm.h"
+#include "../../../apic/lapic_timer.h"
 #include "../../../console/klog.h"
 #include "../../../fb/framebuffer.h"
 #include "../../../fs/ramfs.h"
@@ -21,6 +22,16 @@ drm_framebuffer_create(struct drm_device *dev, struct drm_mode_fb_cmd *cmd);
 extern void drm_framebuffer_free(struct drm_device *dev,
                                  struct drm_framebuffer *fb);
 extern void epoll_notify_event(struct vfs_node *node, uint32_t events);
+
+static uint32_t drm_event_sequence = 1;
+
+static void drm_fill_vblank_event(struct drm_event_vblank *ev, uint32_t crtc_id) {
+  uint64_t ms = lapic_timer_get_ms();
+  ev->tv_sec = (uint32_t)(ms / 1000);
+  ev->tv_usec = (uint32_t)((ms % 1000) * 1000);
+  ev->sequence = drm_event_sequence++;
+  ev->crtc_id = crtc_id;
+}
 
 /* drm_prop.c */
 extern int drm_ioctl_obj_getprops(struct drm_device *dev, uint64_t arg);
@@ -130,6 +141,7 @@ static void drm_commit(struct drm_device *dev) {
 
             memcpy(hw_fb, crtc->fb->gem_obj->virt_addr,
                    (size_t)height * hw_pitch);
+            __asm__ volatile("sfence" ::: "memory");
           } else {
             uint32_t copy_len = width * 4;
             if (copy_len > hw_pitch)
@@ -164,6 +176,7 @@ static void drm_commit(struct drm_device *dev) {
                      (uint8_t *)crtc->fb->gem_obj->virt_addr + y * sw_pitch,
                      copy_len);
             }
+            __asm__ volatile("sfence" ::: "memory");
           }
         }
       }
@@ -284,14 +297,36 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     klog_puts(" val=");
     klog_uint64(cap->value);
     klog_puts("\n");
-    if (!cap->value)
-      return 0;
-    if (cap->capability == DRM_CLIENT_CAP_UNIVERSAL_PLANES) {
-      file->client_caps |= (1 << 1);
-      return 0;
+    uint32_t bit = 0;
+    switch (cap->capability) {
+    case DRM_CLIENT_CAP_STEREO_3D:
+      bit = DRM_FILE_CAP_STEREO_3D;
+      break;
+    case DRM_CLIENT_CAP_UNIVERSAL_PLANES:
+      bit = DRM_FILE_CAP_UNIVERSAL_PLANES;
+      break;
+    case DRM_CLIENT_CAP_ATOMIC:
+      /* Linux DRM makes ATOMIC imply universal planes and aspect-ratio modes. */
+      bit = DRM_FILE_CAP_ATOMIC | DRM_FILE_CAP_UNIVERSAL_PLANES |
+            DRM_FILE_CAP_ASPECT_RATIO;
+      break;
+    case DRM_CLIENT_CAP_ASPECT_RATIO:
+      bit = DRM_FILE_CAP_ASPECT_RATIO;
+      break;
+    case DRM_CLIENT_CAP_WRITEBACK_CONNECTORS:
+      /* No writeback connectors exist, but enabling visibility is harmless. */
+      bit = DRM_FILE_CAP_WRITEBACK_CONNECTORS;
+      break;
+    default:
+      klog_puts("[DRM] SET_CLIENT_CAP unsupported\n");
+      return -95; /* EOPNOTSUPP */
     }
-    klog_puts("[DRM] SET_CLIENT_CAP unsupported\n");
-    return -95; /* EOPNOTSUPP */
+
+    if (cap->value)
+      file->client_caps |= bit;
+    else
+      file->client_caps &= ~bit;
+    return 0;
   }
   case DRM_IOCTL_SET_MASTER:
     file->is_master = 1;
@@ -763,6 +798,7 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
       ev.base.type = DRM_EVENT_FLIP_COMPLETE;
       ev.base.length = sizeof(ev);
       ev.user_data = flip->user_data;
+      drm_fill_vblank_event(&ev, flip->crtc_id);
       spinlock_release(&dev->lock);
       drm_commit(dev);
       drm_file_send_event(file, &ev, node);
@@ -832,6 +868,11 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     p->handle = local_h;
     return 0;
   }
+
+  case DRM_IOCTL_MODE_CURSOR:
+  case DRM_IOCTL_MODE_CURSOR2:
+    klog_puts("[DRM] hardware cursor ioctl unsupported\n");
+    return -25; /* ENOTTY: force Weston to keep cursors in renderer path */
 
   case DRM_IOCTL_MODE_GETGAMMA:
   case DRM_IOCTL_MODE_SETGAMMA:

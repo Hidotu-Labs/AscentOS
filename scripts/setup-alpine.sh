@@ -581,9 +581,11 @@ xwayland=true
 [shell]
 panel-position=top
 locking=false
+cursor-theme=Adwaita
+cursor-size=24
 
 [launcher]
-icon=/usr/share/icons/Adwaita/24x24/apps/utilities-terminal.png
+icon=/usr/share/icons/Adwaita/16x16/mimetypes/application-x-executable.png
 path=/usr/bin/weston-terminal
 
 [output]

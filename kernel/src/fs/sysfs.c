@@ -50,6 +50,8 @@
 
 // GPU device path for netlink uevents
 char sysfs_gpu_devpath[128] = "/devices/pci0000:00/0000:00:01.0/drm/card0";
+char sysfs_gpu_connector_devpath[128] =
+    "/devices/pci0000:00/0000:00:01.0/drm/card0/card0-HDMI-A-1";
 
 // Helpers
 
@@ -424,6 +426,12 @@ void sysfs_init(void) {
     strcat(sl_target, "/drm/card0");
     sysfs_symlink(drm_class, "card0", sl_target);
 
+    char conn_sl_target[160];
+    strcpy(conn_sl_target, "../../devices/pci0000:00/");
+    strcat(conn_sl_target, pci_addr);
+    strcat(conn_sl_target, "/drm/card0/card0-HDMI-A-1");
+    sysfs_symlink(drm_class, "card0-HDMI-A-1", conn_sl_target);
+
     // Also create the real device directory that the symlink points to
     vfs_node_t *pci_seg = sysfs_mkdir(devices_dir, "pci0000:00");
     vfs_node_t *gpu_dev = sysfs_mkdir(pci_seg, pci_addr);
@@ -433,6 +441,17 @@ void sysfs_init(void) {
     sysfs_mkfile(card0_dir, "uevent",
                  "MAJOR=226\nMINOR=0\nDEVNAME=dri/card0\n"
                  "DEVTYPE=drm_minor\nSUBSYSTEM=drm\n");
+
+    vfs_node_t *conn_dir = sysfs_mkdir(card0_dir, "card0-HDMI-A-1");
+    sysfs_mkfile(conn_dir, "status", "connected\n");
+    sysfs_mkfile(conn_dir, "enabled", "enabled\n");
+    sysfs_mkfile(conn_dir, "modes", "1280x800\n");
+    sysfs_mkfile(conn_dir, "dpms", "On\n");
+    sysfs_mkfile(conn_dir, "uevent",
+                 "DEVTYPE=drm_connector\nSUBSYSTEM=drm\nHOTPLUG=1\n"
+                 "CONNECTOR=HDMI-A-1\n");
+    sysfs_symlink(conn_dir, "subsystem", "../../../../../../class/drm");
+    sysfs_symlink(conn_dir, "device", "../../..");
     // subsystem symlink inside card0 → points back to /sys/class/drm
     // wlroots walks up the tree using this to identify the subsystem.
     // Relative from /sys/devices/pci0000:00/<addr>/drm/card0/ to
@@ -491,6 +510,8 @@ void sysfs_init(void) {
     strcpy(sysfs_gpu_devpath, "/devices/pci0000:00/");
     strcat(sysfs_gpu_devpath, pci_addr);
     strcat(sysfs_gpu_devpath, "/drm/card0");
+    strcpy(sysfs_gpu_connector_devpath, sysfs_gpu_devpath);
+    strcat(sysfs_gpu_connector_devpath, "/card0-HDMI-A-1");
 
     // Add devices/ directory under drm_class so that
     // /sys/subsystem/drm/devices/ enumeration finds card0
@@ -503,6 +524,12 @@ void sysfs_init(void) {
       strcat(card0_rel, pci_addr);
       strcat(card0_rel, "/drm/card0");
       sysfs_symlink(drm_devices_dir, "card0", card0_rel);
+
+      char conn_rel[160];
+      strcpy(conn_rel, "../../../devices/pci0000:00/");
+      strcat(conn_rel, pci_addr);
+      strcat(conn_rel, "/drm/card0/card0-HDMI-A-1");
+      sysfs_symlink(drm_devices_dir, "card0-HDMI-A-1", conn_rel);
     }
   }
 

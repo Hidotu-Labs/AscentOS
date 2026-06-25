@@ -51,10 +51,10 @@ struct drm_mode_get_connector {
     uint64_t props_ptr;
     uint64_t prop_values_ptr;
     uint32_t count_modes;
-    uint32_t count_encoders;
     uint32_t count_props;
-    uint32_t connector_id;
+    uint32_t count_encoders;
     uint32_t encoder_id;
+    uint32_t connector_id;
     uint32_t connector_type;
     uint32_t connector_type_id;
     uint32_t connection;

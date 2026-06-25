@@ -1,5 +1,6 @@
 #include "../../../console/klog.h"
 #include "../../../fb/framebuffer.h"
+#include "../../../apic/lapic_timer.h"
 #include "../../../lib/string.h"
 #include "../../../mm/heap.h"
 #include "drm.h"
@@ -8,23 +9,23 @@
 
 static const struct drm_property_def drm_prop_catalogue[] = {
     /* Plane properties */
-    {DRM_PROP_ID_CRTC_ID, DRM_PROP_FLAG_ATOMIC, "CRTC_ID", 0, UINT32_MAX},
-    {DRM_PROP_ID_FB_ID, DRM_PROP_FLAG_ATOMIC, "FB_ID", 0, UINT32_MAX},
-    {DRM_PROP_ID_SRC_X, DRM_PROP_FLAG_ATOMIC, "SRC_X", 0, UINT32_MAX},
-    {DRM_PROP_ID_SRC_Y, DRM_PROP_FLAG_ATOMIC, "SRC_Y", 0, UINT32_MAX},
-    {DRM_PROP_ID_SRC_W, DRM_PROP_FLAG_ATOMIC, "SRC_W", 0, UINT32_MAX},
-    {DRM_PROP_ID_SRC_H, DRM_PROP_FLAG_ATOMIC, "SRC_H", 0, UINT32_MAX},
-    {DRM_PROP_ID_CRTC_X, DRM_PROP_FLAG_ATOMIC, "CRTC_X", 0, UINT32_MAX},
-    {DRM_PROP_ID_CRTC_Y, DRM_PROP_FLAG_ATOMIC, "CRTC_Y", 0, UINT32_MAX},
-    {DRM_PROP_ID_CRTC_W, DRM_PROP_FLAG_ATOMIC, "CRTC_W", 0, UINT32_MAX},
-    {DRM_PROP_ID_CRTC_H, DRM_PROP_FLAG_ATOMIC, "CRTC_H", 0, UINT32_MAX},
+    {DRM_PROP_ID_CRTC_ID, DRM_PROP_TYPE_OBJECT | DRM_PROP_FLAG_ATOMIC, "CRTC_ID", 0, UINT32_MAX},
+    {DRM_PROP_ID_FB_ID, DRM_PROP_TYPE_OBJECT | DRM_PROP_FLAG_ATOMIC, "FB_ID", 0, UINT32_MAX},
+    {DRM_PROP_ID_SRC_X, DRM_PROP_TYPE_RANGE | DRM_PROP_FLAG_ATOMIC, "SRC_X", 0, UINT32_MAX},
+    {DRM_PROP_ID_SRC_Y, DRM_PROP_TYPE_RANGE | DRM_PROP_FLAG_ATOMIC, "SRC_Y", 0, UINT32_MAX},
+    {DRM_PROP_ID_SRC_W, DRM_PROP_TYPE_RANGE | DRM_PROP_FLAG_ATOMIC, "SRC_W", 0, UINT32_MAX},
+    {DRM_PROP_ID_SRC_H, DRM_PROP_TYPE_RANGE | DRM_PROP_FLAG_ATOMIC, "SRC_H", 0, UINT32_MAX},
+    {DRM_PROP_ID_CRTC_X, DRM_PROP_TYPE_SIGNED_RANGE | DRM_PROP_FLAG_ATOMIC, "CRTC_X", 0, UINT32_MAX},
+    {DRM_PROP_ID_CRTC_Y, DRM_PROP_TYPE_SIGNED_RANGE | DRM_PROP_FLAG_ATOMIC, "CRTC_Y", 0, UINT32_MAX},
+    {DRM_PROP_ID_CRTC_W, DRM_PROP_TYPE_RANGE | DRM_PROP_FLAG_ATOMIC, "CRTC_W", 0, UINT32_MAX},
+    {DRM_PROP_ID_CRTC_H, DRM_PROP_TYPE_RANGE | DRM_PROP_FLAG_ATOMIC, "CRTC_H", 0, UINT32_MAX},
     /* CRTC properties */
-    {DRM_PROP_ID_ACTIVE, DRM_PROP_FLAG_ATOMIC, "ACTIVE", 0, 1},
+    {DRM_PROP_ID_ACTIVE, DRM_PROP_TYPE_RANGE | DRM_PROP_FLAG_ATOMIC, "ACTIVE", 0, 1},
     {DRM_PROP_ID_MODE_ID, DRM_PROP_FLAG_ATOMIC | DRM_PROP_TYPE_BLOB, "MODE_ID",
      0, UINT32_MAX},
     /* Connector properties */
-    {DRM_PROP_ID_DPMS, 0, "DPMS", 0, 3},
-    {DRM_PROP_ID_CONNECTOR_ID, DRM_PROP_FLAG_ATOMIC | DRM_PROP_FLAG_IMMUTABLE,
+    {DRM_PROP_ID_DPMS, DRM_PROP_TYPE_ENUM, "DPMS", 0, 3},
+    {DRM_PROP_ID_CONNECTOR_ID, DRM_PROP_TYPE_OBJECT | DRM_PROP_FLAG_ATOMIC | DRM_PROP_FLAG_IMMUTABLE,
      "CONNECTOR_ID", 0, UINT32_MAX},
     /* Plane type property */
     {DRM_PROP_ID_TYPE, DRM_PROP_TYPE_ENUM | DRM_PROP_FLAG_IMMUTABLE, "type", 0,
@@ -229,28 +230,41 @@ int drm_ioctl_getproperty(struct drm_device *dev, uint64_t arg) {
   strncpy(p->name, def->name, 32);
 
   /* For RANGE properties expose [min, max] */
-  if ((def->flags & 0x1C0) == DRM_PROP_TYPE_RANGE) {
+  if ((def->flags & DRM_PROP_TYPE_RANGE) ||
+      ((def->flags & DRM_PROP_EXTENDED_TYPE_MASK) ==
+       DRM_PROP_TYPE_SIGNED_RANGE)) {
     p->count_values = 2;
     if (p->values_ptr) {
       uint64_t *vals = (uint64_t *)p->values_ptr;
       vals[0] = def->min_val;
       vals[1] = def->max_val;
     }
-  } else if ((def->flags & 0x1C0) == DRM_PROP_TYPE_ENUM) {
-    /* Special case for "type" enum labels that wlroots expects */
-    if (def->id == DRM_PROP_ID_TYPE) {
-      p->count_enum_blobs = 3;
+  } else if (def->flags & DRM_PROP_TYPE_ENUM) {
+    /* Special-case enum labels that compositors expect. */
+    if (def->id == DRM_PROP_ID_TYPE || def->id == DRM_PROP_ID_DPMS) {
+      p->count_enum_blobs = (def->id == DRM_PROP_ID_TYPE) ? 3 : 4;
       if (p->enum_blob_ptr) {
         struct {
           uint64_t value;
           char name[32];
         } *enums = (void *)p->enum_blob_ptr;
-        enums[0].value = 0;
-        strcpy(enums[0].name, "Overlay");
-        enums[1].value = 1;
-        strcpy(enums[1].name, "Primary");
-        enums[2].value = 2;
-        strcpy(enums[2].name, "Cursor");
+        if (def->id == DRM_PROP_ID_TYPE) {
+          enums[0].value = 0;
+          strcpy(enums[0].name, "Overlay");
+          enums[1].value = 1;
+          strcpy(enums[1].name, "Primary");
+          enums[2].value = 2;
+          strcpy(enums[2].name, "Cursor");
+        } else {
+          enums[0].value = 0;
+          strcpy(enums[0].name, "On");
+          enums[1].value = 1;
+          strcpy(enums[1].name, "Standby");
+          enums[2].value = 2;
+          strcpy(enums[2].name, "Suspend");
+          enums[3].value = 3;
+          strcpy(enums[3].name, "Off");
+        }
       }
     } else {
       p->count_enum_blobs = 0;
@@ -280,6 +294,17 @@ extern struct drm_gem_object *drm_gem_find_by_handle(struct drm_device *dev,
 extern void drm_file_send_event(struct drm_file *file,
                                 struct drm_event_vblank *ev,
                                 struct vfs_node *node);
+
+static uint32_t drm_atomic_event_sequence = 1;
+
+static void drm_fill_atomic_vblank_event(struct drm_event_vblank *ev,
+                                         uint32_t crtc_id) {
+  uint64_t ms = lapic_timer_get_ms();
+  ev->tv_sec = (uint32_t)(ms / 1000);
+  ev->tv_usec = (uint32_t)((ms % 1000) * 1000);
+  ev->sequence = drm_atomic_event_sequence++;
+  ev->crtc_id = crtc_id;
+}
 
 /*
  * Apply a single (object, property, value) triple.
@@ -415,6 +440,7 @@ int drm_ioctl_atomic(struct vfs_node *node, struct drm_file *file,
 
   spinlock_acquire(&dev->lock);
 
+  uint32_t event_crtc_id = 0;
   uint32_t prop_offset = 0;
   for (uint32_t i = 0; i < req->count_objs; i++) {
     uint32_t obj_id = obj_ids[i];
@@ -449,6 +475,11 @@ int drm_ioctl_atomic(struct vfs_node *node, struct drm_file *file,
       klog_uint64(val);
       klog_puts("\n");
 
+      if (mobj->type == DRM_MODE_OBJECT_CRTC)
+        event_crtc_id = obj_id;
+      if (pid == DRM_PROP_ID_CRTC_ID && val != 0)
+        event_crtc_id = (uint32_t)val;
+
       if (!test_only) {
         if (atomic_apply_prop(dev, mobj, pid, val) != 0) {
           klog_puts("[DRM] atomic: unknown prop_id=");
@@ -469,6 +500,7 @@ int drm_ioctl_atomic(struct vfs_node *node, struct drm_file *file,
     ev.base.type = DRM_EVENT_FLIP_COMPLETE;
     ev.base.length = sizeof(struct drm_event_vblank);
     ev.user_data = req->user_data;
+    drm_fill_atomic_vblank_event(&ev, event_crtc_id);
     spinlock_release(&dev->lock);
     drm_file_send_event(file, &ev, node);
     goto done;

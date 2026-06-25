@@ -349,12 +349,33 @@ static uint64_t sys_dup2(uint64_t oldfd, uint64_t newfd, uint64_t a2,
 // read / write helpers
 // ---------------------------------------------------------------------------
 
+static void trace_weston_debug_write(struct thread *t, int fd, const void *buf,
+                                     size_t count) {
+  if (!t || fd < 0 || fd >= MAX_FDS || !t->fds[fd] || !buf || count == 0)
+    return;
+
+  if (strcmp(t->fds[fd]->name, "weston-debug.log") != 0)
+    return;
+
+  klog_puts("[WESTON-LOG] ");
+  const char *s = (const char *)buf;
+  for (size_t i = 0; i < count; i++) {
+    char c = s[i];
+    if (c == '\0')
+      break;
+    klog_putchar(c);
+  }
+  if (((const char *)buf)[count - 1] != '\n')
+    klog_putchar('\n');
+}
+
 static int64_t fd_write(int fd, const void *buf, size_t count) {
   struct thread *t = sched_get_current();
   if (!t || fd < 0 || fd >= MAX_FDS || !t->fds[fd])
     return -9;
 
   vfs_node_t *node = t->fds[fd];
+  trace_weston_debug_write(t, fd, buf, count);
   int32_t bytes_written =
       (int32_t)vfs_write(node, t->fd_offsets[fd], count, (uint8_t *)buf);
   if (bytes_written > 0)

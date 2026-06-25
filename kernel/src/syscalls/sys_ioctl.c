@@ -12,6 +12,16 @@
 
 struct termios console_termios;
 
+static int ioctl_arg_is_scalar(uint32_t request) {
+  switch (request) {
+  case 0x40044590: // EVIOCGRAB: _IOW('E', 0x90, int)
+  case 0x40044591: // EVIOCREVOKE: _IOW('E', 0x91, int)
+    return 1;
+  default:
+    return 0;
+  }
+}
+
 static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
                           uint64_t a3, uint64_t a4, uint64_t a5) {
   (void)a3;
@@ -56,7 +66,8 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
     if (node->ioctl) {
       if (request & 0xC0000000) {
         size_t sz = (request >> 16) & 0x3FFF;
-        if (sz > 0 && !vmm_is_user_addr_range_valid(arg, sz)) {
+        if (sz > 0 && !ioctl_arg_is_scalar((uint32_t)request) &&
+            !vmm_is_user_addr_range_valid(arg, sz)) {
           klog_puts(
               "[SYSCALL] ioctl: invalid arg pointer for encoded request\n");
           return (uint64_t)-14;

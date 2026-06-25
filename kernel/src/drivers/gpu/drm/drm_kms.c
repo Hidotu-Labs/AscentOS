@@ -88,12 +88,8 @@ void drm_kms_init(struct drm_device *dev) {
     // 2. Create a CRTC and link to primary plane
     struct drm_crtc *crtc = drm_crtc_create(dev, primary);
 
-    // 1a. Create a cursor plane and link it to the CRTC
-    struct drm_plane *cursor = drm_plane_create(dev, 0x1);
-    if (cursor) {
-        drm_obj_set_prop(&cursor->base, DRM_PROP_ID_TYPE, DRM_PLANE_TYPE_CURSOR);
-        crtc->cursor = cursor;
-    }
+    /* Do not advertise a cursor plane until we can actually composite one.
+       Weston will render the pointer into the primary plane instead. */
 
     // 3. Create an encoder linked to CRTC 1
     struct drm_encoder *encoder = drm_encoder_create(dev, 1 /* bits */, 0x1);

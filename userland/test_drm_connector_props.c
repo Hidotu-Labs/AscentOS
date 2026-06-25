@@ -75,8 +75,8 @@ struct drm_mode_modeinfo {
 };
 struct drm_mode_get_connector {
     uint64_t encoders_ptr, modes_ptr, props_ptr, prop_values_ptr;
-    uint32_t count_modes, count_encoders, count_props;
-    uint32_t connector_id, encoder_id, connector_type, connector_type_id;
+    uint32_t count_modes, count_props, count_encoders;
+    uint32_t encoder_id, connector_id, connector_type, connector_type_id;
     uint32_t connection, mm_width, mm_height, subpixel, pad;
 };
 struct drm_mode_get_property {
@@ -106,7 +106,7 @@ struct drm_mode_atomic {
 struct drm_event        { uint32_t type, length; };
 struct drm_event_vblank {
     struct drm_event base; uint64_t user_data;
-    uint32_t tv_sec, tv_usec, sequence, reserved;
+    uint32_t tv_sec, tv_usec, sequence, crtc_id;
 };
 #define DRM_EVENT_FLIP_COMPLETE 0x02
 struct plane_res { uint64_t plane_id_ptr; uint32_t count_planes; };
