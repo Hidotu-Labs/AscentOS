@@ -5,6 +5,13 @@ QEMUFLAGS := -m 2G
 
 override IMAGE_NAME := ascentos-$(ARCH)
 
+ASCENTD_CONFIG_FILES := \
+	initrd/ascentd/default.target \
+	initrd/ascentd/services/system-init.service \
+	initrd/ascentd/services/console.service \
+	initrd/ascentd/services/wayland.service \
+	initrd/ascentd/services/x11.service
+
 HOST_CC := cc
 HOST_CFLAGS := -g -O2 -pipe
 HOST_CPPFLAGS :=
@@ -119,7 +126,7 @@ run-fat32: edk2-ovmf $(IMAGE_NAME).iso fat32_test.img
 		$(QEMUFLAGS)
 
 # Create a 64MB ext2 disk image with sample files for testing
-disk.img: assets/boot.wav assets/test.wav assets/jane.mp3 assets/mc9.mp3 assets/test.bmp assets/test.tar assets/room.png assets/logo.png userland/forkit.elf userland/about.elf userland/hello.elf userland/hello_glibc.elf userland/malloc_test_glibc.elf userland/booter.elf userland/test_cpp.elf userland/test_cow.elf userland/test_syscalls.elf userland/test_kilo_syscalls.elf userland/test_wait4_complex.elf userland/kilo.elf userland/test_args.elf userland/test_stat.elf userland/ls.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/test_mmap_shared_private.elf userland/asplay.elf userland/showbmp.elf userland/test_uname_pipe.elf userland/test_pipe_fork.elf userland/test_sys_access.elf userland/test_sys_cwd.elf userland/test_newfstatat.elf userland/test_unlink_rename.elf userland/wget.elf userland/kria.elf userland/doom.elf userland/poll_test.elf userland/pty_test.elf userland/test_tcc_libc.c userland/test_mm.c userland/test_mmap_perf.elf userland/test_invlpg_bench.elf userland/test_mmap_stress.elf userland/test_page_cache.elf userland/test_dynamic.elf userland/test_dup.elf userland/test_attrib.elf userland/test_symlink.elf userland/test_cred.elf userland/test_time.elf userland/test_tsc_manual.elf userland/test_unix_sock.elf userland/test_unix_fdpass.elf userland/test_fb.elf userland/test_events.elf userland/test_read.elf userland/test_socket_phase3.elf userland/test_socket_phase3_advanced.elf userland/test_socket_phase3_megastress.elf userland/test_socket_phase4.elf userland/test_socket_phase5.elf userland/test_socket_phase6.elf userland/test_socket_phase7.elf userland/test_socket_phase7_advanced.elf userland/test_socket_phase8.elf userland/test_socket_phase9.elf userland/test_socket_phase10.elf userland/test_socket_phase11.elf userland/test_inet_stress.elf userland/dns_lookup.elf userland/test_signal_subsystem.elf userland/xeyes.elf userland/test_x11_simple.elf userland/xkbcomp.elf userland/test_shared_irq.elf userland/jwm.elf userland/doom_x11.elf userland/gtk_test.elf userland/tinywl.elf userland/tglgears_fb.elf userland/tglgears_drm.elf userland/tglhello_drm.elf userland/drm_bench.elf userland/test_drm_kms.elf userland/test_drm_flip.elf userland/test_drm_atomic.elf userland/test_drm_epoll.elf userland/test_clone_futex.elf userland/test_clone_futex_stress.elf userland/test_mem_stress.elf userland/test_io_leak.elf userland/panic_test.elf userland/fault_mon.elf userland/crash.elf userland/classicube.elf userland/test_sdl2.elf userland/terrain.png userland/texpacks/classicube.zip userland/netlink_test.elf userland/test_timer_sid.elf userland/ltp_timerfd.elf userland/ltp_epoll.elf initrd/startx.sh initrd/startw.sh initrd/weston.ini
+disk.img: assets/boot.wav assets/test.wav assets/jane.mp3 assets/mc9.mp3 assets/test.bmp assets/test.tar assets/room.png assets/logo.png userland/forkit.elf userland/about.elf userland/hello.elf userland/hello_glibc.elf userland/malloc_test_glibc.elf userland/booter.elf userland/test_cpp.elf userland/test_cow.elf userland/test_syscalls.elf userland/test_kilo_syscalls.elf userland/test_wait4_complex.elf userland/kilo.elf userland/test_args.elf userland/test_stat.elf userland/ls.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/test_mmap_shared_private.elf userland/asplay.elf userland/showbmp.elf userland/test_uname_pipe.elf userland/test_pipe_fork.elf userland/test_sys_access.elf userland/test_sys_cwd.elf userland/test_newfstatat.elf userland/test_unlink_rename.elf userland/wget.elf userland/kria.elf userland/doom.elf userland/poll_test.elf userland/pty_test.elf userland/test_tcc_libc.c userland/test_mm.c userland/test_mmap_perf.elf userland/test_invlpg_bench.elf userland/test_mmap_stress.elf userland/test_page_cache.elf userland/test_dynamic.elf userland/test_dup.elf userland/test_attrib.elf userland/test_symlink.elf userland/test_cred.elf userland/test_time.elf userland/test_tsc_manual.elf userland/test_unix_sock.elf userland/test_unix_fdpass.elf userland/test_fb.elf userland/test_events.elf userland/test_read.elf userland/test_socket_phase3.elf userland/test_socket_phase3_advanced.elf userland/test_socket_phase3_megastress.elf userland/test_socket_phase4.elf userland/test_socket_phase5.elf userland/test_socket_phase6.elf userland/test_socket_phase7.elf userland/test_socket_phase7_advanced.elf userland/test_socket_phase8.elf userland/test_socket_phase9.elf userland/test_socket_phase10.elf userland/test_socket_phase11.elf userland/test_inet_stress.elf userland/dns_lookup.elf userland/test_signal_subsystem.elf userland/xeyes.elf userland/test_x11_simple.elf userland/xrootcursor.elf userland/xkbcomp.elf userland/test_shared_irq.elf userland/jwm.elf userland/doom_x11.elf userland/gtk_test.elf userland/tinywl.elf userland/tglgears_fb.elf userland/tglgears_drm.elf userland/tglhello_drm.elf userland/drm_bench.elf userland/test_drm_kms.elf userland/test_drm_flip.elf userland/test_drm_atomic.elf userland/test_drm_epoll.elf userland/test_clone_futex.elf userland/test_clone_futex_stress.elf userland/test_mem_stress.elf userland/test_io_leak.elf userland/panic_test.elf userland/fault_mon.elf userland/crash.elf userland/classicube.elf userland/test_sdl2.elf userland/terrain.png userland/texpacks/classicube.zip userland/netlink_test.elf userland/test_timer_sid.elf userland/ltp_timerfd.elf userland/ltp_epoll.elf initrd/startx.sh initrd/startw.sh initrd/weston.ini userland/ascentd.elf $(ASCENTD_CONFIG_FILES)
 	@echo "Creating root filesystem (ext3)..."
 	rm -f ./part.img
 	dd if=/dev/zero of=./part.img bs=1M count=2047
@@ -134,9 +141,25 @@ disk.img: assets/boot.wav assets/test.wav assets/jane.mp3 assets/mc9.mp3 assets/
 		echo "write initrd/startx.sh bin/startx.sh"; \
 		echo "rm bin/startw.sh"; \
 		echo "write initrd/startw.sh bin/startw.sh"; \
+		echo "rm bin/ascentd"; \
+		echo "write userland/ascentd.elf bin/ascentd"; \
 		echo "rm bin/tinywl"; \
 		echo "write userland/tinywl.elf bin/tinywl"; \
+		echo "rm bin/xrootcursor"; \
+		echo "write userland/xrootcursor.elf bin/xrootcursor"; \
 		echo "mkdir etc"; \
+		echo "mkdir etc/ascentd"; \
+		echo "mkdir etc/ascentd/services"; \
+		echo "rm etc/ascentd/default.target"; \
+		echo "write initrd/ascentd/default.target etc/ascentd/default.target"; \
+		echo "rm etc/ascentd/services/system-init.service"; \
+		echo "write initrd/ascentd/services/system-init.service etc/ascentd/services/system-init.service"; \
+		echo "rm etc/ascentd/services/console.service"; \
+		echo "write initrd/ascentd/services/console.service etc/ascentd/services/console.service"; \
+		echo "rm etc/ascentd/services/wayland.service"; \
+		echo "write initrd/ascentd/services/wayland.service etc/ascentd/services/wayland.service"; \
+		echo "rm etc/ascentd/services/x11.service"; \
+		echo "write initrd/ascentd/services/x11.service etc/ascentd/services/x11.service"; \
 		echo "rm etc/weston.ini"; \
 		echo "write initrd/weston.ini etc/weston.ini"; \
 		echo "rm lib/libc.so"; \
@@ -633,7 +656,7 @@ clean-wolfssl:
 clean-musl:
 	rm -rf build/musl-1.2.5 build/musl-cross-make
 	rm -rf toolchain/musl-sysroot toolchain/x86_64-linux-musl
-	rm -f userland/hello.elf userland/test_syscalls.elf userland/test_kilo_syscalls.elf userland/test_kilo_asm.elf userland/kilo.elf userland/test_args.elf userland/kilo.c userland/test_mmap_shared_private.elf userland/asplay.elf userland/kria.elf userland/test_uname_pipe.elf userland/test_pipe_fork.elf userland/test_sys_access.elf userland/test_sys_cwd.elf userland/test_newfstatat.elf userland/ls.elf userland/readelf.elf userland/test_ext3.elf userland/poll_test.elf
+	rm -f userland/hello.elf userland/ascentd.elf userland/test_syscalls.elf userland/test_kilo_syscalls.elf userland/test_kilo_asm.elf userland/kilo.elf userland/test_args.elf userland/kilo.c userland/test_mmap_shared_private.elf userland/asplay.elf userland/kria.elf userland/test_uname_pipe.elf userland/test_pipe_fork.elf userland/test_sys_access.elf userland/test_sys_cwd.elf userland/test_newfstatat.elf userland/ls.elf userland/readelf.elf userland/test_ext3.elf userland/poll_test.elf
 	rm -rf userland/kria-lang/target
 
 .PHONY: clean-disk
@@ -657,6 +680,10 @@ musl-toolchain: $(MUSL_LIBC)
 userland/hello.elf: userland/hello.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/hello.c -o userland/hello.elf
+
+userland/ascentd.elf: userland/ascentd.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/ascentd.c -o userland/ascentd.elf
 
 userland/hello_glibc.elf: userland/hello_glibc.c
 	$(GLIBC_CC) $(GLIBC_USER_CFLAGS) \
@@ -935,6 +962,10 @@ userland/test_read.elf: userland/test_read.c $(MUSL_LIBC)
 userland/test_x11_simple.elf: userland/test_x11_simple.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/test_x11_simple.c -L$(MUSL_SYSROOT)/lib -lX11 -lxcb -lXau -lXdmcp -o userland/test_x11_simple.elf
+
+userland/xrootcursor.elf: userland/xrootcursor.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/xrootcursor.c -L$(MUSL_SYSROOT)/lib -lX11 -lxcb -lXau -lXdmcp -o userland/xrootcursor.elf
 
 userland/xkbcomp.elf: scripts/port-x11.sh
 	./scripts/port-x11.sh

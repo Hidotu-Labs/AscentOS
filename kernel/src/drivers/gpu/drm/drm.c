@@ -1043,36 +1043,43 @@ case DRM_IOCTL_MODE_CURSOR: {
     if (!cursor)
       continue;
 
-    cursor->crtc_x = cur->x;
-    cursor->crtc_y = cur->y;
+    uint32_t flags = cur->flags ? cur->flags :
+        (DRM_MODE_CURSOR_BO | DRM_MODE_CURSOR_MOVE);
 
-    if (cur->width)
-      cursor->crtc_w = cur->width;
-    if (cur->height)
-      cursor->crtc_h = cur->height;
-
-    if (cur->handle == 0) {
-      cursor->fb = NULL;
-      break;
+    if (flags & DRM_MODE_CURSOR_MOVE) {
+      cursor->crtc_x = cur->x;
+      cursor->crtc_y = cur->y;
     }
 
-    struct drm_gem_object *gem = drm_file_gem_lookup(file, cur->handle);
-    if (!gem) {
-      spinlock_release(&dev->lock);
-      klog_puts("[DRM] MODE_CURSOR invalid GEM handle\n");
-      return -2; /* ENOENT */
+    if (flags & DRM_MODE_CURSOR_BO) {
+      if (cur->width)
+        cursor->crtc_w = cur->width;
+      if (cur->height)
+        cursor->crtc_h = cur->height;
+
+      if (cur->handle == 0) {
+        cursor->fb = NULL;
+        break;
+      }
+
+      struct drm_gem_object *gem = drm_file_gem_lookup(file, cur->handle);
+      if (!gem) {
+        spinlock_release(&dev->lock);
+        klog_puts("[DRM] MODE_CURSOR invalid GEM handle\n");
+        return -2; /* ENOENT */
+      }
+
+      static struct drm_framebuffer legacy_cursor_fb;
+      memset(&legacy_cursor_fb, 0, sizeof(legacy_cursor_fb));
+
+      legacy_cursor_fb.width = cur->width ? cur->width : 64;
+      legacy_cursor_fb.height = cur->height ? cur->height : 64;
+      legacy_cursor_fb.pitch = legacy_cursor_fb.width * 4;
+      legacy_cursor_fb.bpp = 32;
+      legacy_cursor_fb.gem_obj = gem;
+
+      cursor->fb = &legacy_cursor_fb;
     }
-
-    static struct drm_framebuffer legacy_cursor_fb;
-    memset(&legacy_cursor_fb, 0, sizeof(legacy_cursor_fb));
-
-    legacy_cursor_fb.width = cur->width ? cur->width : 64;
-    legacy_cursor_fb.height = cur->height ? cur->height : 64;
-    legacy_cursor_fb.pitch = legacy_cursor_fb.width * 4;
-    legacy_cursor_fb.bpp = 32;
-    legacy_cursor_fb.gem_obj = gem;
-
-    cursor->fb = &legacy_cursor_fb;
     break;
   }
 
@@ -1115,36 +1122,43 @@ case DRM_IOCTL_MODE_CURSOR2: {
     if (!cursor)
       continue;
 
-    cursor->crtc_x = cur->x;
-    cursor->crtc_y = cur->y;
+    uint32_t flags = cur->flags ? cur->flags :
+        (DRM_MODE_CURSOR_BO | DRM_MODE_CURSOR_MOVE);
 
-    if (cur->width)
-      cursor->crtc_w = cur->width;
-    if (cur->height)
-      cursor->crtc_h = cur->height;
-
-    if (cur->handle == 0) {
-      cursor->fb = NULL;
-      break;
+    if (flags & DRM_MODE_CURSOR_MOVE) {
+      cursor->crtc_x = cur->x;
+      cursor->crtc_y = cur->y;
     }
 
-    struct drm_gem_object *gem = drm_file_gem_lookup(file, cur->handle);
-    if (!gem) {
-      spinlock_release(&dev->lock);
-      klog_puts("[DRM] MODE_CURSOR2 invalid GEM handle\n");
-      return -2; /* ENOENT */
+    if (flags & DRM_MODE_CURSOR_BO) {
+      if (cur->width)
+        cursor->crtc_w = cur->width;
+      if (cur->height)
+        cursor->crtc_h = cur->height;
+
+      if (cur->handle == 0) {
+        cursor->fb = NULL;
+        break;
+      }
+
+      struct drm_gem_object *gem = drm_file_gem_lookup(file, cur->handle);
+      if (!gem) {
+        spinlock_release(&dev->lock);
+        klog_puts("[DRM] MODE_CURSOR2 invalid GEM handle\n");
+        return -2; /* ENOENT */
+      }
+
+      static struct drm_framebuffer legacy_cursor2_fb;
+      memset(&legacy_cursor2_fb, 0, sizeof(legacy_cursor2_fb));
+
+      legacy_cursor2_fb.width = cur->width ? cur->width : 64;
+      legacy_cursor2_fb.height = cur->height ? cur->height : 64;
+      legacy_cursor2_fb.pitch = legacy_cursor2_fb.width * 4;
+      legacy_cursor2_fb.bpp = 32;
+      legacy_cursor2_fb.gem_obj = gem;
+
+      cursor->fb = &legacy_cursor2_fb;
     }
-
-    static struct drm_framebuffer legacy_cursor2_fb;
-    memset(&legacy_cursor2_fb, 0, sizeof(legacy_cursor2_fb));
-
-    legacy_cursor2_fb.width = cur->width ? cur->width : 64;
-    legacy_cursor2_fb.height = cur->height ? cur->height : 64;
-    legacy_cursor2_fb.pitch = legacy_cursor2_fb.width * 4;
-    legacy_cursor2_fb.bpp = 32;
-    legacy_cursor2_fb.gem_obj = gem;
-
-    cursor->fb = &legacy_cursor2_fb;
     break;
   }
 

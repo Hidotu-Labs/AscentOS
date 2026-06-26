@@ -169,6 +169,9 @@ union drm_wait_vblank {
   struct drm_wait_vblank_reply reply;
 };
 
+#define DRM_MODE_CURSOR_BO   0x01
+#define DRM_MODE_CURSOR_MOVE 0x02
+
 struct drm_mode_cursor {
   uint32_t flags;
   uint32_t crtc_id;

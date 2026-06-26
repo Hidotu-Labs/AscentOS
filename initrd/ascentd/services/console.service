@@ -1,0 +1,4 @@
+NAME=console
+DESCRIPTION="interactive root shell"
+TYPE=foreground
+COMMAND=/bin/bash

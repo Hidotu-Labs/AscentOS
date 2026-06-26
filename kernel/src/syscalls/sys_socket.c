@@ -19,6 +19,8 @@ static inline bool is_user_ptr(uint64_t addr) {
   return addr != 0 && addr <= USER_ADDR_MAX;
 }
 
+#define SOCKET_FD_FLAGS_CLOEXEC_BIT (1u << 24)
+
 // Syscall: socket(int domain, int type, int protocol)
 // ─────────────────────── Returns: file descriptor or negative error
 static uint64_t sys_socket(uint64_t domain, uint64_t type, uint64_t protocol,
@@ -274,16 +276,14 @@ static uint64_t sys_listen(uint64_t sockfd, uint64_t backlog, uint64_t _arg2,
   return (uint64_t)ret;
 }
 
-// Syscall: accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen)
-static uint64_t sys_accept(uint64_t sockfd, uint64_t addr_ptr,
-                           uint64_t addrlen_ptr, uint64_t _arg3, uint64_t _arg4,
-                           uint64_t _arg5) {
-  (void)_arg3;
-  (void)_arg4;
-  (void)_arg5;
-
+static uint64_t sys_accept_impl(uint64_t sockfd, uint64_t addr_ptr,
+                                uint64_t addrlen_ptr, uint64_t flags) {
   int fd = (int)sockfd;
   struct thread *t = sched_get_current();
+
+  if (flags & ~(uint64_t)(SOCK_NONBLOCK | SOCK_CLOEXEC)) {
+    return (uint64_t)-22; // EINVAL
+  }
 
   // Get socket from FD
   socket_t *sock = socket_from_fd(fd);
@@ -302,6 +302,10 @@ static uint64_t sys_accept(uint64_t sockfd, uint64_t addr_ptr,
     klog_uint64(t->tid);
   klog_puts(" fd=");
   klog_uint64(fd);
+  if (flags) {
+    klog_puts(" flags=");
+    klog_uint64(flags);
+  }
   klog_puts("\n");
 
   // Validate pointers (can be NULL)
@@ -321,11 +325,22 @@ static uint64_t sys_accept(uint64_t sockfd, uint64_t addr_ptr,
     return (uint64_t)ret;
   }
 
+  if (flags & SOCK_NONBLOCK) {
+    newsock->flags |= SOCK_NONBLOCK;
+  }
+
   // Allocate FD for new socket
   int newfd = socket_alloc_fd(newsock);
   if (newfd < 0) {
     socket_put(newsock);
     return (uint64_t)newfd;
+  }
+
+  if (t && newfd < MAX_FDS) {
+    if (flags & SOCK_CLOEXEC)
+      t->fd_flags[newfd] |= SOCKET_FD_FLAGS_CLOEXEC_BIT;
+    if (flags & SOCK_NONBLOCK)
+      t->fd_flags[newfd] |= SOCK_NONBLOCK;
   }
 
   // Fill in addr and addrlen for AF_INET
@@ -355,6 +370,25 @@ static uint64_t sys_accept(uint64_t sockfd, uint64_t addr_ptr,
   klog_puts("\n");
 
   return (uint64_t)newfd;
+}
+
+// Syscall: accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen)
+static uint64_t sys_accept(uint64_t sockfd, uint64_t addr_ptr,
+                           uint64_t addrlen_ptr, uint64_t _arg3, uint64_t _arg4,
+                           uint64_t _arg5) {
+  (void)_arg3;
+  (void)_arg4;
+  (void)_arg5;
+  return sys_accept_impl(sockfd, addr_ptr, addrlen_ptr, 0);
+}
+
+// Syscall: accept4(int sockfd, struct sockaddr *addr, socklen_t *addrlen, int flags)
+static uint64_t sys_accept4(uint64_t sockfd, uint64_t addr_ptr,
+                            uint64_t addrlen_ptr, uint64_t flags, uint64_t _arg4,
+                            uint64_t _arg5) {
+  (void)_arg4;
+  (void)_arg5;
+  return sys_accept_impl(sockfd, addr_ptr, addrlen_ptr, flags);
 }
 
 // Syscall: sendto(int sockfd, const void *buf, size_t len, int flags, ...)
@@ -1000,6 +1034,7 @@ void syscall_register_socket(void) {
   syscall_register(SYS_CONNECT, sys_connect);
   syscall_register(SYS_LISTEN, sys_listen);
   syscall_register(SYS_ACCEPT, sys_accept);
+  syscall_register(SYS_ACCEPT4, sys_accept4);
   syscall_register(SYS_SENDTO, sys_sendto);
   syscall_register(SYS_RECVFROM, sys_recvfrom);
   syscall_register(SYS_RECVMSG, sys_recvmsg);

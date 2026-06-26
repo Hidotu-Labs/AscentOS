@@ -156,9 +156,9 @@ static void init_thread_entry(void) {
                            " Console cleared, starting session...\n");
 
   while (1) {
-    // Launch booter in the background then exec into bash.
-    // Using sh -c lets the shell fork() booter without blocking the session.
-    const char *sh_argv[] = {"/bin/sh", "-c", "exec /bin/bash", NULL};
+    // Start AscentD as the main userspace session. Fall back to bash if the
+    // root filesystem does not provide it yet.
+    const char *sh_argv[] = {"/bin/ascentd", NULL};
 
     struct thread *current = sched_get_current();
     if (current) {

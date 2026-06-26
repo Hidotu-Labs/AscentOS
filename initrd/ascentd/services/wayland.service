@@ -1,0 +1,5 @@
+NAME=wayland
+DESCRIPTION="Weston desktop session"
+TYPE=foreground
+ENABLED=no
+COMMAND=/bin/startw.sh

@@ -1,0 +1,4 @@
+NAME=system-init
+DESCRIPTION="prepare writable runtime directories"
+TYPE=oneshot
+COMMAND=ascentd:runtime-dirs

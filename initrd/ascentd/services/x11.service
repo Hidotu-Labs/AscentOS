@@ -1,0 +1,5 @@
+NAME=x11
+DESCRIPTION="Xfbdev desktop session"
+TYPE=foreground
+ENABLED=no
+COMMAND=/bin/startx.sh
