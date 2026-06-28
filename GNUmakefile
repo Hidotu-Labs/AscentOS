@@ -22,7 +22,6 @@ HOST_LIBS :=
 MUSL_TOOLCHAIN_BIN := $(CURDIR)/toolchain/x86_64-linux-musl/bin
 MUSL_SYSROOT := $(CURDIR)/toolchain/musl-sysroot
 MUSL_LIBC := $(MUSL_SYSROOT)/lib/libc.a
-WOLFSSL_LIB := $(MUSL_SYSROOT)/lib/libwolfssl.a
 MUSL_CC ?= x86_64-linux-musl-gcc
 MUSL_CXX ?= x86_64-linux-musl-g++
 MUSL_USER_CFLAGS := -static -O2 -Wall -Wextra -fno-stack-protector \
@@ -126,7 +125,7 @@ run-fat32: edk2-ovmf $(IMAGE_NAME).iso fat32_test.img
 		$(QEMUFLAGS)
 
 # Create a 64MB ext2 disk image with sample files for testing
-disk.img: assets/boot.wav assets/test.wav assets/jane.mp3 assets/mc9.mp3 assets/test.bmp assets/test.tar assets/room.png assets/logo.png userland/forkit.elf userland/about.elf userland/hello.elf userland/hello_glibc.elf userland/malloc_test_glibc.elf userland/booter.elf userland/test_cpp.elf userland/test_cow.elf userland/test_syscalls.elf userland/test_kilo_syscalls.elf userland/test_wait4_complex.elf userland/kilo.elf userland/test_args.elf userland/test_stat.elf userland/ls.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/test_mmap_shared_private.elf userland/asplay.elf userland/showbmp.elf userland/test_uname_pipe.elf userland/test_pipe_fork.elf userland/test_sys_access.elf userland/test_sys_cwd.elf userland/test_newfstatat.elf userland/test_unlink_rename.elf userland/wget.elf userland/kria.elf userland/doom.elf userland/poll_test.elf userland/pty_test.elf userland/test_tcc_libc.c userland/test_mm.c userland/test_mmap_perf.elf userland/test_invlpg_bench.elf userland/test_mmap_stress.elf userland/test_page_cache.elf userland/test_dynamic.elf userland/test_dup.elf userland/test_attrib.elf userland/test_symlink.elf userland/test_cred.elf userland/test_time.elf userland/test_tsc_manual.elf userland/test_unix_sock.elf userland/test_unix_fdpass.elf userland/test_fb.elf userland/test_events.elf userland/test_read.elf userland/test_socket_phase3.elf userland/test_socket_phase3_advanced.elf userland/test_socket_phase3_megastress.elf userland/test_socket_phase4.elf userland/test_socket_phase5.elf userland/test_socket_phase6.elf userland/test_socket_phase7.elf userland/test_socket_phase7_advanced.elf userland/test_socket_phase8.elf userland/test_socket_phase9.elf userland/test_socket_phase10.elf userland/test_socket_phase11.elf userland/test_inet_stress.elf userland/dns_lookup.elf userland/test_signal_subsystem.elf userland/xeyes.elf userland/test_x11_simple.elf userland/xrootcursor.elf userland/xkbcomp.elf userland/test_shared_irq.elf userland/jwm.elf userland/doom_x11.elf userland/gtk_test.elf userland/tinywl.elf userland/tglgears_fb.elf userland/tglgears_drm.elf userland/tglhello_drm.elf userland/drm_bench.elf userland/test_drm_kms.elf userland/test_drm_flip.elf userland/test_drm_atomic.elf userland/test_drm_epoll.elf userland/test_clone_futex.elf userland/test_clone_futex_stress.elf userland/test_mem_stress.elf userland/test_io_leak.elf userland/panic_test.elf userland/fault_mon.elf userland/crash.elf userland/classicube.elf userland/test_sdl2.elf userland/terrain.png userland/texpacks/classicube.zip userland/netlink_test.elf userland/test_timer_sid.elf userland/ltp_timerfd.elf userland/ltp_epoll.elf initrd/startx.sh initrd/startw.sh initrd/weston.ini userland/ascentd.elf $(ASCENTD_CONFIG_FILES)
+disk.img: assets/boot.wav assets/test.wav assets/jane.mp3 assets/mc9.mp3 assets/test.bmp assets/test.tar assets/room.png assets/logo.png userland/forkit.elf userland/about.elf userland/hello.elf userland/hello_glibc.elf userland/malloc_test_glibc.elf userland/booter.elf userland/test_cpp.elf userland/test_cow.elf userland/test_syscalls.elf userland/test_kilo_syscalls.elf userland/test_wait4_complex.elf userland/kilo.elf userland/test_args.elf userland/test_stat.elf userland/ls.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/test_mmap_shared_private.elf userland/asplay.elf userland/showbmp.elf userland/test_uname_pipe.elf userland/test_pipe_fork.elf userland/test_sys_access.elf userland/test_sys_cwd.elf userland/test_newfstatat.elf userland/test_unlink_rename.elf userland/kria.elf userland/doom.elf userland/poll_test.elf userland/pty_test.elf userland/test_tcc_libc.c userland/test_mm.c userland/test_mmap_perf.elf userland/test_invlpg_bench.elf userland/test_mmap_stress.elf userland/test_page_cache.elf userland/test_dynamic.elf userland/test_dup.elf userland/test_attrib.elf userland/test_symlink.elf userland/test_cred.elf userland/test_time.elf userland/test_tsc_manual.elf userland/test_unix_sock.elf userland/test_unix_fdpass.elf userland/test_fb.elf userland/test_events.elf userland/test_read.elf userland/test_socket_phase3.elf userland/test_socket_phase3_advanced.elf userland/test_socket_phase3_megastress.elf userland/test_socket_phase4.elf userland/test_socket_phase5.elf userland/test_socket_phase6.elf userland/test_socket_phase7.elf userland/test_socket_phase7_advanced.elf userland/test_socket_phase8.elf userland/test_socket_phase9.elf userland/test_socket_phase10.elf userland/test_socket_phase11.elf userland/test_inet_stress.elf userland/dns_lookup.elf userland/test_signal_subsystem.elf userland/xeyes.elf userland/test_x11_simple.elf userland/xrootcursor.elf userland/xkbcomp.elf userland/test_shared_irq.elf userland/jwm.elf userland/doom_x11.elf userland/gtk_test.elf userland/tinywl.elf userland/tglgears_fb.elf userland/tglgears_drm.elf userland/tglhello_drm.elf userland/drm_bench.elf userland/test_drm_kms.elf userland/test_drm_flip.elf userland/test_drm_atomic.elf userland/test_drm_epoll.elf userland/test_clone_futex.elf userland/test_clone_futex_stress.elf userland/test_mem_stress.elf userland/test_io_leak.elf userland/panic_test.elf userland/fault_mon.elf userland/crash.elf userland/classicube.elf userland/test_sdl2.elf userland/terrain.png userland/texpacks/classicube.zip userland/netlink_test.elf userland/test_timer_sid.elf userland/ltp_timerfd.elf userland/ltp_epoll.elf initrd/startx.sh initrd/startw.sh initrd/weston.ini userland/ascentd.elf $(ASCENTD_CONFIG_FILES)
 	@echo "Creating root filesystem (ext3)..."
 	rm -f ./part.img
 	dd if=/dev/zero of=./part.img bs=1M count=2047
@@ -299,8 +298,6 @@ disk.img: assets/boot.wav assets/test.wav assets/jane.mp3 assets/mc9.mp3 assets/
 		echo "write userland/test_tsc_manual.elf bin/test_tsc_manual"; \
 		echo "rm doom1.wad"; \
 		echo "write assets/doomu.wad doom1.wad"; \
-		echo "rm bin/wget"; \
-		echo "write userland/wget.elf bin/wget"; \
 		echo "rm bin/test_unix_sock"; \
 		echo "write userland/test_unix_sock.elf bin/test_unix_sock"; \
 		echo "rm bin/test_unix_fdpass"; \
@@ -631,7 +628,7 @@ clean:
 	rm -f $(IMAGE_NAME).iso
 
 .PHONY: clean-all
-clean-all: clean-musl clean-doom clean-coreutils clean-wolfssl clean-tar
+clean-all: clean-musl clean-doom clean-coreutils clean-tar
 	$(MAKE) -C kernel clean
 	rm -rf iso_root $(IMAGE_NAME).iso $(IMAGE_NAME).hdd nvme.img build/alpine
 
@@ -640,17 +637,6 @@ clean-coreutils:
 	rm -rf build/coreutils-9.5
 	rm -rf toolchain/musl-sysroot/opt/coreutils
 	rm -rf toolchain/glibc-sysroot/opt/coreutils
-
-.PHONY: clean-tar
-clean-tar:
-	rm -rf build/tar-1.35
-	rm -f toolchain/musl-sysroot/bin/tar
-
-.PHONY: clean-wolfssl
-clean-wolfssl:
-	rm -rf build/wolfssl-5.7.0
-	rm -f $(WOLFSSL_LIB)
-	rm -rf toolchain/musl-sysroot/include/wolfssl
 
 .PHONY: clean-musl
 clean-musl:
@@ -900,16 +886,6 @@ userland/ltp_timerfd.elf: userland/ltp_timerfd.c $(MUSL_LIBC)
 userland/ltp_epoll.elf: userland/ltp_epoll.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/ltp_epoll.c -o userland/ltp_epoll.elf
-
-$(WOLFSSL_LIB): $(MUSL_LIBC)
-	./scripts/build-wolfssl.sh
-
-.PHONY: wolfssl
-wolfssl: $(WOLFSSL_LIB)
-
-userland/wget.elf: $(MUSL_LIBC) $(WOLFSSL_LIB)
-	./scripts/build-wget.sh
-
 
 # Kria programming language (Rust-based, compiled with musl for static linking)
 userland/kria-lang:
