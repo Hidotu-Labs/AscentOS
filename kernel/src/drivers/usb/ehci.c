@@ -20,6 +20,7 @@ static struct ehci_int_pipe int_pipes[EHCI_MAX_INT_PIPES];
 static int int_pipe_count = 0;
 
 // Helpers
+static void ehci_enumerate_ports(struct ehci_controller *hc);
 
 static inline uint32_t ehci_read_cap32(struct ehci_controller *hc,
                                        uint32_t reg) {
@@ -604,6 +605,10 @@ void ehci_init(void) {
       hc->present = true;
     }
   }
+
+  for (int i = 0; i < ehci_count; i++) {
+    ehci_enumerate_ports(&controllers[i]);
+  }
 }
 
 void ehci_hand_to_companion(void) {
@@ -693,17 +698,3 @@ struct ehci_controller *ehci_get_controller(int index) {
   return &controllers[index];
 }
 
-void ehci_self_test(void) {
-  klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " EHCI self-test: Port Enumeration & HID Support\n");
-  if (ehci_count == 0) {
-    klog_puts("       No EHCI controllers detected.\n");
-    return;
-  }
-
-  for (int i = 0; i < ehci_count; i++) {
-    struct ehci_controller *hc = &controllers[i];
-    ehci_enumerate_ports(hc);
-  }
-
-  klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " EHCI self-test complete.\n\n");
-}

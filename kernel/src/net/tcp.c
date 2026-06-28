@@ -23,7 +23,8 @@ static inline uint32_t tcp_generate_isn(void) {
 
 static tcp_socket_t sockets[MAX_TCP_SOCKETS];
 static uint16_t next_local_port = 45000;
-static bool tcp_debug_logging = true; // TCP RX/TX logging
+static bool tcp_debug_logging =
+    false; // TCP RX/TX logging (disabled for performance)
 
 static void tcp_print_ip(uint32_t ip) {
   klog_uint64((ip >> 24) & 0xFF);
@@ -250,50 +251,65 @@ int tcp_send(int sock_id, const void *data, uint16_t len) {
   if (!sock->valid || sock->state != TCP_STATE_ESTABLISHED)
     return -1;
 
-  uint32_t start_seq = sock->seq_num;
+  const uint8_t *ptr = (const uint8_t *)data;
+  uint16_t total_sent = 0;
+  uint16_t mss = 1460; // Standard MSS for 1500 MTU
 
-  // Heap-allocate wait queue entry to persist across context switches
-  wait_queue_entry_t *wq_entry = kmalloc(sizeof(wait_queue_entry_t));
-  struct thread *current = sched_get_current();
-  if (current && wq_entry) {
-    wq_entry->thread = current;
-    wq_entry->next = NULL;
-    wait_queue_add(&sock->wait_queue, wq_entry);
-  }
+  while (total_sent < len) {
+    uint16_t chunk_len = len - total_sent;
+    if (chunk_len > mss)
+      chunk_len = mss;
 
-  uint64_t start_ms = lapic_timer_get_ms();
-  uint64_t last_retransmit = start_ms;
+    uint32_t start_seq = sock->seq_num;
 
-  tcp_send_segment(sock, TCP_FLAG_ACK | TCP_FLAG_PSH, data, len);
-
-  while (sock->seq_num != start_seq + len &&
-         sock->state == TCP_STATE_ESTABLISHED && sock->valid) {
-    uint64_t now = lapic_timer_get_ms();
-
-    if (now - start_ms > 2000) { // 2 sec timeout
-      break;
+    // Heap-allocate wait queue entry to persist across context switches
+    wait_queue_entry_t *wq_entry = kmalloc(sizeof(wait_queue_entry_t));
+    struct thread *current = sched_get_current();
+    if (current && wq_entry) {
+      wq_entry->thread = current;
+      wq_entry->next = NULL;
+      wait_queue_add(&sock->wait_queue, wq_entry);
     }
 
-    if (now - last_retransmit > 200) { // Retransmit every 200ms
-      tcp_send_segment(sock, TCP_FLAG_ACK | TCP_FLAG_PSH, data, len);
-      last_retransmit = now;
+    uint64_t start_ms = lapic_timer_get_ms();
+    uint64_t last_retransmit = start_ms;
+
+    tcp_send_segment(sock, TCP_FLAG_ACK | TCP_FLAG_PSH, ptr + total_sent,
+                     chunk_len);
+
+    while (sock->seq_num != start_seq + chunk_len &&
+           sock->state == TCP_STATE_ESTABLISHED && sock->valid) {
+      uint64_t now = lapic_timer_get_ms();
+
+      if (now - start_ms > 2000) { // 2 sec timeout
+        break;
+      }
+
+      if (now - last_retransmit > 200) { // Retransmit every 200ms
+        tcp_send_segment(sock, TCP_FLAG_ACK | TCP_FLAG_PSH, ptr + total_sent,
+                         chunk_len);
+        last_retransmit = now;
+      }
+
+      // Drain the full RX queue
+      while (net_poll())
+        ;
+      sched_yield();
     }
 
-    // Drain the full RX queue — required since there are no RX interrupts
-    while (net_poll())
-      ;
-    sched_yield();
+    if (current && wq_entry) {
+      wait_queue_remove(&sock->wait_queue, wq_entry);
+      kfree(wq_entry);
+    }
+
+    if (sock->seq_num != start_seq + chunk_len) {
+      return total_sent > 0 ? (int)total_sent : -1; // Timeout or Socket closed
+    }
+
+    total_sent += chunk_len;
   }
 
-  if (current && wq_entry) {
-    wait_queue_remove(&sock->wait_queue, wq_entry);
-    kfree(wq_entry);
-  }
-
-  if (sock->seq_num == start_seq + len) {
-    return len; // Successfully ACKed
-  }
-  return -1; // Timeout or Socket closed
+  return total_sent;
 }
 
 void tcp_close(int sock_id) {
@@ -393,7 +409,8 @@ void tcp_handle_packet(const uint8_t *payload, uint16_t length, uint32_t src_ip,
         sock = &sockets[i];
         break;
       } else if (sockets[i].state == TCP_STATE_SYN_SENT &&
-                 sockets[i].remote_ip == src_ip && (hdr->flags & TCP_FLAG_RST)) {
+                 sockets[i].remote_ip == src_ip &&
+                 (hdr->flags & TCP_FLAG_RST)) {
         // Fallback: match by IP if we are in SYN_SENT and receive an RST
         sock = &sockets[i];
         break;

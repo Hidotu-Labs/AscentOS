@@ -25,7 +25,8 @@ extern void epoll_notify_event(struct vfs_node *node, uint32_t events);
 
 static uint32_t drm_event_sequence = 1;
 
-static void drm_fill_vblank_event(struct drm_event_vblank *ev, uint32_t crtc_id) {
+static void drm_fill_vblank_event(struct drm_event_vblank *ev,
+                                  uint32_t crtc_id) {
   uint64_t ms = lapic_timer_get_ms();
   ev->tv_sec = (uint32_t)(ms / 1000);
   ev->tv_usec = (uint32_t)((ms % 1000) * 1000);
@@ -182,22 +183,36 @@ static void drm_commit(struct drm_device *dev) {
           struct drm_plane *cursor = crtc->cursor;
           if (cursor && cursor->fb && cursor->fb->gem_obj &&
               cursor->fb->gem_obj->virt_addr && cursor->fb->bpp == 32) {
-            int32_t cx = cursor->crtc_x;
-            int32_t cy = cursor->crtc_y;
-            uint32_t cw = cursor->crtc_w ? cursor->crtc_w : cursor->fb->width;
-            uint32_t ch = cursor->crtc_h ? cursor->crtc_h : cursor->fb->height;
-            if (cw > cursor->fb->width)
-              cw = cursor->fb->width;
-            if (ch > cursor->fb->height)
-              ch = cursor->fb->height;
+            uint32_t src_x = cursor->src_x >> 16;
+            uint32_t src_y = cursor->src_y >> 16;
+            uint32_t src_w = cursor->src_w ? (cursor->src_w >> 16) : 0;
+            uint32_t src_h = cursor->src_h ? (cursor->src_h >> 16) : 0;
 
+            if (src_x >= cursor->fb->width || src_y >= cursor->fb->height)
+              goto cursor_done;
+
+            uint32_t max_w = cursor->fb->width - src_x;
+            uint32_t max_h = cursor->fb->height - src_y;
+            uint32_t cw =
+                cursor->crtc_w ? cursor->crtc_w : (src_w ? src_w : max_w);
+            uint32_t ch =
+                cursor->crtc_h ? cursor->crtc_h : (src_h ? src_h : max_h);
+            if (cw > max_w)
+              cw = max_w;
+            if (ch > max_h)
+              ch = max_h;
+
+            int32_t cx = cursor->crtc_x - cursor->hotspot_x;
+            int32_t cy = cursor->crtc_y - cursor->hotspot_y;
             uint8_t *src_base = (uint8_t *)cursor->fb->gem_obj->virt_addr;
             uint8_t *dst_base = (uint8_t *)hw_fb;
             for (uint32_t sy = 0; sy < ch; sy++) {
               int32_t dy = cy + (int32_t)sy;
               if (dy < 0 || dy >= (int32_t)height)
                 continue;
-              uint32_t *src = (uint32_t *)(src_base + sy * cursor->fb->pitch);
+              uint32_t *src =
+                  (uint32_t *)(src_base + (src_y + sy) * cursor->fb->pitch) +
+                  src_x;
               uint32_t *dst = (uint32_t *)(dst_base + (uint32_t)dy * hw_pitch);
               for (uint32_t sx = 0; sx < cw; sx++) {
                 int32_t dx = cx + (int32_t)sx;
@@ -225,6 +240,7 @@ static void drm_commit(struct drm_device *dev) {
               }
             }
             __asm__ volatile("sfence" ::: "memory");
+          cursor_done:;
           }
         }
       }
@@ -324,7 +340,7 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
       cap->value = 64;
       break;
     case DRM_CAP_ATOMIC:
-      cap->value = 0;
+      cap->value = 1;
       break;
     case 0x11:
       cap->value = 0;
@@ -354,7 +370,8 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
       bit = DRM_FILE_CAP_UNIVERSAL_PLANES;
       break;
     case DRM_CLIENT_CAP_ATOMIC:
-      /* Linux DRM makes ATOMIC imply universal planes and aspect-ratio modes. */
+      /* Linux DRM makes ATOMIC imply universal planes and aspect-ratio modes.
+       */
       bit = DRM_FILE_CAP_ATOMIC | DRM_FILE_CAP_UNIVERSAL_PLANES |
             DRM_FILE_CAP_ASPECT_RATIO;
       break;
@@ -364,6 +381,9 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     case DRM_CLIENT_CAP_WRITEBACK_CONNECTORS:
       /* No writeback connectors exist, but enabling visibility is harmless. */
       bit = DRM_FILE_CAP_WRITEBACK_CONNECTORS;
+      break;
+    case DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT:
+      bit = DRM_FILE_CAP_CURSOR_PLANE_HOTSPOT;
       break;
     default:
       klog_puts("[DRM] SET_CLIENT_CAP unsupported\n");
@@ -534,134 +554,134 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     res->max_height = 4096;
     return 0;
   }
- case DRM_IOCTL_MODE_GETPLANERESOURCES: {
-  struct {
-    uint64_t plane_id_ptr;
-    uint32_t count_planes;
-  } *res = (void *)arg;
+  case DRM_IOCTL_MODE_GETPLANERESOURCES: {
+    struct {
+      uint64_t plane_id_ptr;
+      uint32_t count_planes;
+    } *res = (void *)arg;
 
-  uint32_t planes = 0;
-  struct drm_mode_object *mobj;
+    uint32_t planes = 0;
+    struct drm_mode_object *mobj;
 
-  klog_puts("[DRM] GETPLANERESOURCES in count=");
-  klog_uint64(res->count_planes);
-  klog_puts(" ptr=0x");
-  klog_hex64(res->plane_id_ptr);
-  klog_puts("\n");
+    klog_puts("[DRM] GETPLANERESOURCES in count=");
+    klog_uint64(res->count_planes);
+    klog_puts(" ptr=0x");
+    klog_hex64(res->plane_id_ptr);
+    klog_puts("\n");
 
-  spinlock_acquire(&dev->lock);
+    spinlock_acquire(&dev->lock);
 
-  list_for_each_entry(mobj, &dev->kms_objects, list) {
-    if (mobj->type == DRM_MODE_OBJECT_PLANE) {
-      uint64_t type_val = 999;
-      drm_obj_get_prop(mobj, DRM_PROP_ID_TYPE, &type_val);
+    list_for_each_entry(mobj, &dev->kms_objects, list) {
+      if (mobj->type == DRM_MODE_OBJECT_PLANE) {
+        uint64_t type_val = 999;
+        drm_obj_get_prop(mobj, DRM_PROP_ID_TYPE, &type_val);
 
-      klog_puts("[DRM] GETPLANERESOURCES found plane index=");
-      klog_uint64(planes);
-      klog_puts(" id=");
-      klog_uint64(mobj->id);
-      klog_puts(" type=");
-      klog_uint64(type_val);
-      klog_puts("\n");
-
-      if (res->plane_id_ptr && planes < res->count_planes) {
-        ((uint32_t *)res->plane_id_ptr)[planes] = mobj->id;
-
-        klog_puts("[DRM] GETPLANERESOURCES wrote index=");
+        klog_puts("[DRM] GETPLANERESOURCES found plane index=");
         klog_uint64(planes);
         klog_puts(" id=");
         klog_uint64(mobj->id);
+        klog_puts(" type=");
+        klog_uint64(type_val);
         klog_puts("\n");
+
+        if (res->plane_id_ptr && planes < res->count_planes) {
+          ((uint32_t *)res->plane_id_ptr)[planes] = mobj->id;
+
+          klog_puts("[DRM] GETPLANERESOURCES wrote index=");
+          klog_uint64(planes);
+          klog_puts(" id=");
+          klog_uint64(mobj->id);
+          klog_puts("\n");
+        }
+
+        planes++;
       }
-
-      planes++;
     }
-  }
 
-  spinlock_release(&dev->lock);
-
-  res->count_planes = planes;
-
-  klog_puts("[DRM] GETPLANERESOURCES out count=");
-  klog_uint64(planes);
-  klog_puts("\n");
-
-  return 0;
-}
-  case 0xC02064B6: { /* DRM_IOCTL_MODE_GETPLANE */
-  struct {
-    uint32_t plane_id;
-    uint32_t crtc_id;
-    uint32_t fb_id;
-    uint32_t possible_crtcs;
-    uint32_t gamma_size;
-    uint32_t count_formats;
-    uint64_t format_type_ptr;
-  } *p = (void *)arg;
-
-  klog_puts("[DRM] GETPLANE in id=");
-  klog_uint64(p->plane_id);
-  klog_puts(" format_ptr=0x");
-  klog_hex64(p->format_type_ptr);
-  klog_puts(" count_in=");
-  klog_uint64(p->count_formats);
-  klog_puts("\n");
-
-  spinlock_acquire(&dev->lock);
-
-  struct drm_mode_object *mobj = drm_mode_object_find(dev, p->plane_id);
-  if (!mobj || mobj->type != DRM_MODE_OBJECT_PLANE) {
     spinlock_release(&dev->lock);
-    klog_puts("[DRM] GETPLANE failed: bad plane id\n");
-    return -2; /* ENOENT */
+
+    res->count_planes = planes;
+
+    klog_puts("[DRM] GETPLANERESOURCES out count=");
+    klog_uint64(planes);
+    klog_puts("\n");
+
+    return 0;
   }
+  case 0xC02064B6: { /* DRM_IOCTL_MODE_GETPLANE */
+    struct {
+      uint32_t plane_id;
+      uint32_t crtc_id;
+      uint32_t fb_id;
+      uint32_t possible_crtcs;
+      uint32_t gamma_size;
+      uint32_t count_formats;
+      uint64_t format_type_ptr;
+    } *p = (void *)arg;
 
-  struct drm_plane *plane = (struct drm_plane *)mobj;
+    klog_puts("[DRM] GETPLANE in id=");
+    klog_uint64(p->plane_id);
+    klog_puts(" format_ptr=0x");
+    klog_hex64(p->format_type_ptr);
+    klog_puts(" count_in=");
+    klog_uint64(p->count_formats);
+    klog_puts("\n");
 
-  uint64_t type_val = 0;
-  if (drm_obj_get_prop(&plane->base, DRM_PROP_ID_TYPE, &type_val) != 0)
-    type_val = DRM_PLANE_TYPE_OVERLAY;
+    spinlock_acquire(&dev->lock);
 
-  uint64_t crtc_id = 0;
-  uint64_t fb_id = 0;
-  drm_obj_get_prop(&plane->base, DRM_PROP_ID_CRTC_ID, &crtc_id);
-  drm_obj_get_prop(&plane->base, DRM_PROP_ID_FB_ID, &fb_id);
+    struct drm_mode_object *mobj = drm_mode_object_find(dev, p->plane_id);
+    if (!mobj || mobj->type != DRM_MODE_OBJECT_PLANE) {
+      spinlock_release(&dev->lock);
+      klog_puts("[DRM] GETPLANE failed: bad plane id\n");
+      return -2; /* ENOENT */
+    }
 
-  p->crtc_id = (uint32_t)crtc_id;
-  p->fb_id = (uint32_t)fb_id;
-  p->possible_crtcs = plane->possible_crtcs;
-  p->gamma_size = 0;
+    struct drm_plane *plane = (struct drm_plane *)mobj;
 
-  uint32_t formats[2];
+    uint64_t type_val = 0;
+    if (drm_obj_get_prop(&plane->base, DRM_PROP_ID_TYPE, &type_val) != 0)
+      type_val = DRM_PLANE_TYPE_OVERLAY;
 
-  if ((uint32_t)type_val == DRM_PLANE_TYPE_CURSOR) {
-    formats[0] = 0x34325241; /* ARGB8888 */
-    formats[1] = 0x34325258; /* XRGB8888 */
-    p->count_formats = 2;
-  } else {
-    formats[0] = 0x34325258; /* XRGB8888 */
-    formats[1] = 0x34325241; /* ARGB8888 */
-    p->count_formats = 2;
+    uint64_t crtc_id = 0;
+    uint64_t fb_id = 0;
+    drm_obj_get_prop(&plane->base, DRM_PROP_ID_CRTC_ID, &crtc_id);
+    drm_obj_get_prop(&plane->base, DRM_PROP_ID_FB_ID, &fb_id);
+
+    p->crtc_id = (uint32_t)crtc_id;
+    p->fb_id = (uint32_t)fb_id;
+    p->possible_crtcs = plane->possible_crtcs;
+    p->gamma_size = 0;
+
+    uint32_t formats[2];
+
+    if ((uint32_t)type_val == DRM_PLANE_TYPE_CURSOR) {
+      formats[0] = 0x34325241; /* ARGB8888 */
+      formats[1] = 0x34325258; /* XRGB8888 */
+      p->count_formats = 2;
+    } else {
+      formats[0] = 0x34325258; /* XRGB8888 */
+      formats[1] = 0x34325241; /* ARGB8888 */
+      p->count_formats = 2;
+    }
+
+    if (p->format_type_ptr) {
+      ((uint32_t *)p->format_type_ptr)[0] = formats[0];
+      ((uint32_t *)p->format_type_ptr)[1] = formats[1];
+    }
+
+    klog_puts("[DRM] GETPLANE out id=");
+    klog_uint64(p->plane_id);
+    klog_puts(" type=");
+    klog_uint64(type_val);
+    klog_puts(" possible_crtcs=0x");
+    klog_hex32(p->possible_crtcs);
+    klog_puts(" formats=");
+    klog_uint64(p->count_formats);
+    klog_puts("\n");
+
+    spinlock_release(&dev->lock);
+    return 0;
   }
-
-  if (p->format_type_ptr) {
-    ((uint32_t *)p->format_type_ptr)[0] = formats[0];
-    ((uint32_t *)p->format_type_ptr)[1] = formats[1];
-  }
-
-  klog_puts("[DRM] GETPLANE out id=");
-  klog_uint64(p->plane_id);
-  klog_puts(" type=");
-  klog_uint64(type_val);
-  klog_puts(" possible_crtcs=0x");
-  klog_hex32(p->possible_crtcs);
-  klog_puts(" formats=");
-  klog_uint64(p->count_formats);
-  klog_puts("\n");
-
-  spinlock_release(&dev->lock);
-  return 0;
-}
   case DRM_IOCTL_MODE_GETCRTC: {
     struct drm_mode_get_crtc *c = (struct drm_mode_get_crtc *)arg;
     spinlock_acquire(&dev->lock);
@@ -1013,159 +1033,171 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     return 0;
   }
 
-case DRM_IOCTL_MODE_CURSOR: {
-  struct drm_mode_cursor *cur = (struct drm_mode_cursor *)arg;
+  case DRM_IOCTL_MODE_CURSOR: {
+    struct drm_mode_cursor *cur = (struct drm_mode_cursor *)arg;
 
-  klog_puts("[DRM] MODE_CURSOR flags=0x");
-  klog_hex32(cur->flags);
-  klog_puts(" handle=");
-  klog_uint64(cur->handle);
-  klog_puts(" x=");
-  klog_uint64((uint32_t)cur->x);
-  klog_puts(" y=");
-  klog_uint64((uint32_t)cur->y);
-  klog_puts(" w=");
-  klog_uint64(cur->width);
-  klog_puts(" h=");
-  klog_uint64(cur->height);
-  klog_puts("\n");
+    klog_puts("[DRM] MODE_CURSOR flags=0x");
+    klog_hex32(cur->flags);
+    klog_puts(" handle=");
+    klog_uint64(cur->handle);
+    klog_puts(" x=");
+    klog_uint64((uint32_t)cur->x);
+    klog_puts(" y=");
+    klog_uint64((uint32_t)cur->y);
+    klog_puts(" w=");
+    klog_uint64(cur->width);
+    klog_puts(" h=");
+    klog_uint64(cur->height);
+    klog_puts("\n");
 
-  spinlock_acquire(&dev->lock);
+    spinlock_acquire(&dev->lock);
 
-  struct drm_mode_object *obj;
-  list_for_each_entry(obj, &dev->kms_objects, list) {
-    if (obj->type != DRM_MODE_OBJECT_CRTC)
-      continue;
+    struct drm_mode_object *obj;
+    list_for_each_entry(obj, &dev->kms_objects, list) {
+      if (obj->type != DRM_MODE_OBJECT_CRTC)
+        continue;
 
-    struct drm_crtc *crtc = (struct drm_crtc *)obj;
-    struct drm_plane *cursor = crtc->cursor;
+      struct drm_crtc *crtc = (struct drm_crtc *)obj;
+      struct drm_plane *cursor = crtc->cursor;
 
-    if (!cursor)
-      continue;
+      if (!cursor)
+        continue;
 
-    uint32_t flags = cur->flags ? cur->flags :
-        (DRM_MODE_CURSOR_BO | DRM_MODE_CURSOR_MOVE);
+      uint32_t flags =
+          cur->flags ? cur->flags : (DRM_MODE_CURSOR_BO | DRM_MODE_CURSOR_MOVE);
 
-    if (flags & DRM_MODE_CURSOR_MOVE) {
-      cursor->crtc_x = cur->x;
-      cursor->crtc_y = cur->y;
-    }
-
-    if (flags & DRM_MODE_CURSOR_BO) {
-      if (cur->width)
-        cursor->crtc_w = cur->width;
-      if (cur->height)
-        cursor->crtc_h = cur->height;
-
-      if (cur->handle == 0) {
-        cursor->fb = NULL;
-        break;
+      if (flags & DRM_MODE_CURSOR_MOVE) {
+        cursor->crtc_x = cur->x;
+        cursor->crtc_y = cur->y;
       }
 
-      struct drm_gem_object *gem = drm_file_gem_lookup(file, cur->handle);
-      if (!gem) {
-        spinlock_release(&dev->lock);
-        klog_puts("[DRM] MODE_CURSOR invalid GEM handle\n");
-        return -2; /* ENOENT */
+      if (flags & DRM_MODE_CURSOR_BO) {
+        if (cur->width)
+          cursor->crtc_w = cur->width;
+        if (cur->height)
+          cursor->crtc_h = cur->height;
+        cursor->src_x = 0;
+        cursor->src_y = 0;
+        cursor->src_w = cursor->crtc_w << 16;
+        cursor->src_h = cursor->crtc_h << 16;
+        cursor->hotspot_x = 0;
+        cursor->hotspot_y = 0;
+
+        if (cur->handle == 0) {
+          cursor->fb = NULL;
+          break;
+        }
+
+        struct drm_gem_object *gem = drm_file_gem_lookup(file, cur->handle);
+        if (!gem) {
+          spinlock_release(&dev->lock);
+          klog_puts("[DRM] MODE_CURSOR invalid GEM handle\n");
+          return -2; /* ENOENT */
+        }
+
+        static struct drm_framebuffer legacy_cursor_fb;
+        memset(&legacy_cursor_fb, 0, sizeof(legacy_cursor_fb));
+
+        legacy_cursor_fb.width = cur->width ? cur->width : 64;
+        legacy_cursor_fb.height = cur->height ? cur->height : 64;
+        legacy_cursor_fb.pitch = legacy_cursor_fb.width * 4;
+        legacy_cursor_fb.bpp = 32;
+        legacy_cursor_fb.gem_obj = gem;
+
+        cursor->fb = &legacy_cursor_fb;
       }
-
-      static struct drm_framebuffer legacy_cursor_fb;
-      memset(&legacy_cursor_fb, 0, sizeof(legacy_cursor_fb));
-
-      legacy_cursor_fb.width = cur->width ? cur->width : 64;
-      legacy_cursor_fb.height = cur->height ? cur->height : 64;
-      legacy_cursor_fb.pitch = legacy_cursor_fb.width * 4;
-      legacy_cursor_fb.bpp = 32;
-      legacy_cursor_fb.gem_obj = gem;
-
-      cursor->fb = &legacy_cursor_fb;
+      break;
     }
-    break;
+
+    spinlock_release(&dev->lock);
+    drm_commit(dev);
+    return 0;
   }
 
-  spinlock_release(&dev->lock);
-  drm_commit(dev);
-  return 0;
-}
+  case DRM_IOCTL_MODE_CURSOR2: {
+    struct drm_mode_cursor2 *cur = (struct drm_mode_cursor2 *)arg;
 
-case DRM_IOCTL_MODE_CURSOR2: {
-  struct drm_mode_cursor2 *cur = (struct drm_mode_cursor2 *)arg;
+    klog_puts("[DRM] MODE_CURSOR2 flags=0x");
+    klog_hex32(cur->flags);
+    klog_puts(" handle=");
+    klog_uint64(cur->handle);
+    klog_puts(" x=");
+    klog_uint64((uint32_t)cur->x);
+    klog_puts(" y=");
+    klog_uint64((uint32_t)cur->y);
+    klog_puts(" w=");
+    klog_uint64(cur->width);
+    klog_puts(" h=");
+    klog_uint64(cur->height);
+    klog_puts(" hot=");
+    klog_uint64((uint32_t)cur->hot_x);
+    klog_puts(",");
+    klog_uint64((uint32_t)cur->hot_y);
+    klog_puts("\n");
 
-  klog_puts("[DRM] MODE_CURSOR2 flags=0x");
-  klog_hex32(cur->flags);
-  klog_puts(" handle=");
-  klog_uint64(cur->handle);
-  klog_puts(" x=");
-  klog_uint64((uint32_t)cur->x);
-  klog_puts(" y=");
-  klog_uint64((uint32_t)cur->y);
-  klog_puts(" w=");
-  klog_uint64(cur->width);
-  klog_puts(" h=");
-  klog_uint64(cur->height);
-  klog_puts(" hot=");
-  klog_uint64((uint32_t)cur->hot_x);
-  klog_puts(",");
-  klog_uint64((uint32_t)cur->hot_y);
-  klog_puts("\n");
+    spinlock_acquire(&dev->lock);
 
-  spinlock_acquire(&dev->lock);
+    struct drm_mode_object *obj;
+    list_for_each_entry(obj, &dev->kms_objects, list) {
+      if (obj->type != DRM_MODE_OBJECT_CRTC)
+        continue;
 
-  struct drm_mode_object *obj;
-  list_for_each_entry(obj, &dev->kms_objects, list) {
-    if (obj->type != DRM_MODE_OBJECT_CRTC)
-      continue;
+      struct drm_crtc *crtc = (struct drm_crtc *)obj;
+      struct drm_plane *cursor = crtc->cursor;
 
-    struct drm_crtc *crtc = (struct drm_crtc *)obj;
-    struct drm_plane *cursor = crtc->cursor;
+      if (!cursor)
+        continue;
 
-    if (!cursor)
-      continue;
+      uint32_t flags =
+          cur->flags ? cur->flags : (DRM_MODE_CURSOR_BO | DRM_MODE_CURSOR_MOVE);
 
-    uint32_t flags = cur->flags ? cur->flags :
-        (DRM_MODE_CURSOR_BO | DRM_MODE_CURSOR_MOVE);
-
-    if (flags & DRM_MODE_CURSOR_MOVE) {
-      cursor->crtc_x = cur->x;
-      cursor->crtc_y = cur->y;
-    }
-
-    if (flags & DRM_MODE_CURSOR_BO) {
-      if (cur->width)
-        cursor->crtc_w = cur->width;
-      if (cur->height)
-        cursor->crtc_h = cur->height;
-
-      if (cur->handle == 0) {
-        cursor->fb = NULL;
-        break;
+      if (flags & DRM_MODE_CURSOR_MOVE) {
+        cursor->crtc_x = cur->x;
+        cursor->crtc_y = cur->y;
       }
 
-      struct drm_gem_object *gem = drm_file_gem_lookup(file, cur->handle);
-      if (!gem) {
-        spinlock_release(&dev->lock);
-        klog_puts("[DRM] MODE_CURSOR2 invalid GEM handle\n");
-        return -2; /* ENOENT */
+      if (flags & DRM_MODE_CURSOR_BO) {
+        if (cur->width)
+          cursor->crtc_w = cur->width;
+        if (cur->height)
+          cursor->crtc_h = cur->height;
+        cursor->src_x = 0;
+        cursor->src_y = 0;
+        cursor->src_w = cursor->crtc_w << 16;
+        cursor->src_h = cursor->crtc_h << 16;
+        cursor->hotspot_x = cur->hot_x;
+        cursor->hotspot_y = cur->hot_y;
+
+        if (cur->handle == 0) {
+          cursor->fb = NULL;
+          break;
+        }
+
+        struct drm_gem_object *gem = drm_file_gem_lookup(file, cur->handle);
+        if (!gem) {
+          spinlock_release(&dev->lock);
+          klog_puts("[DRM] MODE_CURSOR2 invalid GEM handle\n");
+          return -2; /* ENOENT */
+        }
+
+        static struct drm_framebuffer legacy_cursor2_fb;
+        memset(&legacy_cursor2_fb, 0, sizeof(legacy_cursor2_fb));
+
+        legacy_cursor2_fb.width = cur->width ? cur->width : 64;
+        legacy_cursor2_fb.height = cur->height ? cur->height : 64;
+        legacy_cursor2_fb.pitch = legacy_cursor2_fb.width * 4;
+        legacy_cursor2_fb.bpp = 32;
+        legacy_cursor2_fb.gem_obj = gem;
+
+        cursor->fb = &legacy_cursor2_fb;
       }
-
-      static struct drm_framebuffer legacy_cursor2_fb;
-      memset(&legacy_cursor2_fb, 0, sizeof(legacy_cursor2_fb));
-
-      legacy_cursor2_fb.width = cur->width ? cur->width : 64;
-      legacy_cursor2_fb.height = cur->height ? cur->height : 64;
-      legacy_cursor2_fb.pitch = legacy_cursor2_fb.width * 4;
-      legacy_cursor2_fb.bpp = 32;
-      legacy_cursor2_fb.gem_obj = gem;
-
-      cursor->fb = &legacy_cursor2_fb;
+      break;
     }
-    break;
+
+    spinlock_release(&dev->lock);
+    drm_commit(dev);
+    return 0;
   }
-
-  spinlock_release(&dev->lock);
-  drm_commit(dev);
-  return 0;
-}
 
   case DRM_IOCTL_MODE_GETGAMMA:
   case DRM_IOCTL_MODE_SETGAMMA:

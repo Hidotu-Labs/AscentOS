@@ -35,6 +35,8 @@ struct drm_plane *drm_plane_create(struct drm_device *dev, uint32_t possible_crt
     drm_obj_add_prop(&plane->base, DRM_PROP_ID_CRTC_Y,  0);
     drm_obj_add_prop(&plane->base, DRM_PROP_ID_CRTC_W,  0);
     drm_obj_add_prop(&plane->base, DRM_PROP_ID_CRTC_H,  0);
+    drm_obj_add_prop(&plane->base, DRM_PROP_ID_HOTSPOT_X, 0);
+    drm_obj_add_prop(&plane->base, DRM_PROP_ID_HOTSPOT_Y, 0);
     return plane;
 }
 
@@ -122,6 +124,16 @@ struct drm_framebuffer *drm_framebuffer_create(struct drm_device *dev, struct dr
     fb->height = cmd->height;
     fb->pitch = cmd->pitch;
     fb->bpp = cmd->bpp;
+    /* Legacy ADDFB has no fourcc. depth=32 means ARGB8888,
+     * depth=24/bpp=32 means XRGB8888, bpp=16 means RGB565. */
+    if (cmd->bpp == 32 && cmd->depth == 32)
+        fb->pixel_format = 0x34325241; /* ARGB8888 */
+    else if (cmd->bpp == 32)
+        fb->pixel_format = 0x34325258; /* XRGB8888 */
+    else if (cmd->bpp == 16)
+        fb->pixel_format = 0x36315652; /* RGB565 */
+    else
+        fb->pixel_format = 0;
     fb->gem_obj = gem_obj;
     gem_obj->refcount++;
 

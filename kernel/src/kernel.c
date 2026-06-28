@@ -400,7 +400,6 @@ void kmain_high_half(void) {
   usb_init();
 
   ehci_init();
-  ehci_self_test();
   ehci_hand_to_companion(); // Hand ports to UHCI before it probes
   uhci_init();
   uhci_self_test();
@@ -487,6 +486,7 @@ mount_fail:
   // Run networking as a background thread
   if (nic_is_present()) {
     net_init();
+    sched_create_kernel_thread(net_thread_entry, cpu_get_bsp(), true);
   }
 
   // FORCE Init thread to BSP to ensure it gets first slice

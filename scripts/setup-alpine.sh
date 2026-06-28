@@ -621,7 +621,7 @@ fi
 cat > "${ROOTFS_DIR}/usr/share/icons/default/index.theme" <<'EOF'
 [Icon Theme]
 Name=Default
-Inherits=Breeze_Light
+Inherits=Adwaita
 EOF
 rm -rf "${ROOTFS_DIR}/usr/share/icons/default/cursors"
 ln -s ../Breeze_Light/cursors "${ROOTFS_DIR}/usr/share/icons/default/cursors"

@@ -15,10 +15,12 @@ static const struct drm_property_def drm_prop_catalogue[] = {
     {DRM_PROP_ID_SRC_Y, DRM_PROP_TYPE_RANGE | DRM_PROP_FLAG_ATOMIC, "SRC_Y", 0, UINT32_MAX},
     {DRM_PROP_ID_SRC_W, DRM_PROP_TYPE_RANGE | DRM_PROP_FLAG_ATOMIC, "SRC_W", 0, UINT32_MAX},
     {DRM_PROP_ID_SRC_H, DRM_PROP_TYPE_RANGE | DRM_PROP_FLAG_ATOMIC, "SRC_H", 0, UINT32_MAX},
-    {DRM_PROP_ID_CRTC_X, DRM_PROP_TYPE_SIGNED_RANGE | DRM_PROP_FLAG_ATOMIC, "CRTC_X", 0, UINT32_MAX},
-    {DRM_PROP_ID_CRTC_Y, DRM_PROP_TYPE_SIGNED_RANGE | DRM_PROP_FLAG_ATOMIC, "CRTC_Y", 0, UINT32_MAX},
+    {DRM_PROP_ID_CRTC_X, DRM_PROP_TYPE_SIGNED_RANGE | DRM_PROP_FLAG_ATOMIC, "CRTC_X", (uint64_t)INT32_MIN, INT32_MAX},
+    {DRM_PROP_ID_CRTC_Y, DRM_PROP_TYPE_SIGNED_RANGE | DRM_PROP_FLAG_ATOMIC, "CRTC_Y", (uint64_t)INT32_MIN, INT32_MAX},
     {DRM_PROP_ID_CRTC_W, DRM_PROP_TYPE_RANGE | DRM_PROP_FLAG_ATOMIC, "CRTC_W", 0, UINT32_MAX},
     {DRM_PROP_ID_CRTC_H, DRM_PROP_TYPE_RANGE | DRM_PROP_FLAG_ATOMIC, "CRTC_H", 0, UINT32_MAX},
+    {DRM_PROP_ID_HOTSPOT_X, DRM_PROP_TYPE_SIGNED_RANGE | DRM_PROP_FLAG_ATOMIC, "HOTSPOT_X", 0, INT32_MAX},
+    {DRM_PROP_ID_HOTSPOT_Y, DRM_PROP_TYPE_SIGNED_RANGE | DRM_PROP_FLAG_ATOMIC, "HOTSPOT_Y", 0, INT32_MAX},
     /* CRTC properties */
     {DRM_PROP_ID_ACTIVE, DRM_PROP_TYPE_RANGE | DRM_PROP_FLAG_ATOMIC, "ACTIVE", 0, 1},
     {DRM_PROP_ID_MODE_ID, DRM_PROP_FLAG_ATOMIC | DRM_PROP_TYPE_BLOB, "MODE_ID",
@@ -297,6 +299,48 @@ extern void drm_file_send_event(struct drm_file *file,
 
 static uint32_t drm_atomic_event_sequence = 1;
 
+static uint32_t drm_plane_type(struct drm_plane *plane) {
+  uint64_t type = DRM_PLANE_TYPE_OVERLAY;
+  drm_obj_get_prop(&plane->base, DRM_PROP_ID_TYPE, &type);
+  return (uint32_t)type;
+}
+
+static struct drm_crtc *drm_find_crtc(struct drm_device *dev, uint32_t id) {
+  struct drm_mode_object *obj;
+  list_for_each_entry(obj, &dev->kms_objects, list) {
+    if (obj->type == DRM_MODE_OBJECT_CRTC && obj->id == id)
+      return (struct drm_crtc *)obj;
+  }
+  return NULL;
+}
+
+static struct drm_crtc *drm_find_crtc_for_plane(struct drm_device *dev,
+                                                struct drm_plane *plane) {
+  struct drm_mode_object *obj;
+  list_for_each_entry(obj, &dev->kms_objects, list) {
+    if (obj->type != DRM_MODE_OBJECT_CRTC)
+      continue;
+    struct drm_crtc *crtc = (struct drm_crtc *)obj;
+    if (crtc->primary == plane || crtc->cursor == plane)
+      return crtc;
+  }
+  return NULL;
+}
+
+static int drm_cursor_fb_validate(struct drm_framebuffer *fb) {
+  if (!fb)
+    return 0;
+  if (!fb->gem_obj || !fb->gem_obj->virt_addr || fb->bpp != 32)
+    return -22;
+  if (fb->width == 0 || fb->height == 0 || fb->width > 64 || fb->height > 64)
+    return -22;
+  if (fb->pitch < fb->width * 4)
+    return -22;
+  if (fb->pixel_format != 0x34325241 && fb->pixel_format != 0x34325258)
+    return -22;
+  return 0;
+}
+
 static void drm_fill_atomic_vblank_event(struct drm_event_vblank *ev,
                                          uint32_t crtc_id) {
   uint64_t ms = lapic_timer_get_ms();
@@ -310,7 +354,7 @@ static void drm_fill_atomic_vblank_event(struct drm_event_vblank *ev,
  * Apply a single (object, property, value) triple.
  * Returns 0 on success, -1 on unknown object/property.
  */
-static int atomic_apply_prop(struct drm_device *dev,
+int atomic_apply_prop(struct drm_device *dev,
                              struct drm_mode_object *obj, uint32_t prop_id,
                              uint64_t value) {
   /* Validate the property exists in our catalogue */
@@ -322,40 +366,95 @@ static int atomic_apply_prop(struct drm_device *dev,
     struct drm_plane *plane = (struct drm_plane *)obj;
     switch (prop_id) {
     case DRM_PROP_ID_FB_ID: {
-      /* Attach framebuffer to plane — find the linked CRTC and update it */
-      struct drm_mode_object *cobj;
-      list_for_each_entry(cobj, &dev->kms_objects, list) {
-        if (cobj->type != DRM_MODE_OBJECT_CRTC)
-          continue;
-        struct drm_crtc *crtc = (struct drm_crtc *)cobj;
-        if (crtc->primary == plane || crtc->cursor == plane) {
-          struct drm_framebuffer *new_fb = NULL;
-          if (value != 0) {
-            struct drm_mode_object *fbobj;
-            list_for_each_entry(fbobj, &dev->kms_objects, list) {
-              if (fbobj->type == DRM_MODE_OBJECT_FB &&
-                  fbobj->id == (uint32_t)value) {
-                new_fb = (struct drm_framebuffer *)fbobj;
-                break;
-              }
-            }
+      uint32_t plane_type = drm_plane_type(plane);
+      struct drm_framebuffer *new_fb = NULL;
+      if (value != 0) {
+        struct drm_mode_object *fbobj;
+        list_for_each_entry(fbobj, &dev->kms_objects, list) {
+          if (fbobj->type == DRM_MODE_OBJECT_FB &&
+              fbobj->id == (uint32_t)value) {
+            new_fb = (struct drm_framebuffer *)fbobj;
+            break;
           }
-          if (crtc->primary == plane)
-            crtc->fb = new_fb;
-          else if (crtc->cursor == plane)
-            plane->fb = new_fb;
-          break;
         }
+        if (!new_fb)
+          return -2;
+      }
+
+      if (plane_type == DRM_PLANE_TYPE_CURSOR &&
+          drm_cursor_fb_validate(new_fb) != 0) {
+        klog_puts("[DRM] atomic cursor: rejected invalid cursor FB\n");
+        return -22;
+      }
+
+      plane->fb = new_fb;
+
+      struct drm_crtc *owner = drm_find_crtc_for_plane(dev, plane);
+      if (owner && owner->primary == plane)
+        owner->fb = new_fb;
+
+      if (new_fb) {
+        if (plane->src_w == 0)
+          plane->src_w = new_fb->width << 16;
+        if (plane->src_h == 0)
+          plane->src_h = new_fb->height << 16;
+        if (plane->crtc_w == 0)
+          plane->crtc_w = new_fb->width;
+        if (plane->crtc_h == 0)
+          plane->crtc_h = new_fb->height;
+      }
+
+      if (plane_type == DRM_PLANE_TYPE_CURSOR) {
+        klog_puts("[DRM] atomic cursor: FB_ID=");
+        klog_uint64((uint32_t)value);
+        klog_puts(" size=");
+        klog_uint64(new_fb ? new_fb->width : 0);
+        klog_puts("x");
+        klog_uint64(new_fb ? new_fb->height : 0);
+        klog_puts(" fmt=0x");
+        klog_hex32(new_fb ? new_fb->pixel_format : 0);
+        klog_puts("\n");
       }
       break;
     }
-    case DRM_PROP_ID_CRTC_ID:
+    case DRM_PROP_ID_CRTC_ID: {
+      uint32_t plane_type = drm_plane_type(plane);
+      if (value == 0) {
+        plane->fb = NULL;
+        struct drm_crtc *owner = drm_find_crtc_for_plane(dev, plane);
+        if (owner && owner->primary == plane)
+          owner->fb = NULL;
+      } else {
+        struct drm_crtc *crtc = drm_find_crtc(dev, (uint32_t)value);
+        if (!crtc)
+          return -2;
+        if (plane_type == DRM_PLANE_TYPE_CURSOR)
+          crtc->cursor = plane;
+        else if (plane_type == DRM_PLANE_TYPE_PRIMARY) {
+          crtc->primary = plane;
+          if (plane->fb)
+            crtc->fb = plane->fb;
+        }
+      }
+      if (plane_type == DRM_PLANE_TYPE_CURSOR) {
+        klog_puts("[DRM] atomic cursor: CRTC_ID=");
+        klog_uint64((uint32_t)value);
+        klog_puts("\n");
+      }
       break;
+    }
 
     case DRM_PROP_ID_SRC_X:
+      plane->src_x = (uint32_t)value;
+      break;
     case DRM_PROP_ID_SRC_Y:
+      plane->src_y = (uint32_t)value;
+      break;
     case DRM_PROP_ID_SRC_W:
+      plane->src_w = (uint32_t)value;
+      break;
     case DRM_PROP_ID_SRC_H:
+      plane->src_h = (uint32_t)value;
       break;
 
     case DRM_PROP_ID_CRTC_X:
@@ -365,10 +464,16 @@ static int atomic_apply_prop(struct drm_device *dev,
       plane->crtc_y = (int32_t)value;
       break;
     case DRM_PROP_ID_CRTC_W:
-  plane->crtc_w = (uint32_t)value;
+      plane->crtc_w = (uint32_t)value;
       break;
     case DRM_PROP_ID_CRTC_H:
       plane->crtc_h = (uint32_t)value;
+      break;
+    case DRM_PROP_ID_HOTSPOT_X:
+      plane->hotspot_x = (int32_t)value;
+      break;
+    case DRM_PROP_ID_HOTSPOT_Y:
+      plane->hotspot_y = (int32_t)value;
       break;
     default:
       return -1;
@@ -430,6 +535,44 @@ static int atomic_apply_prop(struct drm_device *dev,
   /* Persist the value in the object's property table */
   drm_obj_set_prop(obj, prop_id, value);
   return 0;
+}
+
+int drm_ioctl_obj_setproperty(struct drm_device *dev, uint64_t arg) {
+  struct {
+    uint64_t value;
+    uint32_t prop_id;
+    uint32_t obj_id;
+    uint32_t obj_type;
+  } *req = (void *)arg;
+
+  klog_puts("[DRM] OBJ_SETPROPERTY obj=");
+  klog_uint64(req->obj_id);
+  klog_puts(" type=0x");
+  klog_hex32(req->obj_type);
+  klog_puts(" prop=");
+  klog_uint64(req->prop_id);
+  klog_puts(" val=");
+  klog_uint64(req->value);
+  klog_puts("\n");
+
+  spinlock_acquire(&dev->lock);
+  struct drm_mode_object *mobj = NULL;
+  struct drm_mode_object *iter;
+  list_for_each_entry(iter, &dev->kms_objects, list) {
+    if (iter->id == req->obj_id &&
+        (req->obj_type == 0 || req->obj_type == iter->type)) {
+      mobj = iter;
+      break;
+    }
+  }
+  if (!mobj) {
+    spinlock_release(&dev->lock);
+    return -2;
+  }
+
+  int ret = atomic_apply_prop(dev, mobj, req->prop_id, req->value);
+  spinlock_release(&dev->lock);
+  return ret;
 }
 
 int drm_ioctl_atomic(struct vfs_node *node, struct drm_file *file,

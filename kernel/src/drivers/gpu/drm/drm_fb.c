@@ -144,6 +144,7 @@ struct drm_framebuffer *drm_framebuffer_create_full(struct drm_file *file,
 
     fb->base_fb.width = cmd->width;
     fb->base_fb.height = cmd->height;
+    fb->base_fb.pixel_format = cmd->pixel_format;
     fb->width        = cmd->width;
     fb->height       = cmd->height;
     fb->pixel_format = cmd->pixel_format;

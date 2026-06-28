@@ -14,12 +14,12 @@ rm -f /tmp/.X11-unix/X0 /tmp/.X0-lock
 seatd -u root &
 sleep 1
 
-# Disable hardware cursor — kernel DRM does not implement MODE_CURSOR ioctls
-export WLR_NO_HARDWARE_CURSORS=1
+# Native DRM cursor path is enabled; do not force userspace cursor.
+# export WLR_NO_HARDWARE_CURSORS=1
 export WESTON_FORCE_RENDERER=1
 export XCURSOR_THEME=Adwaita
-export XCURSOR_SIZE=48
-export XCURSOR_PATH=/usr/share/icons/Adwaita/cursors/left_ptr
+export XCURSOR_SIZE=24
+export XCURSOR_PATH=/usr/share/icons/
 
 # ── Wayland / Weston debug logging ──────────────────────────────────────────
 export WAYLAND_DEBUG=1
@@ -28,15 +28,15 @@ export WLR_RENDERER_ALLOW_SOFTWARE=1
 export WLR_LOG_LEVEL=debug
 export WLR_DRM_NO_ATOMIC=1
 
-# Seed Xwayland with a visible X root cursor. Xwayland hides its Wayland
-# cursor over X surfaces and expects the X cursor to be drawn from there.
-(
-    export DISPLAY=:0
-    export HOME=/root
-    if [ -x /bin/xrootcursor ]; then
-        /bin/xrootcursor 80 >>/tmp/xrootcursor.log 2>&1
-    fi
-) &
+# xrootcursor workaround disabled. Cursor should come from native DRM
+# MODE_CURSOR/CURSOR2 or the KMS cursor plane path now.
+# (
+#     export DISPLAY=:0
+#     export HOME=/root
+#     if [ -x /bin/xrootcursor ]; then
+#         /bin/xrootcursor 80 >>/tmp/xrootcursor.log 2>&1
+#     fi
+# ) &
 
 # Redirect all output to a log file so it survives a crash
 LOG=/tmp/weston-debug.log

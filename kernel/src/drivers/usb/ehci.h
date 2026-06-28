@@ -193,7 +193,6 @@ struct ehci_controller {
 // Public API
 
 void ehci_init(void);
-void ehci_self_test(void);
 void ehci_hand_to_companion(void);
 
 // Controller accessors (for HID drivers to identify EHCI-backed devices)

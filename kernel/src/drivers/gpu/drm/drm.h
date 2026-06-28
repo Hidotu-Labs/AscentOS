@@ -47,13 +47,14 @@
 #define DRM_IOCTL_MODE_GETPROPERTY 0xC04064AA
 #define DRM_IOCTL_MODE_GETPLANERESOURCES 0xC01064B5
 #define DRM_IOCTL_MODE_OBJ_GETPROPERTIES 0xC02064B9
-#define DRM_IOCTL_MODE_ATOMIC            0xC03864BC
-#define DRM_IOCTL_MODE_CREATEPROPBLOB    0xC01064BD
-#define DRM_IOCTL_MODE_DESTROYPROPBLOB   0xC00464BE
-#define DRM_IOCTL_MODE_ADDFB2            0xC06864B8
-#define DRM_IOCTL_MODE_CREATE_LEASE      0xC01864C6
-#define DRM_IOCTL_MODE_SETPROPERTY       0x401064AB
-#define DRM_IOCTL_MODE_DIRTYFB           0x401064B1
+#define DRM_IOCTL_MODE_OBJ_SETPROPERTY 0xC01864BA
+#define DRM_IOCTL_MODE_ATOMIC 0xC03864BC
+#define DRM_IOCTL_MODE_CREATEPROPBLOB 0xC01064BD
+#define DRM_IOCTL_MODE_DESTROYPROPBLOB 0xC00464BE
+#define DRM_IOCTL_MODE_ADDFB2 0xC06864B8
+#define DRM_IOCTL_MODE_CREATE_LEASE 0xC01864C6
+#define DRM_IOCTL_MODE_SETPROPERTY 0xC01064AB
+#define DRM_IOCTL_MODE_DIRTYFB 0x401064B1
 
 #define DRM_CLIENT_CAP_STEREO_3D 1
 #define DRM_CLIENT_CAP_UNIVERSAL_PLANES 2
@@ -68,6 +69,8 @@
 #define DRM_FILE_CAP_ASPECT_RATIO (1U << DRM_CLIENT_CAP_ASPECT_RATIO)
 #define DRM_FILE_CAP_WRITEBACK_CONNECTORS                                      \
   (1U << DRM_CLIENT_CAP_WRITEBACK_CONNECTORS)
+#define DRM_FILE_CAP_CURSOR_PLANE_HOTSPOT                                      \
+  (1U << DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT)
 
 #define DRM_CAP_DUMB_BUFFER 1
 #define DRM_CAP_VBLANK_HIGH_CRTC 2
@@ -81,10 +84,10 @@
 #define DRM_CAP_ADDFB2_MODIFIERS 0x10
 
 /* Atomic commit flags */
-#define DRM_MODE_ATOMIC_TEST_ONLY  0x0100
-#define DRM_MODE_ATOMIC_NONBLOCK   0x0200
+#define DRM_MODE_ATOMIC_TEST_ONLY 0x0100
+#define DRM_MODE_ATOMIC_NONBLOCK 0x0200
 #define DRM_MODE_ATOMIC_ALLOW_MODESET 0x0400
-#define DRM_MODE_PAGE_FLIP_ASYNC   0x02
+#define DRM_MODE_PAGE_FLIP_ASYNC 0x02
 
 struct drm_mode_card_res {
   uint64_t fb_id_ptr;
@@ -169,7 +172,7 @@ union drm_wait_vblank {
   struct drm_wait_vblank_reply reply;
 };
 
-#define DRM_MODE_CURSOR_BO   0x01
+#define DRM_MODE_CURSOR_BO 0x01
 #define DRM_MODE_CURSOR_MOVE 0x02
 
 struct drm_mode_cursor {
@@ -298,8 +301,8 @@ struct drm_gem_mmap {
 
 /* Per-object property value slot — declared early, used by drm_mode_object */
 struct drm_prop_value {
-    uint32_t prop_id;
-    uint64_t value;
+  uint32_t prop_id;
+  uint64_t value;
 };
 
 #define DRM_MAX_OBJ_PROPS 16
@@ -310,9 +313,9 @@ struct drm_device {
   spinlock_t lock;
   struct list_head gem_objects;
   struct list_head kms_objects;
-  struct list_head event_queue;   /* legacy global queue (kept for compat) */
+  struct list_head event_queue; /* legacy global queue (kept for compat) */
   struct list_head blob_objects;
-  struct list_head file_list;     /* all open drm_file instances */
+  struct list_head file_list; /* all open drm_file instances */
   wait_queue_t event_wq;
   uint32_t next_gem_handle;
   uint32_t next_kms_id;
@@ -336,10 +339,16 @@ struct drm_plane {
   uint32_t formats[8];
   int format_count;
   struct drm_framebuffer *fb;
+  uint32_t src_x;
+  uint32_t src_y;
+  uint32_t src_w;
+  uint32_t src_h;
   int32_t crtc_x;
   int32_t crtc_y;
   uint32_t crtc_w;
   uint32_t crtc_h;
+  int32_t hotspot_x;
+  int32_t hotspot_y;
 };
 
 struct drm_crtc {
@@ -353,6 +362,7 @@ struct drm_framebuffer {
   struct drm_mode_object base;
   uint32_t width, height;
   uint32_t pitch, bpp;
+  uint32_t pixel_format; /* DRM_FORMAT_* fourcc; important for cursor alpha */
   struct drm_gem_object *gem_obj;
 };
 
@@ -376,106 +386,106 @@ struct drm_pending_event {
 
 /* ── Property system ─────────────────────────────────────────────────────── */
 
-#define DRM_PROP_TYPE_RANGE        (1U << 1)
-#define DRM_PROP_FLAG_IMMUTABLE    (1U << 2)
-#define DRM_PROP_TYPE_ENUM         (1U << 3)
-#define DRM_PROP_TYPE_BLOB         (1U << 4)
-#define DRM_PROP_TYPE_BITMASK      (1U << 5)
-#define DRM_PROP_TYPE_OBJECT       (1U << 6)
+#define DRM_PROP_TYPE_RANGE (1U << 1)
+#define DRM_PROP_FLAG_IMMUTABLE (1U << 2)
+#define DRM_PROP_TYPE_ENUM (1U << 3)
+#define DRM_PROP_TYPE_BLOB (1U << 4)
+#define DRM_PROP_TYPE_BITMASK (1U << 5)
+#define DRM_PROP_TYPE_OBJECT (1U << 6)
 #define DRM_PROP_TYPE_SIGNED_RANGE (2U << 6)
 #define DRM_PROP_EXTENDED_TYPE_MASK 0x0000ffc0U
-#define DRM_PROP_FLAG_ATOMIC       0x80000000U
+#define DRM_PROP_FLAG_ATOMIC 0x80000000U
 
 /* Well-known property IDs (fixed, so userland can hardcode them) */
-#define DRM_PROP_ID_CRTC_ID      1
-#define DRM_PROP_ID_FB_ID        2
-#define DRM_PROP_ID_SRC_X        3
-#define DRM_PROP_ID_SRC_Y        4
-#define DRM_PROP_ID_SRC_W        5
-#define DRM_PROP_ID_SRC_H        6
-#define DRM_PROP_ID_CRTC_X       7
-#define DRM_PROP_ID_CRTC_Y       8
-#define DRM_PROP_ID_CRTC_W       9
-#define DRM_PROP_ID_CRTC_H       10
-#define DRM_PROP_ID_ACTIVE       11
-#define DRM_PROP_ID_MODE_ID      12
-#define DRM_PROP_ID_DPMS         13
+#define DRM_PROP_ID_CRTC_ID 1
+#define DRM_PROP_ID_FB_ID 2
+#define DRM_PROP_ID_SRC_X 3
+#define DRM_PROP_ID_SRC_Y 4
+#define DRM_PROP_ID_SRC_W 5
+#define DRM_PROP_ID_SRC_H 6
+#define DRM_PROP_ID_CRTC_X 7
+#define DRM_PROP_ID_CRTC_Y 8
+#define DRM_PROP_ID_CRTC_W 9
+#define DRM_PROP_ID_CRTC_H 10
+#define DRM_PROP_ID_ACTIVE 11
+#define DRM_PROP_ID_MODE_ID 12
+#define DRM_PROP_ID_DPMS 13
 #define DRM_PROP_ID_CONNECTOR_ID 14
-#define DRM_PROP_ID_TYPE         15
-#define DRM_PROP_ID_MAX          16
+#define DRM_PROP_ID_TYPE 15
+#define DRM_PROP_ID_HOTSPOT_X 16
+#define DRM_PROP_ID_HOTSPOT_Y 17
+#define DRM_PROP_ID_MAX 18
 
 #define DRM_PLANE_TYPE_OVERLAY 0
 #define DRM_PLANE_TYPE_PRIMARY 1
-#define DRM_PLANE_TYPE_CURSOR  2
-
-
+#define DRM_PLANE_TYPE_CURSOR 2
 
 struct drm_property_def {
-    uint32_t id;
-    uint32_t flags;
-    char     name[32];
-    uint64_t min_val;
-    uint64_t max_val;
+  uint32_t id;
+  uint32_t flags;
+  char name[32];
+  uint64_t min_val;
+  uint64_t max_val;
 };
 
 /* ── Blob objects ────────────────────────────────────────────────────────── */
 struct drm_prop_blob {
-    uint32_t id;
-    uint32_t length;
-    void    *data;
-    struct list_head list;
+  uint32_t id;
+  uint32_t length;
+  void *data;
+  struct list_head list;
 };
 
 /* ── Atomic ioctl structs ────────────────────────────────────────────────── */
 struct drm_mode_atomic {
-    uint32_t flags;
-    uint32_t count_objs;
-    uint64_t objs_ptr;       /* uint32_t[] of object IDs */
-    uint64_t count_props_ptr;/* uint32_t[] of prop counts per object */
-    uint64_t props_ptr;      /* uint32_t[] of prop IDs (flattened) */
-    uint64_t prop_values_ptr;/* uint64_t[] of prop values (flattened) */
-    uint64_t reserved;
-    uint64_t user_data;
+  uint32_t flags;
+  uint32_t count_objs;
+  uint64_t objs_ptr;        /* uint32_t[] of object IDs */
+  uint64_t count_props_ptr; /* uint32_t[] of prop counts per object */
+  uint64_t props_ptr;       /* uint32_t[] of prop IDs (flattened) */
+  uint64_t prop_values_ptr; /* uint64_t[] of prop values (flattened) */
+  uint64_t reserved;
+  uint64_t user_data;
 };
 
 struct drm_mode_obj_get_properties {
-    uint64_t props_ptr;
-    uint64_t prop_values_ptr;
-    uint32_t count_props;
-    uint32_t obj_id;
-    uint32_t obj_type;
-    uint32_t pad;
+  uint64_t props_ptr;
+  uint64_t prop_values_ptr;
+  uint32_t count_props;
+  uint32_t obj_id;
+  uint32_t obj_type;
+  uint32_t pad;
 };
 
 struct drm_mode_create_blob {
-    uint64_t data;
-    uint32_t length;
-    uint32_t blob_id;
+  uint64_t data;
+  uint32_t length;
+  uint32_t blob_id;
 };
 
 struct drm_mode_destroy_blob {
-    uint32_t blob_id;
+  uint32_t blob_id;
 };
 
 struct drm_mode_fb_cmd2 {
-    uint32_t fb_id;
-    uint32_t width, height;
-    uint32_t pixel_format;
-    uint32_t flags;
-    uint32_t handles[4];
-    uint32_t pitches[4];
-    uint32_t offsets[4];
-    uint64_t modifier[4];
+  uint32_t fb_id;
+  uint32_t width, height;
+  uint32_t pixel_format;
+  uint32_t flags;
+  uint32_t handles[4];
+  uint32_t pitches[4];
+  uint32_t offsets[4];
+  uint64_t modifier[4];
 };
 
 /* ── GEM PRIME / DMA-buf ─────────────────────────────────────────────────── */
-#define DRM_IOCTL_PRIME_HANDLE_TO_FD  0xC008642D
-#define DRM_IOCTL_PRIME_FD_TO_HANDLE  0xC008642E
+#define DRM_IOCTL_PRIME_HANDLE_TO_FD 0xC008642D
+#define DRM_IOCTL_PRIME_FD_TO_HANDLE 0xC008642E
 
 struct drm_prime_handle {
-    uint32_t handle;
-    uint32_t flags;
-    int32_t  fd;
+  uint32_t handle;
+  uint32_t flags;
+  int32_t fd;
 };
 
 /* ── Per-file (per-client) DRM state ─────────────────────────────────────── */
@@ -486,57 +496,60 @@ struct drm_prime_handle {
  * Tracks per-client GEM handle namespace, event queue, and caps.
  */
 struct drm_file {
-    struct drm_device *dev;
+  struct drm_device *dev;
 
-    /* Per-client GEM handle table: maps local handle → global gem object */
-    struct drm_gem_object *handles[DRM_MAX_HANDLES_PER_FILE];
-    uint32_t next_handle;   /* next local handle to assign (1-based) */
+  /* Per-client GEM handle table: maps local handle → global gem object */
+  struct drm_gem_object *handles[DRM_MAX_HANDLES_PER_FILE];
+  uint32_t next_handle; /* next local handle to assign (1-based) */
 
-    /*
-     * Legacy hardware FB gem object (handle 0xF0B0).
-     * Stored separately because 0xF0B0 > DRM_MAX_HANDLES_PER_FILE.
-     * drm_file_gem_lookup falls back to this when handle == 0xF0B0.
-     */
-    struct drm_gem_object *hw_fb_gem;
+  /*
+   * Legacy hardware FB gem object (handle 0xF0B0).
+   * Stored separately because 0xF0B0 > DRM_MAX_HANDLES_PER_FILE.
+   * drm_file_gem_lookup falls back to this when handle == 0xF0B0.
+   */
+  struct drm_gem_object *hw_fb_gem;
 
-    /* Per-client event queue (so two clients don't steal each other's events) */
-    struct list_head event_queue;
-    wait_queue_t     event_wq;
+  /* Per-client event queue (so two clients don't steal each other's events) */
+  struct list_head event_queue;
+  wait_queue_t event_wq;
 
-    /* Per-client capabilities */
-    uint32_t client_caps;   /* DRM_FILE_CAP_* */
-    uint32_t is_master;
+  /* Per-client capabilities */
+  uint32_t client_caps; /* DRM_FILE_CAP_* */
+  uint32_t is_master;
 
-    spinlock_t lock;
-    struct list_head list;  /* linked into drm_device.file_list */
+  spinlock_t lock;
+  struct list_head list; /* linked into drm_device.file_list */
 };
 
 /* ── Full ADDFB2 framebuffer (multi-planar + modifiers) ──────────────────── */
-#define DRM_FORMAT_MOD_INVALID  (~0ULL)
-#define DRM_FORMAT_MOD_LINEAR   0ULL
+#define DRM_FORMAT_MOD_INVALID (~0ULL)
+#define DRM_FORMAT_MOD_LINEAR 0ULL
 
 #define DRM_MAX_FB_PLANES 4
 
 struct drm_framebuffer_full {
-    struct drm_framebuffer base_fb;
-    uint32_t width, height;
-    uint32_t pixel_format;  /* fourcc */
-    uint64_t modifier;
-    uint32_t flags;
-    /* per-plane */
-    struct drm_gem_object *gem_obj[DRM_MAX_FB_PLANES];
-    uint32_t pitches[DRM_MAX_FB_PLANES];
-    uint32_t offsets[DRM_MAX_FB_PLANES];
-    /* legacy compat fields */
-    uint32_t pitch, bpp;
+  struct drm_framebuffer base_fb;
+  uint32_t width, height;
+  uint32_t pixel_format; /* fourcc */
+  uint64_t modifier;
+  uint32_t flags;
+  /* per-plane */
+  struct drm_gem_object *gem_obj[DRM_MAX_FB_PLANES];
+  uint32_t pitches[DRM_MAX_FB_PLANES];
+  uint32_t offsets[DRM_MAX_FB_PLANES];
+  /* legacy compat fields */
+  uint32_t pitch, bpp;
 };
 
 void drm_init(void);
 void drm_register_vfs(void);
 
-void drm_obj_add_prop(struct drm_mode_object *obj, uint32_t prop_id, uint64_t default_val);
-int drm_obj_set_prop(struct drm_mode_object *obj, uint32_t prop_id, uint64_t value);
-int drm_obj_get_prop(struct drm_mode_object *obj, uint32_t prop_id, uint64_t *out);
+void drm_obj_add_prop(struct drm_mode_object *obj, uint32_t prop_id,
+                      uint64_t default_val);
+int drm_obj_set_prop(struct drm_mode_object *obj, uint32_t prop_id,
+                     uint64_t value);
+int drm_obj_get_prop(struct drm_mode_object *obj, uint32_t prop_id,
+                     uint64_t *out);
 
 // GEM internals
 struct drm_gem_object {
