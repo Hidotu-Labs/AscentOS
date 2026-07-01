@@ -46,7 +46,7 @@ export WLR_DRM_NO_ATOMIC=1
 LOG=/tmp/weston-debug.log
 echo "[startw] starting weston at $(date)" > $LOG
 
-LD_PRELOAD=/lib/libgcompat.so.0 weston \
+weston \
     --backend=drm-backend.so \
     --renderer=pixman \
     -c /etc/weston.ini \

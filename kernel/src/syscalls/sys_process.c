@@ -15,6 +15,9 @@
 #include "syscall.h"
 #include <stdint.h>
 
+// Wake waiters after CLONE_CHILD_CLEARTID/set_tid_address exit cleanup.
+uint64_t futex_wake_user(uint32_t *uaddr, uint32_t count);
+
 extern void mm_reset_mmap_state(struct thread *t);
 void vma_list_init(struct vma_list *list);
 void vma_list_destroy(struct vma_list *list);
@@ -104,50 +107,53 @@ void process_do_exit(uint64_t status) {
     klog_puts("\n");
   }
 
-  // If tid_address was set via set_tid_address, clear it (set to 0) to signal
-  // exit. We must check if the memory is actually mapped to avoid panicking
-  // if the user unmapped it.
-  if (current && current->tid_address) {
-    if (current->cr3 &&
-        vmm_is_user_addr_range_writable((uint64_t)current->tid_address,
-                                        sizeof(uint32_t))) {
-      uint64_t phys = vmm_virt_to_phys((uint64_t *)current->cr3,
-                                       (uint64_t)current->tid_address);
-      if (phys != 0) {
-        *(uint32_t *)(phys + pmm_get_hhdm_offset()) = 0;
-      }
-    }
-  }
-
-  // Common Cleanup
-  // Close all open file descriptors to prevent resource leaks.
+  // Common cleanup. CLONE_FILES tables remain alive until the final thread
+  // drops its reference; closing every fd on each pthread exit would break
+  // descriptors still in use by its siblings.
   if (current) {
-    for (int i = 0; i < MAX_FDS; i++) {
-      if (current->fds[i]) {
-        vfs_node_t *node = current->fds[i];
-        current->fds[i] = NULL;
-        vfs_close(node);
-      }
-    }
+    sched_release_files(current);
 
-    // Switch to kernel CR3. We don't free it here; the scheduler's
-    // reaping logic handles reference counting and reclamation of the
-    // shared mm_struct and page tables once the thread is reaped.
-    if (current->cr3) {
-      struct cpu_info *cpu = cpu_get_current();
-      __asm__ volatile("mov %0, %%cr3" ::"r"(cpu->kernel_cr3) : "memory");
-    }
     if (current->cwd_node) {
       vfs_close(current->cwd_node);
       current->cwd_node = NULL;
     }
   }
 
+  // Linux clear-child-TID semantics: publish zero only after ordinary task
+  // cleanup is complete, then wake one futex waiter joining this thread.
+  if (current && current->tid_address && current->cr3 &&
+      vmm_is_user_addr_range_writable((uint64_t)current->tid_address,
+                                      sizeof(uint32_t))) {
+    uint64_t phys = vmm_virt_to_phys((uint64_t *)current->cr3,
+                                     (uint64_t)current->tid_address);
+    if (phys != 0) {
+      *(uint32_t *)(phys + pmm_get_hhdm_offset()) = 0;
+      futex_wake_user((uint32_t *)current->tid_address, 1);
+    }
+  }
+
+  // Reaping handles the address-space reference after this task is off-CPU.
+  if (current && current->cr3) {
+    struct cpu_info *cpu = cpu_get_current();
+    __asm__ volatile("mov %0, %%cr3" :: "r"(cpu->kernel_cr3) : "memory");
+  }
+
   if (current && current->is_forked_child) {
     current->exit_status = (int)status;
-    current->state = THREAD_ZOMBIE;
 
-    if (current->parent && current->parent->state == THREAD_BLOCKED) {
+    // Thread-group members are not waitable children. Keeping them as
+    // zombies retains their large struct thread and kernel stack forever.
+    // Arrange for the scheduler to reclaim them after this context switches
+    // away; ordinary fork/clone processes remain zombies for wait4().
+    if (current->clone_flags & CLONE_THREAD) {
+      current->state = THREAD_DEAD;
+      sched_queue_reap(current);
+    } else {
+      current->state = THREAD_ZOMBIE;
+    }
+
+    if (!(current->clone_flags & CLONE_THREAD) && current->parent &&
+        current->parent->state == THREAD_BLOCKED) {
       current->parent->state = THREAD_READY;
     }
 
@@ -775,6 +781,13 @@ static uint64_t sys_clone_internal(struct syscall_regs *regs, uint64_t flags,
     return (uint64_t)-12;
   }
 
+  // Discard the empty MM created for a generic kernel thread before
+  // installing clone's shared or copied address-space state.
+  if (child->mm) {
+    vma_list_destroy(&child->mm->vmas);
+    kfree(child->mm);
+  }
+
   // 4. Configure child
   child->cr3 = child_cr3;
   child->mm = child_mm;
@@ -817,23 +830,27 @@ static uint64_t sys_clone_internal(struct syscall_regs *regs, uint64_t flags,
     child->tid_address = (uint64_t *)ctid;
   }
 
-  // File descriptors
-  for (int i = 0; i < MAX_FDS; i++) {
-    if (parent->fds[i]) {
-      child->fds[i] = parent->fds[i];
-      child->fd_offsets[i] = parent->fd_offsets[i];
-      child->fd_flags[i] = parent->fd_flags[i];
-      memcpy(child->fd_paths[i], parent->fd_paths[i],
-             sizeof(child->fd_paths[i]));
-      vfs_open(child->fds[i]);
+  // pthreads pass CLONE_FILES and must observe one descriptor table. A clone
+  // without CLONE_FILES receives a referenced snapshot instead.
+  if (flags & CLONE_FILES) {
+    sched_share_files(child, parent);
+  } else {
+    for (int i = 0; i < MAX_FDS; i++) {
+      if (parent->fds[i]) {
+        child->fds[i] = parent->fds[i];
+        child->fd_offsets[i] = parent->fd_offsets[i];
+        child->fd_flags[i] = parent->fd_flags[i];
+        memcpy(child->fd_paths[i], parent->fd_paths[i],
+               sizeof(child->fd_paths[i]));
+        vfs_open(child->fds[i]);
+      }
     }
   }
 
   // Shared state copies
   memcpy(child->cwd_path, parent->cwd_path, sizeof(child->cwd_path));
+  // sched_create_kernel_thread already inherited and referenced this CWD.
   child->cwd_node = parent->cwd_node;
-  if (child->cwd_node)
-    vfs_open(child->cwd_node);
   child->uid = parent->uid;
   child->gid = parent->gid;
   child->euid = parent->euid;

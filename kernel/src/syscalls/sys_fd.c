@@ -23,22 +23,35 @@
 // FD allocation helpers
 // ---------------------------------------------------------------------------
 
+#define FD_RESERVED ((vfs_node_t *)-1)
+
 int alloc_fd(struct thread *t) {
+  if (!t || !t->files)
+    return -1;
+  spinlock_acquire(&t->files->lock);
   for (int i = 0; i < MAX_FDS; i++) {
     if (t->fds[i] == NULL) {
+      t->fds[i] = FD_RESERVED;
+      spinlock_release(&t->files->lock);
       return i;
     }
   }
+  spinlock_release(&t->files->lock);
   return -1;
 }
 
 int alloc_fd_from(struct thread *t, int from) {
-  if (from < 0 || from >= MAX_FDS)
+  if (!t || !t->files || from < 0 || from >= MAX_FDS)
     return -1;
+  spinlock_acquire(&t->files->lock);
   for (int i = from; i < MAX_FDS; i++) {
-    if (t->fds[i] == NULL)
+    if (t->fds[i] == NULL) {
+      t->fds[i] = FD_RESERVED;
+      spinlock_release(&t->files->lock);
       return i;
+    }
   }
+  spinlock_release(&t->files->lock);
   return -1;
 }
 
@@ -59,17 +72,7 @@ static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags,
   if (!t)
     return (uint64_t)-1;
 
-  int fd = alloc_fd(t);
-  if (fd < 0)
-    return (uint64_t)-24; // EMFILE
-
-  klog_puts("[SYSCALL] opening: \"");
-  klog_puts(path);
-  klog_puts("\" fd=");
-  klog_uint64(fd);
-  klog_puts(" tid=");
-  klog_uint64(t->tid);
-  klog_puts("\n");
+  int fd;
 
   vfs_node_t *base_dir = fs_root;
   if (path[0] != '/') {
@@ -223,6 +226,18 @@ static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags,
     node->length = 0;
 
 open_done:
+  fd = alloc_fd(t);
+  if (fd < 0)
+    return (uint64_t)-24; // EMFILE
+
+  klog_puts("[SYSCALL] opening: \"");
+  klog_puts(path);
+  klog_puts("\" fd=");
+  klog_uint64(fd);
+  klog_puts(" tid=");
+  klog_uint64(t->tid);
+  klog_puts("\n");
+
   vfs_open(node);
   t->fds[fd] = node;
   t->fd_offsets[fd] = 0;

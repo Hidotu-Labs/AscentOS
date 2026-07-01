@@ -25,6 +25,20 @@ struct mm_struct {
 
 #define MAX_FDS 256
 
+/*
+ * CLONE_FILES makes this object shared by all pthreads in a process. Keep
+ * the arrays indirectly referenced from struct thread so existing syscall
+ * code can continue to use t->fds[n] while observing one common table.
+ */
+struct fd_table {
+  vfs_node_t *fds[MAX_FDS];
+  uint64_t fd_offsets[MAX_FDS];
+  uint64_t fd_flags[MAX_FDS];
+  char fd_paths[MAX_FDS][256];
+  uint32_t ref_count;
+  spinlock_t lock;
+};
+
 // Signal constants
 #define SIGHUP 1
 #define SIGINT 2
@@ -114,10 +128,11 @@ struct thread {
   uint64_t stack_size;
   thread_state_t state;
   uint64_t wakeup_ticks;
-  vfs_node_t *fds[MAX_FDS];
-  uint64_t fd_offsets[MAX_FDS]; // Track seek offset per file descriptor
-  uint64_t fd_flags[MAX_FDS];   // Track flags (O_NONBLOCK, etc.) for each FD
-  char fd_paths[MAX_FDS][256];  // Track full path for each file descriptor
+  struct fd_table *files;
+  vfs_node_t **fds;
+  uint64_t *fd_offsets;  // Track seek offset per file descriptor
+  uint64_t *fd_flags;    // Track flags (O_NONBLOCK, etc.) for each FD
+  char (*fd_paths)[256]; // Track full path for each file descriptor
   uint64_t cr3;                 // Per-process page table (0 = inherited/kernel)
   bool is_forked_child;         // True for forked children (affects sys_exit)
   bool is_idle;                 // True for idle thread (cannot be terminated)
@@ -133,6 +148,7 @@ struct thread {
   uint64_t *tid_address;       // Pointer to user-space TID for set_tid_address
   struct thread *global_next;  // Used to link all threads together
   struct thread *next;         // Used for runqueue / blocked queue
+  struct thread *reap_next;    // Used for automatic reaping of detached threads
   char cwd_path[256];          // Current working directory
   vfs_node_t *cwd_node;        // Current working directory VFS node
   struct mm_struct *mm;        // Shared memory management state
@@ -209,6 +225,9 @@ struct thread *sched_get_thread_by_tid(uint32_t tid);
 
 // Reap a zombie thread (remove from runqueue, free resources)
 void sched_reap_thread(struct thread *t);
+void sched_queue_reap(struct thread *t);
+void sched_share_files(struct thread *child, struct thread *parent);
+void sched_release_files(struct thread *t);
 
 // Returns the total number of threads in the global thread list
 uint16_t sched_get_thread_count(void);

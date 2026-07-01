@@ -18,6 +18,111 @@ typedef struct vfs_mount_entry {
 
 static vfs_mount_entry_t *vfs_mount_list = NULL;
 
+/* Bounded positive dentry cache. Each entry owns one child reference. */
+#define VFS_DENTRY_CACHE_SIZE 256
+
+typedef struct vfs_dentry_cache_entry {
+  vfs_node_t *parent;
+  vfs_node_t *child;
+  char name[128];
+  bool valid;
+} vfs_dentry_cache_entry_t;
+
+static vfs_dentry_cache_entry_t vfs_dentry_cache[VFS_DENTRY_CACHE_SIZE];
+static spinlock_t vfs_dentry_cache_lock = SPINLOCK_INIT;
+
+static uint32_t vfs_dentry_hash(vfs_node_t *parent, const char *name) {
+  uint64_t hash = ((uint64_t)(uintptr_t)parent >> 4) ^ 1469598103934665603ULL;
+  while (*name) {
+    hash ^= (uint8_t)*name++;
+    hash *= 1099511628211ULL;
+  }
+  return (uint32_t)(hash ^ (hash >> 32));
+}
+
+static vfs_node_t *vfs_dentry_lookup(vfs_node_t *parent, const char *name) {
+  if (parent->flags & FS_DENTRY_NOCACHE)
+    return NULL;
+
+  uint32_t slot = vfs_dentry_hash(parent, name) % VFS_DENTRY_CACHE_SIZE;
+
+  spinlock_acquire(&vfs_dentry_cache_lock);
+  vfs_dentry_cache_entry_t *entry = &vfs_dentry_cache[slot];
+  if (entry->valid && entry->parent == parent &&
+      strcmp(entry->name, name) == 0) {
+    /* Internal lookup reference: do not invoke the file-open callback. */
+    entry->child->refcount++;
+    vfs_node_t *child = entry->child;
+    spinlock_release(&vfs_dentry_cache_lock);
+    return child;
+  }
+  spinlock_release(&vfs_dentry_cache_lock);
+  return NULL;
+}
+
+static void vfs_dentry_insert(vfs_node_t *parent, const char *name,
+                              vfs_node_t *child) {
+  if (!parent || !name || !child || strlen(name) >= 128 ||
+      (parent->flags & FS_DENTRY_NOCACHE))
+    return;
+
+  uint32_t slot = vfs_dentry_hash(parent, name) % VFS_DENTRY_CACHE_SIZE;
+  vfs_node_t *evicted = NULL;
+  vfs_node_t *evicted_parent = NULL;
+
+  spinlock_acquire(&vfs_dentry_cache_lock);
+  vfs_dentry_cache_entry_t *entry = &vfs_dentry_cache[slot];
+  if (entry->valid && entry->parent == parent &&
+      strcmp(entry->name, name) == 0) {
+    spinlock_release(&vfs_dentry_cache_lock);
+    return;
+  }
+  if (entry->valid) {
+    evicted = entry->child;
+    evicted_parent = entry->parent;
+  }
+  parent->refcount++;
+  child->refcount++;
+  entry->parent = parent;
+  entry->child = child;
+  strncpy(entry->name, name, sizeof(entry->name) - 1);
+  entry->name[sizeof(entry->name) - 1] = '\0';
+  entry->valid = true;
+  spinlock_release(&vfs_dentry_cache_lock);
+
+  if (evicted)
+    vfs_close(evicted);
+  if (evicted_parent)
+    vfs_close(evicted_parent);
+}
+
+void vfs_dentry_invalidate(vfs_node_t *parent, const char *name) {
+  vfs_node_t *released[VFS_DENTRY_CACHE_SIZE];
+  vfs_node_t *released_parents[VFS_DENTRY_CACHE_SIZE];
+  uint32_t released_count = 0;
+
+  spinlock_acquire(&vfs_dentry_cache_lock);
+  for (uint32_t i = 0; i < VFS_DENTRY_CACHE_SIZE; i++) {
+    vfs_dentry_cache_entry_t *entry = &vfs_dentry_cache[i];
+    if (entry->valid && (!parent || entry->parent == parent) &&
+        (!name || strcmp(entry->name, name) == 0)) {
+      released[released_count] = entry->child;
+      released_parents[released_count] = entry->parent;
+      released_count++;
+      entry->valid = false;
+      entry->parent = NULL;
+      entry->child = NULL;
+      entry->name[0] = '\0';
+    }
+  }
+  spinlock_release(&vfs_dentry_cache_lock);
+
+  for (uint32_t i = 0; i < released_count; i++)
+    vfs_close(released[i]);
+  for (uint32_t i = 0; i < released_count; i++)
+    vfs_close(released_parents[i]);
+}
+
 uint32_t vfs_read(vfs_node_t *node, uint32_t offset, uint32_t size,
                   uint8_t *buffer) {
   if (!node)
@@ -85,6 +190,10 @@ struct dirent *vfs_readdir(vfs_node_t *node, uint32_t index) {
 
 vfs_node_t *vfs_finddir(vfs_node_t *node, char *name) {
   if ((node->flags & FS_TYPE_MASK) == FS_DIRECTORY && node->finddir) {
+    vfs_node_t *cached = vfs_dentry_lookup(node, name);
+    if (cached)
+      return cached;
+
     vfs_node_t *res = node->finddir(node, name);
     if (!res)
       return 0;
@@ -96,11 +205,13 @@ vfs_node_t *vfs_finddir(vfs_node_t *node, char *name) {
         if (curr->target != res) {
           vfs_close(res);
           vfs_open(curr->target);
+          vfs_dentry_insert(node, name, curr->target);
           return curr->target;
         }
       }
       curr = curr->next;
     }
+    vfs_dentry_insert(node, name, res);
     return res;
   }
   return 0;
@@ -108,20 +219,27 @@ vfs_node_t *vfs_finddir(vfs_node_t *node, char *name) {
 
 int vfs_create(vfs_node_t *node, char *name, uint16_t permission) {
   if ((node->flags & FS_TYPE_MASK) == FS_DIRECTORY && node->create) {
-    return node->create(node, name, permission);
+    int result = node->create(node, name, permission);
+    if (result == 0)
+      vfs_dentry_invalidate(node, name);
+    return result;
   }
   return -1;
 }
 
 int vfs_mkdir(vfs_node_t *node, char *name, uint16_t permission) {
   if ((node->flags & FS_TYPE_MASK) == FS_DIRECTORY && node->mkdir) {
-    return node->mkdir(node, name, permission);
+    int result = node->mkdir(node, name, permission);
+    if (result == 0)
+      vfs_dentry_invalidate(node, name);
+    return result;
   }
   return -1;
 }
 
 int vfs_unlink(vfs_node_t *node, char *name) {
   if ((node->flags & FS_TYPE_MASK) == FS_DIRECTORY && node->unlink) {
+    vfs_dentry_invalidate(node, name);
     return node->unlink(node, name);
   }
   return -1;
@@ -129,6 +247,7 @@ int vfs_unlink(vfs_node_t *node, char *name) {
 
 int vfs_rmdir(vfs_node_t *node, char *name) {
   if ((node->flags & FS_TYPE_MASK) == FS_DIRECTORY && node->rmdir) {
+    vfs_dentry_invalidate(node, name);
     return node->rmdir(node, name);
   }
   return -1;
@@ -143,13 +262,18 @@ int vfs_readlink(vfs_node_t *node, char *buf, uint32_t size) {
 
 int vfs_symlink(vfs_node_t *node, char *name, char *target) {
   if ((node->flags & FS_TYPE_MASK) == FS_DIRECTORY && node->symlink) {
-    return node->symlink(node, name, target);
+    int result = node->symlink(node, name, target);
+    if (result == 0)
+      vfs_dentry_invalidate(node, name);
+    return result;
   }
   return -1;
 }
 
 int vfs_rename(vfs_node_t *node, char *old_name, char *new_name) {
   if ((node->flags & FS_TYPE_MASK) == FS_DIRECTORY && node->rename) {
+    vfs_dentry_invalidate(node, old_name);
+    vfs_dentry_invalidate(node, new_name);
     return node->rename(node, old_name, new_name);
   }
   return -1;
@@ -172,7 +296,10 @@ int vfs_chown(vfs_node_t *node, uint32_t uid, uint32_t gid) {
 int vfs_mknod(vfs_node_t *node, char *name, uint16_t permission, uint32_t flags,
               void *device) {
   if ((node->flags & FS_TYPE_MASK) == FS_DIRECTORY && node->mknod) {
-    return node->mknod(node, name, permission, flags, device);
+    int result = node->mknod(node, name, permission, flags, device);
+    if (result == 0)
+      vfs_dentry_invalidate(node, name);
+    return result;
   }
   return -1;
 }
@@ -375,6 +502,9 @@ int vfs_mount_ex(vfs_node_t *mountpoint, vfs_node_t *target,
   strncpy(entry->fs_type, fs_type ? fs_type : "unknown", 31);
   entry->next = vfs_mount_list;
   vfs_mount_list = entry;
+
+  /* A prior lookup may have cached the node hidden by this mount. */
+  vfs_dentry_invalidate(NULL, NULL);
 
   target->flags |= FS_PERSISTENT;
 

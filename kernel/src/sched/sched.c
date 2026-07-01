@@ -21,14 +21,64 @@ static void ipi_reschedule_handler(struct registers *regs) {
 static uint32_t next_tid = 1;
 spinlock_t tid_lock = SPINLOCK_INIT;
 
-// Deferred reaping structures
-struct dead_thread_info {
-  uint64_t stack_base;
-  uint64_t thread_ptr;
-  struct dead_thread_info *next;
-};
-struct dead_thread_info *dead_threads = NULL;
-spinlock_t dead_threads_lock = SPINLOCK_INIT;
+static struct fd_table *fd_table_create(void) {
+  struct fd_table *files = kmalloc(sizeof(struct fd_table));
+  if (!files)
+    return NULL;
+  memset(files, 0, sizeof(struct fd_table));
+  files->ref_count = 1;
+  spinlock_init(&files->lock);
+  return files;
+}
+
+static void thread_set_files(struct thread *t, struct fd_table *files) {
+  t->files = files;
+  t->fds = files ? files->fds : NULL;
+  t->fd_offsets = files ? files->fd_offsets : NULL;
+  t->fd_flags = files ? files->fd_flags : NULL;
+  t->fd_paths = files ? files->fd_paths : NULL;
+}
+
+void sched_release_files(struct thread *t) {
+  if (!t || !t->files)
+    return;
+
+  struct fd_table *files = t->files;
+  bool last = false;
+  spinlock_acquire(&files->lock);
+  if (--files->ref_count == 0)
+    last = true;
+  spinlock_release(&files->lock);
+  thread_set_files(t, NULL);
+
+  if (!last)
+    return;
+
+  for (int i = 0; i < MAX_FDS; i++) {
+    if (files->fds[i] && files->fds[i] != (vfs_node_t *)-1) {
+      vfs_node_t *node = files->fds[i];
+      files->fds[i] = NULL;
+      vfs_close(node);
+    }
+  }
+  kfree(files);
+}
+
+void sched_share_files(struct thread *child, struct thread *parent) {
+  if (!child || !parent || !parent->files)
+    return;
+
+  sched_release_files(child);
+  spinlock_acquire(&parent->files->lock);
+  parent->files->ref_count++;
+  spinlock_release(&parent->files->lock);
+  thread_set_files(child, parent->files);
+}
+
+// Threads in a CLONE_THREAD group are not wait4() children. Queue them for
+// destruction after they have switched off their kernel stacks.
+static struct thread *reap_queue = NULL;
+static spinlock_t reap_queue_lock = SPINLOCK_INIT;
 
 // Global list of all threads (for wait4)
 struct thread *global_thread_list = NULL;
@@ -200,6 +250,12 @@ struct thread *sched_create_kernel_thread(void (*entry)(void),
     return NULL;
 
   memset(t, 0, sizeof(struct thread));
+  struct fd_table *files = fd_table_create();
+  if (!files) {
+    kfree(t);
+    return NULL;
+  }
+  thread_set_files(t, files);
   // Default comm for kernel threads; overwritten by execve for user processes
   strcpy(t->comm, "kthread");
   t->cwd_path[0] = '/';
@@ -255,6 +311,7 @@ struct thread *sched_create_kernel_thread(void (*entry)(void),
   t->stack_base = (uint64_t)kmalloc(THREAD_STACK_SIZE);
 
   if (!t->stack_base) {
+    sched_release_files(t);
     kfree(t);
     return NULL;
   }
@@ -414,6 +471,28 @@ void sched_yield(void) {
 
   struct thread *prev = cpu->current_thread;
 
+  // Reap detached threads from a different scheduler context. Never reap the
+  // current thread: it is still executing on the stack that will be freed.
+  while (1) {
+    struct thread *victim = NULL;
+    spinlock_acquire(&reap_queue_lock);
+    struct thread **link = &reap_queue;
+    while (*link) {
+      if (*link != prev) {
+        victim = *link;
+        *link = victim->reap_next;
+        victim->reap_next = NULL;
+        break;
+      }
+      link = &(*link)->reap_next;
+    }
+    spinlock_release(&reap_queue_lock);
+
+    if (!victim)
+      break;
+    sched_reap_thread(victim);
+  }
+
   spinlock_acquire(&cpu->queue_lock);
 
   // Wake ALL expired sleeping threads FIRST.
@@ -570,6 +649,16 @@ void sched_yield(void) {
 
   // Only enable here if we are returning normally
   __asm__ volatile("sti");
+}
+
+void sched_queue_reap(struct thread *t) {
+  if (!t || t->is_idle)
+    return;
+
+  spinlock_acquire(&reap_queue_lock);
+  t->reap_next = reap_queue;
+  reap_queue = t;
+  spinlock_release(&reap_queue_lock);
 }
 
 void sched_tick(struct registers *regs) {
@@ -903,6 +992,10 @@ void sched_reap_thread(struct thread *t) {
     t->fork_ctx = NULL;
   }
 
+  // Normally released by process_do_exit(); retain this as a safety net for
+  // kernel-thread and abnormal teardown paths.
+  sched_release_files(t);
+
   // 4. Free user page tables (CR3) and MM if last thread
   if (t->mm) {
     spinlock_acquire(&t->mm->lock);
@@ -924,38 +1017,11 @@ void sched_reap_thread(struct thread *t) {
     t->mm = NULL;
   }
 
-  // Deferred Free: Free any previously deferred dead threads.
-  // By the time a new thread is being reaped, any previously dead threads
-  // have long been switched away from, guaranteeing their stacks are safe to
-  // free.
-  spinlock_acquire(&dead_threads_lock);
-  struct dead_thread_info *curr_dead = dead_threads;
-  dead_threads = NULL;
-  spinlock_release(&dead_threads_lock);
-
-  while (curr_dead) {
-    if (curr_dead->stack_base) {
-      kfree((void *)curr_dead->stack_base);
-    }
-    if (curr_dead->thread_ptr) {
-      kfree((void *)curr_dead->thread_ptr);
-    }
-    struct dead_thread_info *to_free = curr_dead;
-    curr_dead = curr_dead->next;
-    kfree(to_free);
-  }
-
-  // Defer Freeing for THIS thread
-  struct dead_thread_info *dead_info = kmalloc(sizeof(struct dead_thread_info));
-  if (dead_info) {
-    dead_info->stack_base = t->stack_base;
-    dead_info->thread_ptr = (uint64_t)t;
-    spinlock_acquire(&dead_threads_lock);
-    dead_info->next = dead_threads;
-    dead_threads = dead_info;
-    spinlock_release(&dead_threads_lock);
-    t->stack_base = 0;
-  }
+  // The active-CPU check above guarantees that no CPU is using this stack.
+  // Freeing it here also avoids retaining the final reaped thread forever.
+  if (t->stack_base)
+    kfree((void *)t->stack_base);
+  kfree(t);
 
   klog_puts("[REAP] Done\n");
 }

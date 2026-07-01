@@ -55,6 +55,7 @@ static epitem_t *epitem_alloc(void) {
   memset(epi, 0, sizeof(epitem_t));
   INIT_LIST_HEAD(&epi->rdllink);
   INIT_LIST_HEAD(&epi->fllink);
+  INIT_LIST_HEAD(&epi->ep_node_link);
   spinlock_init(&epi->lock);
   return epi;
 }
@@ -97,7 +98,6 @@ eventpoll_t *epoll_create(void) {
 
   epoll_table[idx] = ep;
 
-  epoll_get(ep);
   return ep;
 }
 
@@ -107,17 +107,26 @@ void epoll_destroy(eventpoll_t *ep) {
     return;
   }
 
-  spinlock_acquire(&ep->lock);
-
-  // Free all watched items
+  // Free all watched items and release the VFS references acquired by
+  // EPOLL_CTL_ADD. Holding these references keeps watcher links valid even
+  // when userspace closes a watched fd before closing the epoll fd.
   for (int i = 0; i < EPOLL_MAX_WATCHED; i++) {
-    if (ep->items[i]) {
-      epitem_free(ep->items[i]);
+    epitem_t *epi = ep->items[i];
+    if (epi) {
+      if (epi->on_ready_list) {
+        list_del(&epi->rdllink);
+        epi->on_ready_list = false;
+      }
+      if (epi->node) {
+        spinlock_acquire(&epi->node->ep_lock);
+        list_del(&epi->ep_node_link);
+        spinlock_release(&epi->node->ep_lock);
+        vfs_close(epi->node);
+      }
+      epitem_free(epi);
       ep->items[i] = NULL;
     }
   }
-
-  spinlock_release(&ep->lock);
 
   // Remove from table
   for (int i = 0; i < EPOLL_MAX_INSTANCES; i++) {
@@ -253,6 +262,7 @@ int epoll_ctl_add(eventpoll_t *ep, int fd, struct epoll_event *event) {
     ep->items[fd] = NULL;
     ep->item_count--;
     spinlock_release(&ep->lock);
+    vfs_close(old->node);
     epitem_free(old);
   }
 
@@ -272,6 +282,9 @@ int epoll_ctl_add(eventpoll_t *ep, int fd, struct epoll_event *event) {
   epi->oneshot_disabled = false;
   epi->exclusive = (event->events & EPOLLEXCLUSIVE) != 0;
   epi->registered_events = event->events;
+
+  // Keep the watched object alive until DEL or epoll destruction.
+  vfs_open(node);
 
   // Add to epoll instance
   spinlock_acquire(&ep->lock);
@@ -327,7 +340,8 @@ int epoll_ctl_del(eventpoll_t *ep, int fd) {
     spinlock_release(&epi->node->ep_lock);
   }
 
-  // Free epitem
+  // Release the watched object reference, then free the item.
+  vfs_close(epi->node);
   epitem_free(epi);
 
   return 0;
@@ -569,10 +583,9 @@ int epoll_alloc_fd(eventpoll_t *ep) {
   t->fds[fd] = node;
   t->fd_offsets[fd] = 0;
 
-  vfs_open(node);
-
-  // Release the initial creation reference, as the VFS node now owns it
-  epoll_put(ep);
+  // vfs_node_init() created the node with refcount 1; that initial node
+  // reference is the fd-table ownership. The epoll object's initial
+  // reference is transferred to the node and released by epoll_vfs_close().
 
   return fd;
 }

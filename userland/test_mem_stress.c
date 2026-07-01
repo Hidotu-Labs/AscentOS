@@ -2,6 +2,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/futex.h>
+#include <poll.h>
 #include <sched.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -9,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/epoll.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -219,6 +221,106 @@ void test_vfs_stress() {
   DEBUGLOG("VFS stress test PASSED\n");
 }
 
+void test_vfs_open_close_stress() {
+  DEBUGLOG("Starting VFS open/close stress test...\n");
+  for (int i = 0; i < NUM_ITERATIONS * 10; i++) {
+    int fd = open("/proc/meminfo", O_RDONLY);
+    if (fd < 0) {
+      fprintf(stderr, "VFS open failed at iteration %d: %s\n", i,
+              strerror(errno));
+      exit(1);
+    }
+    char byte;
+    read(fd, &byte, 1);
+    close(fd);
+    if (i % 250 == 0)
+      DEBUGLOG("VFS open/close iteration %d complete\n", i);
+  }
+  DEBUGLOG("VFS open/close stress test PASSED\n");
+}
+
+static int epoll_lifecycle_once(void) {
+  int fds[2];
+  int epfd = epoll_create1(0);
+  if (epfd < 0)
+    return -1;
+  if (pipe(fds) < 0) {
+    close(epfd);
+    return -1;
+  }
+
+  struct epoll_event event = {.events = EPOLLIN, .data.fd = fds[0]};
+  if (epoll_ctl(epfd, EPOLL_CTL_ADD, fds[0], &event) < 0) {
+    close(fds[0]);
+    close(fds[1]);
+    close(epfd);
+    return -1;
+  }
+
+  write(fds[1], "E", 1);
+  struct epoll_event ready;
+  epoll_wait(epfd, &ready, 1, 0);
+  close(fds[0]);
+  close(fds[1]);
+  close(epfd);
+  return 0;
+}
+
+void test_epoll_stress() {
+  DEBUGLOG("Starting EPOLL stress test...\n");
+  for (int i = 0; i < NUM_ITERATIONS * 3; i++) {
+    if (epoll_lifecycle_once() < 0) {
+      fprintf(stderr, "epoll lifecycle failed at iteration %d: %s\n", i,
+              strerror(errno));
+      exit(1);
+    }
+    if (i % 100 == 0)
+      DEBUGLOG("EPOLL iteration %d complete\n", i);
+  }
+  DEBUGLOG("EPOLL stress test PASSED\n");
+}
+
+void test_poll_stress() {
+  DEBUGLOG("Starting POLL stress test...\n");
+  for (int i = 0; i < NUM_ITERATIONS * 3; i++) {
+    int fds[2];
+    if (pipe(fds) < 0) {
+      fprintf(stderr, "poll pipe failed: %s\n", strerror(errno));
+      exit(1);
+    }
+    struct pollfd pfd = {.fd = fds[0], .events = POLLIN};
+    poll(&pfd, 1, 0);
+    write(fds[1], "P", 1);
+    poll(&pfd, 1, 0);
+    close(fds[0]);
+    close(fds[1]);
+    if (i % 100 == 0)
+      DEBUGLOG("POLL iteration %d complete\n", i);
+  }
+  DEBUGLOG("POLL stress test PASSED\n");
+}
+
+void test_ppoll_stress() {
+  DEBUGLOG("Starting PPOLL stress test...\n");
+  const struct timespec timeout = {0, 0};
+  for (int i = 0; i < NUM_ITERATIONS * 3; i++) {
+    int fds[2];
+    if (pipe(fds) < 0) {
+      fprintf(stderr, "ppoll pipe failed: %s\n", strerror(errno));
+      exit(1);
+    }
+    struct pollfd pfd = {.fd = fds[0], .events = POLLIN};
+    ppoll(&pfd, 1, &timeout, NULL);
+    write(fds[1], "Q", 1);
+    ppoll(&pfd, 1, &timeout, NULL);
+    close(fds[0]);
+    close(fds[1]);
+    if (i % 100 == 0)
+      DEBUGLOG("PPOLL iteration %d complete\n", i);
+  }
+  DEBUGLOG("PPOLL stress test PASSED\n");
+}
+
 void test_pipe_stress() {
   DEBUGLOG("Starting PIPE stress test...\n");
   int pipefds[2];
@@ -304,19 +406,23 @@ int stress_thread_entry(void *arg) {
 void test_clone_futex_stress() {
   DEBUGLOG("Starting CLONE/FUTEX stress test...\n");
   uint8_t *stacks[CLONE_STRESS_THREADS];
+  _Atomic int child_tids[CLONE_STRESS_THREADS];
   for (int i = 0; i < CLONE_STRESS_THREADS; i++) {
     stacks[i] = mmap(NULL, THREAD_STACK_SIZE, PROT_READ | PROT_WRITE,
                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   }
 
   unsigned long flags = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND |
-                        CLONE_THREAD | CLONE_SYSVSEM;
+                        CLONE_THREAD | CLONE_SYSVSEM | CLONE_CHILD_SETTID |
+                        CLONE_CHILD_CLEARTID;
 
   for (int i = 0; i < CLONE_STRESS_ITERATIONS; i++) {
     atomic_store(&threads_running, CLONE_STRESS_THREADS);
     for (int j = 0; j < CLONE_STRESS_THREADS; j++) {
+      atomic_store(&child_tids[j], 0);
       void *stack_top = stacks[j] + THREAD_STACK_SIZE;
-      long tid = raw_clone(flags, stack_top, NULL, NULL, 0);
+      long tid = raw_clone(flags, stack_top, NULL,
+                           (int *)&child_tids[j], 0);
       if (tid == 0) {
         stress_thread_entry(NULL);
       }
@@ -326,9 +432,30 @@ void test_clone_futex_stress() {
       usleep(1000);
     }
 
+    // A worker decrements threads_running before entering SYS_exit. Join on
+    // clear-child-TID before reusing its user stack.
+    for (int j = 0; j < CLONE_STRESS_THREADS; j++) {
+      int tid;
+      while ((tid = atomic_load(&child_tids[j])) != 0) {
+        raw_futex((uint32_t *)&child_tids[j], FUTEX_WAIT, (uint32_t)tid,
+                  NULL, NULL, 0);
+      }
+    }
+
+    // Give the scheduler context that resumed us a chance to consume the
+    // detached-task reap queue before the next iteration.
+    sched_yield();
+
     if (i % 2 == 0) {
       DEBUGLOG("CLONE iteration %d complete\n", i);
     }
+  }
+
+  // clear-child-TID and reap-queue publication happen on different CPUs.
+  // Allow a few complete scheduling cycles before taking the PMM sample.
+  for (int i = 0; i < 8; i++) {
+    sched_yield();
+    usleep(1000);
   }
 
   for (int i = 0; i < CLONE_STRESS_THREADS; i++) {
@@ -455,6 +582,14 @@ int main(int argc, char **argv) {
 
   printf("=== Userland Leak Detection Stress Test ===\n");
 
+  // Prime the kernel slab caches used by epoll, watched VFS nodes and pipes.
+  // Empty slab pages are intentionally retained for reuse, so measuring the
+  // first-ever lifecycle would mislabel bounded cache growth as a leak.
+  if (epoll_lifecycle_once() < 0) {
+    printf("CRITICAL: epoll allocator warm-up failed: %s\n", strerror(errno));
+    return 1;
+  }
+
   long initial_mem = get_free_mem_kb();
   if (initial_mem == -1) {
     printf("CRITICAL: Could not read /proc/meminfo. Make sure procfs is "
@@ -471,6 +606,22 @@ int main(int argc, char **argv) {
   printf("\n--- Running VFS Stress ---\n");
   test_vfs_stress();
   check_leak("VFS Stress", &current_mem);
+
+  printf("\n--- Running VFS Open/Close Stress ---\n");
+  test_vfs_open_close_stress();
+  check_leak("VFS Open/Close Stress", &current_mem);
+
+  printf("\n--- Running EPOLL Stress ---\n");
+  test_epoll_stress();
+  check_leak("EPOLL Stress", &current_mem);
+
+  printf("\n--- Running POLL Stress ---\n");
+  test_poll_stress();
+  check_leak("POLL Stress", &current_mem);
+
+  printf("\n--- Running PPOLL Stress ---\n");
+  test_ppoll_stress();
+  check_leak("PPOLL Stress", &current_mem);
 
   printf("\n--- Running PIPE Stress ---\n");
   test_pipe_stress();

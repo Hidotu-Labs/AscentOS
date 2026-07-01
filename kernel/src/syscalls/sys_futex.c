@@ -323,4 +323,8 @@ static uint64_t sys_futex(uint64_t uaddr_val, uint64_t op_val, uint64_t val_arg,
 }
 
 // Registration
+uint64_t futex_wake_user(uint32_t *uaddr, uint32_t count) {
+  return futex_wake(uaddr, count);
+}
+
 void syscall_register_futex(void) { syscall_register(SYS_FUTEX, sys_futex); }

@@ -18,6 +18,7 @@
 #define FS_EPOLL 0x09
 #define FS_PERSISTENT 0x10
 #define FS_NONBLOCK 0x20
+#define FS_DENTRY_NOCACHE 0x40
 #define FS_TYPE_MASK 0x0F
 
 // Poll Events
@@ -149,6 +150,7 @@ void vfs_open(vfs_node_t *node);
 void vfs_close(vfs_node_t *node);
 struct dirent *vfs_readdir(vfs_node_t *node, uint32_t index);
 vfs_node_t *vfs_finddir(vfs_node_t *node, char *name);
+void vfs_dentry_invalidate(vfs_node_t *parent, const char *name);
 vfs_node_t *vfs_resolve_path_at(vfs_node_t *dir, const char *path);
 vfs_node_t *vfs_resolve_path(const char *path);
 int vfs_create(vfs_node_t *node, char *name, uint16_t permission);

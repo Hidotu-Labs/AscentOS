@@ -740,7 +740,7 @@ static vfs_node_t *make_pid_dir(uint32_t pid) {
   if (fd_dir) {
     vfs_node_init(fd_dir);
     strcpy(fd_dir->name, "fd");
-    fd_dir->flags = FS_DIRECTORY;
+    fd_dir->flags = FS_DIRECTORY | FS_DENTRY_NOCACHE;
     fd_dir->mask = 0555;
     fd_dir->impl = pid;
     fd_dir->readdir = procfs_pid_fd_readdir;
@@ -1080,6 +1080,7 @@ void procfs_init(void) {
 
     // Install dynamic PID hooks on top of the ramfs root.
     // These wrap the ramfs readdir/finddir to also expose live per-PID dirs.
+    procfs_root->flags |= FS_DENTRY_NOCACHE;
     procfs_root->readdir = procfs_root_readdir;
     procfs_root->finddir = procfs_root_finddir;
   }
