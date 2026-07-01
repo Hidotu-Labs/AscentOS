@@ -118,6 +118,7 @@ static void drm_commit(struct drm_device *dev) {
           uint32_t sw_pitch = crtc->fb->pitch;
 
           if (hw_pitch == sw_pitch) {
+#if DRM_DEBUG_LOGGING
             klog_puts("[DRM] Blit: fast copy, size=");
             klog_uint64((size_t)height * hw_pitch);
             klog_puts("\n");
@@ -139,6 +140,7 @@ static void drm_commit(struct drm_device *dev) {
               klog_hex32(pixels[0]);
               klog_puts("\n");
             }
+#endif
 
             memcpy(hw_fb, crtc->fb->gem_obj->virt_addr,
                    (size_t)height * hw_pitch);
@@ -150,6 +152,7 @@ static void drm_commit(struct drm_device *dev) {
             if (copy_len > sw_pitch)
               copy_len = sw_pitch;
 
+#if DRM_DEBUG_LOGGING
             klog_puts("[DRM] Blit: line copy (pitch mismatch), lines=");
             klog_uint64(height);
             klog_puts("\n");
@@ -171,6 +174,7 @@ static void drm_commit(struct drm_device *dev) {
               klog_hex32(pixels[0]);
               klog_puts("\n");
             }
+#endif
 
             for (uint32_t y = 0; y < height; y++) {
               memcpy((uint8_t *)hw_fb + y * hw_pitch,
@@ -257,9 +261,11 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
   if (!dev)
     return -9; /* EBADF */
 
+#if DRM_DEBUG_LOGGING
   klog_puts("[DRM] ioctl request=0x");
   klog_hex32(request);
   klog_puts("\n");
+#endif
 
   switch (request) {
 
@@ -923,6 +929,7 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
   case DRM_IOCTL_MODE_PAGE_FLIP: {
     struct drm_mode_crtc_page_flip *flip =
         (struct drm_mode_crtc_page_flip *)arg;
+#if DRM_DEBUG_LOGGING
     klog_puts("[DRM] PAGE_FLIP crtc=");
     klog_uint64(flip->crtc_id);
     klog_puts(" fb=");
@@ -932,6 +939,7 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     klog_puts(" user_data=0x");
     klog_hex64(flip->user_data);
     klog_puts("\n");
+#endif
     spinlock_acquire(&dev->lock);
     struct drm_mode_object *crtc_obj = drm_mode_object_find(dev, flip->crtc_id);
     struct drm_mode_object *fb_obj = drm_mode_object_find(dev, flip->fb_id);
@@ -964,7 +972,9 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     int ret = drm_ioctl_atomic(node, file, dev, arg);
     if (ret == 0 &&
         !(((struct drm_mode_atomic *)arg)->flags & DRM_MODE_ATOMIC_TEST_ONLY)) {
+#if DRM_DEBUG_LOGGING
       klog_puts("[DRM] ATOMIC commit triggering drm_commit\n");
+#endif
       drm_commit(dev);
     }
     return ret;
@@ -1025,11 +1035,13 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     uint64_t user_data = vbl->request.signal;
     uint64_t ms = lapic_timer_get_ms();
     uint32_t seq = drm_event_sequence++;
+#if DRM_DEBUG_LOGGING
     klog_puts("[DRM] WAIT_VBLANK type=0x");
     klog_hex32(type);
     klog_puts(" seq_in=");
     klog_uint64(vbl->request.sequence);
     klog_puts("\n");
+#endif
     vbl->reply.type = type;
     vbl->reply.sequence = seq;
     vbl->reply.tval_sec = (long)(ms / 1000);
@@ -1051,6 +1063,7 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
   case DRM_IOCTL_MODE_CURSOR: {
     struct drm_mode_cursor *cur = (struct drm_mode_cursor *)arg;
 
+#if DRM_DEBUG_LOGGING
     klog_puts("[DRM] MODE_CURSOR flags=0x");
     klog_hex32(cur->flags);
     klog_puts(" handle=");
@@ -1064,6 +1077,7 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     klog_puts(" h=");
     klog_uint64(cur->height);
     klog_puts("\n");
+#endif
 
     spinlock_acquire(&dev->lock);
 
@@ -1132,6 +1146,7 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
   case DRM_IOCTL_MODE_CURSOR2: {
     struct drm_mode_cursor2 *cur = (struct drm_mode_cursor2 *)arg;
 
+#if DRM_DEBUG_LOGGING
     klog_puts("[DRM] MODE_CURSOR2 flags=0x");
     klog_hex32(cur->flags);
     klog_puts(" handle=");
@@ -1149,6 +1164,7 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     klog_puts(",");
     klog_uint64((uint32_t)cur->hot_y);
     klog_puts("\n");
+#endif
 
     spinlock_acquire(&dev->lock);
 

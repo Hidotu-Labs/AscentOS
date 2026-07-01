@@ -405,6 +405,7 @@ int atomic_apply_prop(struct drm_device *dev,
       }
 
       if (plane_type == DRM_PLANE_TYPE_CURSOR) {
+#if DRM_DEBUG_LOGGING
         klog_puts("[DRM] atomic cursor: FB_ID=");
         klog_uint64((uint32_t)value);
         klog_puts(" size=");
@@ -414,6 +415,7 @@ int atomic_apply_prop(struct drm_device *dev,
         klog_puts(" fmt=0x");
         klog_hex32(new_fb ? new_fb->pixel_format : 0);
         klog_puts("\n");
+#endif
       }
       break;
     }
@@ -437,9 +439,11 @@ int atomic_apply_prop(struct drm_device *dev,
         }
       }
       if (plane_type == DRM_PLANE_TYPE_CURSOR) {
+#if DRM_DEBUG_LOGGING
         klog_puts("[DRM] atomic cursor: CRTC_ID=");
         klog_uint64((uint32_t)value);
         klog_puts("\n");
+#endif
       }
       break;
     }
@@ -545,6 +549,7 @@ int drm_ioctl_obj_setproperty(struct drm_device *dev, uint64_t arg) {
     uint32_t obj_type;
   } *req = (void *)arg;
 
+#if DRM_DEBUG_LOGGING
   klog_puts("[DRM] OBJ_SETPROPERTY obj=");
   klog_uint64(req->obj_id);
   klog_puts(" type=0x");
@@ -554,6 +559,7 @@ int drm_ioctl_obj_setproperty(struct drm_device *dev, uint64_t arg) {
   klog_puts(" val=");
   klog_uint64(req->value);
   klog_puts("\n");
+#endif
 
   spinlock_acquire(&dev->lock);
   struct drm_mode_object *mobj = NULL;
@@ -623,6 +629,7 @@ int drm_ioctl_atomic(struct vfs_node *node, struct drm_file *file,
       uint32_t pid = prop_ids[prop_offset + j];
       uint64_t val = prop_vals[prop_offset + j];
 
+#if DRM_DEBUG_LOGGING
       klog_puts("[DRM] atomic: obj=");
       klog_uint64(obj_id);
       klog_puts(" prop=");
@@ -630,6 +637,7 @@ int drm_ioctl_atomic(struct vfs_node *node, struct drm_file *file,
       klog_puts(" val=");
       klog_uint64(val);
       klog_puts("\n");
+#endif
 
       if (mobj->type == DRM_MODE_OBJECT_CRTC)
         event_crtc_id = obj_id;
@@ -664,12 +672,13 @@ int drm_ioctl_atomic(struct vfs_node *node, struct drm_file *file,
 
   spinlock_release(&dev->lock);
 done:
-
+#if DRM_DEBUG_LOGGING
   klog_puts("[DRM] atomic commit: ");
   klog_uint64(req->count_objs);
   klog_puts(" objects, flags=0x");
   klog_hex32(req->flags);
   klog_puts(test_only ? " (TEST_ONLY)\n" : "\n");
+#endif
 
   return 0;
 }

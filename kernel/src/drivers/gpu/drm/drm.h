@@ -8,6 +8,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifndef DRM_DEBUG_LOGGING
+#define DRM_DEBUG_LOGGING 0
+#endif
+
 #define DRM_MAJOR 226
 
 // KMS Object types

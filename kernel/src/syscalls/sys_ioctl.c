@@ -10,6 +10,10 @@
 #include "syscall.h"
 #include <stdint.h>
 
+#ifndef IOCTL_DEBUG_LOGGING
+#define IOCTL_DEBUG_LOGGING 0
+#endif
+
 struct termios console_termios;
 
 static int ioctl_arg_is_scalar(uint32_t request) {
@@ -29,6 +33,7 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
   (void)a5;
 
   struct thread *t = sched_get_current();
+#if IOCTL_DEBUG_LOGGING
   if (t) {
     klog_puts("[IOCTL] tid=");
     klog_uint64(t->tid);
@@ -48,6 +53,7 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
   klog_puts(" arg=0x");
   klog_hex64(arg);
   klog_puts("\n");
+#endif
 
   if (arg > USER_ADDR_MAX)
     return (uint64_t)-14;
@@ -57,11 +63,13 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
 
   if (fd < MAX_FDS && t->fds[fd]) {
     vfs_node_t *node = t->fds[fd];
+#if IOCTL_DEBUG_LOGGING
     klog_puts("[SYSCALL] ioctl: node name=");
     klog_puts(node->name);
     klog_puts(" has_ioctl=");
     klog_uint64(node->ioctl ? 1 : 0);
     klog_puts("\n");
+#endif
 
     if (node->ioctl) {
       if (request & 0xC0000000) {
@@ -74,9 +82,11 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
         }
       }
       uint64_t res = (uint64_t)node->ioctl(node, (uint32_t)request, arg);
+#if IOCTL_DEBUG_LOGGING
       klog_puts("[SYSCALL] ioctl: node handler returned 0x");
       klog_hex64(res);
       klog_puts("\n");
+#endif
       if (res != (uint64_t)-25)
         return res;
     }
@@ -251,9 +261,11 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
     break;
   }
 
+#if IOCTL_DEBUG_LOGGING
   klog_puts("[SYSCALL] sys_ioctl RETURN 0x");
   klog_hex64(ret);
   klog_puts("\n");
+#endif
   return ret;
 }
 

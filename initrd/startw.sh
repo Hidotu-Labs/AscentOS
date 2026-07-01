@@ -21,11 +21,15 @@ export XCURSOR_THEME=Adwaita
 export XCURSOR_SIZE=24
 export XCURSOR_PATH=/usr/share/icons/
 
-# ── Wayland / Weston debug logging ──────────────────────────────────────────
-export WAYLAND_DEBUG=1
-export WESTON_DEBUG_COMPOSITOR=1
+# Set ASCENT_GRAPHICS_DEBUG=1 to restore verbose protocol/compositor logging.
+if [ "${ASCENT_GRAPHICS_DEBUG:-0}" = "1" ]; then
+    export WAYLAND_DEBUG=1
+    export WESTON_DEBUG_COMPOSITOR=1
+    export WLR_LOG_LEVEL=debug
+else
+    unset WAYLAND_DEBUG WESTON_DEBUG_COMPOSITOR WLR_LOG_LEVEL
+fi
 export WLR_RENDERER_ALLOW_SOFTWARE=1
-export WLR_LOG_LEVEL=debug
 export WLR_DRM_NO_ATOMIC=1
 
 # xrootcursor workaround disabled. Cursor should come from native DRM
