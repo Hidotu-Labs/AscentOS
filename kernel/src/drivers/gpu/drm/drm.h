@@ -555,12 +555,18 @@ int drm_obj_set_prop(struct drm_mode_object *obj, uint32_t prop_id,
 int drm_obj_get_prop(struct drm_mode_object *obj, uint32_t prop_id,
                      uint64_t *out);
 
+enum drm_gem_cache_mode {
+  DRM_GEM_CACHE_WB = 0,
+  DRM_GEM_CACHE_WC,
+};
+
 // GEM internals
 struct drm_gem_object {
   uint32_t handle;
   size_t size;
   uint64_t phys_addr;
   void *virt_addr;
+  enum drm_gem_cache_mode cache_mode;
   struct list_head list;
   struct list_head file_list;
   int refcount;

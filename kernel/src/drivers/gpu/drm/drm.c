@@ -1242,12 +1242,42 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
 
 static uint64_t drm_vfs_mmap(vfs_node_t *node, uint64_t addr, uint64_t length,
                              uint64_t prot, uint64_t flags, uint64_t offset) {
-  (void)node;
   (void)flags;
   (void)prot;
+  struct drm_file *file = node_to_file(node);
+  if (!file || length == 0)
+    return (uint64_t)-1;
   if ((offset & 0x1000000000000000ULL) == 0)
     return (uint64_t)-1;
   uint64_t phys = offset & ~0x1000000000000000ULL;
+
+  /* Resolve the opaque MAP_DUMB token to an object owned by this DRM file. */
+  enum drm_gem_cache_mode cache_mode = DRM_GEM_CACHE_WB;
+  bool found = false;
+  spinlock_acquire(&file->lock);
+  for (uint32_t i = 1; i < DRM_MAX_HANDLES_PER_FILE; i++) {
+    struct drm_gem_object *candidate = file->handles[i];
+    if (!candidate || phys < candidate->phys_addr)
+      continue;
+    uint64_t object_offset = phys - candidate->phys_addr;
+    if (object_offset <= candidate->size &&
+        length <= candidate->size - object_offset) {
+      cache_mode = candidate->cache_mode;
+      found = true;
+      break;
+    }
+  }
+  if (!found && file->hw_fb_gem && phys >= file->hw_fb_gem->phys_addr) {
+    uint64_t object_offset = phys - file->hw_fb_gem->phys_addr;
+    if (object_offset <= file->hw_fb_gem->size &&
+        length <= file->hw_fb_gem->size - object_offset) {
+      cache_mode = file->hw_fb_gem->cache_mode;
+      found = true;
+    }
+  }
+  spinlock_release(&file->lock);
+  if (!found)
+    return (uint64_t)-1;
   uint64_t vaddr = addr;
   if (vaddr == 0) {
     extern uint64_t mm_alloc_mmap_region(uint64_t length);
@@ -1258,8 +1288,9 @@ static uint64_t drm_vfs_mmap(vfs_node_t *node, uint64_t addr, uint64_t length,
   if (vaddr == 0)
     return (uint64_t)-1;
 
-  uint64_t page_flags = PAGE_FLAG_PRESENT | PAGE_FLAG_USER | PAGE_FLAG_RW |
-                        PAGE_FLAG_PWT | PAGE_FLAG_PAT;
+  uint64_t page_flags = PAGE_FLAG_PRESENT | PAGE_FLAG_USER | PAGE_FLAG_RW;
+  if (cache_mode == DRM_GEM_CACHE_WC)
+    page_flags |= PAGE_FLAG_PWT | PAGE_FLAG_PCD | PAGE_FLAG_PAT;
   uint32_t num_pages = (length + 4095) / 4096;
   uint64_t *pml4 = vmm_get_active_pml4();
   for (uint32_t i = 0; i < num_pages; i++)
@@ -1386,6 +1417,7 @@ void drm_init(void) {
       fb_obj->size = fb_size;
       fb_obj->phys_addr = fb_phys;
       fb_obj->virt_addr = fb_base;
+      fb_obj->cache_mode = DRM_GEM_CACHE_WC;
       fb_obj->refcount = 1;
       fb_obj->handle = 0xF0B0;
       spinlock_acquire(&global_drm_dev.lock);

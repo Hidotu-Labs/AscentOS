@@ -22,6 +22,7 @@ struct drm_gem_object *drm_gem_object_create(struct drm_device *dev, size_t size
     obj->size = size;
     obj->phys_addr = (uint64_t)phys;
     obj->virt_addr = (void *)((uint64_t)phys + pmm_get_hhdm_offset());
+    obj->cache_mode = DRM_GEM_CACHE_WB;
     obj->refcount = 1;
 
     spinlock_acquire(&dev->lock);
