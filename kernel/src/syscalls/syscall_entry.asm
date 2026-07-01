@@ -5,18 +5,13 @@ extern console_puts
 section .text
 
 syscall_entry:
-    ; Arrive from Ring 3 via SYSCALL instruction.
-    ; Interrupts disabled by FMASK.
-    ; KERNEL_GS_BASE contains pointer to cpu_info.
+
     swapgs
 
-    ; Save user RSP temporarily into cpu_info->scratch_rsp (offset 336 for aligned struct)
     mov gs:[336], rsp
 
-    ; Switch to kernel stack: cpu_info->stack_top (offset 24)
     mov rsp, gs:[24]
 
-    ; Push standard state to construct struct syscall_regs
     push qword gs:[336] ; User RSP
     push r11           ; User RFLAGS
     push rcx           ; User RIP
@@ -35,18 +30,14 @@ syscall_entry:
     push rsi
     push rdi
 
-    ; Align the stack to 16 bytes for System V AMD64 ABI
     mov rbp, rsp
     and rsp, -16
 
-    ; Pass pointer to struct syscall_regs in RDI (1st argument)
     mov rdi, rbp
     call syscall_dispatcher
 
-    ; Restore stack
     mov rsp, rbp
 
-    ; Restore GPRs
     pop rdi
     pop rsi
     pop rdx

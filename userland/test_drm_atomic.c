@@ -268,8 +268,8 @@ int main(void) {
     printf("  CRTCs=%u  Connectors=%u  Planes=%u\n", ncrtcs, nconns, nplanes);
     if (ncrtcs > 0 && nconns > 0) PASS("KMS pipeline present");
     else FAIL("Missing CRTCs or connectors");
-    if (nplanes >= 2) PASS("Both primary + cursor planes visible");
-    else FAIL("Expected >=2 planes, got %u", nplanes);
+    if (nplanes >= 1) PASS("Primary scanout plane visible");
+    else FAIL("Expected a primary plane, got %u", nplanes);
 
     /* ── 4. OBJ_GETPROPERTIES ──────────────────────────────────────────── */
     SECTION("4. OBJ_GETPROPERTIES");

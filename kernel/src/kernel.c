@@ -179,15 +179,6 @@ static void init_thread_entry(void) {
   }
 }
 
-static void net_thread_entry(void) {
-  klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET
-                           " Background networking thread started\n");
-  while (1) {
-    net_poll();
-    sched_yield();
-  }
-}
-
 void kmain(void) {
   if (!LIMINE_BASE_REVISION_SUPPORTED(limine_base_revision)) {
     halt();
@@ -267,7 +258,7 @@ void kmain(void) {
 
   keyboard_init();
   mouse_init();
-  __asm__ volatile("sti"); // Enable hardware interrupts!
+  __asm__ volatile("sti"); 
 
   klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET
                            " Initializing Virtual Memory Manager (VMM)...\n");
@@ -276,12 +267,11 @@ void kmain(void) {
   heap_init();
   slab_cache_init();
 
-  // Create named object caches for frequent kernel structures
   extern kmem_cache_t *vma_cache;
   vma_cache = kmem_cache_create("vma", sizeof(struct vma), 8, NULL, NULL);
 
   dma_alloc_init();
-  sb16_reserve_dma(); // Grab ISA DMA buffer before PCI/storage eat low memory
+  sb16_reserve_dma(); 
   console_init(fb);
   klog_set_screen_logging(false);
   dm_init();
@@ -296,10 +286,8 @@ void kmain(void) {
 
   acpi_init(rsdp_request.response);
 
-  // Initialize HPET (High Precision Event Timer)
   hpet_init();
 
-  // Parse and log FADT (Fixed ACPI Description Table)
   acpi_parse_fadt();
 
   cpu_init();
@@ -323,50 +311,34 @@ void kmain_high_half(void) {
     klog_puts("\n" KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET
               " Switching to APIC interrupt mode...\n");
 
-    // Disable interrupts during the transition
     __asm__ volatile("cli");
 
-    // 5a. Disable the legacy 8259 PIC
     pic_disable();
     klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET
                              " Legacy 8259 PIC disabled.\n");
 
-    // 5b. Initialize the Local APIC
     lapic_init((uint64_t)lapic_base);
 
-    // 5c. Initialize the I/O APIC
     ioapic_init((uint64_t)ioapic_base, acpi_get_ioapic_gsi_base());
 
-    // 5d. Synchronize IRQ routing
-    // This automates ACPI overrides and transitions all early-registered
-    // legacy IRQs to the I/O APIC path.
     irq_manager_sync();
 
-    // 5f. Switch ISR EOI routing to LAPIC
     isr_set_apic_mode(true);
 
-    // Re-enable interrupts — now handled through the APIC path
     __asm__ volatile("sti");
 
     klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET
                              " APIC interrupt mode ACTIVE.\n\n");
 
-    // 5h. Start the LAPIC timer (calibrates against PIT)
     lapic_timer_init();
 
-    // 5h.1: HPET is available as backup timer if LAPIC fails
     if (hpet_is_backup_available()) {
       klog_puts(KLOG_CLR_BLUE "[ INFO ]" KLOG_CLR_RESET
                               " HPET available as backup timer.\n");
     }
 
-    // 5i. Register TLB shootdown IPI handler before waking APs so it is
-    //     already in the IDT when the first AP comes online.
     tlb_shootdown_init();
 
-    // 5j. Wake up Application Processors
-    // This is done AFTER lapic_timer_init because APs need the calibrated
-    // ticks_per_ms value to initialize their own timers.
     cpu_init_aps();
   } else {
     klog_puts(KLOG_CLR_YELLOW
@@ -386,21 +358,17 @@ void kmain_high_half(void) {
             " Initializing RamFS & Virtual Filesystem (VFS)...\n");
   ramfs_init();
 
-  // Create VFS node slab cache now that the full kernel is up.
-  // NOTE: struct thread (~7KB) is too large for single-page slabs and stays
-  // on the general-purpose big-alloc path, which is already efficient for it.
   extern kmem_cache_t *vfs_node_cache;
   vfs_node_cache =
       kmem_cache_create("vfs_node", sizeof(vfs_node_t), 8, NULL, NULL);
 
-  // Initialize shared memory subsystem
   shm_init();
 
   pci_init();
   usb_init();
 
   ehci_init();
-  ehci_hand_to_companion(); // Hand ports to UHCI before it probes
+  ehci_hand_to_companion(); 
   uhci_init();
   uhci_self_test();
   ohci_init();
@@ -416,8 +384,6 @@ void kmain_high_half(void) {
   // Mount root filesystem
   struct block_device *boot_dev = NULL;
 
-  // Try to find a partition first (indices 1, 2, ... usually partitions)
-  // then fallback to raw device (index 0)
   for (int i = 1; i < block_count(); i++) {
     boot_dev = block_get(i);
     if (boot_dev) {
@@ -450,7 +416,6 @@ void kmain_high_half(void) {
 mount_success:
   klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET
                            " Root filesystem mounted successfully.\n");
-  // Mount /dev and /tmp as in-memory filesystems
   ramfs_mount_at("/dev");
   ramfs_mount_at("/tmp");
   ramfs_mount_at("/run");
@@ -460,12 +425,11 @@ mount_success:
   sysfs_init();
   evdev_init();
 
-  // Re-populate /dev in the new root
   block_repopulate_devices();
   fb_register_vfs();
   drm_init();
   drm_register_vfs();
-  fb_detect_drm_backend(); // Detect DRM after it's been registered
+  fb_detect_drm_backend(); 
   mouse_register_vfs();
   random_register_vfs();
   procfs_init();
@@ -477,19 +441,16 @@ mount_fail:
   ac97_init();
   hda_init();
 
-  // Driver VFS registration MUST happen after hardware init
   sb16_register_vfs();
   ac97_register_vfs();
   hda_register_vfs();
   audio_dsp_register_vfs();
 
-  // Run networking as a background thread
   if (nic_is_present()) {
     net_init();
-    sched_create_kernel_thread(net_thread_entry, cpu_get_bsp(), true);
+    net_poll();
   }
 
-  // FORCE Init thread to BSP to ensure it gets first slice
   struct thread *init_thread =
       sched_create_kernel_thread(init_thread_entry, cpu_get_bsp(), true);
   if (!init_thread) {
@@ -498,7 +459,6 @@ mount_fail:
     halt();
   }
 
-  // This loop should never really be reached as the scheduler takes over
   for (;;) {
     __asm__ volatile("hlt");
   }

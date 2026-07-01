@@ -1,4 +1,5 @@
 // Process Syscalls: fork, getpid, exit
+#include "../acpi/acpi.h"
 #include "../apic/lapic_timer.h"
 #include "../console/klog.h"
 #include "../cpu/gdt.h"
@@ -1661,6 +1662,72 @@ static uint64_t sys_set_robust_list(uint64_t head, uint64_t len, uint64_t a2,
   return 0;
 }
 
+// ---------------------------------------------------------------------------
+// sys_reboot — syscall 169, mirrors Linux reboot(2)
+// ---------------------------------------------------------------------------
+
+// Linux reboot(2) magic values
+#define LINUX_REBOOT_MAGIC1       0xfee1dead
+#define LINUX_REBOOT_MAGIC2       0x28121969
+#define LINUX_REBOOT_MAGIC2A      0x05121996
+#define LINUX_REBOOT_MAGIC2B      0x16041998
+#define LINUX_REBOOT_MAGIC2C      0x20112000
+
+// reboot commands
+#define LINUX_REBOOT_CMD_RESTART       0x01234567
+#define LINUX_REBOOT_CMD_HALT          0xcdef0123
+#define LINUX_REBOOT_CMD_POWER_OFF     0x4321fedc
+#define LINUX_REBOOT_CMD_RESTART2      0xa1b2c3d4
+#define LINUX_REBOOT_CMD_CAD_ON        0x89abcdef
+#define LINUX_REBOOT_CMD_CAD_OFF       0x00000000
+#define LINUX_REBOOT_CMD_KEXEC         0x45584543
+
+static uint64_t sys_reboot(uint64_t magic1, uint64_t magic2, uint64_t cmd,
+                           uint64_t arg, uint64_t a4, uint64_t a5) {
+  (void)arg;
+  (void)a4;
+  (void)a5;
+
+  // Both magic values must match (as on Linux)
+  if (magic1 != LINUX_REBOOT_MAGIC1)
+    return (uint64_t)-22; // EINVAL
+  if (magic2 != LINUX_REBOOT_MAGIC2  && magic2 != LINUX_REBOOT_MAGIC2A &&
+      magic2 != LINUX_REBOOT_MAGIC2B && magic2 != LINUX_REBOOT_MAGIC2C)
+    return (uint64_t)-22; // EINVAL
+
+  switch ((uint32_t)cmd) {
+  case LINUX_REBOOT_CMD_RESTART:
+  case LINUX_REBOOT_CMD_RESTART2:
+    klog_puts("[REBOOT] System reboot requested via syscall.\n");
+    acpi_reboot();
+    /* noreturn */
+    break;
+
+  case LINUX_REBOOT_CMD_POWER_OFF:
+    klog_puts("[REBOOT] System power-off requested via syscall.\n");
+    acpi_poweroff();
+    /* noreturn */
+    break;
+
+  case LINUX_REBOOT_CMD_HALT:
+    klog_puts("[REBOOT] System halt requested via syscall.\n");
+    __asm__ volatile("cli");
+    for (;;) __asm__ volatile("hlt");
+    break;
+
+  case LINUX_REBOOT_CMD_CAD_ON:
+  case LINUX_REBOOT_CMD_CAD_OFF:
+    // Ctrl-Alt-Delete enable/disable -- no-op for now
+    return 0;
+
+  default:
+    return (uint64_t)-22; // EINVAL
+  }
+
+  /* Should never reach here */
+  return 0;
+}
+
 void syscall_register_process(void) {
   syscall_register(SYS_EXIT, sys_exit);
   syscall_register(SYS_EXIT_GROUP, sys_exit_group);
@@ -1713,4 +1780,5 @@ void syscall_register_process(void) {
   syscall_register(SYS_SETPRIORITY, sys_setpriority);
   syscall_register(SYS_GETPRIORITY, sys_getpriority);
   syscall_register(SYS_SET_ROBUST_LIST, sys_set_robust_list);
+  syscall_register(SYS_REBOOT, sys_reboot);
 }

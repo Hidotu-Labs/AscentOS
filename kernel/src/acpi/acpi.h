@@ -315,4 +315,11 @@ struct acpi_fadt *acpi_get_fadt(void);
 // Parses and logs FADT information. Returns true if FADT found.
 bool acpi_parse_fadt(void);
 
+// Power control (backed by ACPI FADT)
+// acpi_poweroff: enter the S5 (soft-off) sleep state; never returns on success.
+void acpi_poweroff(void);
+// acpi_reboot: trigger a hardware reset via the FADT reset register, falling
+// back to the PS/2 keyboard controller reset pulse (port 0x64 / 0xFE).
+void acpi_reboot(void);
+
 #endif

@@ -269,6 +269,104 @@ bool acpi_parse_fadt(void) {
   return true;
 }
 
+// ---------------------------------------------------------------------------
+// Power control
+// ---------------------------------------------------------------------------
+
+#include "../io/io.h"
+
+// ACPI SLP_EN bit in PM1x_CNT register
+#define ACPI_PM1_SLP_EN  (1u << 13)
+// Sleep type for S5 (soft-off).  The actual value is encoded in bits [12:10]
+// of PM1x_CNT as (SLP_TYP << 10).  The ACPI spec assigns the per-platform
+// SLP_TYP values in the DSDT \_S5 object; without an AML interpreter we use
+// the QEMU / OVMF well-known encoding: SLP_TYP=7 -> bits = 7<<10 = 0x1C00.
+// Combined with SLP_EN: 0x1C00 | 0x2000 = 0x3C00.
+// (QEMU's PIIX4 ACPI uses SLP_TYP=0 -> 0x0000|0x2000 = 0x2000 instead; we
+//  try both so we work on common QEMU configs.)
+#define ACPI_S5_SLP_TYP_QEMU  (0u << 10)   // QEMU PIIX4
+#define ACPI_S5_SLP_EN_QEMU   (ACPI_S5_SLP_TYP_QEMU | ACPI_PM1_SLP_EN)
+
+void acpi_poweroff(void) {
+  struct acpi_fadt *fadt = acpi_get_fadt();
+
+  console_puts("[ACPI] Initiating system power-off (S5)...\n");
+
+  if (!fadt) {
+    console_puts("[ACPI] No FADT — cannot perform ACPI power-off.\n");
+    goto hang;
+  }
+
+  uint32_t pm1a = fadt->pm1a_cnt_blk;
+  uint32_t pm1b = fadt->pm1b_cnt_blk;
+
+  if (!pm1a) {
+    console_puts("[ACPI] PM1a_CNT block not present.\n");
+    goto hang;
+  }
+
+  // Write SLP_TYP | SLP_EN to PM1a_CNT (and optionally PM1b_CNT)
+  outw((uint16_t)pm1a, (uint16_t)ACPI_S5_SLP_EN_QEMU);
+  if (pm1b)
+    outw((uint16_t)pm1b, (uint16_t)ACPI_S5_SLP_EN_QEMU);
+
+  // If the machine is still running, the firmware may use SLP_TYP=5 (0x5<<10)
+  outw((uint16_t)pm1a, (uint16_t)((5u << 10) | ACPI_PM1_SLP_EN));
+  if (pm1b)
+    outw((uint16_t)pm1b, (uint16_t)((5u << 10) | ACPI_PM1_SLP_EN));
+
+hang:
+  // Should not reach here; halt all CPUs
+  __asm__ volatile("cli");
+  for (;;)
+    __asm__ volatile("hlt");
+}
+
+void acpi_reboot(void) {
+  struct acpi_fadt *fadt = acpi_get_fadt();
+
+  console_puts("[ACPI] Initiating system reboot...\n");
+
+  // Method 1: ACPI 2.0+ reset register (FADT revision >= 2, reset_reg valid)
+  if (fadt && fadt->header.revision >= 2 && fadt->reset_reg.address &&
+      (fadt->flags & FADT_FLAG_RESET_REG_SUP)) {
+    uint8_t  space  = fadt->reset_reg.space_id;
+    uint64_t addr   = fadt->reset_reg.address;
+    uint8_t  value  = fadt->reset_value;
+
+    if (space == 1) {
+      // SystemIO — write reset value to the I/O port
+      outb((uint16_t)addr, value);
+    } else if (space == 0) {
+      // SystemMemory
+      volatile uint8_t *mem = (volatile uint8_t *)(addr + pmm_get_hhdm_offset());
+      *mem = value;
+    }
+    // Give the hardware a moment to act
+    for (int i = 0; i < 0x1000; i++)
+      io_wait();
+  }
+
+  // Method 2: PS/2 keyboard controller reset pulse (port 0x64 bit 0)
+  // Wait for KBC input buffer to be empty, then send "pulse output port" cmd
+  {
+    int timeout = 0x10000;
+    while ((inb(0x64) & 0x02) && --timeout > 0)
+      io_wait();
+    outb(0x64, 0xFE); // pulse reset line
+  }
+
+  for (int i = 0; i < 0x10000; i++)
+    io_wait();
+
+  // Last resort: triple-fault via loading a zero-length IDT and triggering #UD
+  struct { uint16_t limit; uint64_t base; } __attribute__((packed)) idtr = {0, 0};
+  __asm__ volatile("cli; lidt %0; ud2" :: "m"(idtr));
+
+  for (;;)
+    __asm__ volatile("hlt");
+}
+
 // Initialization
 
 void acpi_init(struct limine_rsdp_response *response) {

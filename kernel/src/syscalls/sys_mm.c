@@ -503,9 +503,40 @@ static uint64_t sys_mremap(uint64_t old_addr, uint64_t old_size,
   }
   uint64_t prot = orig_vma->prot;
   uint64_t vma_flags = orig_vma->flags;
+  int vma_fd = orig_vma->fd;
+  uint64_t vma_offset = orig_vma->offset;
+  vfs_node_t *vma_file = (vfs_node_t *)orig_vma->file_node;
   uint64_t page_flags = build_page_flags(prot);
 
   if (can_grow_inplace) {
+    /* Preserve the backing object when a shared file mapping grows.
+     * wl_shm_pool.resize() relies on the new pages viewing the same memfd;
+     * anonymous zero pages here make every buffer beyond the old size blank. */
+    if ((vma_flags & MAP_SHARED) && vma_file && vma_file->mmap) {
+      uint64_t mapped =
+          vma_file->mmap(vma_file, grow_base, grow_len, prot,
+                         vma_flags | MAP_FIXED, vma_offset + aligned_old);
+      if (mapped != grow_base) {
+        spinlock_release(&current->mm->lock);
+        return E_NOMEM;
+      }
+
+      /* Keep the file alive while replacing the old VMA reference. */
+      vma_file->refcount++;
+      vma_remove(&current->mm->vmas, old_addr, old_addr + aligned_old);
+      int add_ret =
+          vma_add(&current->mm->vmas, old_addr, old_addr + aligned_new, prot,
+                  vma_flags, vma_fd, vma_offset, vma_file);
+      vfs_close(vma_file);
+      if (add_ret < 0) {
+        spinlock_release(&current->mm->lock);
+        return E_NOMEM;
+      }
+
+      spinlock_release(&current->mm->lock);
+      return old_addr;
+    }
+
     // Allocate and map the new pages.
     for (uint64_t va = grow_base; va < grow_base + grow_len; va += PAGE_SIZE) {
       void *phys = pmm_alloc();
@@ -541,6 +572,36 @@ static uint64_t sys_mremap(uint64_t old_addr, uint64_t old_size,
   if (new_addr == 0 || new_addr + aligned_new > MMAP_REGION_LIMIT) {
     spinlock_release(&current->mm->lock);
     return E_NOMEM;
+  }
+
+  /* A moved shared file mapping must remain a view of the same file, not
+   * become an anonymous copy. This is the relocation path for a Wayland SHM
+   * pool which cannot expand at its current virtual address. */
+  if ((vma_flags & MAP_SHARED) && vma_file && vma_file->mmap) {
+    uint64_t mapped =
+        vma_file->mmap(vma_file, new_addr, aligned_new, prot,
+                       vma_flags | MAP_FIXED, vma_offset);
+    if (mapped != new_addr) {
+      spinlock_release(&current->mm->lock);
+      return E_NOMEM;
+    }
+
+    vma_file->refcount++;
+    teardown_range(pml4, current, old_addr, aligned_old, "mremap file move");
+    vma_remove(&current->mm->vmas, old_addr, old_addr + aligned_old);
+    int add_ret =
+        vma_add(&current->mm->vmas, new_addr, new_addr + aligned_new, prot,
+                vma_flags, vma_fd, vma_offset, vma_file);
+    vfs_close(vma_file);
+    if (add_ret < 0) {
+      spinlock_release(&current->mm->lock);
+      return E_NOMEM;
+    }
+
+    current->mm->mmap_next_addr =
+        MAX(current->mm->mmap_next_addr, new_addr + aligned_new);
+    spinlock_release(&current->mm->lock);
+    return new_addr;
   }
 
   // Allocate and map new pages.

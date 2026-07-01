@@ -173,6 +173,7 @@
 #define SYS_STATX 332
 #define SYS_SET_ROBUST_LIST 273
 #define SYS_RSEQ 334
+#define SYS_REBOOT 169
 #define SYS_UPTIME 399
 #define SYS_FACCESSAT2 439
 

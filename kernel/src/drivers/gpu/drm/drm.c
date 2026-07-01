@@ -576,6 +576,21 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
         uint64_t type_val = 999;
         drm_obj_get_prop(mobj, DRM_PROP_ID_TYPE, &type_val);
 
+        /* The Limine framebuffer bridge has no independent hardware cursor:
+         * drm_commit() emulates one by blending it into the scanout buffer.
+         * Do not expose that internal plane through universal-plane discovery.
+         *
+         * Weston 14 with the Pixman renderer otherwise sees a cursor plane but
+         * does not allocate GBM cursor BOs. It keeps the cursor view off the
+         * primary plane while never enabling the KMS cursor plane, making the
+         * cursor invisible. Reporting only the real primary plane makes the
+         * compositor use its correct software-cursor fallback.
+         *
+         * Keep the object for legacy MODE_CURSOR ioctls and for a future DRM
+         * backend with a genuinely independent cursor plane. */
+        if ((uint32_t)type_val == DRM_PLANE_TYPE_CURSOR)
+          continue;
+
         klog_puts("[DRM] GETPLANERESOURCES found plane index=");
         klog_uint64(planes);
         klog_puts(" id=");

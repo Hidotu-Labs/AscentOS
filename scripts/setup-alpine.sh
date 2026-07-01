@@ -349,6 +349,13 @@ install_apk "python3" "main"
 install_apk "dbus-dev" "main"
 install_apk "nano" "main"
 
+# Compiler / toolchain tools for AUR package compilation
+echo "[*] Installing compilation tools..."
+install_apk "make" "main"
+install_apk "gcc" "main"
+install_apk "musl-dev" "main"
+install_apk "binutils" "main"
+
 # GTK 3.0 Development headers
 echo "[*] Installing GTK 3.0 development packages..."
 install_apk "gtk+3.0-dev" "main"
@@ -659,6 +666,15 @@ path=/usr/bin/netsurf
 name=HDMI-A-1
 mode=preferred
 EOF
+
+# 4c. Setup helper symlinks in /usr/bin for path resolutions (e.g. tar child execs)
+echo "[*] Creating helper symlinks in /usr/bin..."
+mkdir -p "${ROOTFS_DIR}/usr/bin"
+ln -sf /bin/busybox "${ROOTFS_DIR}/usr/bin/gzip"
+ln -sf /bin/busybox "${ROOTFS_DIR}/usr/bin/tar"
+ln -sf /bin/busybox "${ROOTFS_DIR}/usr/bin/xz"
+ln -sf /bin/busybox "${ROOTFS_DIR}/usr/bin/unzip"
+ln -sf /bin/busybox "${ROOTFS_DIR}/usr/bin/zip"
 
 # 5. Inject custom binaries
 echo "[*] Injecting custom binaries into rootfs..."
