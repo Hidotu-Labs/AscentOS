@@ -6,8 +6,6 @@
 #include "../mm/heap.h"
 #include "../mm/vmm.h"
 #include "../sched/sched.h"
-#include "../socket/af_inet.h"
-#include "../socket/af_inet6.h"
 #include "../socket/socket.h"
 #include "../socket/socket_internal.h"
 #include "syscall.h"
@@ -38,8 +36,7 @@ static uint64_t sys_socket(uint64_t domain, uint64_t type, uint64_t protocol,
   if (!sock) {
     // Determine error - extract base type for comparison
     int base = typ & ~SOCK_NONBLOCK & ~SOCK_CLOEXEC;
-    if (dom != AF_UNIX && dom != AF_INET && dom != AF_INET6 &&
-        dom != AF_NETLINK)
+    if (dom != AF_UNIX && dom != AF_INET && dom != AF_NETLINK)
       return (uint64_t)-EAFNOSUPPORT;
     if (base != SOCK_STREAM && base != SOCK_DGRAM && base != SOCK_RAW &&
         base != SOCK_SEQPACKET)
@@ -308,16 +305,6 @@ static uint64_t sys_accept_impl(uint64_t sockfd, uint64_t addr_ptr,
   }
   klog_puts("\n");
 
-  // Validate pointers (can be NULL)
-  struct sockaddr *addr = NULL;
-  int *addrlen = NULL;
-  if (addr_ptr && is_user_ptr(addr_ptr)) {
-    addr = (struct sockaddr *)addr_ptr;
-  }
-  if (addrlen_ptr && is_user_ptr(addrlen_ptr)) {
-    addrlen = (int *)addrlen_ptr;
-  }
-
   // Accept connection
   socket_t *newsock = NULL;
   int ret = socket_accept(sock, &newsock);
@@ -327,6 +314,15 @@ static uint64_t sys_accept_impl(uint64_t sockfd, uint64_t addr_ptr,
 
   if (flags & SOCK_NONBLOCK) {
     newsock->flags |= SOCK_NONBLOCK;
+  }
+
+  // Fill peer address if the caller provided a buffer
+  if (addr_ptr && addrlen_ptr && is_user_ptr(addr_ptr) && is_user_ptr(addrlen_ptr)) {
+    int *addrlen = (int *)addrlen_ptr;
+    struct sockaddr *addr = (struct sockaddr *)addr_ptr;
+    if (newsock->ops && newsock->ops->getpeername) {
+      newsock->ops->getpeername(newsock, addr, addrlen);
+    }
   }
 
   // Allocate FD for new socket
@@ -341,25 +337,6 @@ static uint64_t sys_accept_impl(uint64_t sockfd, uint64_t addr_ptr,
       t->fd_flags[newfd] |= SOCKET_FD_FLAGS_CLOEXEC_BIT;
     if (flags & SOCK_NONBLOCK)
       t->fd_flags[newfd] |= SOCK_NONBLOCK;
-  }
-
-  // Fill in addr and addrlen for AF_INET
-  if (newsock->domain == AF_INET) {
-    inet_sock_t *newinet = (inet_sock_t *)newsock->sk;
-    if (addr && addrlen) {
-      struct sockaddr_in sin;
-      memset(&sin, 0, sizeof(sin));
-      sin.sin_family = AF_INET;
-      sin.sin_port = newinet->remote_addr.sin_port;
-      sin.sin_addr.s_addr = newinet->remote_addr.sin_addr.s_addr;
-
-      int copy_len = *addrlen < (int)sizeof(sin) ? *addrlen : (int)sizeof(sin);
-      memcpy(addr, &sin, copy_len);
-      *addrlen = sizeof(sin);
-    }
-  } else if (newsock->domain == AF_INET6) {
-    if (sock->ops && sock->ops->getpeername && addr && addrlen)
-      sock->ops->getpeername(newsock, addr, addrlen);
   }
 
   klog_puts("[ACCEPT] tid=");
@@ -632,7 +609,7 @@ static uint64_t sys_recvmsg(uint64_t sockfd, uint64_t msg_ptr, uint64_t flags,
   // Fallback to simple recv into iovec array
   ssize_t total_received = 0;
 
-  /* For AF_INET UDP, we need to fill msg_name with the source address.
+  /* Fill msg_name with the source address when requested.
    * Pull the first iovec as the data buffer and use recvfrom. */
   struct sockaddr *src_addr = NULL;
   int src_addrlen = 0;
@@ -872,55 +849,6 @@ static uint64_t sys_setsockopt(uint64_t sockfd, uint64_t level,
       return 0; // Stub success
     default:
       break;
-    }
-  }
-
-  // IPPROTO_TCP options (level=6)
-  if ((int)level == 6 /* IPPROTO_TCP */) {
-    switch ((int)optname) {
-    case 1:     // TCP_NODELAY
-    case 2:     // TCP_MAXSEG
-    case 3:     // TCP_CORK
-    case 4:     // TCP_KEEPIDLE
-    case 5:     // TCP_KEEPINTVL
-    case 6:     // TCP_KEEPCNT
-    case 7:     // TCP_SYNCNT
-    case 8:     // TCP_LINGER2
-    case 9:     // TCP_DEFER_ACCEPT
-    case 10:    // TCP_WINDOW_CLAMP
-    case 11:    // TCP_INFO
-    case 12:    // TCP_QUICKACK
-    case 23:    // TCP_FASTOPEN
-    case 24:    // TCP_TIMESTAMP
-    case 25:    // TCP_NOTSENT_LOWAT
-    case 26:    // TCP_CC_INFO
-    case 27:    // TCP_SAVE_SYN
-    case 28:    // TCP_SAVED_SYN
-      return 0; // Stub success
-    default:
-      return 0; // Accept all unknown TCP options silently
-    }
-  }
-
-  // IPPROTO_IP options (level=0)
-  if ((int)level == 0 /* IPPROTO_IP */) {
-    switch ((int)optname) {
-    case 1:     // IP_TOS
-    case 2:     // IP_TTL
-    case 3:     // IP_HDRINCL
-    case 4:     // IP_OPTIONS
-    case 9:     // IP_ROUTER_ALERT
-    case 10:    // IP_RECVOPTS
-    case 11:    // IP_RETOPTS
-    case 12:    // IP_PKTINFO
-    case 14:    // IP_MTU_DISCOVER
-    case 15:    // IP_RECVERR
-    case 16:    // IP_RECVTTL
-    case 17:    // IP_RECVTOS
-    case 35:    // IP_FREEBIND
-      return 0; // Stub success
-    default:
-      return 0; // Accept all unknown IP options silently
     }
   }
 

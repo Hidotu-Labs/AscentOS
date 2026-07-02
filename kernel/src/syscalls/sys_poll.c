@@ -4,7 +4,6 @@
 #include "../fs/vfs.h"
 #include "../lib/string.h"
 #include "../mm/vmm.h"
-#include "../net/net.h"
 #include "../sched/sched.h"
 #include "syscall.h"
 #include <stdint.h>
@@ -57,27 +56,12 @@ static uint64_t do_poll(struct pollfd *fds, uint64_t nfds,
   if (ready > 0 || timeout_ms == 0)
     goto done;
 
-  /*
-   * Slow path: the NIC is poll-driven (no RX interrupts), so we cannot
-   * simply block the thread and wait for a wakeup — nobody would drain
-   * the NIC's RX ring while we sleep.  Instead, spin-poll the network
-   * stack and re-check the fds on every iteration, yielding to the
-   * scheduler between iterations so other threads can run.
-   *
-   * We honour the timeout by comparing against the LAPIC timer.
-   */
+  /* Slow path: re-check readiness while honoring the timeout. */
   uint64_t deadline = (timeout_ms != (uint64_t)-1)
                           ? lapic_timer_get_ticks() + timeout_ms
                           : (uint64_t)-1;
 
   while (1) {
-    /* Drive the NIC — drain ALL pending RX frames before checking fds.
-     * net_poll() processes one ring entry per call; loop until the ring
-     * is empty so that multi-segment TLS records are fully reassembled
-     * before we test socket readiness. */
-    while (net_poll())
-      ;
-
     ready = poll_check_fds(fds, nfds, t);
     if (ready > 0)
       break;

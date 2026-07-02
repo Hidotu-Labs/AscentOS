@@ -43,6 +43,7 @@
 #define SYS_DUP 32
 #define SYS_DUP2 33
 #define SYS_NANOSLEEP 35
+#define SYS_ALARM 37
 #define SYS_SETITIMER 38
 #define SYS_GETPID 39
 #define SYS_SENDFILE 40

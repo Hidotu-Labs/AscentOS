@@ -330,46 +330,6 @@ uint32_t procfs_cmdline_read(vfs_node_t *node, uint32_t offset, uint32_t size,
   return size;
 }
 
-// /proc/net/dev
-// Format expected by IceWM, netsurf, and other tools:
-//   Inter-|   Receive   ...   |  Transmit ...
-//    face |bytes packets ...  | bytes packets ...
-//     eth0: <rx stats>        <tx stats>
-//       lo: <rx stats>        <tx stats>
-#include "net/netif.h"
-static uint32_t procfs_net_dev_read(vfs_node_t *node, uint32_t offset,
-                                    uint32_t size, uint8_t *buffer) {
-  (void)node;
-  char buf[512];
-  buf[0] = '\0';
-
-  strcat(buf, "Inter-|   Receive                                               "
-              " |  Transmit\n");
-  strcat(
-      buf,
-      " face |bytes    packets errs drop fifo frame compressed multicast|bytes "
-      "   packets errs drop fifo colls carrier compressed\n");
-
-  netif_t *nif = netif_get();
-  if (nif && nif->up) {
-    // eth0 line — stub counters, just needs to be parseable
-    strcat(buf,
-           "  eth0:       0       0    0    0    0     0          0         0  "
-           "      0       0    0    0    0     0       0          0\n");
-  }
-  strcat(buf, "    lo:       0       0    0    0    0     0          0         "
-              "0        0       0    0    0    0     0       0          0\n");
-
-  uint32_t len = (uint32_t)strlen(buf);
-  node->length = len;
-  if (offset >= len)
-    return 0;
-  if (offset + size > len)
-    size = len - offset;
-  memcpy(buffer, buf + offset, size);
-  return size;
-}
-
 // Helpers shared by per-PID readers
 
 // Parse a decimal string; returns 0 if not a pure number.
@@ -791,9 +751,9 @@ static vfs_node_t *make_pid_dir(uint32_t pid) {
 
 // Number of static entries in the procfs root (excluding . and ..)
 // These are the nodes added by procfs_init before we install our hooks:
-//   meminfo cpuinfo partitions mounts uptime stat heapinfo cmdline loadavg net
-//   → 10
-#define PROCFS_STATIC_ENTRIES 10
+//   meminfo cpuinfo partitions mounts uptime stat loadavg heapinfo cmdline
+//   → 9
+#define PROCFS_STATIC_ENTRIES 9
 
 static int procfs_self_readlink(vfs_node_t *node, char *buf, uint32_t size) {
   (void)node;
@@ -1053,29 +1013,6 @@ void procfs_init(void) {
       cmdline_node->mask = 0444;
       cmdline_node->read = procfs_cmdline_read;
       ramfs_mount_node(procfs_root, cmdline_node);
-    }
-
-    // Add /proc/net/ directory with /proc/net/dev
-    vfs_node_t *net_dir = kmalloc(sizeof(vfs_node_t));
-    if (net_dir) {
-      vfs_node_init(net_dir);
-      strncpy(net_dir->name, "net", 127);
-      net_dir->flags = FS_DIRECTORY | FS_PERSISTENT;
-      net_dir->mask = 0555;
-      ramfs_mount_on(net_dir);
-
-      vfs_node_t *net_dev_node = kmalloc(sizeof(vfs_node_t));
-      if (net_dev_node) {
-        vfs_node_init(net_dev_node);
-        strncpy(net_dev_node->name, "dev", 127);
-        net_dev_node->flags = FS_FILE | FS_PERSISTENT;
-        net_dev_node->mask = 0444;
-        net_dev_node->read = procfs_net_dev_read;
-        net_dev_node->length = 512;
-        ramfs_mount_node(net_dir, net_dev_node);
-      }
-
-      ramfs_mount_node(procfs_root, net_dir);
     }
 
     // Install dynamic PID hooks on top of the ramfs root.

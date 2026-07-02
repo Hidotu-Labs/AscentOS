@@ -39,19 +39,22 @@
 
 #include "fs/sysfs.h"
 #include "console/klog.h"
-#include "drivers/net/nic.h"
 #include "drivers/pci/pci.h"
 #include "drivers/storage/block.h"
 #include "fs/ramfs.h"
 #include "fs/vfs.h"
 #include "lib/string.h"
 #include "mm/heap.h"
+#include "net/core.h"
+#include "net/ipv4.h"
+#include "net/ipv6.h"
 #include "smp/cpu.h"
 
 // GPU device path for netlink uevents
 char sysfs_gpu_devpath[128] = "/devices/pci0000:00/0000:00:01.0/drm/card0";
 char sysfs_gpu_connector_devpath[128] =
     "/devices/pci0000:00/0000:00:01.0/drm/card0/card0-HDMI-A-1";
+static vfs_node_t *net_class_root;
 
 // Helpers
 
@@ -281,36 +284,91 @@ static void sysfs_populate_block(vfs_node_t *block_class_dir) {
   }
 }
 
-// Net class population
+static void append_dec_line(vfs_node_t *dir, const char *name, uint64_t value) {
+  char buf[32];
+  u64_to_dec(value, buf);
+  strcat(buf, "\n");
+  sysfs_mkfile(dir, name, buf);
+}
 
 static void sysfs_populate_net(vfs_node_t *net_class_dir) {
-  if (!nic_is_present())
+  struct net_device *dev = net_device_default();
+  if (!dev)
+    return;
+  vfs_node_t *ndir = sysfs_mkdir(net_class_dir, dev->name);
+  if (!ndir)
     return;
 
-  vfs_node_t *eth0 = sysfs_mkdir(net_class_dir, "eth0");
-  if (!eth0)
-    return;
-
-  // MAC address
-  const uint8_t *mac = nic_get_mac();
-  char macbuf[20];
-  if (mac) {
-    const char *hex = "0123456789abcdef";
-    int j = 0;
-    for (int i = 0; i < 6; i++) {
-      macbuf[j++] = hex[mac[i] >> 4];
-      macbuf[j++] = hex[mac[i] & 0xF];
-      macbuf[j++] = (i < 5) ? ':' : '\n';
-    }
-    macbuf[j] = '\0';
-  } else {
-    strcpy(macbuf, "00:00:00:00:00:00\n");
+  static const char hex[] = "0123456789abcdef";
+  char mac[19];
+  for (int i = 0; i < 6; i++) {
+    mac[i * 3] = hex[dev->mac[i] >> 4];
+    mac[i * 3 + 1] = hex[dev->mac[i] & 15];
+    mac[i * 3 + 2] = i == 5 ? '\n' : ':';
   }
-  sysfs_mkfile(eth0, "address", macbuf);
+  mac[18] = '\0';
+  sysfs_mkfile(ndir, "address", mac);
+  sysfs_mkfile(ndir, "operstate",
+               dev->ops->link_up(dev) ? "up\n" : "down\n");
+  sysfs_mkfile(ndir, "type", "1\n");
+  append_dec_line(ndir, "mtu", dev->mtu);
 
-  sysfs_mkfile(eth0, "operstate", nic_link_up() ? "up\n" : "down\n");
-  sysfs_mkfile(eth0, "type", "1\n"); // ARPHRD_ETHER
-  sysfs_mkfile(eth0, "mtu", "1500\n");
+  const struct ipv4_config *cfg = ipv4_get_config();
+  char ip[20];
+  uint32_t values[3] = {cfg->address, cfg->netmask, cfg->gateway};
+  const char *names[3] = {"ipv4_address", "ipv4_netmask", "ipv4_gateway"};
+  for (int n = 0; n < 3; n++) {
+    ip[0] = '\0';
+    for (int octet = 3; octet >= 0; octet--) {
+      char part[4];
+      u64_to_dec((values[n] >> (octet * 8)) & 0xff, part);
+      strcat(ip, part);
+      strcat(ip, octet ? "." : "\n");
+    }
+    sysfs_mkfile(ndir, names[n], ip);
+  }
+
+  const struct ipv6_config *cfg6 = ipv6_get_config();
+  char ip6[41], group[5];
+  ip6[0] = '\0';
+  for (int i = 0; i < 8; i++) {
+    u32_to_hex(((uint16_t)cfg6->link_local[i * 2] << 8) |
+                   cfg6->link_local[i * 2 + 1], group, 4);
+    strcat(ip6, group);
+    strcat(ip6, i == 7 ? "\n" : ":");
+  }
+  sysfs_mkfile(ndir, "ipv6_link_local", ip6);
+  if (cfg6->global_valid) {
+    ip6[0] = '\0';
+    for (int i = 0; i < 8; i++) {
+      u32_to_hex(((uint16_t)cfg6->global[i * 2] << 8) |
+                     cfg6->global[i * 2 + 1], group, 4);
+      strcat(ip6, group);
+      strcat(ip6, i == 7 ? "\n" : ":");
+    }
+    sysfs_mkfile(ndir, "ipv6_global", ip6);
+  }
+
+  uint32_t queued, in_use;
+  net_queue_snapshot(&queued, &in_use);
+  append_dec_line(ndir, "rx_queue_depth", queued);
+  append_dec_line(ndir, "packet_buffers_in_use", in_use);
+  vfs_node_t *stats = sysfs_mkdir(ndir, "statistics");
+  if (!stats)
+    return;
+#define NET_STAT(field) append_dec_line(stats, #field, dev->stats.field)
+  NET_STAT(rx_packets); NET_STAT(tx_packets);
+  NET_STAT(rx_bytes); NET_STAT(tx_bytes);
+  NET_STAT(rx_dropped); NET_STAT(tx_dropped);
+  NET_STAT(rx_errors); NET_STAT(tx_errors);
+  NET_STAT(interrupts); NET_STAT(resets); NET_STAT(queue_full);
+  NET_STAT(link_changes); NET_STAT(rx_overflows); NET_STAT(tx_underruns);
+#undef NET_STAT
+}
+
+void sysfs_populate_network(void) {
+  if (net_class_root)
+    sysfs_populate_net(net_class_root);
 }
 
 // CPU devices population
@@ -382,8 +440,7 @@ void sysfs_init(void) {
   sysfs_populate_block(block_class);
 
   // /sys/class/net
-  vfs_node_t *net_class = sysfs_mkdir(class_dir, "net");
-  sysfs_populate_net(net_class);
+  net_class_root = sysfs_mkdir(class_dir, "net");
 
   // /sys/class/drm/card0
   // card0 is a symlink to the real device path (wlroots uses readlink on it)

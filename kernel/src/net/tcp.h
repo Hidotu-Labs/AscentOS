@@ -1,83 +1,52 @@
 #ifndef NET_TCP_H
 #define NET_TCP_H
-
-#include "../sched/wait.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#define TCP_MAX_TCBS 32
+#define TCP_RX_BUFFER_SIZE 8192
+enum tcp_state { TCP_CLOSED, TCP_LISTEN, TCP_SYN_SENT, TCP_SYN_RECEIVED, TCP_ESTABLISHED, TCP_FIN_WAIT_1,
+  TCP_FIN_WAIT_2, TCP_CLOSE_WAIT, TCP_LAST_ACK, TCP_TIME_WAIT, TCP_RESET };
 
-#define TCP_FLAG_FIN 0x01
-#define TCP_FLAG_SYN 0x02
-#define TCP_FLAG_RST 0x04
-#define TCP_FLAG_PSH 0x08
-#define TCP_FLAG_ACK 0x10
-#define TCP_FLAG_URG 0x20
+struct tcp_tcb {
+  bool used; enum tcp_state state;
+  uint8_t address_family;
+  uint32_t local_ip, remote_ip; uint16_t local_port, remote_port;
+  uint8_t local_ip6[16], remote_ip6[16];
+  uint32_t snd_una, snd_nxt, rcv_nxt; uint16_t snd_wnd, rcv_wnd, mss;
+  uint8_t retries; uint64_t deadline;
+  uint8_t rx_buffer[TCP_RX_BUFFER_SIZE];
+  uint8_t tx_buffer[1460]; size_t tx_length; uint32_t tx_seq; uint8_t tx_flags;
+  size_t rx_head, rx_tail; bool peer_closed; int error;
+  void *wait_queue; void *vfs_node;
+  struct tcp_tcb *listener;
+  struct tcp_tcb *accept_queue[8]; size_t accept_head, accept_tail; int backlog;
+};
 
-#define PROTO_TCP 6
-
-typedef struct {
-  uint16_t src_port;
-  uint16_t dst_port;
-  uint32_t seq_num;
-  uint32_t ack_num;
-  uint8_t
-      data_offset; // Top 4 bits are length (in 32-bit words), bottom 4 reserved
-  uint8_t flags;
-  uint16_t window;
-  uint16_t checksum;
-  uint16_t urgent_ptr;
-} __attribute__((packed)) tcp_header_t;
-
-typedef enum {
-  TCP_STATE_CLOSED,
-  TCP_STATE_LISTEN,
-  TCP_STATE_SYN_SENT,
-  TCP_STATE_SYN_RCVD,
-  TCP_STATE_ESTABLISHED,
-  TCP_STATE_FIN_WAIT1,
-  TCP_STATE_FIN_WAIT2
-} tcp_state_t;
-
-#define MAX_TCP_SOCKETS 32
-#define TCP_MAX_BACKLOG 8
-
-typedef void (*tcp_recv_cb_t)(int sock_id, const uint8_t *payload,
-                              uint16_t length);
-
-typedef struct {
-  volatile bool valid;
-  volatile tcp_state_t state;
-
-  uint32_t local_ip;
-  uint16_t local_port;
-  uint32_t remote_ip;
-  uint16_t remote_port;
-
-  uint32_t seq_num; // Our next sequence number
-  uint32_t ack_num; // Their next sequence number we expect to ACK
-
-  tcp_recv_cb_t recv_callback;
-  void (*event_callback)(int sock_id);
-
-  // Server mode fields
-  int parent_sock_id; // If spawned from a listening socket
-  int accept_queue[TCP_MAX_BACKLOG];
-  int accept_count;
-
-  wait_queue_t wait_queue;
-} tcp_socket_t;
+struct tcp_stats {
+  uint64_t rx_segments, bad_checksum, malformed, resets, retransmits;
+  uint64_t duplicates, out_of_order, timeouts;
+};
 
 void tcp_init(void);
-int tcp_listen(uint16_t port, tcp_recv_cb_t on_recv);
-int tcp_connect(uint32_t ip, uint16_t port, tcp_recv_cb_t on_recv);
-int tcp_send(int sock_id, const void *data, uint16_t len);
-void tcp_close(int sock_id);
-void tcp_handle_packet(const uint8_t *payload, uint16_t length, uint32_t src_ip,
-                       uint32_t dst_ip);
-
-int tcp_accept(int sock_id);
-int tcp_get_remote_info(int sock_id, uint32_t *ip, uint16_t *port);
-void tcp_set_callbacks(int sock_id, tcp_recv_cb_t rcb,
-                       void (*ecb)(int sock_id));
-
+void tcp_input_ipv4(uint32_t src, uint32_t dst, const uint8_t *, size_t);
+void tcp_input_ipv6(const uint8_t src[16], const uint8_t dst[16],
+                    const uint8_t *, size_t);
+void tcp_timer_tick(uint64_t now);
+const struct tcp_stats *tcp_get_stats(void);
+struct tcp_tcb *tcp_alloc(void);
+void tcp_free(struct tcp_tcb *);
+int tcp_active_open(struct tcp_tcb *, uint32_t, uint16_t);
+int tcp_active_open6(struct tcp_tcb *, const uint8_t[16], uint16_t);
+int tcp_bind(struct tcp_tcb *, uint32_t, uint16_t);
+int tcp_bind6(struct tcp_tcb *, const uint8_t[16], uint16_t);
+int tcp_send(struct tcp_tcb *, const void *, size_t);
+int tcp_recv(struct tcp_tcb *, void *, size_t, bool);
+int tcp_close(struct tcp_tcb *);
+int tcp_listen(struct tcp_tcb *, int);
+struct tcp_tcb *tcp_accept(struct tcp_tcb *, bool);
+bool tcp_readable(const struct tcp_tcb *);
+bool tcp_writable(const struct tcp_tcb *);
+bool net_phase8_init(void);
+bool net_phase8_selftest(void);
 #endif

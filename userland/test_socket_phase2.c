@@ -83,15 +83,14 @@ static int test_invalid_family(void) {
     printf("  Family=99 correctly rejected (errno=%d EAFNOSUPPORT=%d)\n",
            errno, EAFNOSUPPORT);
     
-    // AF_INET not yet supported
+    // Internet families are registered by the network stack.
     fd = socket(AF_INET, SOCK_STREAM, 0);
-    TEST_ASSERT(fd < 0, "AF_INET should fail (not implemented)");
-    printf("  AF_INET correctly rejected (not yet implemented)\n");
-    
-    // AF_INET6 not yet supported
+    TEST_ASSERT(fd >= 0, "AF_INET should be implemented");
+    close(fd);
+
     fd = socket(AF_INET6, SOCK_STREAM, 0);
-    TEST_ASSERT(fd < 0, "AF_INET6 should fail (not implemented)");
-    printf("  AF_INET6 correctly rejected (not yet implemented)\n");
+    TEST_ASSERT(fd >= 0, "AF_INET6 should be implemented");
+    close(fd);
     
     TEST_END();
     return 0;

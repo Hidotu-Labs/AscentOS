@@ -22,7 +22,7 @@
 #include "drivers/input/mouse.h"
 #include "drivers/manager/device.h"
 #include "drivers/manager/dtb.h"
-#include "drivers/net/nic.h"
+#include "drivers/net/rtl8139.h"
 #include "drivers/pci/pci.h"
 #include "drivers/serial.h"
 #include "drivers/storage/ahci.h"
@@ -54,11 +54,16 @@
 #include "mm/slab_cache.h"
 #include "mm/tlb_shootdown.h"
 #include "mm/vmm.h"
-#include "net/net.h"
+#include "net/core.h"
+#include "net/dhcp.h"
+#include "net/ipv4.h"
+#include "net/ipv6.h"
+#include "fs/sysfs.h"
+#include "net/udp.h"
+#include "net/tcp.h"
 #include "sched/sched.h"
 #include "shell/shell.h"
 #include "smp/cpu.h"
-#include "socket/af_inet.h"
 #include "socket/epoll.h"
 #include "socket/socket.h"
 #include "syscalls/syscall.h"
@@ -149,6 +154,19 @@ void restart_main_session(void) {
 }
 
 static void init_thread_entry(void) {
+  net_core_start_worker();
+  if (rtl8139_present()) {
+    if (rtl8139_phase2_init() && rtl8139_phase3_init()) {
+      net_phase4_init();
+      net_phase5_init();
+      net_phase6_init();
+      ipv4_set_tcp_handler(tcp_input_ipv4);
+      net_phase8_init();
+      net_phase10_init();
+      net_phase11_init();
+      sysfs_populate_network();
+    }
+  }
   klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " Init thread started\n");
   // Clear console only once when userland starts
   console_clear();
@@ -436,7 +454,6 @@ mount_success:
 
 mount_fail:
 
-  nic_init();
   sb16_init();
   ac97_init();
   hda_init();
@@ -446,10 +463,8 @@ mount_fail:
   hda_register_vfs();
   audio_dsp_register_vfs();
 
-  if (nic_is_present()) {
-    net_init();
-    net_poll();
-  }
+  net_core_init();
+  rtl8139_phase1_init();
 
   struct thread *init_thread =
       sched_create_kernel_thread(init_thread_entry, cpu_get_bsp(), true);
@@ -458,6 +473,7 @@ mount_fail:
                            " Failed to create init thread!\n");
     halt();
   }
+  klog_puts("[KERNEL] init thread queued\n");
 
   for (;;) {
     __asm__ volatile("hlt");

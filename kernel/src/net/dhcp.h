@@ -1,44 +1,31 @@
 #ifndef NET_DHCP_H
 #define NET_DHCP_H
 
-#include <stdint.h>
-#include <stddef.h>
 #include <stdbool.h>
+#include <stdint.h>
 
-#define DHCP_SERVER_PORT 67
-#define DHCP_CLIENT_PORT 68
+struct dhcp_lease {
+    uint32_t address;
+    uint32_t netmask;
+    uint32_t gateway;
+    uint32_t dns[2];        
+    uint32_t lease_time;  
+    uint32_t renew_time;   
+    uint32_t rebind_time;   
+    uint32_t server_id;    
+    uint64_t obtained_ms;   
+};
 
-#define DHCP_OP_REQUEST 1
-#define DHCP_OP_REPLY   2
+void dhcp_set_static_fallback(uint32_t address, uint32_t netmask,
+                              uint32_t gateway);
 
-#define DHCP_MSG_DISCOVER 1
-#define DHCP_MSG_OFFER    2
-#define DHCP_MSG_REQUEST  3
-#define DHCP_MSG_ACK      5
-#define DHCP_MSG_NAK      6
+bool dhcp_start(void);
 
-#define DHCP_MAGIC_COOKIE 0x63825363
+const struct dhcp_lease *dhcp_current_lease(void);
 
-typedef struct {
-    uint8_t op;
-    uint8_t htype;
-    uint8_t hlen;
-    uint8_t hops;
-    uint32_t xid;
-    uint16_t secs;
-    uint16_t flags;
-    uint32_t ciaddr;
-    uint32_t yiaddr;
-    uint32_t siaddr;
-    uint32_t giaddr;
-    uint8_t chaddr[16];
-    uint8_t sname[64];
-    uint8_t file[128];
-    uint32_t magic_cookie;
-    uint8_t options[308];
-} __attribute__((packed)) dhcp_packet_t;
+bool dhcp_renew(void);
 
-void dhcp_init(void);
-bool dhcp_negotiate(void);
+bool net_phase5_selftest(void);
+bool net_phase5_init(void);
 
 #endif

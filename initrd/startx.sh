@@ -2,19 +2,12 @@
 # Xfbdev ile X server başlat ve IceWM + xclock + st çalıştır
 # Alpine package integration via setup-alpine.sh provides additional userland tools
 
-echo "X server başlatılıyor..."
-
 rm -f "/tmp/.X0-lock"
 
 # X server'ı arka planda başlat
 Xfbdev -retro -xkbdir /share/X11/xkb \
     -mouse evdev,,device=/dev/input/event1 \
     -keybd evdev,,device=/dev/input/event0 &
-
-# X server'ın tam olarak başlaması için bekle
-sleep 1
-
-echo "X server hazır, uygulamalar başlatılıyor..."
 
 # DISPLAY ortam değişkenini ayarla
 export DISPLAY=:0
@@ -39,9 +32,6 @@ elif command -v icewm >/dev/null 2>&1; then
 else
     echo "Uyarı: IceWM bulunamadı!"
 fi
-
-# IceWM'in tam olarak başlaması için daha uzun süre bekle
-sleep 3
 
 # Set background image
 if [ -f /assets/room.png ]; then

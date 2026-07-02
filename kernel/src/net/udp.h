@@ -5,41 +5,60 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define MAX_UDP_SOCKETS 16
+typedef int64_t ssize_t;
 
-typedef struct __attribute__((packed)) {
-  uint16_t src_port;
-  uint16_t dst_port;
-  uint16_t length;
-  uint16_t checksum;
-} udp_header_t;
+#define UDP_PORT_EPHEMERAL_MIN 49152
+#define UDP_PORT_EPHEMERAL_MAX 65535
+#define UDP_MAX_SOCKETS        64
+#define UDP_RX_QUEUE_DEPTH     32
+#define UDP_PAYLOAD_MAX        65507
 
-// Callback type for incoming UDP packets
-typedef void (*udp_recv_cb_t)(uint16_t local_port, const uint8_t *payload,
-                              uint16_t length, uint32_t src_ip,
-                              uint16_t src_port);
+struct udp_socket;
 
-typedef struct {
-  uint16_t local_port;
-  udp_recv_cb_t callback;
-  bool valid;
-} udp_socket_t;
+struct udp_rxbuf {
+    uint8_t  data[UDP_PAYLOAD_MAX];
+    uint16_t length;
+    uint32_t src_ip;
+    uint16_t src_port;
+};
 
-// Initialize the UDP layer
+struct udp_socket {
+    bool     used;
+    bool     bound;
+    bool     connected;
+    uint32_t local_ip;
+    uint16_t local_port;
+    uint32_t remote_ip;
+    uint16_t remote_port;
+    struct udp_rxbuf queue[UDP_RX_QUEUE_DEPTH];
+    uint32_t q_head;
+    uint32_t q_tail;
+    void    *wait_queue;
+    void    *vfs_node;
+    bool     nonblocking;
+    int      rcvtimeo_ms;
+    int      sndtimeo_ms;
+};
+
 void udp_init(void);
 
-// Bind a port to receive incoming UDP packets on that port
-int udp_bind(uint16_t port, udp_recv_cb_t callback);
+struct udp_socket *udp_socket_alloc(void);
+void               udp_socket_free(struct udp_socket *s);
 
-// Unbind a port
-void udp_unbind(uint16_t port);
+int  udp_bind(struct udp_socket *s, uint32_t ip, uint16_t port);
+int  udp_connect(struct udp_socket *s, uint32_t ip, uint16_t port);
 
-// Send a UDP packet
-int udp_send_packet(uint32_t dst_ip, uint16_t src_port, uint16_t dst_port,
-                    const void *data, uint16_t len);
+ssize_t udp_sendto(struct udp_socket *s, const void *buf, size_t len,
+                   uint32_t dst_ip, uint16_t dst_port);
 
-// Handle an incoming UDP packet (called from IPv4)
-void udp_handle_packet(const uint8_t *data, uint16_t len, uint32_t src_ip,
-                       uint32_t dst_ip);
+ssize_t udp_recvfrom(struct udp_socket *s, void *buf, size_t len,
+                     uint32_t *src_ip, uint16_t *src_port, bool nonblocking,
+                     int timeout_ms);
+
+void udp_deliver(uint32_t src_ip, uint16_t src_port,
+                 uint16_t dst_port, const uint8_t *payload, uint16_t length);
+
+bool net_phase6_init(void);
+bool net_phase6_selftest(void);
 
 #endif

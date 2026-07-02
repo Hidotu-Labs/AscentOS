@@ -1,188 +1,484 @@
 #include "net/ipv4.h"
-#include "console/console.h"
+#include "apic/lapic_timer.h"
 #include "console/klog.h"
 #include "lib/string.h"
-#include "net/arp.h"
-#include "net/byteorder.h"
-#include "net/checksum.h"
-#include "net/ethernet.h"
-#include "net/icmp.h"
-#include "net/net.h"
-#include "net/netif.h"
-#include "net/tcp.h"
-#include "drivers/net/nic.h"
-#include "net/udp.h"
+#include "lock/spinlock.h"
+#include "net/core.h"
+#include "net/ipv6.h"
+#include "sched/sched.h"
 
-static uint16_t next_id = 1;
+#include <stddef.h>
+#include <stdint.h>
 
+#define ETH_TYPE_IPV4 0x0800
+#define ETH_TYPE_ARP 0x0806
+#define ETH_TYPE_IPV6 0x86dd
+#define ARP_HTYPE_ETHERNET 1
+#define ARP_OP_REQUEST 1
+#define ARP_OP_REPLY 2
+#define IP_PROTO_ICMP 1
+#define IP_PROTO_UDP  17
+#define IP_PROTO_TCP  6
+#define ICMP_ECHO_REPLY 0
+#define ICMP_ECHO_REQUEST 8
+#define ICMP_PORT_UNREACHABLE_TYPE 3
+#define ICMP_PORT_UNREACHABLE_CODE 3
+#define ARP_CACHE_SIZE 16
+#define ARP_REACHABLE_MS 60000
+#define ICMP_TEST_ID 0xa5ce
 
-void ipv4_handle_packet(const uint8_t *data, uint16_t len) {
-  if (len < sizeof(ipv4_header_t))
+typedef void (*udp_handler_t)(uint32_t, uint16_t, uint16_t,
+                               const uint8_t *, uint16_t);
+static udp_handler_t udp_handler;
+static void (*tcp_handler)(uint32_t, uint32_t, const uint8_t *, size_t);
+static void (*icmp_handler)(uint32_t, uint32_t, const uint8_t *, size_t);
+
+struct eth_header {
+  uint8_t destination[6];
+  uint8_t source[6];
+  uint16_t type;
+} __attribute__((packed));
+
+struct arp_packet {
+  uint16_t hardware_type;
+  uint16_t protocol_type;
+  uint8_t hardware_length;
+  uint8_t protocol_length;
+  uint16_t operation;
+  uint8_t sender_mac[6];
+  uint8_t sender_ip[4];
+  uint8_t target_mac[6];
+  uint8_t target_ip[4];
+} __attribute__((packed));
+
+struct ipv4_header {
+  uint8_t version_ihl;
+  uint8_t dscp_ecn;
+  uint16_t total_length;
+  uint16_t identification;
+  uint16_t flags_fragment;
+  uint8_t ttl;
+  uint8_t protocol;
+  uint16_t checksum;
+  uint8_t source[4];
+  uint8_t destination[4];
+} __attribute__((packed));
+
+struct icmp_echo {
+  uint8_t type;
+  uint8_t code;
+  uint16_t checksum;
+  uint16_t identifier;
+  uint16_t sequence;
+} __attribute__((packed));
+
+enum arp_state { ARP_FREE, ARP_INCOMPLETE, ARP_REACHABLE };
+struct arp_entry {
+  uint32_t ip;
+  uint8_t mac[6];
+  enum arp_state state;
+  uint8_t retries;
+  uint64_t updated;
+};
+
+static struct ipv4_config config;
+static struct arp_entry arp_cache[ARP_CACHE_SIZE];
+static spinlock_t arp_lock = SPINLOCK_INIT;
+static volatile uint32_t echo_replies;
+static volatile bool address_conflict;
+static uint16_t next_ip_id = 1;
+
+static uint16_t be16(uint16_t value) {
+  return (uint16_t)((value << 8) | (value >> 8));
+}
+static void put_ip(uint8_t out[4], uint32_t ip) {
+  out[0] = (uint8_t)(ip >> 24);
+  out[1] = (uint8_t)(ip >> 16);
+  out[2] = (uint8_t)(ip >> 8);
+  out[3] = (uint8_t)ip;
+}
+static uint32_t get_ip(const uint8_t in[4]) {
+  return ((uint32_t)in[0] << 24) | ((uint32_t)in[1] << 16) |
+         ((uint32_t)in[2] << 8) | in[3];
+}
+static bool mac_equal(const uint8_t a[6], const uint8_t b[6]) {
+  return memcmp(a, b, 6) == 0;
+}
+static bool mac_broadcast(const uint8_t mac[6]) {
+  static const uint8_t broadcast[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+  return mac_equal(mac, broadcast);
+}
+
+static uint16_t checksum(const void *data, size_t length) {
+  const uint8_t *bytes = data;
+  uint32_t sum = 0;
+  while (length > 1) {
+    sum += ((uint16_t)bytes[0] << 8) | bytes[1];
+    bytes += 2;
+    length -= 2;
+  }
+  if (length)
+    sum += (uint16_t)bytes[0] << 8;
+  while (sum >> 16)
+    sum = (sum & 0xffff) + (sum >> 16);
+  return (uint16_t)~sum;
+}
+
+static int ethernet_send(const uint8_t destination[6], uint16_t type,
+                         const void *payload, size_t length) {
+  struct net_device *dev = net_device_default();
+  if (!dev || length + sizeof(struct eth_header) > NET_FRAME_MAX - 4)
+    return -1;
+  uint8_t frame[NET_FRAME_MAX - 4];
+  struct eth_header *header = (struct eth_header *)frame;
+  memcpy(header->destination, destination, 6);
+  memcpy(header->source, dev->mac, 6);
+  header->type = be16(type);
+  memcpy(frame + sizeof(*header), payload, length);
+  return dev->ops->transmit(dev, frame, sizeof(*header) + length);
+}
+
+static struct arp_entry *arp_find_locked(uint32_t ip) {
+  for (uint32_t i = 0; i < ARP_CACHE_SIZE; i++)
+    if (arp_cache[i].state != ARP_FREE && arp_cache[i].ip == ip)
+      return &arp_cache[i];
+  return NULL;
+}
+
+static struct arp_entry *arp_get_slot_locked(uint32_t ip) {
+  struct arp_entry *entry = arp_find_locked(ip);
+  if (entry)
+    return entry;
+  uint64_t oldest = UINT64_MAX;
+  uint32_t slot = 0;
+  for (uint32_t i = 0; i < ARP_CACHE_SIZE; i++) {
+    if (arp_cache[i].state == ARP_FREE)
+      return &arp_cache[i];
+    if (arp_cache[i].updated < oldest) {
+      oldest = arp_cache[i].updated;
+      slot = i;
+    }
+  }
+  return &arp_cache[slot];
+}
+
+static void arp_learn(uint32_t ip, const uint8_t mac[6]) {
+  spinlock_acquire(&arp_lock);
+  struct arp_entry *entry = arp_get_slot_locked(ip);
+  entry->ip = ip;
+  memcpy(entry->mac, mac, 6);
+  entry->state = ARP_REACHABLE;
+  entry->retries = 0;
+  entry->updated = lapic_timer_get_ticks();
+  spinlock_release(&arp_lock);
+}
+
+static bool arp_lookup(uint32_t ip, uint8_t mac[6]) {
+  bool found = false;
+  spinlock_acquire(&arp_lock);
+  struct arp_entry *entry = arp_find_locked(ip);
+  if (entry && entry->state == ARP_REACHABLE &&
+      lapic_timer_get_ticks() - entry->updated < ARP_REACHABLE_MS) {
+    memcpy(mac, entry->mac, 6);
+    found = true;
+  } else if (entry && entry->state == ARP_REACHABLE) {
+    entry->state = ARP_FREE;
+  }
+  spinlock_release(&arp_lock);
+  return found;
+}
+
+static int arp_send(uint16_t operation, const uint8_t destination_mac[6],
+                    uint32_t target_ip, const uint8_t target_mac[6]) {
+  struct net_device *dev = net_device_default();
+  struct arp_packet packet;
+  memset(&packet, 0, sizeof(packet));
+  packet.hardware_type = be16(ARP_HTYPE_ETHERNET);
+  packet.protocol_type = be16(ETH_TYPE_IPV4);
+  packet.hardware_length = 6;
+  packet.protocol_length = 4;
+  packet.operation = be16(operation);
+  memcpy(packet.sender_mac, dev->mac, 6);
+  put_ip(packet.sender_ip, config.address);
+  if (target_mac)
+    memcpy(packet.target_mac, target_mac, 6);
+  put_ip(packet.target_ip, target_ip);
+  return ethernet_send(destination_mac, ETH_TYPE_ARP, &packet, sizeof(packet));
+}
+
+static bool arp_resolve(uint32_t ip, uint8_t mac[6]) {
+  static const uint8_t broadcast[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+  static const uint8_t zero[6] = {0};
+  if (arp_lookup(ip, mac))
+    return true;
+
+  for (uint8_t attempt = 0; attempt < 3; attempt++) {
+    spinlock_acquire(&arp_lock);
+    struct arp_entry *entry = arp_get_slot_locked(ip);
+    entry->ip = ip;
+    entry->state = ARP_INCOMPLETE;
+    entry->retries = (uint8_t)(attempt + 1);
+    entry->updated = lapic_timer_get_ticks();
+    spinlock_release(&arp_lock);
+    if (arp_send(ARP_OP_REQUEST, broadcast, ip, zero) != 0)
+      return false;
+    uint64_t deadline = lapic_timer_get_ticks() + 500;
+    while (lapic_timer_get_ticks() < deadline) {
+      if (arp_lookup(ip, mac))
+        return true;
+      sched_yield();
+    }
+  }
+  return false;
+}
+
+static void handle_arp(const uint8_t *payload, size_t length) {
+  if (length < sizeof(struct arp_packet))
     return;
-
-  ipv4_header_t *hdr = (ipv4_header_t *)data;
-
-  if ((hdr->version_ihl >> 4) != 4)
+  const struct arp_packet *packet = (const struct arp_packet *)payload;
+  if (be16(packet->hardware_type) != ARP_HTYPE_ETHERNET ||
+      be16(packet->protocol_type) != ETH_TYPE_IPV4 ||
+      packet->hardware_length != 6 || packet->protocol_length != 4)
     return;
-
-  uint8_t ihl = (hdr->version_ihl & 0x0F) * 4;
-  if (len < ihl)
-    return;
-
-  // Verify Checksum
-  uint16_t received_checksum = hdr->checksum;
-  ((ipv4_header_t *)hdr)->checksum = 0;
-  uint16_t computed = calculate_checksum(hdr, ihl);
-  if (computed != received_checksum) {
-    hdr->checksum = received_checksum;
+  uint32_t sender_ip = get_ip(packet->sender_ip);
+  uint32_t target_ip = get_ip(packet->target_ip);
+  if (sender_ip == config.address &&
+      !mac_equal(packet->sender_mac, net_device_default()->mac)) {
+    address_conflict = true;
     return;
   }
-  hdr->checksum = received_checksum;
-
-  netif_t *nif = netif_get();
-  uint32_t dst_ip = ntohl(hdr->dst_ip);
-
-  // Filter packets not for us (and not broadcast)
-  if (dst_ip != nif->ip && dst_ip != 0xFFFFFFFF && dst_ip != 0x7F000001) {
-    return;
-  }
-
-  const uint8_t *payload = data + ihl;
-  uint16_t payload_len = ntohs(hdr->length) - ihl;
-
-  switch (hdr->protocol) {
-  case PROTO_ICMP:
-    icmp_handle_packet(payload, payload_len, ntohl(hdr->src_ip));
-    break;
-  case PROTO_UDP:
-    udp_handle_packet(payload, payload_len, ntohl(hdr->src_ip), dst_ip);
-    break;
-  case PROTO_TCP:
-    klog_puts("[IPV4] TCP RX from ");
-    klog_uint64(ntohl(hdr->src_ip));
-    klog_puts(" len=");
-    klog_uint64(payload_len);
-    klog_puts("\n");
-    tcp_handle_packet(payload, payload_len, ntohl(hdr->src_ip), dst_ip);
-    break;
-  default:
-    break;
+  arp_learn(sender_ip, packet->sender_mac);
+  if (be16(packet->operation) == ARP_OP_REQUEST &&
+      target_ip == config.address) {
+    arp_send(ARP_OP_REPLY, packet->sender_mac, sender_ip, packet->sender_mac);
   }
 }
 
-int ipv4_send_packet(uint32_t dst_ip, uint8_t protocol, const void *data,
-                     uint16_t len) {
-  netif_t *nif = netif_get();
-  if (!nif->up)
+static int ipv4_send(uint32_t destination, uint8_t protocol,
+                     const void *payload, size_t payload_length) {
+  if (payload_length + sizeof(struct ipv4_header) > NET_MTU_ETHERNET)
+    return -1;
+  uint32_t next_hop =
+      ((destination & config.netmask) == (config.address & config.netmask))
+          ? destination
+          : config.gateway;
+  uint8_t destination_mac[6];
+  if (!arp_resolve(next_hop, destination_mac))
     return -1;
 
-  if (dst_ip == 0x7F000001 || dst_ip == nif->ip) {
-    ipv4_header_t hdr;
-    hdr.version_ihl = (4 << 4) | 5;
-    hdr.tos = 0;
-    hdr.length = htons(sizeof(ipv4_header_t) + len);
-    hdr.id = htons(next_id++);
-    hdr.flags_offset = 0;
-    hdr.ttl = 64;
-    hdr.protocol = protocol;
-    hdr.src_ip = htonl(dst_ip); // Loopback: source = destination
-    hdr.dst_ip = htonl(dst_ip);
-    hdr.checksum = 0;
-    hdr.checksum = calculate_checksum(&hdr, sizeof(ipv4_header_t));
+  uint8_t packet[NET_MTU_ETHERNET];
+  struct ipv4_header *header = (struct ipv4_header *)packet;
+  memset(header, 0, sizeof(*header));
+  header->version_ihl = 0x45;
+  header->total_length =
+      be16((uint16_t)(sizeof(*header) + payload_length));
+  header->identification = be16(next_ip_id++);
+  header->flags_fragment = be16(0x4000);
+  header->ttl = 64;
+  header->protocol = protocol;
+  put_ip(header->source, config.address);
+  put_ip(header->destination, destination);
+  header->checksum = be16(checksum(header, sizeof(*header)));
+  memcpy(packet + sizeof(*header), payload, payload_length);
+  return ethernet_send(destination_mac, ETH_TYPE_IPV4, packet,
+                       sizeof(*header) + payload_length);
+}
 
-    uint8_t packet[sizeof(ipv4_header_t) + len];
-    memcpy(packet, &hdr, sizeof(ipv4_header_t));
-    if (len > 0 && data) {
-      memcpy(packet + sizeof(ipv4_header_t), data, len);
-    }
-
-    // Construct a dummy Ethernet frame for the RX queue
-    uint16_t eth_hdr_len = 14;
-    uint8_t frame[eth_hdr_len + sizeof(ipv4_header_t) + len];
-    
-    // Use the NIC's MAC for the destination so ethernet.c accepts it
-    const uint8_t *mac = nic_get_mac();
-    if (mac) {
-      memcpy(frame, mac, 6);
-    } else {
-      memset(frame, 0, 6);
-    }
-    
-    // Source MAC can be any (or the same)
-    memset(frame + 6, 0, 6);
-    
-    // EtherType: IPv4 (big endian)
-    frame[12] = 0x08;
-    frame[13] = 0x00;
-
-    // IP payload
-    memcpy(frame + eth_hdr_len, &hdr, sizeof(ipv4_header_t));
-    if (len > 0 && data) {
-      memcpy(frame + eth_hdr_len + sizeof(ipv4_header_t), data, len);
-    }
-
-    // BREAK RECURSION: Enqueue as a standard Ethernet frame
-    net_rx_enqueue(frame, eth_hdr_len + sizeof(ipv4_header_t) + len);
-    return 0;
+static void handle_icmp(uint32_t source, const uint8_t *payload, size_t length) {
+  if (length < sizeof(struct icmp_echo) || checksum(payload, length) != 0)
+    return;
+  const struct icmp_echo *echo = (const struct icmp_echo *)payload;
+  if (echo->type == ICMP_ECHO_REPLY &&
+      be16(echo->identifier) == ICMP_TEST_ID) {
+    echo_replies++;
+    return;
   }
+  if (echo->type != ICMP_ECHO_REQUEST || echo->code != 0)
+    return;
+  uint8_t reply[NET_MTU_ETHERNET - sizeof(struct ipv4_header)];
+  memcpy(reply, payload, length);
+  struct icmp_echo *reply_echo = (struct icmp_echo *)reply;
+  reply_echo->type = ICMP_ECHO_REPLY;
+  reply_echo->checksum = 0;
+  reply_echo->checksum = be16(checksum(reply, length));
+  ipv4_send(source, IP_PROTO_ICMP, reply, length);
+}
 
-  // Routing: if destination is off-subnet, send via gateway
-  uint32_t next_hop = dst_ip;
-  if (dst_ip != 0xFFFFFFFF &&
-      (dst_ip & nif->netmask) != (nif->ip & nif->netmask)) {
-    next_hop = nif->gateway;
+static void send_icmp_port_unreachable(uint32_t src_ip,
+                                       const uint8_t *orig_ip_hdr,
+                                       size_t orig_ip_len) {
+  size_t copy_len = orig_ip_len > 28 ? 28 : orig_ip_len;
+  uint8_t icmp_buf[4 + 28];
+  icmp_buf[0] = ICMP_PORT_UNREACHABLE_TYPE;
+  icmp_buf[1] = ICMP_PORT_UNREACHABLE_CODE;
+  icmp_buf[2] = 0; icmp_buf[3] = 0;
+  icmp_buf[4] = 0; icmp_buf[5] = 0; icmp_buf[6] = 0; icmp_buf[7] = 0;
+  memcpy(icmp_buf + 4, orig_ip_hdr, copy_len);
+  size_t total = 4 + copy_len;
+  uint16_t cs = checksum(icmp_buf, total);
+  icmp_buf[2] = (uint8_t)(cs >> 8);
+  icmp_buf[3] = (uint8_t)cs;
+  ipv4_send(src_ip, IP_PROTO_ICMP, icmp_buf, total);
+}
+
+static void handle_udp(uint32_t src_ip, const uint8_t *ip_hdr,
+                        const uint8_t *seg, size_t seg_len) {
+  if (seg_len < 8) return;
+  uint16_t src_port = (uint16_t)(((uint16_t)seg[0] << 8) | seg[1]);
+  uint16_t dst_port = (uint16_t)(((uint16_t)seg[2] << 8) | seg[3]);
+  uint16_t udp_len  = (uint16_t)(((uint16_t)seg[4] << 8) | seg[5]);
+  if (udp_len < 8 || udp_len > seg_len) return;
+  if (udp_handler) {
+    udp_handler(src_ip, src_port, dst_port,
+                seg + 8, (uint16_t)(udp_len - 8));
+  } else {
+    send_icmp_port_unreachable(src_ip, ip_hdr,
+                               sizeof(struct ipv4_header) + udp_len);
   }
+}
 
-  uint8_t dst_mac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-
-  if (dst_ip != 0xFFFFFFFF) {
-    // Determine next-hop MAC via ARP
-    const arp_entry_t *entry = arp_lookup(next_hop);
-    if (!entry) {
-      arp_send_request(next_hop);
-      // Wait up to 100ms for reply
-      for (int i = 0; i < 100; i++) {
-        net_poll();
-        entry = arp_lookup(next_hop);
-        if (entry)
-          break;
-        // Small delay (~1ms)
-        for (volatile int d = 0; d < 50000; d++)
-          __asm__ volatile("pause");
-      }
-      if (!entry)
-        return -1;
-    }
-    memcpy(dst_mac, entry->mac, 6);
+static void handle_ipv4(const uint8_t *packet, size_t length) {
+  if (length < sizeof(struct ipv4_header))
+    return;
+  const struct ipv4_header *header = (const struct ipv4_header *)packet;
+  uint8_t version = header->version_ihl >> 4;
+  size_t header_length = (header->version_ihl & 0x0f) * 4u;
+  uint16_t total_length = be16(header->total_length);
+  if (version != 4 || header_length < sizeof(*header) ||
+      header_length > length || total_length < header_length ||
+      total_length > length || checksum(packet, header_length) != 0)
+    return;
+  if (be16(header->flags_fragment) & 0x3fff)
+    return;
+  uint32_t destination = get_ip(header->destination);
+  if (destination != config.address && destination != 0xffffffff)
+    return;
+  uint32_t source = get_ip(header->source);
+  if (header->protocol == IP_PROTO_ICMP) {
+    if (icmp_handler)
+      icmp_handler(source, destination, packet, total_length);
+    handle_icmp(source, packet + header_length,
+                total_length - header_length);
   }
+  else if (header->protocol == IP_PROTO_UDP)
+    handle_udp(source, packet, packet + header_length,
+               total_length - header_length);
+  else if (header->protocol == IP_PROTO_TCP && tcp_handler)
+    tcp_handler(source, destination, packet + header_length,
+                total_length - header_length);
+}
 
-  ipv4_header_t hdr;
-  hdr.version_ihl = (4 << 4) | 5; // Ver 4, IHL 5 (20 bytes)
-  hdr.tos = 0;
-  hdr.length = htons(sizeof(ipv4_header_t) + len);
-  hdr.id = htons(next_id++);
-  hdr.flags_offset = 0;
-  hdr.ttl = 64;
-  hdr.protocol = protocol;
-  hdr.src_ip = htonl(nif->ip);
-  hdr.dst_ip = htonl(dst_ip);
-  hdr.checksum = 0;
-  hdr.checksum = calculate_checksum(&hdr, sizeof(ipv4_header_t));
+static void ethernet_receive(struct net_packet *packet) {
+  if (!packet || packet->length < sizeof(struct eth_header))
+    return;
+  const struct eth_header *header = (const struct eth_header *)packet->data;
+  bool ipv6_multicast = header->destination[0] == 0x33 &&
+                        header->destination[1] == 0x33;
+  if (!mac_equal(header->destination, packet->device->mac) &&
+      !mac_broadcast(header->destination) && !ipv6_multicast)
+    return;
+  const uint8_t *payload = packet->data + sizeof(*header);
+  size_t length = packet->length - sizeof(*header);
+  uint16_t type = be16(header->type);
+  if (type == ETH_TYPE_ARP)
+    handle_arp(payload, length);
+  else if (type == ETH_TYPE_IPV4)
+    handle_ipv4(payload, length);
+  else if (type == ETH_TYPE_IPV6)
+    ipv6_receive(header->source, payload, length);
+}
 
-  klog_puts("[IPV4] Sending proto ");
-  klog_uint64(protocol);
-  klog_puts(" to ");
-  klog_uint64(dst_ip);
-  klog_puts("\n");
-
-  // Allocate buffer for frame
-  uint8_t packet[sizeof(ipv4_header_t) + len];
-  memcpy(packet, &hdr, sizeof(ipv4_header_t));
-  if (len > 0 && data) {
-    memcpy(packet + sizeof(ipv4_header_t), data, len);
+static bool ping_gateway(void) {
+  uint8_t request[32];
+  memset(request, 0, sizeof(request));
+  struct icmp_echo *echo = (struct icmp_echo *)request;
+  echo->type = ICMP_ECHO_REQUEST;
+  echo->identifier = be16(ICMP_TEST_ID);
+  echo->sequence = be16(1);
+  for (uint32_t i = sizeof(*echo); i < sizeof(request); i++)
+    request[i] = (uint8_t)i;
+  echo->checksum = be16(checksum(request, sizeof(request)));
+  uint32_t before = echo_replies;
+  if (ipv4_send(config.gateway, IP_PROTO_ICMP, request, sizeof(request)) != 0)
+    return false;
+  uint64_t deadline = lapic_timer_get_ticks() + 2000;
+  while (lapic_timer_get_ticks() < deadline) {
+    if (echo_replies > before)
+      return true;
+    sched_yield();
   }
+  return false;
+}
 
-  int ret = eth_send_frame(dst_mac, ETHERTYPE_IPV4, packet,
-                           sizeof(ipv4_header_t) + len);
-  return ret;
+bool net_phase4_selftest(void) {
+  uint8_t gateway_mac[6];
+  if (!arp_resolve(config.gateway, gateway_mac) || address_conflict)
+    return false;
+  /* Parser/checksum negative gate. */
+  uint8_t malformed[sizeof(struct ipv4_header)];
+  memset(malformed, 0, sizeof(malformed));
+  malformed[0] = 0x65;
+  uint32_t replies = echo_replies;
+  handle_ipv4(malformed, sizeof(malformed));
+  if (echo_replies != replies)
+    return false;
+  return ping_gateway();
+}
+
+bool net_phase4_init(void) {
+  if (!net_device_default())
+    return false;
+  spinlock_init(&arp_lock);
+  memset(arp_cache, 0, sizeof(arp_cache));
+  config.address = IPV4_ADDR(10, 0, 2, 15);
+  config.netmask = IPV4_ADDR(255, 255, 255, 0);
+  config.gateway = IPV4_ADDR(10, 0, 2, 2);
+  echo_replies = 0;
+  address_conflict = false;
+  net_set_rx_handler(ethernet_receive);
+  bool passed = net_phase4_selftest();
+  klog_puts(passed ? "[NET TEST] Phase 4 PASS: Ethernet, ARP, IPv4 checksum/"
+                     "routing and ICMP gateway ping\n"
+                   : "[NET TEST] Phase 4 FAIL: ARP or gateway ping timeout\n");
+  net_print_stats(net_device_default());
+  return passed;
+}
+
+const struct ipv4_config *ipv4_get_config(void) { return &config; }
+
+void ipv4_arp_flush(void) {
+  spinlock_acquire(&arp_lock);
+  memset(arp_cache, 0, sizeof(arp_cache));
+  spinlock_release(&arp_lock);
+}
+
+void ipv4_apply_config(const struct ipv4_config *cfg) {
+  if (!cfg) return;
+  spinlock_acquire(&arp_lock);
+  memset(arp_cache, 0, sizeof(arp_cache));
+  config.address = cfg->address;
+  config.netmask = cfg->netmask ? cfg->netmask : 0xffffff00u;
+  config.gateway = cfg->gateway;
+  address_conflict = false;
+  spinlock_release(&arp_lock);
+}
+
+int ipv4_send_raw(uint32_t dst_ip, uint8_t proto,
+                  const void *payload, size_t payload_len) {
+  return ipv4_send(dst_ip, proto, payload, payload_len);
+}
+
+void ipv4_set_udp_handler(void (*handler)(uint32_t, uint16_t, uint16_t,
+                                          const uint8_t *, uint16_t)) {
+  udp_handler = handler;
+}
+
+void ipv4_set_tcp_handler(void (*handler)(uint32_t, uint32_t,
+                                          const uint8_t *, size_t)) {
+  tcp_handler = handler;
+}
+
+void ipv4_set_icmp_handler(void (*handler)(uint32_t, uint32_t,
+                                           const uint8_t *, size_t)) {
+  icmp_handler = handler;
 }

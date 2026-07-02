@@ -14,10 +14,10 @@ typedef int64_t ssize_t;
 // Socket Address Family Type
 typedef uint16_t sa_family_t;
 
-#define AF_UNIX 1   // Unix domain sockets
-#define AF_INET 2   // Internet IP Protocol (future)
-#define AF_INET6 10 // Internet IP v6 (future)
-#define AF_NETLINK 16 // Netlink kernel interface
+#define AF_UNIX 1
+#define AF_INET 2
+#define AF_INET6 10
+#define AF_NETLINK 16
 #define NETLINK_ROUTE 0
 #define NETLINK_KOBJECT_UEVENT 15
 
@@ -123,39 +123,6 @@ struct vfs_node;
 // Socket Address Family Type
 // (moved up)
 
-// IPv4 Address Structure
-struct in_addr {
-  uint32_t s_addr;
-};
-
-// IPv4 Socket Address structure
-struct sockaddr_in {
-  sa_family_t sin_family;
-  uint16_t sin_port;
-  struct in_addr sin_addr;
-  char sin_zero[8];
-};
-
-// IPv6 Address Structure
-struct in6_addr {
-  uint8_t s6_addr[16];
-};
-
-// IPv6 Socket Address structure
-struct sockaddr_in6 {
-  sa_family_t     sin6_family;
-  uint16_t        sin6_port;
-  uint32_t        sin6_flowinfo;
-  struct in6_addr sin6_addr;
-  uint32_t        sin6_scope_id;
-};
-
-// IP Protocols
-#define IPPROTO_IP 0
-#define IPPROTO_ICMP 1
-#define IPPROTO_TCP 6
-#define IPPROTO_UDP 17
-
 // Socket Address Structure (generic)
 struct sockaddr {
   sa_family_t sa_family;
@@ -183,6 +150,57 @@ struct sockaddr_un {
   sa_family_t sun_family;
   char sun_path[UNIX_PATH_MAX];
 };
+
+struct in_addr {
+  uint32_t s_addr;
+};
+
+struct sockaddr_in {
+  sa_family_t    sin_family;
+  uint16_t       sin_port;
+  struct in_addr sin_addr;
+  uint8_t        sin_zero[8];
+};
+
+struct in6_addr { uint8_t s6_addr[16]; };
+struct sockaddr_in6 {
+  sa_family_t sin6_family;
+  uint16_t sin6_port;
+  uint32_t sin6_flowinfo;
+  struct in6_addr sin6_addr;
+  uint32_t sin6_scope_id;
+};
+
+#define INADDR_ANY       0x00000000u
+#define INADDR_BROADCAST 0xffffffffu
+#define INADDR_LOOPBACK  0x7f000001u
+
+#define IPPROTO_IP   0
+#define IPPROTO_ICMP 1
+#define IPPROTO_TCP  6
+#define IPPROTO_UDP  17
+#define IPPROTO_IPV6 41
+#define IPPROTO_ICMPV6 58
+#define SOL_IPV6 41
+#define IPV6_V6ONLY 26
+
+#define SOL_TCP 6
+#define TCP_NODELAY   1
+#define TCP_MAXSEG    2
+#define TCP_KEEPIDLE  4
+#define TCP_KEEPINTVL 5
+#define TCP_KEEPCNT   6
+
+#define ETIMEDOUT 110
+#define ECONNABORTED 103
+#define EPIPE 32
+#define EHOSTUNREACH 113
+#define ENETUNREACH 101
+#define ENOBUFS 105
+
+#define SOL_IP  0
+#define SOL_UDP 17
+#define IPPROTO_UDP_ALIAS 17
 
 // Socket Operations Vector
 typedef struct sock_ops {
@@ -212,7 +230,7 @@ typedef struct sock_ops {
 
 // Socket Structure
 typedef struct socket {
-  int domain;            // AF_UNIX, AF_INET, etc.
+  int domain;            // AF_UNIX or AF_NETLINK
   int type;              // SOCK_STREAM, SOCK_DGRAM, etc.
   int protocol;          // Protocol (usually 0)
   volatile int state;    // SS_UNCONNECTED, SS_CONNECTED, etc.

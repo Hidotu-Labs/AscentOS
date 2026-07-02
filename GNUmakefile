@@ -42,6 +42,20 @@ all: $(IMAGE_NAME).iso
 .PHONY: run
 run: run-$(ARCH)
 
+.PHONY: run-net
+run-net: edk2-ovmf $(IMAGE_NAME).iso disk.img
+	qemu-system-$(ARCH) \
+		-M q35 \
+		-drive if=pflash,unit=0,format=raw,file=edk2-ovmf/ovmf-code-$(ARCH).fd,readonly=on \
+		-cdrom $(IMAGE_NAME).iso \
+		-drive file=disk.img,format=raw,if=ide \
+		-smp 4 \
+		-serial stdio \
+		-display none \
+		-device rtl8139,netdev=net0 \
+		-netdev user,id=net0 \
+		$(QEMUFLAGS)
+
 .PHONY: run-x86_64
 run-x86_64: edk2-ovmf $(IMAGE_NAME).iso disk.img nvme.img
 	qemu-system-$(ARCH) \
@@ -53,10 +67,10 @@ run-x86_64: edk2-ovmf $(IMAGE_NAME).iso disk.img nvme.img
 		-serial stdio \
 		-audiodev pa,id=snd0 \
 		-device rtl8139,netdev=net0 \
+		-netdev user,id=net0 \
 		-device sb16,audiodev=snd0 \
 		-device AC97,audiodev=snd0 \
 		-device intel-hda -device hda-duplex,audiodev=snd0 \
-		-netdev user,id=net0 \
 		-device usb-ehci,id=ehci \
 		-device usb-tablet,bus=ehci.0 \
 		-drive file=nvme.img,if=none,id=nvm0 \
@@ -90,11 +104,9 @@ run-ata: edk2-ovmf $(IMAGE_NAME).iso disk.img
 		-smp 4 \
 		-serial stdio \
 		-audiodev pa,id=snd0 \
-		-device e1000,netdev=net0 \
 		-device sb16,audiodev=snd0 \
 		-device AC97,audiodev=snd0 \
 		-device intel-hda -device hda-duplex,audiodev=snd0 \
-		-netdev user,id=net0 \
 		-device usb-ehci,id=ehci \
 		-device usb-tablet,bus=ehci.0 \
 		-device usb-kbd,bus=ehci.0 \
@@ -114,18 +126,17 @@ run-fat32: edk2-ovmf $(IMAGE_NAME).iso fat32_test.img
 		-smp 4 \
 		-serial stdio \
 		-audiodev pa,id=snd0 \
-		-device e1000,netdev=net0 \
 		-device sb16,audiodev=snd0 \
 		-device AC97,audiodev=snd0 \
 		-device intel-hda -device hda-duplex,audiodev=snd0 \
-		-netdev user,id=net0 \
 		-device usb-ehci,id=ehci \
 		-device usb-tablet,bus=ehci.0 \
 		-device usb-kbd,bus=ehci.0 \
 		$(QEMUFLAGS)
 
 # Create a 64MB ext2 disk image with sample files for testing
-disk.img: assets/boot.wav assets/test.wav assets/jane.mp3 assets/mc9.mp3 assets/test.bmp assets/test.tar assets/room.png assets/logo.png userland/forkit.elf userland/about.elf userland/hello.elf userland/hello_glibc.elf userland/malloc_test_glibc.elf userland/booter.elf userland/reboot.elf userland/shutdown.elf userland/apm.elf userland/test_cpp.elf userland/test_cow.elf userland/test_syscalls.elf userland/test_kilo_syscalls.elf userland/test_wait4_complex.elf userland/kilo.elf userland/test_args.elf userland/test_stat.elf userland/ls.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/test_mmap_shared_private.elf userland/asplay.elf userland/showbmp.elf userland/test_uname_pipe.elf userland/test_pipe_fork.elf userland/test_sys_access.elf userland/test_sys_cwd.elf userland/test_newfstatat.elf userland/test_unlink_rename.elf userland/kria.elf userland/doom.elf userland/poll_test.elf userland/pty_test.elf userland/test_tcc_libc.c userland/test_mm.c userland/test_mmap_perf.elf userland/test_invlpg_bench.elf userland/test_mmap_stress.elf userland/test_page_cache.elf userland/test_dynamic.elf userland/test_dup.elf userland/test_attrib.elf userland/test_symlink.elf userland/test_cred.elf userland/test_time.elf userland/test_tsc_manual.elf userland/test_unix_sock.elf userland/test_unix_fdpass.elf userland/test_fb.elf userland/test_events.elf userland/test_read.elf userland/test_socket_phase3.elf userland/test_socket_phase3_advanced.elf userland/test_socket_phase3_megastress.elf userland/test_socket_phase4.elf userland/test_socket_phase5.elf userland/test_socket_phase6.elf userland/test_socket_phase7.elf userland/test_socket_phase7_advanced.elf userland/test_socket_phase8.elf userland/test_socket_phase9.elf userland/test_socket_phase10.elf userland/test_socket_phase11.elf userland/test_inet_stress.elf userland/dns_lookup.elf userland/test_signal_subsystem.elf userland/xeyes.elf userland/test_x11_simple.elf userland/xrootcursor.elf userland/xkbcomp.elf userland/test_shared_irq.elf userland/jwm.elf userland/doom_x11.elf userland/gtk_test.elf userland/tinywl.elf userland/tglgears_fb.elf userland/tglgears_drm.elf userland/tglhello_drm.elf userland/drm_bench.elf userland/test_drm_kms.elf userland/test_drm_flip.elf userland/test_drm_atomic.elf userland/test_drm_epoll.elf userland/test_clone_futex.elf userland/test_clone_futex_stress.elf userland/test_mem_stress.elf userland/test_io_leak.elf userland/panic_test.elf userland/fault_mon.elf userland/crash.elf userland/classicube.elf userland/test_sdl2.elf userland/terrain.png userland/texpacks/classicube.zip userland/netlink_test.elf userland/test_timer_sid.elf userland/ltp_timerfd.elf userland/ltp_epoll.elf initrd/startx.sh initrd/startw.sh initrd/weston.ini userland/ascentd.elf $(ASCENTD_CONFIG_FILES)
+disk.img: userland/test_net_phase6.elf userland/test_net_phase7.elf userland/test_net_phase9.elf userland/test_net_phase10.elf userland/test_net_phase11.elf userland/dns_lookup.elf
+disk.img: assets/boot.wav assets/test.wav assets/jane.mp3 assets/mc9.mp3 assets/test.bmp assets/test.tar assets/room.png assets/logo.png userland/forkit.elf userland/about.elf userland/hello.elf userland/hello_glibc.elf userland/malloc_test_glibc.elf userland/booter.elf userland/reboot.elf userland/shutdown.elf userland/apm.elf userland/test_cpp.elf userland/test_cow.elf userland/test_syscalls.elf userland/test_kilo_syscalls.elf userland/test_wait4_complex.elf userland/kilo.elf userland/test_args.elf userland/test_stat.elf userland/ls.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/test_mmap_shared_private.elf userland/asplay.elf userland/showbmp.elf userland/test_uname_pipe.elf userland/test_pipe_fork.elf userland/test_sys_access.elf userland/test_sys_cwd.elf userland/test_newfstatat.elf userland/test_unlink_rename.elf userland/kria.elf userland/doom.elf userland/poll_test.elf userland/pty_test.elf userland/test_tcc_libc.c userland/test_mm.c userland/test_mmap_perf.elf userland/test_invlpg_bench.elf userland/test_mmap_stress.elf userland/test_page_cache.elf userland/test_dynamic.elf userland/test_dup.elf userland/test_attrib.elf userland/test_symlink.elf userland/test_cred.elf userland/test_time.elf userland/test_tsc_manual.elf userland/test_unix_sock.elf userland/test_unix_fdpass.elf userland/test_fb.elf userland/test_events.elf userland/test_read.elf userland/test_socket_phase3.elf userland/test_socket_phase3_advanced.elf userland/test_socket_phase3_megastress.elf userland/test_socket_phase4.elf userland/test_socket_phase5.elf userland/test_socket_phase6.elf userland/test_socket_phase7.elf userland/test_socket_phase7_advanced.elf userland/test_socket_phase8.elf userland/test_socket_phase9.elf userland/test_socket_phase10.elf userland/test_socket_phase11.elf userland/test_signal_subsystem.elf userland/xeyes.elf userland/test_x11_simple.elf userland/xrootcursor.elf userland/xkbcomp.elf userland/test_shared_irq.elf userland/jwm.elf userland/doom_x11.elf userland/gtk_test.elf userland/tinywl.elf userland/tglgears_fb.elf userland/tglgears_drm.elf userland/tglhello_drm.elf userland/drm_bench.elf userland/test_drm_kms.elf userland/test_drm_flip.elf userland/test_drm_atomic.elf userland/test_drm_epoll.elf userland/test_clone_futex.elf userland/test_clone_futex_stress.elf userland/test_mem_stress.elf userland/test_io_leak.elf userland/panic_test.elf userland/fault_mon.elf userland/crash.elf userland/classicube.elf userland/test_sdl2.elf userland/terrain.png userland/texpacks/classicube.zip userland/netlink_test.elf userland/test_timer_sid.elf userland/ltp_timerfd.elf userland/ltp_epoll.elf initrd/startx.sh initrd/startw.sh initrd/weston.ini userland/ascentd.elf $(ASCENTD_CONFIG_FILES)
 	@echo "Creating root filesystem (ext3)..."
 	rm -f ./part.img
 	dd if=/dev/zero of=./part.img bs=1M count=2047
@@ -330,6 +341,18 @@ disk.img: assets/boot.wav assets/test.wav assets/jane.mp3 assets/mc9.mp3 assets/
 		echo "write userland/test_socket_phase5.elf bin/test_socket_phase5"; \
 		echo "rm bin/test_socket_phase6"; \
 		echo "write userland/test_socket_phase6.elf bin/test_socket_phase6"; \
+		echo "rm bin/test_net_phase6"; \
+		echo "write userland/test_net_phase6.elf bin/test_net_phase6"; \
+		echo "rm bin/test_net_phase7"; \
+		echo "write userland/test_net_phase7.elf bin/test_net_phase7"; \
+		echo "rm bin/test_net_phase9"; \
+		echo "write userland/test_net_phase9.elf bin/test_net_phase9"; \
+		echo "rm bin/test_net_phase10"; \
+		echo "write userland/test_net_phase10.elf bin/test_net_phase10"; \
+		echo "rm bin/test_net_phase11"; \
+		echo "write userland/test_net_phase11.elf bin/test_net_phase11"; \
+		echo "rm bin/dns_lookup"; \
+		echo "write userland/dns_lookup.elf bin/dns_lookup"; \
 		echo "rm bin/test_socket_phase7"; \
 		echo "write userland/test_socket_phase7.elf bin/test_socket_phase7"; \
 		echo "rm bin/test_socket_phase7_advanced"; \
@@ -342,10 +365,6 @@ disk.img: assets/boot.wav assets/test.wav assets/jane.mp3 assets/mc9.mp3 assets/
 		echo "write userland/test_socket_phase10.elf bin/test_socket_phase10"; \
 		echo "rm bin/test_socket_phase11"; \
 		echo "write userland/test_socket_phase11.elf bin/test_socket_phase11"; \
-		echo "rm bin/test_inet_stress"; \
-		echo "write userland/test_inet_stress.elf bin/test_inet_stress"; \
-		echo "rm bin/dns_lookup"; \
-		echo "write userland/dns_lookup.elf bin/dns_lookup"; \
 		echo "rm bin/test_signal_subsystem"; \
 		echo "write userland/test_signal_subsystem.elf bin/test_signal_subsystem"; \
 		echo "rm bin/test_timer_sid"; \
@@ -803,6 +822,30 @@ userland/test_socket_phase6.elf: userland/test_socket_phase6.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/test_socket_phase6.c -o userland/test_socket_phase6.elf
 
+userland/test_net_phase6.elf: userland/test_net_phase6.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_net_phase6.c -o userland/test_net_phase6.elf
+
+userland/test_net_phase7.elf: userland/test_net_phase7.c userland/dns_resolver.c userland/dns_resolver.h $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_net_phase7.c userland/dns_resolver.c -o userland/test_net_phase7.elf
+
+userland/test_net_phase9.elf: userland/test_net_phase9.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_net_phase9.c -o userland/test_net_phase9.elf
+
+userland/test_net_phase10.elf: userland/test_net_phase10.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_net_phase10.c -o userland/test_net_phase10.elf
+
+userland/test_net_phase11.elf: userland/test_net_phase11.c userland/dns_resolver.c userland/dns_resolver.h $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_net_phase11.c userland/dns_resolver.c -o userland/test_net_phase11.elf
+
+userland/dns_lookup.elf: userland/dns_lookup.c userland/dns_resolver.c userland/dns_resolver.h $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/dns_lookup.c userland/dns_resolver.c -o userland/dns_lookup.elf
+
 userland/test_socket_phase7.elf: userland/test_socket_phase7.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/test_socket_phase7.c -o userland/test_socket_phase7.elf
@@ -826,10 +869,6 @@ userland/test_socket_phase10.elf: userland/test_socket_phase10.c $(MUSL_LIBC)
 userland/test_socket_phase11.elf: userland/test_socket_phase11.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/test_socket_phase11.c -o userland/test_socket_phase11.elf
-
-userland/test_inet_stress.elf: userland/test_inet_stress.c $(MUSL_LIBC)
-	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
-		userland/test_inet_stress.c -o userland/test_inet_stress.elf
 
 userland/test_sys_access.elf: userland/test_sys_access.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
@@ -1038,10 +1077,6 @@ userland/test_drm_atomic.elf: userland/test_drm_atomic.c $(MUSL_LIBC)
 userland/test_drm_epoll.elf: userland/test_drm_epoll.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/test_drm_epoll.c -o userland/test_drm_epoll.elf
-
-userland/dns_lookup.elf: userland/dns_lookup.c $(MUSL_LIBC)
-	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
-		userland/dns_lookup.c -o userland/dns_lookup.elf
 
 userland/test_signal_subsystem.elf: userland/test_signal_subsystem.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \

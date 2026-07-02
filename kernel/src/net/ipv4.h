@@ -1,29 +1,38 @@
 #ifndef NET_IPV4_H
 #define NET_IPV4_H
 
+#include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
-#define PROTO_ICMP 1
-#define PROTO_UDP  17
-#define PROTO_TCP  6
+#define IPV4_ADDR(a, b, c, d)                                               \
+  (((uint32_t)(a) << 24) | ((uint32_t)(b) << 16) | ((uint32_t)(c) << 8) |   \
+   (uint32_t)(d))
 
-typedef struct __attribute__((packed)) {
-    uint8_t  version_ihl;   // Version (4) and IHL (Header Length)
-    uint8_t  tos;           // Type of Service
-    uint16_t length;        // Total Length
-    uint16_t id;            // Identification
-    uint16_t flags_offset;  // Flags (3 bits) and Fragment Offset (13 bits)
-    uint8_t  ttl;           // Time to Live
-    uint8_t  protocol;      // Protocol (ICMP, UDP, TCP)
-    uint16_t checksum;      // Header Checksum
-    uint32_t src_ip;        // Source IP Address
-    uint32_t dst_ip;        // Destination IP Address
-} ipv4_header_t;
+struct ipv4_config {
+  uint32_t address;
+  uint32_t netmask;
+  uint32_t gateway;
+};
 
-// Handle an incoming IPv4 packet
-void ipv4_handle_packet(const uint8_t *data, uint16_t len);
+bool net_phase4_init(void);
+bool net_phase4_selftest(void);
+const struct ipv4_config *ipv4_get_config(void);
 
-// Send an IPv4 packet
-int ipv4_send_packet(uint32_t dst_ip, uint8_t protocol, const void *data, uint16_t len);
+
+void ipv4_apply_config(const struct ipv4_config *cfg);
+
+void ipv4_arp_flush(void);
+
+int ipv4_send_raw(uint32_t dst_ip, uint8_t proto,
+                  const void *payload, size_t payload_len);
+
+void ipv4_set_udp_handler(void (*handler)(uint32_t src_ip, uint16_t src_port,
+                                          uint16_t dst_port,const uint8_t *payload,uint16_t length));
+
+void ipv4_set_tcp_handler(void (*handler)(uint32_t src_ip, uint32_t dst_ip,
+                                          const uint8_t *segment,size_t length));
+void ipv4_set_icmp_handler(void (*handler)(uint32_t src_ip, uint32_t dst_ip,
+                                         const uint8_t *packet,size_t length));
 
 #endif

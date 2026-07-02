@@ -413,7 +413,7 @@ void signal_send_pgid(uint32_t pgid, int sig) {
       t->pending_signals |= (1ULL << (sig - 1));
       // Wake the thread if it is blocked/sleeping so it can deliver the signal
       if (t->state == THREAD_SLEEPING || t->state == THREAD_BLOCKED) {
-        t->state = THREAD_READY;
+        sched_wakeup(t);
       }
     }
     t = t->global_next;
@@ -576,7 +576,7 @@ void signal_notify_thread(struct thread *t, int sig) {
 
   // Wake up thread if it's sleeping/blocked
   if (t->state == THREAD_SLEEPING || t->state == THREAD_BLOCKED) {
-    t->state = THREAD_READY;
+    sched_wakeup(t);
   }
 
   // Find all signalfds in this thread and wake them

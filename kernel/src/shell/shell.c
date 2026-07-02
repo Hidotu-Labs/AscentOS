@@ -5,7 +5,6 @@
 #include "cpu/irq.h"
 #include "drivers/audio/pcspeaker.h"
 #include "drivers/input/keyboard.h"
-#include "drivers/net/nic.h"
 #include "drivers/serial.h"
 #include "drivers/storage/block.h"
 #include "fs/ext2.h"
@@ -17,13 +16,6 @@
 #include "mm/shm.h"
 #include "mm/slab_cache.h"
 #include "mm/vmm.h"
-#include "net/arp.h"
-#include "net/dns.h"
-#include "net/icmp.h"
-#include "net/ipv4.h"
-#include "net/net.h"
-#include "net/netif.h"
-#include "net/tcp.h"
 #include "sched/sched.h"
 #include "smp/cpu.h"
 #include <stdint.h>
@@ -69,20 +61,7 @@ static void shell_print_uint64(uint64_t num) {
   }
 }
 
-static void shell_print_hex_byte(uint8_t num) {
-  const char *hex = "0123456789ABCDEF";
-  console_putchar(hex[num >> 4]);
-  console_putchar(hex[num & 0x0F]);
-}
-
 static void print_prompt(void) { console_puts("AscentOS> "); }
-
-static void http_recv_cb(int sock_id, const uint8_t *p, uint16_t l) {
-  (void)sock_id;
-  for (uint16_t i = 0; i < l; i++) {
-    console_putchar((char)p[i]);
-  }
-}
 
 static void execute_command(char *cmd) {
   // Strip trailing spaces
@@ -149,11 +128,6 @@ static void execute_command(char *cmd) {
     console_puts(
         "  shmtest   - Stress test System V Shared Memory (shmget/shmat)\n");
     console_puts("  kilo      - Launch the kilo text editor\n");
-    console_puts("  netinfo   - Show NIC status and MAC address\n");
-    console_puts("  ifconfig  - Show network interface configuration\n");
-    console_puts("  arp       - Display ARP cache table\n");
-    console_puts("  arping    - Send ARP request (e.g. arping 10.0.2.2)\n");
-    console_puts("  ping      - Send ICMP echo request (e.g. ping 10.0.2.2)\n");
   } else if (strcmp(cmd, "ps") == 0) {
     sched_print_tasks();
   } else if (strncmp(cmd, "kill ", 5) == 0) {
@@ -1999,337 +1973,6 @@ static void execute_command(char *cmd) {
         console_puts("kilo exec failed.\n");
       }
     }
-  } else if (strcmp(cmd, "netinfo") == 0) {
-    if (!nic_is_present()) {
-      console_puts("No NIC detected.\n");
-    } else {
-      const uint8_t *mac = nic_get_mac();
-      const char *hex = "0123456789ABCDEF";
-      console_puts("Network Interface\n");
-      console_puts("  MAC Address: ");
-      for (int i = 0; i < 6; i++) {
-        console_putchar(hex[(mac[i] >> 4) & 0xF]);
-        console_putchar(hex[mac[i] & 0xF]);
-        if (i < 5)
-          console_putchar(':');
-      }
-      console_puts("\n  Link: ");
-      console_puts(nic_link_up() ? "UP" : "DOWN");
-      console_puts("\n");
-    }
-  } else if (strcmp(cmd, "ifconfig") == 0) {
-    netif_t *nif = netif_get();
-    if (!nif->up) {
-      console_puts("Network interface is down.\n");
-    } else {
-      const char *hex = "0123456789ABCDEF";
-      console_puts("eth0:\n");
-      console_puts("  MAC: ");
-      for (int i = 0; i < 6; i++) {
-        console_putchar(hex[(nif->mac[i] >> 4) & 0xF]);
-        console_putchar(hex[nif->mac[i] & 0xF]);
-        if (i < 5)
-          console_putchar(':');
-      }
-      console_puts("\n  IP:      ");
-      shell_print_uint64((nif->ip >> 24) & 0xFF);
-      console_putchar('.');
-      shell_print_uint64((nif->ip >> 16) & 0xFF);
-      console_putchar('.');
-      shell_print_uint64((nif->ip >> 8) & 0xFF);
-      console_putchar('.');
-      shell_print_uint64(nif->ip & 0xFF);
-      console_puts("\n  Gateway: ");
-      shell_print_uint64((nif->gateway >> 24) & 0xFF);
-      console_putchar('.');
-      shell_print_uint64((nif->gateway >> 16) & 0xFF);
-      console_putchar('.');
-      shell_print_uint64((nif->gateway >> 8) & 0xFF);
-      console_putchar('.');
-      shell_print_uint64(nif->gateway & 0xFF);
-      console_puts("\n  Netmask: ");
-      shell_print_uint64((nif->netmask >> 24) & 0xFF);
-      console_putchar('.');
-      shell_print_uint64((nif->netmask >> 16) & 0xFF);
-      console_putchar('.');
-      shell_print_uint64((nif->netmask >> 8) & 0xFF);
-      console_putchar('.');
-      shell_print_uint64(nif->netmask & 0xFF);
-      console_puts("\n  Status:  UP\n");
-    }
-  } else if (strcmp(cmd, "arp") == 0) {
-    int count = 0;
-    const arp_entry_t *table = arp_get_table(&count);
-    const char *hex = "0123456789ABCDEF";
-    int found = 0;
-    console_puts("ARP Cache:\n");
-    for (int i = 0; i < count; i++) {
-      if (!table[i].valid)
-        continue;
-      found++;
-      console_puts("  ");
-      shell_print_uint64((table[i].ip >> 24) & 0xFF);
-      console_putchar('.');
-      shell_print_uint64((table[i].ip >> 16) & 0xFF);
-      console_putchar('.');
-      shell_print_uint64((table[i].ip >> 8) & 0xFF);
-      console_putchar('.');
-      shell_print_uint64(table[i].ip & 0xFF);
-      console_puts(" -> ");
-      for (int j = 0; j < 6; j++) {
-        console_putchar(hex[(table[i].mac[j] >> 4) & 0xF]);
-        console_putchar(hex[table[i].mac[j] & 0xF]);
-        if (j < 5)
-          console_putchar(':');
-      }
-      console_putchar('\n');
-    }
-    if (!found) {
-      console_puts("  (empty)\n");
-    }
-  } else if (strncmp(cmd, "arping ", 7) == 0) {
-    // Parse dotted-decimal IP: arping 10.0.2.2
-    char *ip_str = cmd + 7;
-    uint32_t octets[4] = {0};
-    int octet_idx = 0;
-    for (char *p = ip_str; *p && octet_idx < 4; p++) {
-      if (*p >= '0' && *p <= '9') {
-        octets[octet_idx] = octets[octet_idx] * 10 + (*p - '0');
-      } else if (*p == '.') {
-        octet_idx++;
-      }
-    }
-    if (octet_idx == 3) {
-      // Final octet was set but no trailing dot
-    }
-    uint32_t target_ip =
-        (octets[0] << 24) | (octets[1] << 16) | (octets[2] << 8) | octets[3];
-
-    console_puts("ARPING ");
-    shell_print_uint64(octets[0]);
-    console_putchar('.');
-    shell_print_uint64(octets[1]);
-    console_putchar('.');
-    shell_print_uint64(octets[2]);
-    console_putchar('.');
-    shell_print_uint64(octets[3]);
-    console_puts("...\n");
-
-    if (arp_send_request(target_ip) < 0) {
-      console_puts("Failed to send ARP request.\n");
-    } else {
-      // Poll for a reply (up to ~2 seconds)
-      const char *hex = "0123456789ABCDEF";
-      bool got_reply = false;
-      for (int attempt = 0; attempt < 200000; attempt++) {
-        net_poll(); // Process any queued packets
-        const arp_entry_t *entry = arp_lookup(target_ip);
-        if (entry) {
-          console_puts("Reply from ");
-          shell_print_uint64(octets[0]);
-          console_putchar('.');
-          shell_print_uint64(octets[1]);
-          console_putchar('.');
-          shell_print_uint64(octets[2]);
-          console_putchar('.');
-          shell_print_uint64(octets[3]);
-          console_puts(" [MAC: ");
-          for (int j = 0; j < 6; j++) {
-            console_putchar(hex[(entry->mac[j] >> 4) & 0xF]);
-            console_putchar(hex[entry->mac[j] & 0xF]);
-            if (j < 5)
-              console_putchar(':');
-          }
-          console_puts("]\n");
-          got_reply = true;
-          break;
-        }
-        // Small delay between polls
-        for (volatile int d = 0; d < 100; d++) {
-        }
-      }
-      if (!got_reply) {
-        console_puts("Timeout: no ARP reply received.\n");
-      }
-    }
-  } else if (strncmp(cmd, "ping ", 5) == 0) {
-    char *ip_str = cmd + 5;
-    uint32_t octets[4] = {0};
-    int octet_idx = 0;
-    for (char *p = ip_str; *p && octet_idx < 4; p++) {
-      if (*p >= '0' && *p <= '9') {
-        octets[octet_idx] = octets[octet_idx] * 10 + (*p - '0');
-      } else if (*p == '.') {
-        octet_idx++;
-      }
-    }
-    uint32_t target_ip =
-        (octets[0] << 24) | (octets[1] << 16) | (octets[2] << 8) | octets[3];
-
-    console_puts("PING ");
-    shell_print_uint64(octets[0]);
-    console_putchar('.');
-    shell_print_uint64(octets[1]);
-    console_putchar('.');
-    shell_print_uint64(octets[2]);
-    console_putchar('.');
-    shell_print_uint64(octets[3]);
-    console_puts("...\n");
-
-    // Try to send. If it fails with -1, it's usually because ARP is missing.
-    if (icmp_send_echo(target_ip, 0xC0DE, 1, "AscentOS Ping", 13) < 0) {
-      // Missing ARP? Wait a bit.
-      bool resolved = false;
-      netif_t *nif = netif_get();
-      uint32_t next_hop = target_ip;
-      if (nif && (target_ip & nif->netmask) != (nif->ip & nif->netmask)) {
-        next_hop = nif->gateway;
-      }
-      for (int i = 0; i < 1000; i++) { // Wait up to 1 second
-        net_poll();
-        if (arp_lookup(next_hop)) {
-          resolved = true;
-          break;
-        }
-        for (volatile int d = 0; d < 10000; d++)
-          ; // ~1ms delay
-      }
-
-      if (resolved) {
-        // Try again now that MAC is known
-        if (icmp_send_echo(target_ip, 0xC0DE, 1, "AscentOS Ping", 13) < 0) {
-          console_puts(
-              "Destination host unreachable (send failed after ARP).\n");
-          return;
-        }
-      } else {
-        console_puts(
-            "Destination host unreachable (no ARP reply or link down).\n");
-        return;
-      }
-    }
-
-    // If we reached here, packet was sent. Now wait for reply.
-    bool got_reply = false;
-    extern uint64_t icmp_reply_count;
-    uint64_t start_count = icmp_reply_count;
-
-    for (int attempt = 0; attempt < 200000; attempt++) {
-      net_poll();
-      if (icmp_reply_count > start_count) {
-        console_puts("Reply received!\n");
-        got_reply = true;
-        break;
-      }
-      for (volatile int d = 0; d < 100; d++) {
-      }
-    }
-    if (!got_reply) {
-      console_puts("Timeout: no ICMP reply received.\n");
-    }
-  } else if (strncmp(cmd, "host ", 5) == 0) {
-    char *domain = cmd + 5;
-    console_puts("Resolving ");
-    console_puts(domain);
-    console_puts("...\n");
-
-    uint32_t resolved_ip = 0;
-    if (dns_resolve_A_record(domain, &resolved_ip) == 0) {
-      console_puts(domain);
-      console_puts(" is at ");
-      uint8_t a = (resolved_ip >> 24) & 0xFF;
-      uint8_t b = (resolved_ip >> 16) & 0xFF;
-      uint8_t c = (resolved_ip >> 8) & 0xFF;
-      uint8_t d = resolved_ip & 0xFF;
-      shell_print_uint64(a);
-      console_putchar('.');
-      shell_print_uint64(b);
-      console_putchar('.');
-      shell_print_uint64(c);
-      console_putchar('.');
-      shell_print_uint64(d);
-      console_putchar('\n');
-    } else {
-      console_puts("Failed to resolve domain.\n");
-    }
-  } else if (strncmp(cmd, "http ", 5) == 0) {
-    char *domain = cmd + 5;
-    console_puts("Resolving ");
-    console_puts(domain);
-    console_puts("...\n");
-
-    uint32_t resolved_ip = 0;
-    if (dns_resolve_A_record(domain, &resolved_ip) == 0) {
-      console_puts("Connecting to TCP port 80...\n");
-      int sock = tcp_connect(resolved_ip, 80, http_recv_cb);
-      if (sock >= 0) {
-        console_puts("Connected! Sending HTTP GET...\n");
-        char req[256];
-        memset(req, 0, sizeof(req));
-        strcpy(req, "GET / HTTP/1.1\r\nHost: ");
-        strcpy(req + strlen(req), domain);
-        strcpy(req + strlen(req), "\r\nConnection: close\r\n\r\n");
-
-        if (tcp_send(sock, req, strlen(req)) > 0) {
-          // Wait to receive the webpage (timeout handles closing)
-          // We'll spin for 3 seconds listening to incoming traffic
-          for (int wait = 0; wait < 3000; wait++) {
-            net_poll();
-            for (volatile int d = 0; d < 10000; d++)
-              ;
-          }
-        } else {
-          console_puts("Failed to send request.\n");
-        }
-        tcp_close(sock);
-        console_puts("\n[Connection Closed]\n");
-      } else {
-        console_puts("Connection failed.\n");
-      }
-    } else {
-      console_puts("Failed to resolve domain.\n");
-    }
-  } else if (strcmp(cmd, "ifconfig") == 0) {
-    netif_t *nif = netif_get();
-    console_puts("eth0:\n");
-
-    console_puts("  MAC: ");
-    for (int i = 0; i < 6; i++) {
-      shell_print_hex_byte(nif->mac[i]);
-      if (i < 5)
-        console_putchar(':');
-    }
-    console_puts("\n");
-
-    console_puts("  IP Address: ");
-    shell_print_uint64((nif->ip >> 24) & 0xFF);
-    console_putchar('.');
-    shell_print_uint64((nif->ip >> 16) & 0xFF);
-    console_putchar('.');
-    shell_print_uint64((nif->ip >> 8) & 0xFF);
-    console_putchar('.');
-    shell_print_uint64(nif->ip & 0xFF);
-    console_puts("\n");
-
-    console_puts("  Subnet Mask: ");
-    shell_print_uint64((nif->netmask >> 24) & 0xFF);
-    console_putchar('.');
-    shell_print_uint64((nif->netmask >> 16) & 0xFF);
-    console_putchar('.');
-    shell_print_uint64((nif->netmask >> 8) & 0xFF);
-    console_putchar('.');
-    shell_print_uint64(nif->netmask & 0xFF);
-    console_puts("\n");
-
-    console_puts("  Gateway: ");
-    shell_print_uint64((nif->gateway >> 24) & 0xFF);
-    console_putchar('.');
-    shell_print_uint64((nif->gateway >> 16) & 0xFF);
-    console_putchar('.');
-    shell_print_uint64((nif->gateway >> 8) & 0xFF);
-    console_putchar('.');
-    shell_print_uint64(nif->gateway & 0xFF);
-    console_puts("\n");
   } else {
     console_puts("Unknown command. Type 'help' for available commands.\n");
   }
@@ -2358,7 +2001,6 @@ void shell_run(void) {
     }
 
     if (c == 0) {
-      net_poll();    // Background network processing
       sched_yield(); // Don't hog the CPU if no input
       continue;
     }

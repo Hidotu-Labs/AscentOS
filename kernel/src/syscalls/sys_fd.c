@@ -12,7 +12,6 @@
 #include "../lib/string.h"
 #include "../mm/heap.h"
 #include "../mm/vmm.h"
-#include "../net/net.h"
 #include "../sched/sched.h"
 #include "../socket/socket.h"
 #include "sys_io_shared.h"

@@ -9,10 +9,10 @@
 #include "../mm/heap.h"
 #include "../sched/sched.h"
 #include "../sched/wait.h"
-#include "af_inet.h"
-#include "af_inet6.h"
 #include "af_unix.h"
 #include "af_netlink.h"
+#include "af_inet.h"
+#include "af_inet6.h"
 #include "socket_internal.h"
 #include <stdint.h>
 
@@ -173,7 +173,8 @@ void socket_wake(socket_t *sock) {
 
 socket_t *socket_create(int domain, int type, int protocol) {
   // Validate domain
-  if (domain != AF_UNIX && domain != AF_INET && domain != AF_INET6 && domain != AF_NETLINK) {
+  if (domain != AF_UNIX && domain != AF_INET && domain != AF_INET6 &&
+      domain != AF_NETLINK) {
     klog_puts("[WARN] socket: unsupported domain ");
     klog_uint64((uint64_t)domain);
     klog_puts("\n");
@@ -192,7 +193,6 @@ socket_t *socket_create(int domain, int type, int protocol) {
     return NULL; // EPROTONOSUPPORT
   }
 
-  // For AF_UNIX, protocol must be 0
   if (domain == AF_UNIX && protocol != 0) {
     klog_puts("[WARN] socket: invalid protocol for AF_UNIX\n");
     return NULL; // EPROTONOSUPPORT
@@ -737,9 +737,9 @@ void socket_init(void) {
 
   // Register socket families
   af_unix_init();
+  af_netlink_init();
   af_inet_init();
   af_inet6_init();
-  af_netlink_init();
 
   klog_puts("[OK] Socket subsystem initialized (max sockets: ");
   klog_uint64(SOCKET_MAX_COUNT);

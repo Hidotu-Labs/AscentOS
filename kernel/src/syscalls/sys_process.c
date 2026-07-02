@@ -1338,14 +1338,21 @@ struct itimerval {
 static uint64_t sys_setitimer(uint64_t which, uint64_t new_val_ptr,
                               uint64_t old_val_ptr, uint64_t _a3, uint64_t _a4,
                               uint64_t _a5) {
-  (void)which;
-  (void)new_val_ptr;
-  (void)old_val_ptr;
-  (void)_a3;
-  (void)_a4;
-  (void)_a5;
 
   return 0;
+}
+
+static uint64_t sys_alarm(uint64_t seconds, uint64_t a1, uint64_t a2,
+                          uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+  struct thread *t = sched_get_current();
+  if (!t) return 0;
+  uint64_t now = lapic_timer_get_ticks();
+  uint64_t remaining = t->it_real_next > now ? (t->it_real_next - now + 999) / 1000 : 0;
+  t->it_real_value = seconds * 1000;
+  t->it_real_interval = 0;
+  t->it_real_next = seconds ? now + seconds * 1000 : 0;
+  return remaining;
 }
 
 // Resource Limits (getrlimit / prlimit64)
@@ -1759,6 +1766,7 @@ void syscall_register_process(void) {
   syscall_register(SYS_CHDIR, sys_chdir);
   syscall_register(SYS_PRCTL, sys_prctl);
   syscall_register(SYS_SETITIMER, sys_setitimer);
+  syscall_register(SYS_ALARM, sys_alarm);
   syscall_register_raw(SYS_FORK, sys_fork);
   syscall_register_raw(SYS_VFORK, sys_vfork);
   syscall_register_raw(SYS_CLONE, sys_clone);

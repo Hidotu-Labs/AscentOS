@@ -669,22 +669,20 @@ void sched_tick(struct registers *regs) {
     // Account one tick (1 ms at LAPIC_TIMER_HZ=1000) of CPU time
     curr->runtime_total++;
 
-    // ITIMER_REAL handling
-    if (curr->it_real_value > 0) {
-      if (curr->it_real_value <= 1) {
-        // Timer expired!
-        extern void signal_send(struct thread * t, int sig);
-        signal_send(curr, SIGALRM);
-
-        // Reload if requested
-        if (curr->it_real_interval > 0) {
-          curr->it_real_value = curr->it_real_interval;
-        } else {
-          curr->it_real_value = 0;
+    /* ITIMER_REAL is wall-clock time, including time spent blocked.  The BSP
+     * advances every thread once per millisecond to avoid SMP double ticks. */
+    if (cpu->cpu_id == 0) {
+      uint64_t now = lapic_timer_get_ticks();
+      spinlock_acquire(&tid_lock);
+      for (struct thread *t = global_thread_list; t; t = t->global_next) {
+        if (t->it_real_next && now >= t->it_real_next) {
+          extern void signal_send(struct thread *, int);
+          signal_send(t, SIGALRM);
+          if (t->it_real_interval) t->it_real_next = now + t->it_real_interval;
+          else { t->it_real_next = 0; t->it_real_value = 0; }
         }
-      } else {
-        curr->it_real_value--;
       }
+      spinlock_release(&tid_lock);
     }
 
     sched_yield();

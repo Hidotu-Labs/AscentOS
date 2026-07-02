@@ -1,509 +1,421 @@
-/*
- * AF_INET6 socket family — IPv6 TCP and UDP support.
- * Mirrors af_inet.c but uses 128-bit addresses and ipv6_send_packet().
- */
-#include "af_inet6.h"
-#include "../console/klog.h"
-#include "../lib/string.h"
-#include "../mm/heap.h"
-#include "../net/byteorder.h"
-#include "../net/ipv6.h"
-#include "../net/net.h"
-#include "../net/tcp.h"
-#include "../net/udp.h"
-#include "../sched/sched.h"
-#include "socket_internal.h"
+#include "socket/af_inet6.h"
+#include "apic/lapic_timer.h"
+#include "lib/string.h"
+#include "lock/spinlock.h"
+#include "mm/heap.h"
+#include "net/ipv6.h"
+#include "net/tcp.h"
+#include "sched/sched.h"
+#include "sched/wait.h"
+#include "socket/epoll.h"
+#include "socket/socket.h"
+#include "socket/socket_internal.h"
 
-/* ── TCP/UDP over IPv6: separate socket tables ──────────────────────────── */
-/* We reuse the existing tcp_socket_t / udp_socket_t infrastructure but
- * store the 128-bit addresses separately in inet6_sock_t.               */
+#define UDP6_MAX 32
+#define UDP6_QUEUE 16
+#define UDP6_PAYLOAD 2048
 
-/* Map tcp_sock_id → inet6_sock_t* (parallel to af_inet's tcp_inet_map) */
-static inet6_sock_t *tcp6_map[MAX_TCP_SOCKETS];
-static sk_buff_t    *early6_data[MAX_TCP_SOCKETS];
+struct udp6_packet {
+  uint8_t source[16];
+  uint16_t port, length;
+  uint8_t data[UDP6_PAYLOAD];
+};
 
-/* UDP: map udp slot index → inet6_sock_t* */
-#define MAX_UDP6_SOCKETS 16
-static inet6_sock_t *udp6_map[MAX_UDP6_SOCKETS];
-/* udp6 port → inet6_sock_t* lookup by port */
+struct inet6_sock {
+  socket_t *parent;
+  bool used, bound, connected;
+  uint8_t local[16], remote[16];
+  uint16_t local_port, remote_port;
+  uint32_t scope_id;
+  struct udp6_packet queue[UDP6_QUEUE];
+  uint32_t head, tail;
+  wait_queue_t wait;
+  struct tcp_tcb *tcp;
+  bool heap_allocated;
+};
 
-/* ── Family registration ─────────────────────────────────────────────────── */
-static net_family_t inet6_family_ops;
+static struct inet6_sock udp6[UDP6_MAX];
+static spinlock_t udp6_lock = SPINLOCK_INIT;
+static uint16_t next_port = 49152;
 
-/* ── Helpers ─────────────────────────────────────────────────────────────── */
-static inline void addr6_copy(uint8_t *dst, const uint8_t *src) {
-    memcpy(dst, src, 16);
+static uint16_t get16(const uint8_t *p) { return (uint16_t)(p[0] << 8 | p[1]); }
+static void put16(uint8_t *p, uint16_t v) { p[0] = v >> 8; p[1] = v; }
+static bool zero_addr(const uint8_t a[16]) {
+  static const uint8_t zero[16];
+  return memcmp(a, zero, 16) == 0;
 }
-static inline int addr6_eq(const uint8_t *a, const uint8_t *b) {
-    return memcmp(a, b, 16) == 0;
+static bool same_addr(const uint8_t a[16], const uint8_t b[16]) {
+  return memcmp(a, b, 16) == 0;
 }
-
-/* ── TCP bridge callbacks ─────────────────────────────────────────────────── */
-static void tcp6_data_cb(int sock_id, const uint8_t *data, uint16_t len) {
-    if (sock_id < 0 || sock_id >= MAX_TCP_SOCKETS) return;
-    inet6_sock_t *inet = tcp6_map[sock_id];
-    if (!inet) {
-        if (!data || len == 0) return;
-        sk_buff_t *skb = alloc_skb(len);
-        if (!skb) return;
-        memcpy(skb->data, data, len);
-        skb->len = len; skb->next = NULL;
-        if (!early6_data[sock_id]) {
-            early6_data[sock_id] = skb;
-        } else {
-            sk_buff_t *t = early6_data[sock_id];
-            while (t->next) t = t->next;
-            t->next = skb;
-        }
-        return;
-    }
-    if (data && len > 0) {
-        sk_buff_t *skb = alloc_skb(len);
-        if (skb) {
-            memcpy(skb->data, data, len);
-            skb->len = len;
-            skb_queue_tail(&inet->receive_queue, skb);
-        }
-    } else if (len == 0) {
-        if (inet->parent) inet->parent->state = SS_UNCONNECTED;
-    }
-    if (inet->parent) socket_wake(inet->parent);
+static uint32_t sum_bytes(uint32_t sum, const uint8_t *p, size_t n) {
+  while (n > 1) { sum += get16(p); p += 2; n -= 2; }
+  if (n) sum += (uint16_t)p[0] << 8;
+  return sum;
+}
+static uint16_t udp6_checksum(const uint8_t src[16], const uint8_t dst[16],
+                              const uint8_t *segment, size_t length) {
+  uint32_t sum = sum_bytes(0, src, 16);
+  sum = sum_bytes(sum, dst, 16);
+  sum += (uint32_t)(length >> 16) + (uint16_t)length + IPPROTO_UDP;
+  sum = sum_bytes(sum, segment, length);
+  while (sum >> 16) sum = (sum & 0xffff) + (sum >> 16);
+  return (uint16_t)~sum;
 }
 
-static void tcp6_event_cb(int sock_id) {
-    if (sock_id < 0 || sock_id >= MAX_TCP_SOCKETS) return;
-    inet6_sock_t *inet = tcp6_map[sock_id];
-    if (inet && inet->parent) socket_wake(inet->parent);
+static bool port_used(uint16_t port, const struct inet6_sock *skip) {
+  for (int i = 0; i < UDP6_MAX; i++)
+    if (&udp6[i] != skip && udp6[i].used && udp6[i].bound &&
+        udp6[i].local_port == port)
+      return true;
+  return false;
 }
 
-/* ── UDP bridge callback ─────────────────────────────────────────────────── */
-static void udp6_data_cb(uint16_t local_port, const uint8_t *data,
-                         uint16_t len, uint32_t src_ip, uint16_t src_port) {
-    /* src_ip is unused for IPv6 — we stored src in skb via udp6_handle_packet */
-    (void)src_ip;
-    inet6_sock_t *inet = NULL;
-    for (int i = 0; i < MAX_UDP6_SOCKETS; i++) {
-        if (udp6_map[i] && udp6_map[i]->udp_port == local_port) {
-            inet = udp6_map[i]; break;
-        }
+static int bind_port(struct inet6_sock *s, uint16_t port) {
+  spinlock_acquire(&udp6_lock);
+  if (port && port_used(port, s)) {
+    spinlock_release(&udp6_lock);
+    return -98;
+  }
+  if (!port) {
+    for (uint32_t n = 0; n < 16384; n++) {
+      uint16_t candidate = next_port++;
+      if (next_port < 49152) next_port = 49152;
+      if (!port_used(candidate, s)) { port = candidate; break; }
     }
-    if (!inet) return;
-    sk_buff_t *skb = alloc_skb(len);
-    if (skb) {
-        memcpy(skb->data, data, len);
-        skb->len = len;
-        skb->src_port = src_port;
-        /* src IPv6 address stored separately — not in skb for now */
-        skb_queue_tail(&inet->receive_queue, skb);
-    }
-    if (inet->parent) socket_wake(inet->parent);
+  }
+  if (!port) { spinlock_release(&udp6_lock); return -98; }
+  s->local_port = port; s->bound = true;
+  spinlock_release(&udp6_lock);
+  return 0;
 }
 
-/* ── Public bridge: called from ipv6.c ──────────────────────────────────── */
-void tcp6_handle_packet(const uint8_t *payload, uint16_t len,
-                        const uint8_t *src6, const uint8_t *dst6) {
-    /* tcp_handle_packet uses 32-bit IPs for socket matching.
-     * For IPv6 we need to match by port only (src6 stored in inet6_sock).
-     * We pass 0 for IPs and rely on port matching + state machine.       */
-    (void)dst6;
-    /* Pack last 4 bytes of src6 as a pseudo src_ip for port matching */
-    uint32_t pseudo_src = ((uint32_t)src6[12] << 24) | ((uint32_t)src6[13] << 16)
-                        | ((uint32_t)src6[14] << 8)  |  (uint32_t)src6[15];
-    tcp_handle_packet(payload, len, pseudo_src, 0);
+static void fill_addr(struct sockaddr_in6 *out, const uint8_t addr[16],
+                      uint16_t port, uint32_t scope) {
+  memset(out, 0, sizeof(*out));
+  out->sin6_family = AF_INET6;
+  out->sin6_port = (uint16_t)(port << 8 | port >> 8);
+  memcpy(out->sin6_addr.s6_addr, addr, 16);
+  out->sin6_scope_id = scope;
 }
 
-void udp6_handle_packet(const uint8_t *payload, uint16_t len,
-                        const uint8_t *src6, const uint8_t *dst6) {
-    (void)dst6;
-    if (len < 8) return;
-    uint16_t src_port = (uint16_t)((payload[0] << 8) | payload[1]);
-    uint16_t dst_port = (uint16_t)((payload[2] << 8) | payload[3]);
-    uint16_t udp_len  = (uint16_t)((payload[4] << 8) | payload[5]);
-    if (len < udp_len) return;
-    const uint8_t *data = payload + 8;
-    uint16_t data_len = udp_len - 8;
-    /* Find a registered udp6 socket */
-    for (int i = 0; i < MAX_UDP6_SOCKETS; i++) {
-        if (udp6_map[i] && udp6_map[i]->udp_port == dst_port) {
-            inet6_sock_t *inet = udp6_map[i];
-            sk_buff_t *skb = alloc_skb(data_len);
-            if (skb) {
-                memcpy(skb->data, data, data_len);
-                skb->len = data_len;
-                skb->src_port = src_port;
-                /* Store src IPv6 in src_ip as best-effort (last 4 bytes) */
-                skb->src_ip = ((uint32_t)src6[12] << 24) | ((uint32_t)src6[13] << 16)
-                            | ((uint32_t)src6[14] << 8)  |  (uint32_t)src6[15];
-                skb_queue_tail(&inet->receive_queue, skb);
-            }
-            if (inet->parent) socket_wake(inet->parent);
-            return;
-        }
-    }
-    /* Also try the kernel UDP table (for DNS etc.) */
-    udp_handle_packet(payload, len, 0, 0);
+static int inet6_bind(socket_t *sock, struct sockaddr *addr, int len) {
+  if (len < (int)sizeof(struct sockaddr_in6) || addr->sa_family != AF_INET6)
+    return -22;
+  struct inet6_sock *s = sock->sk;
+  struct sockaddr_in6 *a = (struct sockaddr_in6 *)addr;
+  if (s->tcp)
+    return tcp_bind6(s->tcp, a->sin6_addr.s6_addr,
+                     get16((uint8_t *)&a->sin6_port));
+  memcpy(s->local, a->sin6_addr.s6_addr, 16);
+  s->scope_id = a->sin6_scope_id;
+  return bind_port(s, get16((uint8_t *)&a->sin6_port));
 }
 
-/* ── sock_ops_t forward declarations ─────────────────────────────────────── */
-static sock_ops_t inet6_stream_ops;
-static sock_ops_t inet6_dgram_ops;
-
-/* ── inet6_create ────────────────────────────────────────────────────────── */
-int inet6_create(socket_t *sock, int protocol) {
-    (void)protocol;
-    inet6_sock_t *inet = kmalloc(sizeof(inet6_sock_t));
-    if (!inet) return -12;
-    memset(inet, 0, sizeof(inet6_sock_t));
-    inet->parent = sock;
-    inet->tcp_sock_id = -1;
-    spinlock_init(&inet->receive_queue.lock);
-    sock->sk = inet;
-    if (sock->type == SOCK_STREAM)
-        sock->ops = &inet6_stream_ops;
-    else if (sock->type == SOCK_DGRAM)
-        sock->ops = &inet6_dgram_ops;
-    else { kfree(inet); return -93; }
-    return 0;
+static int inet6_connect(socket_t *sock, struct sockaddr *addr, int len) {
+  if (len < (int)sizeof(struct sockaddr_in6) || addr->sa_family != AF_INET6)
+    return -22;
+  struct inet6_sock *s = sock->sk;
+  struct sockaddr_in6 *a = (struct sockaddr_in6 *)addr;
+  if (s->tcp) {
+    int r = tcp_active_open6(s->tcp, a->sin6_addr.s6_addr,
+                             get16((uint8_t *)&a->sin6_port));
+    if (r < 0) return r;
+    memcpy(s->remote, a->sin6_addr.s6_addr, 16);
+    s->remote_port = get16((uint8_t *)&a->sin6_port);
+    s->scope_id = a->sin6_scope_id;
+    if (socket_is_nonblocking(sock)) { sock->state = SS_CONNECTING; return -115; }
+    uint64_t deadline = lapic_timer_get_ticks() + 10000;
+    while (s->tcp->state == TCP_SYN_SENT &&
+           lapic_timer_get_ticks() < deadline)
+      sched_yield();
+    if (s->tcp->state != TCP_ESTABLISHED)
+      return s->tcp->error ? -s->tcp->error : -110;
+    s->connected = true; sock->state = SS_CONNECTED; return 0;
+  }
+  if (!s->bound) { int r = bind_port(s, 0); if (r < 0) return r; }
+  memcpy(s->remote, a->sin6_addr.s6_addr, 16);
+  s->remote_port = get16((uint8_t *)&a->sin6_port);
+  s->scope_id = a->sin6_scope_id;
+  s->connected = true; sock->state = SS_CONNECTED;
+  return 0;
 }
 
-/* ── inet6_bind ──────────────────────────────────────────────────────────── */
-int inet6_bind(socket_t *sock, struct sockaddr *addr, int addrlen) {
-    if (addrlen < (int)sizeof(struct sockaddr_in6)) return -22;
-    struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)addr;
-    inet6_sock_t *inet = (inet6_sock_t *)sock->sk;
-    memcpy(&inet->local_addr, sin6, sizeof(struct sockaddr_in6));
-
-    if (sock->type == SOCK_DGRAM) {
-        uint16_t port = ntohs(sin6->sin6_port);
-        int bp = udp_bind(port, udp6_data_cb);
-        if (bp < 0) return -98;
-        inet->udp_port = (uint16_t)bp;
-        inet->local_addr.sin6_port = htons(inet->udp_port);
-        for (int i = 0; i < MAX_UDP6_SOCKETS; i++) {
-            if (!udp6_map[i]) { udp6_map[i] = inet; break; }
-        }
-    }
-    return 0;
+static ssize_t inet6_sendto(socket_t *sock, const void *buf, size_t len,
+                            int flags, struct sockaddr *dest, int addrlen) {
+  (void)flags;
+  struct inet6_sock *s = sock->sk;
+  if (s->tcp) return tcp_send(s->tcp, buf, len);
+  const uint8_t *address; uint16_t port;
+  if (dest && addrlen >= (int)sizeof(struct sockaddr_in6)) {
+    struct sockaddr_in6 *a = (struct sockaddr_in6 *)dest;
+    if (a->sin6_family != AF_INET6) return -97;
+    address = a->sin6_addr.s6_addr;
+    port = get16((uint8_t *)&a->sin6_port);
+  } else if (s->connected) { address = s->remote; port = s->remote_port; }
+  else return -107;
+  if (len > UDP6_PAYLOAD) return -90;
+  if (!s->bound) { int r = bind_port(s, 0); if (r < 0) return r; }
+  const struct ipv6_config *cfg = ipv6_get_config();
+  const uint8_t *source = !zero_addr(s->local) ? s->local :
+      (address[0] == 0xfe ? cfg->link_local : cfg->global);
+  uint8_t segment[8 + UDP6_PAYLOAD];
+  put16(segment, s->local_port); put16(segment + 2, port);
+  put16(segment + 4, (uint16_t)(len + 8)); segment[6] = segment[7] = 0;
+  memcpy(segment + 8, buf, len);
+  uint16_t csum = udp6_checksum(source, address, segment, len + 8);
+  if (!csum) csum = 0xffff;
+  put16(segment + 6, csum);
+  int r = ipv6_send_raw(address, IPPROTO_UDP, segment, len + 8);
+  return r < 0 ? r : (ssize_t)len;
 }
 
-/* ── inet6_connect ───────────────────────────────────────────────────────── */
-int inet6_connect(socket_t *sock, struct sockaddr *addr, int addrlen) {
-    if (addrlen < (int)sizeof(struct sockaddr_in6)) return -22;
-    struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)addr;
-    inet6_sock_t *inet = (inet6_sock_t *)sock->sk;
-    memcpy(&inet->remote_addr, sin6, sizeof(struct sockaddr_in6));
-
-    uint16_t port = ntohs(sin6->sin6_port);
-    const uint8_t *a = sin6->sin6_addr.s6_addr;
-
-    if (sock->type == SOCK_DGRAM) {
-        if (inet->udp_port == 0) {
-            int bp = udp_bind(0, udp6_data_cb);
-            if (bp < 0) return -98;
-            inet->udp_port = (uint16_t)bp;
-            inet->local_addr.sin6_port = htons(inet->udp_port);
-            for (int i = 0; i < MAX_UDP6_SOCKETS; i++) {
-                if (!udp6_map[i]) { udp6_map[i] = inet; break; }
-            }
-        }
-        sock->state = SS_CONNECTED;
-        return 0;
-    }
-
-    /* Check for IPv4-mapped IPv6 address: ::ffff:x.x.x.x
-     * Bytes 0-9 = 0x00, bytes 10-11 = 0xFF, bytes 12-15 = IPv4 addr */
-    static const uint8_t v4mapped_pfx[12] = {
-        0,0,0,0, 0,0,0,0, 0,0,0xFF,0xFF
-    };
-    uint32_t ipv4_addr = 0;
-    bool is_v4mapped = (memcmp(a, v4mapped_pfx, 12) == 0);
-    if (is_v4mapped) {
-        ipv4_addr = ((uint32_t)a[12] << 24) | ((uint32_t)a[13] << 16)
-                  | ((uint32_t)a[14] << 8)  |  (uint32_t)a[15];
-    }
-
-    /* Reject unroutable addresses: all-zeros, loopback (::1), or
-     * pure IPv6 global addresses we can't route via our IPv4-only stack. */
-    bool all_zero = true;
-    for (int i = 0; i < 16; i++) { if (a[i]) { all_zero = false; break; } }
-    if (all_zero) return -101; /* ENETUNREACH */
-
-    /* ::1 loopback — map to 127.0.0.1 */
-    static const uint8_t loopback6[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1};
-    if (memcmp(a, loopback6, 16) == 0) {
-        ipv4_addr = 0x7F000001;
-        is_v4mapped = true;
-    }
-
-    /* For pure IPv6 global addresses (not mapped), we don't have IPv6
-     * routing — return ENETUNREACH so the caller falls back to IPv4. */
-    if (!is_v4mapped) {
-        return -101; /* ENETUNREACH */
-    }
-
-    sock->state = SS_CONNECTING;
-    int sock_id = tcp_connect(ipv4_addr, port, tcp6_data_cb);
-    if (sock_id < 0) { sock->state = SS_UNCONNECTED; return sock_id; }
-
-    inet->tcp_sock_id = sock_id;
-    tcp6_map[sock_id] = inet;
-    tcp_set_callbacks(sock_id, tcp6_data_cb, tcp6_event_cb);
-    net_poll();
-    sock->state = SS_CONNECTED;
-    return 0;
+static ssize_t inet6_send(socket_t *s, const void *b, size_t n, int f) {
+  return inet6_sendto(s, b, n, f, NULL, 0);
 }
 
-/* ── inet6_listen / accept ───────────────────────────────────────────────── */
-int inet6_listen(socket_t *sock, int backlog) {
-    (void)backlog;
-    inet6_sock_t *inet = (inet6_sock_t *)sock->sk;
-    uint16_t port = ntohs(inet->local_addr.sin6_port);
-    if (!port) return -22;
-    int sid = tcp_listen(port, tcp6_data_cb);
-    if (sid < 0) return -98;
-    inet->tcp_sock_id = sid;
-    tcp6_map[sid] = inet;
-    tcp_set_callbacks(sid, tcp6_data_cb, tcp6_event_cb);
-    sock->state = SS_LISTENING;
-    return 0;
-}
-
-int inet6_accept(socket_t *sock, socket_t **newsock) {
-    inet6_sock_t *inet = (inet6_sock_t *)sock->sk;
-    if (inet->tcp_sock_id < 0) return -22;
-    int new_id = -1;
-    while ((new_id = tcp_accept(inet->tcp_sock_id)) < 0) {
-        if (sock->flags & SOCK_NONBLOCK) return -11;
-        net_poll(); sched_yield();
-    }
-    socket_t *ns = socket_create(AF_INET6, SOCK_STREAM, 0);
-    if (!ns) return -12;
-    inet6_sock_t *ni = (inet6_sock_t *)ns->sk;
-    ni->tcp_sock_id = new_id;
-    tcp6_map[new_id] = ni;
-    tcp_set_callbacks(new_id, tcp6_data_cb, tcp6_event_cb);
-    while (early6_data[new_id]) {
-        sk_buff_t *skb = early6_data[new_id];
-        early6_data[new_id] = skb->next; skb->next = NULL;
-        skb_queue_tail(&ni->receive_queue, skb);
-    }
-    ns->state = SS_CONNECTED;
-    *newsock = ns;
-    return 0;
-}
-
-/* ── poll ────────────────────────────────────────────────────────────────── */
-int inet6_poll(socket_t *sock, int events) {
-    inet6_sock_t *inet = (inet6_sock_t *)sock->sk;
-    int rev = 0;
-    if ((events & POLLIN) && !skb_queue_empty(&inet->receive_queue))
-        rev |= POLLIN;
-    if (events & POLLOUT) {
-        if (sock->type == SOCK_DGRAM || sock->state == SS_CONNECTED)
-            rev |= POLLOUT;
-    }
-    return rev;
-}
-
-/* ── send / recv ─────────────────────────────────────────────────────────── */
-ssize_t inet6_send(socket_t *sock, const void *buf, size_t len, int flags) {
-    (void)flags;
-    inet6_sock_t *inet = (inet6_sock_t *)sock->sk;
-    if (inet->tcp_sock_id < 0) return -107;
-    size_t sent = 0;
-    const uint8_t *p = (const uint8_t *)buf;
-    while (sent < len) {
-        uint16_t chunk = (len - sent) > 1400 ? 1400 : (uint16_t)(len - sent);
-        int r = tcp_send(inet->tcp_sock_id, p + sent, chunk);
-        if (r < 0) return sent > 0 ? (ssize_t)sent : -104;
-        sent += r;
-    }
-    return (ssize_t)sent;
-}
-
-ssize_t inet6_recv(socket_t *sock, void *buf, size_t len, int flags) {
-    return inet6_recvfrom(sock, buf, len, flags, NULL, NULL);
-}
-
-ssize_t inet6_sendto(socket_t *sock, const void *buf, size_t len, int flags,
-                     struct sockaddr *dest_addr, int addrlen) {
-    (void)flags;
-    inet6_sock_t *inet = (inet6_sock_t *)sock->sk;
-    if (sock->type == SOCK_STREAM) return inet6_send(sock, buf, len, flags);
-    if (!dest_addr || addrlen < (int)sizeof(struct sockaddr_in6)) return -22;
-    struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)dest_addr;
-    uint16_t dst_port = ntohs(sin6->sin6_port);
-
-    if (inet->udp_port == 0) {
-        int bp = udp_bind(0, udp6_data_cb);
-        if (bp < 0) return -105;
-        inet->udp_port = (uint16_t)bp;
-        for (int i = 0; i < MAX_UDP6_SOCKETS; i++) {
-            if (!udp6_map[i]) { udp6_map[i] = inet; break; }
-        }
-    }
-
-    /* Build UDP packet and send via IPv6 */
-    uint16_t udp_len = 8 + (uint16_t)len;
-    uint8_t pkt[udp_len];
-    pkt[0] = inet->udp_port >> 8; pkt[1] = inet->udp_port & 0xFF;
-    pkt[2] = dst_port >> 8;       pkt[3] = dst_port & 0xFF;
-    pkt[4] = udp_len >> 8;        pkt[5] = udp_len & 0xFF;
-    pkt[6] = 0; pkt[7] = 0; /* checksum — optional for IPv6 UDP (RFC 6935) */
-    memcpy(pkt + 8, buf, len);
-
-    /* Compute checksum */
-    const uint8_t *src6 = ipv6_get_global() ? ipv6_get_global() : ipv6_get_linklocal();
-    uint16_t csum = ipv6_checksum(src6, sin6->sin6_addr.s6_addr,
-                                  IPV6_PROTO_UDP, udp_len, pkt);
-    pkt[6] = csum >> 8; pkt[7] = csum & 0xFF;
-
-    int r = ipv6_send_packet(sin6->sin6_addr.s6_addr, IPV6_PROTO_UDP, pkt, udp_len);
-    return r < 0 ? r : (ssize_t)len;
-}
-
-ssize_t inet6_recvfrom(socket_t *sock, void *buf, size_t len, int flags,
-                       struct sockaddr *src_addr, int *addrlen) {
-    inet6_sock_t *inet = (inet6_sock_t *)sock->sk;
-    bool nonblock = (sock->flags & SOCK_NONBLOCK) || (flags & MSG_DONTWAIT);
-
-    while (skb_queue_empty(&inet->receive_queue)) {
-        if (sock->type == SOCK_STREAM && sock->state != SS_CONNECTED
-            && sock->state != SS_CONNECTING) return 0;
-        if (nonblock) return -11;
-        net_poll(); sched_yield();
-    }
-
-    sk_buff_t *skb = skb_dequeue(&inet->receive_queue);
-    if (!skb) return 0;
-
-    size_t copy = len < skb->len ? len : skb->len;
-    memcpy(buf, skb->data, copy);
-
-    if (src_addr && addrlen && *addrlen >= (int)sizeof(struct sockaddr_in6)) {
-        struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)src_addr;
-        memset(s6, 0, sizeof(*s6));
-        s6->sin6_family = AF_INET6;
-        s6->sin6_port   = htons(skb->src_port);
-        /* Best-effort: fill last 4 bytes from src_ip */
-        s6->sin6_addr.s6_addr[15] = skb->src_ip & 0xFF;
-        s6->sin6_addr.s6_addr[14] = (skb->src_ip >> 8) & 0xFF;
-        s6->sin6_addr.s6_addr[13] = (skb->src_ip >> 16) & 0xFF;
-        s6->sin6_addr.s6_addr[12] = (skb->src_ip >> 24) & 0xFF;
+static ssize_t inet6_recvfrom(socket_t *sock, void *buf, size_t len, int flags,
+                              struct sockaddr *src, int *addrlen) {
+  struct inet6_sock *s = sock->sk;
+  if (s->tcp)
+    return tcp_recv(s->tcp, buf, len,
+                    socket_is_nonblocking(sock) || (flags & MSG_DONTWAIT));
+  for (;;) {
+    spinlock_acquire(&udp6_lock);
+    if (s->tail != s->head) {
+      struct udp6_packet *p = &s->queue[s->tail++ % UDP6_QUEUE];
+      size_t copy = p->length < len ? p->length : len;
+      memcpy(buf, p->data, copy);
+      if (src && addrlen && *addrlen >= (int)sizeof(struct sockaddr_in6)) {
+        fill_addr((struct sockaddr_in6 *)src, p->source, p->port, s->scope_id);
         *addrlen = sizeof(struct sockaddr_in6);
+      }
+      spinlock_release(&udp6_lock);
+      return copy;
     }
-
-    if (copy < skb->len && sock->type == SOCK_STREAM) {
-        size_t rem = skb->len - copy;
-        sk_buff_t *rest = alloc_skb(rem);
-        if (rest) {
-            memcpy(rest->data, skb->data + copy, rem);
-            rest->len = rem;
-            skb_queue_tail(&inet->receive_queue, rest);
-        }
-    }
-    free_skb(skb);
-    return (ssize_t)copy;
+    spinlock_release(&udp6_lock);
+    if (socket_is_nonblocking(sock) || (flags & MSG_DONTWAIT)) return -11;
+    struct thread *t = sched_get_current();
+    wait_queue_entry_t e = {.thread = t};
+    wait_queue_add(&s->wait, &e); t->state = THREAD_BLOCKED;
+    sched_yield(); wait_queue_remove(&s->wait, &e);
+  }
 }
 
-/* ── getsockname / getpeername ───────────────────────────────────────────── */
-int inet6_getsockname(socket_t *sock, struct sockaddr *addr, int *addrlen) {
-    if (!addr || !addrlen) return -22;
-    inet6_sock_t *inet = (inet6_sock_t *)sock->sk;
-    int copy = *addrlen < (int)sizeof(struct sockaddr_in6)
-             ? *addrlen : (int)sizeof(struct sockaddr_in6);
-    struct sockaddr_in6 out;
-    memcpy(&out, &inet->local_addr, sizeof(out));
-    if (sock->type == SOCK_DGRAM)
-        out.sin6_port = htons(inet->udp_port);
-    /* Fill address from our link-local if not set */
-    if (ipv6_addr_is_zero(out.sin6_addr.s6_addr)) {
-        const uint8_t *ll = ipv6_get_linklocal();
-        if (ll) memcpy(out.sin6_addr.s6_addr, ll, 16);
-    }
-    memcpy(addr, &out, copy);
-    *addrlen = sizeof(struct sockaddr_in6);
-    return 0;
+static ssize_t inet6_recv(socket_t *s, void *b, size_t n, int f) {
+  return inet6_recvfrom(s, b, n, f, NULL, NULL);
 }
 
-int inet6_getpeername(socket_t *sock, struct sockaddr *addr, int *addrlen) {
-    if (!addr || !addrlen) return -22;
-    if (sock->state != SS_CONNECTED) return -107;
-    inet6_sock_t *inet = (inet6_sock_t *)sock->sk;
-    int copy = *addrlen < (int)sizeof(struct sockaddr_in6)
-             ? *addrlen : (int)sizeof(struct sockaddr_in6);
-    memcpy(addr, &inet->remote_addr, copy);
-    *addrlen = sizeof(struct sockaddr_in6);
-    return 0;
+static int inet6_name(socket_t *sock, struct sockaddr *addr, int *len,
+                      bool peer) {
+  if (!addr || !len || *len < (int)sizeof(struct sockaddr_in6)) return -22;
+  struct inet6_sock *s = sock->sk;
+  if (s->tcp) {
+    if (peer && !s->tcp->remote_port) return -107;
+    const uint8_t *a = peer ? s->tcp->remote_ip6 : s->tcp->local_ip6;
+    fill_addr((struct sockaddr_in6 *)addr, a,
+              peer ? s->tcp->remote_port : s->tcp->local_port, s->scope_id);
+    *len = sizeof(struct sockaddr_in6); return 0;
+  }
+  if (peer && !s->connected) return -107;
+  const uint8_t *a = peer ? s->remote : s->local;
+  fill_addr((struct sockaddr_in6 *)addr, a,
+            peer ? s->remote_port : s->local_port, s->scope_id);
+  *len = sizeof(struct sockaddr_in6); return 0;
+}
+static int inet6_getsockname(socket_t *s, struct sockaddr *a, int *l) {
+  return inet6_name(s, a, l, false);
+}
+static int inet6_getpeername(socket_t *s, struct sockaddr *a, int *l) {
+  return inet6_name(s, a, l, true);
+}
+static int inet6_poll(socket_t *sock, int events) {
+  struct inet6_sock *s = sock->sk; int r = 0;
+  if (s->tcp) {
+    s->tcp->vfs_node = sock->node;
+    if (s->tcp->state == TCP_LISTEN) {
+      if ((events & POLLIN) && s->tcp->accept_head != s->tcp->accept_tail)
+        r |= POLLIN;
+      return r;
+    }
+    if (s->tcp->state == TCP_ESTABLISHED || s->tcp->state == TCP_CLOSE_WAIT) {
+      if ((events & POLLIN) && tcp_readable(s->tcp)) r |= POLLIN;
+      if ((events & POLLOUT) && tcp_writable(s->tcp)) r |= POLLOUT;
+    } else if (s->tcp->state == TCP_RESET) r |= POLLERR | POLLHUP;
+    else if (s->tcp->state != TCP_SYN_SENT) r |= POLLHUP;
+    if (s->tcp->error) r |= POLLERR;
+    return r;
+  }
+  if ((events & POLLIN) && s->head != s->tail) r |= POLLIN;
+  if (events & POLLOUT) r |= POLLOUT;
+  return r;
+}
+static void inet6_destroy(socket_t *sock) {
+  struct inet6_sock *s = sock->sk;
+  if (!s) return;
+  if (s->tcp) { tcp_close(s->tcp); tcp_free(s->tcp); s->tcp = NULL; }
+  if (s->heap_allocated) kfree(s);
+  else { spinlock_acquire(&udp6_lock); memset(s, 0, sizeof(*s));
+         spinlock_release(&udp6_lock); }
+  sock->sk = NULL;
 }
 
-/* ── destroy ─────────────────────────────────────────────────────────────── */
-void inet6_destroy(socket_t *sock) {
-    inet6_sock_t *inet = (inet6_sock_t *)sock->sk;
-    if (!inet) return;
-
-    if (inet->tcp_sock_id >= 0 && inet->tcp_sock_id < MAX_TCP_SOCKETS) {
-        while (early6_data[inet->tcp_sock_id]) {
-            sk_buff_t *skb = early6_data[inet->tcp_sock_id];
-            early6_data[inet->tcp_sock_id] = skb->next;
-            free_skb(skb);
-        }
-        tcp6_map[inet->tcp_sock_id] = NULL;
-        tcp_close(inet->tcp_sock_id);
-        inet->tcp_sock_id = -1;
-    }
-    if (inet->udp_port > 0) {
-        for (int i = 0; i < MAX_UDP6_SOCKETS; i++) {
-            if (udp6_map[i] == inet) { udp6_map[i] = NULL; break; }
-        }
-        udp_unbind(inet->udp_port);
-        inet->udp_port = 0;
-    }
-    sk_buff_t *skb;
-    while ((skb = skb_dequeue(&inet->receive_queue)) != NULL) free_skb(skb);
-    kfree(inet);
-    sock->sk = NULL;
+static int inet6_listen(socket_t *sock, int backlog) {
+  struct inet6_sock *s = sock->sk;
+  if (!s->tcp) return -95;
+  int r = tcp_listen(s->tcp, backlog);
+  if (!r) sock->state = SS_LISTENING;
+  return r;
 }
 
-/* ── ops tables ──────────────────────────────────────────────────────────── */
-static sock_ops_t inet6_stream_ops = {
-    .bind        = inet6_bind,
-    .connect     = inet6_connect,
-    .send        = inet6_send,
-    .recv        = inet6_recv,
-    .listen      = inet6_listen,
-    .accept      = inet6_accept,
-    .sendto      = inet6_sendto,
-    .recvfrom    = inet6_recvfrom,
-    .poll        = inet6_poll,
-    .getsockname = inet6_getsockname,
-    .getpeername = inet6_getpeername,
-    .destroy     = inet6_destroy,
+static int inet6_accept(socket_t *sock, socket_t **out) {
+  struct inet6_sock *s = sock->sk;
+  if (!s->tcp || !out) return -22;
+  struct tcp_tcb *child = tcp_accept(s->tcp, socket_is_nonblocking(sock));
+  if (!child) return socket_is_nonblocking(sock) ? -11 : -4;
+  socket_t *ns = socket_create(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
+  if (!ns) { tcp_free(child); return -12; }
+  struct inet6_sock *n = ns->sk;
+  tcp_free(n->tcp); n->tcp = child; child->wait_queue = &n->wait;
+  memcpy(n->remote, child->remote_ip6, 16); n->remote_port = child->remote_port;
+  n->connected = true; ns->state = SS_CONNECTED; *out = ns; return 0;
+}
+
+static int inet6_shutdown(socket_t *sock, int how) {
+  struct inet6_sock *s = sock->sk;
+  if (s->tcp && (how == SHUT_WR || how == SHUT_RDWR)) return tcp_close(s->tcp);
+  return 0;
+}
+
+static ssize_t inet6_sendmsg(socket_t *sock, struct msghdr *msg, int flags) {
+  if (!msg || !msg->msg_iov || !msg->msg_iovlen) return -22;
+  struct inet6_sock *s = sock->sk;
+  if (s->tcp) {
+    ssize_t total = 0;
+    for (size_t i = 0; i < msg->msg_iovlen; i++) {
+      ssize_t r = inet6_send(sock, msg->msg_iov[i].iov_base,
+                             msg->msg_iov[i].iov_len, flags);
+      if (r < 0) return total ? total : r;
+      total += r;
+    }
+    return total;
+  }
+  uint8_t data[UDP6_PAYLOAD]; size_t total = 0;
+  for (size_t i = 0; i < msg->msg_iovlen; i++) {
+    if (total + msg->msg_iov[i].iov_len > sizeof(data)) return -90;
+    memcpy(data + total, msg->msg_iov[i].iov_base, msg->msg_iov[i].iov_len);
+    total += msg->msg_iov[i].iov_len;
+  }
+  return inet6_sendto(sock, data, total, flags,
+                      (struct sockaddr *)msg->msg_name, msg->msg_namelen);
+}
+
+static ssize_t inet6_recvmsg(socket_t *sock, struct msghdr *msg, int flags) {
+  if (!msg || !msg->msg_iov || !msg->msg_iovlen) return -22;
+  int addrlen = (int)msg->msg_namelen;
+  ssize_t r = inet6_recvfrom(sock, msg->msg_iov[0].iov_base,
+                             msg->msg_iov[0].iov_len, flags,
+                             (struct sockaddr *)msg->msg_name,
+                             msg->msg_name ? &addrlen : NULL);
+  if (r >= 0 && msg->msg_name) msg->msg_namelen = (uint32_t)addrlen;
+  return r;
+}
+
+static int inet6_getsockopt(socket_t *sock, int level, int option,
+                            void *value, int *length) {
+  if (!value || !length || *length < (int)sizeof(int)) return -22;
+  int result;
+  if (level == SOL_SOCKET && option == SO_ERROR) {
+    struct inet6_sock *s = sock->sk;
+    result = s->tcp ? s->tcp->error : sock->error;
+    if (s->tcp) s->tcp->error = 0; else sock->error = 0;
+  } else if (level == SOL_SOCKET && option == SO_TYPE) result = sock->type;
+  else if (level == SOL_SOCKET && option == SO_DOMAIN) result = AF_INET6;
+  else if (level == SOL_SOCKET && option == SO_PROTOCOL) result = sock->protocol;
+  else if (level == SOL_IPV6 && option == IPV6_V6ONLY) result = 1;
+  else return -92;
+  *(int *)value = result; *length = sizeof(int); return 0;
+}
+
+static int inet6_setsockopt(socket_t *sock, int level, int option,
+                            const void *value, int length) {
+  (void)sock;
+  if (!value || length < (int)sizeof(int)) return -22;
+  if (level == SOL_IPV6 && option == IPV6_V6ONLY)
+    return *(const int *)value == 1 ? 0 : -92;
+  if (level == SOL_SOCKET && (option == SO_REUSEADDR ||
+      option == SO_KEEPALIVE || option == SO_RCVTIMEO ||
+      option == SO_SNDTIMEO)) return 0;
+  if (level == SOL_TCP && option == TCP_NODELAY) return 0;
+  return -92;
+}
+
+static sock_ops_t inet6_ops = {
+  .bind=inet6_bind, .connect=inet6_connect, .listen=inet6_listen,
+  .accept=inet6_accept,
+  .send=inet6_send, .recv=inet6_recv,
+  .sendto=inet6_sendto, .recvfrom=inet6_recvfrom,
+  .sendmsg=inet6_sendmsg, .recvmsg=inet6_recvmsg,
+  .poll=inet6_poll, .getsockname=inet6_getsockname,
+  .getpeername=inet6_getpeername, .destroy=inet6_destroy,
+  .shutdown=inet6_shutdown,
+  .getsockopt=inet6_getsockopt, .setsockopt=inet6_setsockopt,
 };
 
-static sock_ops_t inet6_dgram_ops = {
-    .bind        = inet6_bind,
-    .connect     = inet6_connect,
-    .send        = inet6_send,
-    .recv        = inet6_recv,
-    .sendto      = inet6_sendto,
-    .recvfrom    = inet6_recvfrom,
-    .poll        = inet6_poll,
-    .getsockname = inet6_getsockname,
-    .getpeername = inet6_getpeername,
-    .destroy     = inet6_destroy,
-};
+static int inet6_create(socket_t *sock, int protocol) {
+  if (sock->type == SOCK_STREAM) {
+    if (protocol && protocol != IPPROTO_TCP) return -93;
+    struct inet6_sock *s = kmalloc(sizeof(*s));
+    if (!s) return -12;
+    memset(s, 0, sizeof(*s)); s->used = true; s->heap_allocated = true;
+    s->parent = sock; wait_queue_init(&s->wait); s->tcp = tcp_alloc();
+    if (!s->tcp) { kfree(s); return -105; }
+    s->tcp->address_family = 6; s->tcp->wait_queue = &s->wait;
+    sock->sk = s; sock->ops = &inet6_ops; return 0;
+  }
+  if (sock->type != SOCK_DGRAM || (protocol && protocol != IPPROTO_UDP))
+    return -93;
+  spinlock_acquire(&udp6_lock);
+  struct inet6_sock *s = NULL;
+  for (int i = 0; i < UDP6_MAX; i++) if (!udp6[i].used) {
+    s = &udp6[i]; memset(s, 0, sizeof(*s)); s->used = true; break;
+  }
+  spinlock_release(&udp6_lock);
+  if (!s) return -105;
+  s->parent = sock; wait_queue_init(&s->wait);
+  sock->sk = s; sock->ops = &inet6_ops; return 0;
+}
 
-/* ── init ────────────────────────────────────────────────────────────────── */
+static void udp6_input(const uint8_t src[16], const uint8_t dst[16],
+                       const uint8_t *segment, size_t length) {
+  if (length < 8 || get16(segment + 4) < 8 || get16(segment + 4) > length ||
+      get16(segment + 4) - 8 > UDP6_PAYLOAD ||
+      !get16(segment + 6) || udp6_checksum(src, dst, segment,
+                                           get16(segment + 4)) != 0)
+    return;
+  uint16_t sport = get16(segment), dport = get16(segment + 2);
+  spinlock_acquire(&udp6_lock);
+  for (int i = 0; i < UDP6_MAX; i++) {
+    struct inet6_sock *s = &udp6[i];
+    if (!s->used || !s->bound || s->local_port != dport ||
+        (!zero_addr(s->local) && !same_addr(s->local, dst)) ||
+        (s->connected && (!same_addr(s->remote, src) || s->remote_port != sport)))
+      continue;
+    if (s->head - s->tail >= UDP6_QUEUE) break;
+    struct udp6_packet *p = &s->queue[s->head++ % UDP6_QUEUE];
+    memcpy(p->source, src, 16); p->port = sport;
+    p->length = (uint16_t)(get16(segment + 4) - 8);
+    memcpy(p->data, segment + 8, p->length);
+    wait_queue_wake_all(&s->wait);
+    if (s->parent && s->parent->node)
+      epoll_notify_event(s->parent->node, EPOLLIN);
+    break;
+  }
+  spinlock_release(&udp6_lock);
+}
+
+static net_family_t family = {.family=AF_INET6, .create=inet6_create};
 void af_inet6_init(void) {
-    memset(tcp6_map,    0, sizeof(tcp6_map));
-    memset(early6_data, 0, sizeof(early6_data));
-    memset(udp6_map,    0, sizeof(udp6_map));
-
-    inet6_family_ops.family = AF_INET6;
-    inet6_family_ops.create = inet6_create;
-    inet6_family_ops.next   = NULL;
-
-    sock_register_family(&inet6_family_ops);
-    klog_puts("[OK] AF_INET6 protocol family registered\n");
+  spinlock_init(&udp6_lock); memset(udp6, 0, sizeof(udp6));
+  sock_register_family(&family); ipv6_set_udp_handler(udp6_input);
+  ipv6_set_tcp_handler(tcp_input_ipv6);
 }
