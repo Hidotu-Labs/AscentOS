@@ -14,6 +14,14 @@ fi
 ln -sf libxcb-ewmh.so "${SYSROOT}/usr/lib/libxcb-ewmh.so.2" 2>/dev/null || true
 ln -sf libxcb-icccm.so "${SYSROOT}/usr/lib/libxcb-icccm.so.4" 2>/dev/null || true
 
+# Alpine’s libgcc development symlink is absolute. When the cross-linker
+# follows it from the host, /usr/lib refers to the host system and can pull in
+# a glibc libgcc_s instead of Alpine’s musl build. A relative link works both
+# in this staged rootfs and after it is installed as the guest root.
+if [ -e "${SYSROOT}/usr/lib/libgcc_s.so.1" ]; then
+    ln -sfn libgcc_s.so.1 "${SYSROOT}/usr/lib/libgcc_s.so"
+fi
+
 # Generate Wayland protocol headers
 XDG_SHELL_XML="${SYSROOT}/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml"
 if [ ! -f "$XDG_SHELL_XML" ]; then

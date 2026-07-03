@@ -11,7 +11,6 @@ sleep 1
 
 # Native DRM cursor path is enabled; do not force userspace cursor.
 # export WLR_NO_HARDWARE_CURSORS=1
-export WESTON_FORCE_RENDERER=1
 export XCURSOR_THEME=Adwaita
 export XCURSOR_SIZE=24
 export XCURSOR_PATH=/usr/share/icons/
@@ -41,9 +40,31 @@ export WLR_DRM_NO_ATOMIC=1
 LOG=/tmp/weston-debug.log
 echo "[startw] starting weston at $(date)" > $LOG
 
+renderer=pixman
+case "${ASCENT_RENDERER:-llvmpipe}" in
+    llvmpipe|gl)
+        # Force GBM through its software-device creation path. Do not use
+        # MESA_LOADER_DRIVER_OVERRIDE=kms_swrast: that takes GBM's hardware
+        # path and calls a callback which software KMS does not provide.
+        export GBM_ALWAYS_SOFTWARE=1
+        export LIBGL_ALWAYS_SOFTWARE=1
+        export GALLIUM_DRIVER=llvmpipe
+        ;;
+    pixman)
+        renderer=pixman
+        unset GBM_ALWAYS_SOFTWARE LIBGL_ALWAYS_SOFTWARE GALLIUM_DRIVER
+        ;;
+    *)
+        echo "[startw] unknown ASCENT_RENDERER='$ASCENT_RENDERER'" >> $LOG
+        echo "[startw] expected 'llvmpipe' or 'pixman'" >> $LOG
+        exit 2
+        ;;
+esac
+
+echo "[startw] renderer: ${ASCENT_RENDERER:-llvmpipe}" >> $LOG
+
 weston \
     --backend=drm-backend.so \
-    --renderer=pixman \
+    --renderer="$renderer" \
     -c /etc/weston.ini \
-    --log=$LOG \
-    2>&1 | tee -a $LOG
+    --log=$LOG

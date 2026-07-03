@@ -101,6 +101,23 @@ int ext2_write_bgdt(ext2_mount_t *mnt) {
 
 // ── Inode I/O ────────────────────────────────────────────────────────────────
 
+/*
+ * EXT2_INODE_STACK_BUF_MAX — largest block size we will hold on the stack.
+ *
+ * ext2 block sizes are 1024 << s_log_block_size: 1 KB, 2 KB, 4 KB, or 8 KB.
+ * 4096 is by far the most common.  Holding 4 KB on the kernel stack is fine
+ * (kernel thread stacks are 8 KB; the inode I/O functions are not deeply
+ * nested).  8 KB would consume the entire stack, so we heap-allocate for that
+ * rare case.
+ *
+ * Both ext2_read_inode and ext2_write_inode use this same pattern:
+ *   - Declare a 4096-byte stack array.
+ *   - If block_size <= 4096: point block_buf at the stack array, no alloc.
+ *   - Else:                  kmalloc as before, set heap_used flag.
+ *   - On every return path:  kfree only when heap_used is true.
+ */
+#define EXT2_INODE_STACK_BUF_MAX 4096
+
 int ext2_read_inode(ext2_mount_t *mnt, uint32_t inode_num,
                     ext2_inode_t *out) {
   if (inode_num == 0)
@@ -117,18 +134,20 @@ int ext2_read_inode(ext2_mount_t *mnt, uint32_t inode_num,
   uint32_t block_offset         = byte_offset_in_table / mnt->block_size;
   uint32_t offset_within_block  = byte_offset_in_table % mnt->block_size;
 
-  uint8_t *block_buf = kmalloc(mnt->block_size);
+  uint8_t stack_buf[EXT2_INODE_STACK_BUF_MAX];
+  bool heap_used = (mnt->block_size > EXT2_INODE_STACK_BUF_MAX);
+  uint8_t *block_buf = heap_used ? kmalloc(mnt->block_size) : stack_buf;
   if (!block_buf)
     return -1;
 
   int err = ext2_read_block(mnt, inode_table_block + block_offset, block_buf);
   if (err) {
-    kfree(block_buf);
+    if (heap_used) kfree(block_buf);
     return -1;
   }
 
   memcpy(out, block_buf + offset_within_block, sizeof(ext2_inode_t));
-  kfree(block_buf);
+  if (heap_used) kfree(block_buf);
   return 0;
 }
 
@@ -148,19 +167,21 @@ int ext2_write_inode(ext2_mount_t *mnt, uint32_t inode_num,
   uint32_t block_offset         = byte_offset_in_table / mnt->block_size;
   uint32_t offset_within_block  = byte_offset_in_table % mnt->block_size;
 
-  uint8_t *block_buf = kmalloc(mnt->block_size);
+  uint8_t stack_buf[EXT2_INODE_STACK_BUF_MAX];
+  bool heap_used = (mnt->block_size > EXT2_INODE_STACK_BUF_MAX);
+  uint8_t *block_buf = heap_used ? kmalloc(mnt->block_size) : stack_buf;
   if (!block_buf)
     return -1;
 
   int err = ext2_read_block(mnt, inode_table_block + block_offset, block_buf);
   if (err) {
-    kfree(block_buf);
+    if (heap_used) kfree(block_buf);
     return -1;
   }
 
   memcpy(block_buf + offset_within_block, inode, sizeof(ext2_inode_t));
   err = ext2_write_block(mnt, inode_table_block + block_offset, block_buf);
-  kfree(block_buf);
+  if (heap_used) kfree(block_buf);
   return err;
 }
 

@@ -11,7 +11,8 @@ typedef int64_t ssize_t;
 #define UDP_PORT_EPHEMERAL_MAX 65535
 #define UDP_MAX_SOCKETS        64
 #define UDP_RX_QUEUE_DEPTH     32
-#define UDP_PAYLOAD_MAX        65507
+/* IPv4 fragmentation is not implemented: 1500 - 20 (IPv4) - 8 (UDP). */
+#define UDP_PAYLOAD_MAX        1472
 
 struct udp_socket;
 

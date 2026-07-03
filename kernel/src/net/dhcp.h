@@ -18,7 +18,6 @@ struct dhcp_lease {
 
 void dhcp_set_static_fallback(uint32_t address, uint32_t netmask,
                               uint32_t gateway);
-
 bool dhcp_start(void);
 
 const struct dhcp_lease *dhcp_current_lease(void);

@@ -1353,6 +1353,26 @@ static uint32_t drm_read(struct vfs_node *node, uint32_t offset,
  * instead, so each open() gets its own vfs_node_t with device→drm_file.
  */
 
+static struct dirent *drm_dri_readdir(vfs_node_t *dir, uint32_t index) {
+  static struct dirent entry;
+
+  memset(&entry, 0, sizeof(entry));
+  if (index == 0) {
+    strcpy(entry.name, ".");
+    entry.ino = dir->inode;
+  } else if (index == 1) {
+    strcpy(entry.name, "..");
+    entry.ino = dir->inode;
+  } else if (index == 2) {
+    strcpy(entry.name, "card0");
+    entry.ino = (226U << 8) | 0U;
+  } else {
+    return NULL;
+  }
+
+  return &entry;
+}
+
 static vfs_node_t *drm_dri_finddir(vfs_node_t *dir, char *name) {
   (void)dir;
   if (strcmp(name, "card0") != 0)
@@ -1437,7 +1457,9 @@ void drm_register_vfs(void) {
   if (!dri_dir)
     return;
 
-  /* Override finddir on the dri directory to return per-client clones */
+  /* Keep enumeration consistent with the dynamic per-open node factory.
+   * Mesa scans /dev/dri before opening a preferred KMS/render device. */
+  dri_dir->readdir = drm_dri_readdir;
   dri_dir->finddir = drm_dri_finddir;
 
   klog_puts("[DRM] Registered /dev/dri/card0 (per-client mode)\n");

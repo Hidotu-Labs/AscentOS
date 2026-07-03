@@ -124,7 +124,7 @@ static struct tcp_tcb *alloc_locked(void)
 
             tcbs[i].used = true;
             tcbs[i].mss = 1460;
-            tcbs[i].rcv_wnd = 4096;
+            tcbs[i].rcv_wnd = TCP_DEFAULT_WINDOW;
 
             return &tcbs[i];
         }
@@ -211,7 +211,8 @@ static int emit_at(
     segment[12] = 0x50;
     segment[13] = flags;
 
-    p16(segment + 14, t->rcv_wnd ? t->rcv_wnd : 4096);
+    p16(segment + 14,
+        t->rcv_wnd ? t->rcv_wnd : TCP_DEFAULT_WINDOW);
 
     if (len)
         memcpy(segment + 20, data, len);
@@ -815,8 +816,8 @@ static struct tcp_tcb *test(enum tcp_state state)
     t->snd_nxt = 101;
     t->rcv_nxt = 500;
 
-    t->snd_wnd = 4096;
-    t->rcv_wnd = 4096;
+    t->snd_wnd = TCP_DEFAULT_WINDOW;
+    t->rcv_wnd = TCP_DEFAULT_WINDOW;
     t->mss = 1460;
 
     return t;

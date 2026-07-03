@@ -47,6 +47,14 @@ static bool zero_addr(const uint8_t a[16]) {
 static bool same_addr(const uint8_t a[16], const uint8_t b[16]) {
   return memcmp(a, b, 16) == 0;
 }
+static bool link_local_addr(const uint8_t a[16]) {
+  return a[0] == 0xfe && (a[1] & 0xc0) == 0x80;
+}
+static bool loopback_addr(const uint8_t a[16]) {
+  static const uint8_t loopback[16] = {
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+  return same_addr(a, loopback);
+}
 static uint32_t sum_bytes(uint32_t sum, const uint8_t *p, size_t n) {
   while (n > 1) { sum += get16(p); p += 2; n -= 2; }
   if (n) sum += (uint16_t)p[0] << 8;
@@ -132,6 +140,11 @@ static int inet6_connect(socket_t *sock, struct sockaddr *addr, int len) {
       return s->tcp->error ? -s->tcp->error : -110;
     s->connected = true; sock->state = SS_CONNECTED; return 0;
   }
+  const struct ipv6_config *cfg = ipv6_get_config();
+  const uint8_t *destination = a->sin6_addr.s6_addr;
+  if (!cfg->global_valid && !link_local_addr(destination) &&
+      !loopback_addr(destination) && destination[0] != 0xff)
+    return -101;
   if (!s->bound) { int r = bind_port(s, 0); if (r < 0) return r; }
   memcpy(s->remote, a->sin6_addr.s6_addr, 16);
   s->remote_port = get16((uint8_t *)&a->sin6_port);

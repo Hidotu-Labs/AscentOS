@@ -3,6 +3,7 @@
 #include "console/klog.h"
 #include "lib/string.h"
 #include "lock/spinlock.h"
+#include "mm/heap.h"
 #include "net/core.h"
 #include "net/ipv4.h"
 #include "sched/sched.h"
@@ -155,8 +156,9 @@ ssize_t udp_sendto(struct udp_socket *s, const void *buf, size_t len,
     const struct ipv4_config *cfg = ipv4_get_config();
     if (!cfg || !cfg->address) return -101;
 
-    uint8_t seg[UDP_HDR_LEN + UDP_PAYLOAD_MAX];
     uint16_t udp_len = (uint16_t)(UDP_HDR_LEN + len);
+    uint8_t *seg = kmalloc(udp_len);
+    if (!seg) return -12;
     put16_be(seg + 0, s->local_port);
     put16_be(seg + 2, dst_port);
     put16_be(seg + 4, udp_len);
@@ -167,6 +169,7 @@ ssize_t udp_sendto(struct udp_socket *s, const void *buf, size_t len,
     put16_be(seg + 6, csum);
 
     int r = ipv4_send_raw(dst_ip, 17, seg, udp_len);
+    kfree(seg);
     return r < 0 ? (ssize_t)r : (ssize_t)len;
 }
 
