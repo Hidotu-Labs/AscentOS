@@ -761,7 +761,7 @@ bool process_exec_argv(const char **argv) {
 
   // Initialize File Descriptors for the main thread
   struct thread *current_thread = sched_get_current();
-  if (current_thread) {
+  if (current_thread && sched_ensure_files(current_thread)) {
     // 0 = stdin, 1 = stdout, 2 = stderr.
     // First try to get the console from the device registry (preferred)
     vfs_node_t *console_node = fb_lookup_device("console");

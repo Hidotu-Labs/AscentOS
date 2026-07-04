@@ -3,6 +3,7 @@
 
 #include "../lock/spinlock.h"
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 // Forward declaration
@@ -38,9 +39,17 @@ struct cpu_info {
   uint32_t runqueue_bitmap;     // Bit set if runqueues[i] is NOT empty
   spinlock_t queue_lock;
   uint32_t runnable_count;      // Number of READY or RUNNING threads
+  uint64_t timer_deadline_ms;   // Absolute deadline currently armed in LAPIC
+  uint64_t quantum_deadline_ms; // End of the current scheduler quantum
   uint64_t scratch_rsp;
   uint64_t reserved;
+  uint64_t sigreturn_frame;
 } __attribute__((aligned(64)));
+
+_Static_assert(offsetof(struct cpu_info, scratch_rsp) == 368,
+               "update syscall_entry.asm scratch_rsp offset");
+_Static_assert(offsetof(struct cpu_info, sigreturn_frame) == 384,
+               "update syscall_entry.asm sigreturn offset");
 
 // Public API
 

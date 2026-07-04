@@ -4,6 +4,18 @@
 #include <linux/futex.h>
 #include <poll.h>
 #include <sched.h>
+#include <signal.h>
+#include <time.h>
+#include <sys/resource.h>
+#include <sys/timerfd.h>
+#include <sys/eventfd.h>
+#include <sys/inotify.h>
+#include <sys/statfs.h>
+#include <sys/utsname.h>
+#include <sys/sysinfo.h>
+#include <sys/random.h>
+#include <sys/prctl.h>
+#include <sys/sendfile.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -358,6 +370,319 @@ void test_socket_stress() {
   DEBUGLOG("SOCKET stress test PASSED\n");
 }
 
+// Full Unix stream: bind/listen/connect/accept/send/recv/close lifecycle.
+// Uses fork so the parent acts as server and the child as client, then
+// both sides close their FDs and the parent reaps the child.
+void test_unix_stream_stress() {
+  DEBUGLOG("Starting UNIX STREAM connect/accept/send/recv stress test...\n");
+
+  for (int i = 0; i < NUM_ITERATIONS; i++) {
+    // Build a unique abstract socket name per iteration.
+    struct sockaddr_un srv_addr;
+    memset(&srv_addr, 0, sizeof(srv_addr));
+    srv_addr.sun_family = AF_UNIX;
+    snprintf(srv_addr.sun_path + 1, sizeof(srv_addr.sun_path) - 1,
+             "stream_stress_%d", i);
+    socklen_t addrlen = sizeof(srv_addr);
+
+    int srv = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (srv < 0) {
+      fprintf(stderr, "unix_stream socket() failed at iter %d: %s\n", i,
+              strerror(errno));
+      exit(1);
+    }
+    if (bind(srv, (struct sockaddr *)&srv_addr, addrlen) < 0) {
+      fprintf(stderr, "unix_stream bind() failed at iter %d: %s\n", i,
+              strerror(errno));
+      close(srv);
+      exit(1);
+    }
+    if (listen(srv, 1) < 0) {
+      fprintf(stderr, "unix_stream listen() failed at iter %d: %s\n", i,
+              strerror(errno));
+      close(srv);
+      exit(1);
+    }
+
+    pid_t pid = fork();
+    if (pid == 0) {
+      // Child: connect, send, recv, close
+      close(srv);
+      int cli = socket(AF_UNIX, SOCK_STREAM, 0);
+      if (cli < 0)
+        exit(1);
+      if (connect(cli, (struct sockaddr *)&srv_addr, addrlen) < 0)
+        exit(1);
+      const char msg[] = "ping";
+      if (send(cli, msg, sizeof(msg), 0) < 0)
+        exit(1);
+      char buf[8];
+      if (recv(cli, buf, sizeof(buf), 0) < 0)
+        exit(1);
+      close(cli);
+      exit(0);
+    } else if (pid > 0) {
+      // Parent: accept, recv, send, close
+      int cli = accept(srv, NULL, NULL);
+      if (cli >= 0) {
+        char buf[8];
+        recv(cli, buf, sizeof(buf), 0);
+        const char reply[] = "pong";
+        send(cli, reply, sizeof(reply), 0);
+        close(cli);
+      }
+      close(srv);
+      int status;
+      waitpid(pid, &status, 0);
+    } else {
+      close(srv);
+    }
+
+    if (i % 25 == 0)
+      DEBUGLOG("UNIX STREAM iteration %d complete\n", i);
+  }
+  DEBUGLOG("UNIX STREAM connect/accept/send/recv stress test PASSED\n");
+}
+
+// socketpair + send/recv + close — no forking required, exercises the paired
+// socket send/recv path and verifies both FDs are released cleanly.
+void test_socketpair_stress() {
+  DEBUGLOG("Starting SOCKETPAIR send/recv stress test...\n");
+
+  for (int i = 0; i < NUM_ITERATIONS * 3; i++) {
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) < 0) {
+      fprintf(stderr, "socketpair() failed at iter %d: %s\n", i,
+              strerror(errno));
+      exit(1);
+    }
+
+    const char msg[] = "hello";
+    char buf[8];
+
+    if (send(sv[0], msg, sizeof(msg), 0) < 0) {
+      close(sv[0]);
+      close(sv[1]);
+      fprintf(stderr, "socketpair send() failed at iter %d: %s\n", i,
+              strerror(errno));
+      exit(1);
+    }
+    if (recv(sv[1], buf, sizeof(buf), 0) < 0) {
+      close(sv[0]);
+      close(sv[1]);
+      fprintf(stderr, "socketpair recv() failed at iter %d: %s\n", i,
+              strerror(errno));
+      exit(1);
+    }
+
+    close(sv[0]);
+    close(sv[1]);
+
+    if (i % 100 == 0)
+      DEBUGLOG("SOCKETPAIR iteration %d complete\n", i);
+  }
+  DEBUGLOG("SOCKETPAIR send/recv stress test PASSED\n");
+}
+
+// Unix DGRAM: bind server, sendto from unbound client, recvfrom on server.
+// Exercises the datagram path and verifies no FD or buffer leaks.
+void test_unix_dgram_stress() {
+  DEBUGLOG("Starting UNIX DGRAM sendto/recvfrom stress test...\n");
+
+  for (int i = 0; i < NUM_ITERATIONS * 2; i++) {
+    struct sockaddr_un srv_addr;
+    memset(&srv_addr, 0, sizeof(srv_addr));
+    srv_addr.sun_family = AF_UNIX;
+    snprintf(srv_addr.sun_path + 1, sizeof(srv_addr.sun_path) - 1,
+             "dgram_stress_%d", i);
+    socklen_t addrlen = sizeof(srv_addr);
+
+    int srv = socket(AF_UNIX, SOCK_DGRAM, 0);
+    if (srv < 0) {
+      fprintf(stderr, "unix_dgram server socket() failed at iter %d: %s\n", i,
+              strerror(errno));
+      exit(1);
+    }
+    if (bind(srv, (struct sockaddr *)&srv_addr, addrlen) < 0) {
+      fprintf(stderr, "unix_dgram bind() failed at iter %d: %s\n", i,
+              strerror(errno));
+      close(srv);
+      exit(1);
+    }
+
+    int cli = socket(AF_UNIX, SOCK_DGRAM, 0);
+    if (cli < 0) {
+      close(srv);
+      fprintf(stderr, "unix_dgram client socket() failed at iter %d: %s\n", i,
+              strerror(errno));
+      exit(1);
+    }
+
+    const char msg[] = "dgram";
+    ssize_t sent =
+        sendto(cli, msg, sizeof(msg), 0, (struct sockaddr *)&srv_addr, addrlen);
+    if (sent < 0) {
+      // Some kernels may not support unbound dgram send; tolerate ENOTCONN
+      if (errno != ENOTCONN && errno != EOPNOTSUPP) {
+        close(cli);
+        close(srv);
+        fprintf(stderr, "unix_dgram sendto() failed at iter %d: %s\n", i,
+                strerror(errno));
+        exit(1);
+      }
+    } else {
+      char buf[16];
+      struct sockaddr_un from;
+      socklen_t fromlen = sizeof(from);
+      recvfrom(srv, buf, sizeof(buf), MSG_DONTWAIT,
+               (struct sockaddr *)&from, &fromlen);
+    }
+
+    close(cli);
+    close(srv);
+
+    if (i % 50 == 0)
+      DEBUGLOG("UNIX DGRAM iteration %d complete\n", i);
+  }
+  DEBUGLOG("UNIX DGRAM sendto/recvfrom stress test PASSED\n");
+}
+
+// getsockopt / setsockopt / getsockname / getpeername lifecycle stress.
+// Verifies that socket option paths don't leak resources.
+void test_socket_opts_stress() {
+  DEBUGLOG("Starting SOCKET opts/name stress test...\n");
+
+  for (int i = 0; i < NUM_ITERATIONS * 3; i++) {
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) < 0) {
+      fprintf(stderr, "socket_opts socketpair() failed at iter %d: %s\n", i,
+              strerror(errno));
+      exit(1);
+    }
+
+    // setsockopt: SO_SNDBUF / SO_RCVBUF
+    int bufsize = 65536;
+    setsockopt(sv[0], SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
+    setsockopt(sv[0], SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
+
+    // getsockopt: SO_TYPE, SO_SNDBUF, SO_RCVBUF, SO_ERROR
+    int val = 0;
+    socklen_t optlen = sizeof(val);
+    getsockopt(sv[0], SOL_SOCKET, SO_TYPE, &val, &optlen);
+    optlen = sizeof(val);
+    getsockopt(sv[0], SOL_SOCKET, SO_SNDBUF, &val, &optlen);
+    optlen = sizeof(val);
+    getsockopt(sv[0], SOL_SOCKET, SO_RCVBUF, &val, &optlen);
+    optlen = sizeof(val);
+    getsockopt(sv[0], SOL_SOCKET, SO_ERROR, &val, &optlen);
+
+    // getsockname / getpeername
+    struct sockaddr_un name;
+    socklen_t namelen = sizeof(name);
+    getsockname(sv[0], (struct sockaddr *)&name, &namelen);
+    namelen = sizeof(name);
+    getpeername(sv[0], (struct sockaddr *)&name, &namelen);
+
+    close(sv[0]);
+    close(sv[1]);
+
+    if (i % 100 == 0)
+      DEBUGLOG("SOCKET OPTS iteration %d complete\n", i);
+  }
+  DEBUGLOG("SOCKET opts/name stress test PASSED\n");
+}
+
+// shutdown() on both ends of a socketpair; verifies the shutdown path
+// doesn't leak the socket or its send/receive buffers.
+void test_shutdown_stress() {
+  DEBUGLOG("Starting SHUTDOWN stress test...\n");
+
+  for (int i = 0; i < NUM_ITERATIONS * 3; i++) {
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) < 0) {
+      fprintf(stderr, "shutdown socketpair() failed at iter %d: %s\n", i,
+              strerror(errno));
+      exit(1);
+    }
+
+    // Write a byte so there's data in flight when we shut down
+    send(sv[0], "x", 1, 0);
+
+    // SHUT_WR on the writer side, SHUT_RD on the reader side
+    shutdown(sv[0], SHUT_WR);
+    shutdown(sv[1], SHUT_RD);
+
+    // Drain any buffered data
+    char buf[4];
+    recv(sv[1], buf, sizeof(buf), MSG_DONTWAIT);
+
+    // SHUT_RDWR on both
+    shutdown(sv[0], SHUT_RDWR);
+    shutdown(sv[1], SHUT_RDWR);
+
+    close(sv[0]);
+    close(sv[1]);
+
+    if (i % 100 == 0)
+      DEBUGLOG("SHUTDOWN iteration %d complete\n", i);
+  }
+  DEBUGLOG("SHUTDOWN stress test PASSED\n");
+}
+
+// accept4() with SOCK_CLOEXEC / SOCK_NONBLOCK flags stress.
+// Confirms the extended accept path allocates and frees FDs cleanly.
+void test_accept4_stress() {
+  DEBUGLOG("Starting ACCEPT4 stress test...\n");
+
+  for (int i = 0; i < NUM_ITERATIONS; i++) {
+    struct sockaddr_un srv_addr;
+    memset(&srv_addr, 0, sizeof(srv_addr));
+    srv_addr.sun_family = AF_UNIX;
+    snprintf(srv_addr.sun_path + 1, sizeof(srv_addr.sun_path) - 1,
+             "accept4_stress_%d", i);
+    socklen_t addrlen = sizeof(srv_addr);
+
+    int srv = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (srv < 0) {
+      fprintf(stderr, "accept4 socket() failed at iter %d: %s\n", i,
+              strerror(errno));
+      exit(1);
+    }
+    if (bind(srv, (struct sockaddr *)&srv_addr, addrlen) < 0 ||
+        listen(srv, 1) < 0) {
+      close(srv);
+      fprintf(stderr, "accept4 bind/listen failed at iter %d: %s\n", i,
+              strerror(errno));
+      exit(1);
+    }
+
+    pid_t pid = fork();
+    if (pid == 0) {
+      close(srv);
+      int cli = socket(AF_UNIX, SOCK_STREAM, 0);
+      if (cli >= 0) {
+        connect(cli, (struct sockaddr *)&srv_addr, addrlen);
+        close(cli);
+      }
+      exit(0);
+    } else if (pid > 0) {
+      // accept4 with SOCK_CLOEXEC | SOCK_NONBLOCK
+      int cli = accept4(srv, NULL, NULL, SOCK_CLOEXEC | SOCK_NONBLOCK);
+      if (cli >= 0)
+        close(cli);
+      close(srv);
+      int status;
+      waitpid(pid, &status, 0);
+    } else {
+      close(srv);
+    }
+
+    if (i % 25 == 0)
+      DEBUGLOG("ACCEPT4 iteration %d complete\n", i);
+  }
+  DEBUGLOG("ACCEPT4 stress test PASSED\n");
+}
+
 void test_fork_stress() {
   DEBUGLOG("Starting FORK/EXIT stress test...\n");
   for (int i = 0; i < NUM_ITERATIONS; i++) {
@@ -560,6 +885,879 @@ void test_exec_stress() {
   DEBUGLOG("EXECVE stress test PASSED\n");
 }
 
+
+// ---- dup / dup2 / fcntl stress ----
+void test_dup_fcntl_stress() {
+  DEBUGLOG("Starting DUP/DUP2/FCNTL stress test...\n");
+  for (int i = 0; i < NUM_ITERATIONS * 5; i++) {
+    int fds[2];
+    if (pipe(fds) < 0) { fprintf(stderr, "dup pipe: %s\n", strerror(errno)); exit(1); }
+
+    // dup
+    int d = dup(fds[0]);
+    if (d < 0) { fprintf(stderr, "dup failed: %s\n", strerror(errno)); exit(1); }
+
+    // dup2 to a specific slot
+    int slot = d + 1;
+    int d2 = dup2(fds[1], slot);
+    if (d2 < 0) { close(d); close(fds[0]); close(fds[1]); i++; continue; }
+
+    // fcntl F_GETFL / F_SETFL O_NONBLOCK
+    int fl = fcntl(fds[0], F_GETFL, 0);
+    fcntl(fds[0], F_SETFL, fl | O_NONBLOCK);
+    fcntl(fds[0], F_SETFL, fl & ~O_NONBLOCK);
+
+    // fcntl F_GETFD / F_SETFD FD_CLOEXEC
+    int fd_flags = fcntl(d, F_GETFD, 0);
+    fcntl(d, F_SETFD, fd_flags | FD_CLOEXEC);
+    fcntl(d, F_SETFD, fd_flags & ~FD_CLOEXEC);
+
+    // fcntl F_DUPFD
+    int d3 = fcntl(fds[0], F_DUPFD, 0);
+    if (d3 >= 0) close(d3);
+
+    close(d); close(d2); close(fds[0]); close(fds[1]);
+    if (i % 100 == 0) DEBUGLOG("DUP/FCNTL iteration %d complete\n", i);
+  }
+  DEBUGLOG("DUP/DUP2/FCNTL stress test PASSED\n");
+}
+
+// ---- pread64 / pwrite64 stress ----
+void test_pread_pwrite_stress() {
+  DEBUGLOG("Starting PREAD64/PWRITE64 stress test...\n");
+  char path[] = "/tmp/preadwrite_stress.tmp";
+  char wbuf[512];
+  char rbuf[512];
+  memset(wbuf, 0x5A, sizeof(wbuf));
+
+  int fd = open(path, O_CREAT | O_RDWR | O_TRUNC, 0666);
+  if (fd < 0) { fprintf(stderr, "pread/pwrite open: %s\n", strerror(errno)); return; }
+
+  for (int i = 0; i < NUM_ITERATIONS * 4; i++) {
+    off_t off = (off_t)(i % 8) * sizeof(wbuf);
+    ssize_t w = pwrite(fd, wbuf, sizeof(wbuf), off);
+    if (w < 0) { fprintf(stderr, "pwrite64 failed: %s\n", strerror(errno)); break; }
+    ssize_t r = pread(fd, rbuf, sizeof(rbuf), off);
+    if (r < 0) { fprintf(stderr, "pread64 failed: %s\n", strerror(errno)); break; }
+    if (i % 100 == 0) DEBUGLOG("PREAD/PWRITE iteration %d complete\n", i);
+  }
+  close(fd);
+  unlink(path);
+  DEBUGLOG("PREAD64/PWRITE64 stress test PASSED\n");
+}
+
+// ---- writev stress ----
+void test_writev_stress() {
+  DEBUGLOG("Starting WRITEV stress test...\n");
+  int fds[2];
+  if (pipe(fds) < 0) { perror("writev pipe"); return; }
+
+  char a[32], b[32], c[32];
+  memset(a, 'A', sizeof(a)); memset(b, 'B', sizeof(b)); memset(c, 'C', sizeof(c));
+  struct iovec iov[3];
+  iov[0].iov_base = a; iov[0].iov_len = sizeof(a);
+  iov[1].iov_base = b; iov[1].iov_len = sizeof(b);
+  iov[2].iov_base = c; iov[2].iov_len = sizeof(c);
+
+  for (int i = 0; i < NUM_ITERATIONS * 5; i++) {
+    ssize_t w = writev(fds[1], iov, 3);
+    if (w < 0) { fprintf(stderr, "writev failed: %s\n", strerror(errno)); break; }
+    char drain[96];
+    read(fds[0], drain, (size_t)w);
+    if (i % 100 == 0) DEBUGLOG("WRITEV iteration %d complete\n", i);
+  }
+  close(fds[0]); close(fds[1]);
+  DEBUGLOG("WRITEV stress test PASSED\n");
+}
+
+// ---- sendfile stress ----
+void test_sendfile_stress() {
+  DEBUGLOG("Starting SENDFILE stress test...\n");
+  char src_path[] = "/tmp/sendfile_src.tmp";
+  char dst_path[] = "/tmp/sendfile_dst.tmp";
+  char data[1024];
+  memset(data, 0xCC, sizeof(data));
+
+  int src = open(src_path, O_CREAT | O_RDWR | O_TRUNC, 0666);
+  if (src < 0) { perror("sendfile src open"); return; }
+  write(src, data, sizeof(data));
+
+  int dst = open(dst_path, O_CREAT | O_RDWR | O_TRUNC, 0666);
+  if (dst < 0) { perror("sendfile dst open"); close(src); return; }
+
+  for (int i = 0; i < NUM_ITERATIONS * 3; i++) {
+    off_t off = 0;
+    lseek(dst, 0, SEEK_SET);
+    ssize_t sent = sendfile(dst, src, &off, sizeof(data));
+    if (sent < 0) { fprintf(stderr, "sendfile failed: %s\n", strerror(errno)); break; }
+    if (i % 75 == 0) DEBUGLOG("SENDFILE iteration %d complete\n", i);
+  }
+  close(src); close(dst);
+  unlink(src_path); unlink(dst_path);
+  DEBUGLOG("SENDFILE stress test PASSED\n");
+}
+
+// ---- ftruncate / fallocate / fsync / fstat stress ----
+void test_ftruncate_fsync_stress() {
+  DEBUGLOG("Starting FTRUNCATE/FALLOCATE/FSYNC/FSTAT stress test...\n");
+  char path[] = "/tmp/trunc_stress.tmp";
+
+  for (int i = 0; i < NUM_ITERATIONS * 2; i++) {
+    int fd = open(path, O_CREAT | O_RDWR | O_TRUNC, 0666);
+    if (fd < 0) { fprintf(stderr, "trunc open failed: %s\n", strerror(errno)); exit(1); }
+
+    // grow via write then truncate down
+    char buf[4096] = {0};
+    write(fd, buf, sizeof(buf));
+    ftruncate(fd, 1024);
+    ftruncate(fd, 0);
+
+    // fallocate to pre-reserve space
+    fallocate(fd, 0, 0, 2048);
+
+    // fsync (no-op on our kernel but exercises the syscall path)
+    fsync(fd);
+
+    // fstat
+    struct stat st;
+    fstat(fd, &st);
+
+    close(fd);
+    unlink(path);
+    if (i % 50 == 0) DEBUGLOG("FTRUNCATE/FSYNC iteration %d complete\n", i);
+  }
+  DEBUGLOG("FTRUNCATE/FALLOCATE/FSYNC/FSTAT stress test PASSED\n");
+}
+
+// ---- lseek stress (SEEK_SET / SEEK_CUR / SEEK_END) ----
+void test_lseek_stress() {
+  DEBUGLOG("Starting LSEEK stress test...\n");
+  int fd = open("/proc/meminfo", O_RDONLY);
+  if (fd < 0) { perror("lseek open"); return; }
+
+  char buf[16];
+  for (int i = 0; i < NUM_ITERATIONS * 10; i++) {
+    lseek(fd, 0, SEEK_SET);
+    read(fd, buf, sizeof(buf));
+    lseek(fd, -4, SEEK_CUR);
+    lseek(fd, 0, SEEK_END);
+    lseek(fd, 0, SEEK_SET);
+    if (i % 250 == 0) DEBUGLOG("LSEEK iteration %d complete\n", i);
+  }
+  close(fd);
+  DEBUGLOG("LSEEK stress test PASSED\n");
+}
+
+// ---- stat / lstat / fstat / newfstatat / statx stress ----
+void test_stat_variants_stress() {
+  DEBUGLOG("Starting STAT variants stress test...\n");
+  struct stat st;
+  struct statx stx;
+  char path[] = "/tmp/stat_stress.tmp";
+
+  int fd = open(path, O_CREAT | O_RDWR | O_TRUNC, 0666);
+  if (fd >= 0) { write(fd, "x", 1); }
+
+  for (int i = 0; i < NUM_ITERATIONS * 5; i++) {
+    stat(path, &st);
+    lstat(path, &st);
+    if (fd >= 0) fstat(fd, &st);
+    fstatat(AT_FDCWD, path, &st, 0);
+    fstatat(AT_FDCWD, path, &st, AT_SYMLINK_NOFOLLOW);
+    statx(AT_FDCWD, path, 0, STATX_BASIC_STATS, &stx);
+    if (i % 100 == 0) DEBUGLOG("STAT variants iteration %d complete\n", i);
+  }
+  if (fd >= 0) { close(fd); unlink(path); }
+  DEBUGLOG("STAT variants stress test PASSED\n");
+}
+
+// ---- getdents64 stress ----
+void test_getdents64_stress() {
+  DEBUGLOG("Starting GETDENTS64 stress test...\n");
+  for (int i = 0; i < NUM_ITERATIONS * 3; i++) {
+    int fd = open("/tmp", O_RDONLY | O_DIRECTORY);
+    if (fd < 0) fd = open("/", O_RDONLY | O_DIRECTORY);
+    if (fd < 0) continue;
+    char buf[1024];
+    long n;
+    while ((n = syscall(SYS_getdents64, fd, buf, sizeof(buf))) > 0) {}
+    close(fd);
+    if (i % 75 == 0) DEBUGLOG("GETDENTS64 iteration %d complete\n", i);
+  }
+  DEBUGLOG("GETDENTS64 stress test PASSED\n");
+}
+
+// ---- statfs / fstatfs stress ----
+void test_statfs_stress() {
+  DEBUGLOG("Starting STATFS/FSTATFS stress test...\n");
+  struct statfs sf;
+  for (int i = 0; i < NUM_ITERATIONS * 5; i++) {
+    statfs("/", &sf);
+    statfs("/tmp", &sf);
+    statfs("/proc", &sf);
+    int fd = open("/proc/meminfo", O_RDONLY);
+    if (fd >= 0) { fstatfs(fd, &sf); close(fd); }
+    if (i % 100 == 0) DEBUGLOG("STATFS iteration %d complete\n", i);
+  }
+  DEBUGLOG("STATFS/FSTATFS stress test PASSED\n");
+}
+
+// ---- mkdir / rmdir / rename / symlink / readlink / chmod / chown stress ----
+void test_fs_ops_stress() {
+  DEBUGLOG("Starting FS OPS (mkdir/rmdir/rename/symlink/readlink) stress test...\n");
+  char dir[64], dir2[64], sym[64], linkbuf[128];
+
+  for (int i = 0; i < NUM_ITERATIONS; i++) {
+    snprintf(dir,  sizeof(dir),  "/tmp/fsops_dir_%d",  i);
+    snprintf(dir2, sizeof(dir2), "/tmp/fsops_dir2_%d", i);
+    snprintf(sym,  sizeof(sym),  "/tmp/fsops_sym_%d",  i);
+
+    mkdir(dir, 0755);
+    rename(dir, dir2);
+    rmdir(dir2);
+
+    // create a file, symlink to it, readlink, unlink both
+    char file[64], file2[64];
+    snprintf(file,  sizeof(file),  "/tmp/fsops_f_%d.tmp", i);
+    snprintf(file2, sizeof(file2), "/tmp/fsops_f2_%d.tmp", i);
+    int fd = open(file, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (fd >= 0) {
+      write(fd, "data", 4);
+      close(fd);
+      chmod(file, 0600);
+      chown(file, 0, 0);
+      symlink(file, sym);
+      readlink(sym, linkbuf, sizeof(linkbuf) - 1);
+      // link (hard link)
+      link(file, file2);
+      unlink(file2);
+      unlink(sym);
+      unlink(file);
+    }
+    if (i % 25 == 0) DEBUGLOG("FS OPS iteration %d complete\n", i);
+  }
+  DEBUGLOG("FS OPS stress test PASSED\n");
+}
+
+// ---- access / faccessat stress ----
+void test_access_stress() {
+  DEBUGLOG("Starting ACCESS/FACCESSAT stress test...\n");
+  for (int i = 0; i < NUM_ITERATIONS * 5; i++) {
+    access("/proc/meminfo", R_OK);
+    access("/tmp",          F_OK | X_OK);
+    access("/nonexistent_access_test", F_OK);  // expected ENOENT
+    faccessat(AT_FDCWD, "/proc/meminfo", R_OK, 0);
+    faccessat(AT_FDCWD, "/nonexistent",  F_OK, 0);
+    if (i % 100 == 0) DEBUGLOG("ACCESS iteration %d complete\n", i);
+  }
+  DEBUGLOG("ACCESS/FACCESSAT stress test PASSED\n");
+}
+
+// ---- getcwd / chdir / fchdir stress ----
+void test_getcwd_chdir_stress() {
+  DEBUGLOG("Starting GETCWD/CHDIR/FCHDIR stress test...\n");
+  char cwd[256];
+  for (int i = 0; i < NUM_ITERATIONS * 3; i++) {
+    getcwd(cwd, sizeof(cwd));
+    chdir("/tmp");
+    chdir("/");
+    chdir("/proc");
+    int fd = open("/tmp", O_RDONLY | O_DIRECTORY);
+    if (fd >= 0) { fchdir(fd); close(fd); }
+    chdir("/");
+    if (i % 75 == 0) DEBUGLOG("GETCWD/CHDIR iteration %d complete\n", i);
+  }
+  DEBUGLOG("GETCWD/CHDIR/FCHDIR stress test PASSED\n");
+}
+
+// ---- mprotect stress (R/W/RX cycling) ----
+void test_mprotect_stress() {
+  DEBUGLOG("Starting MPROTECT stress test...\n");
+  size_t sz = 4 * 4096;
+  for (int i = 0; i < NUM_ITERATIONS * 2; i++) {
+    void *p = mmap(NULL, sz, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) { perror("mprotect mmap"); exit(1); }
+    memset(p, i & 0xFF, sz);
+    mprotect(p, sz, PROT_READ);
+    mprotect(p, sz, PROT_READ | PROT_WRITE);
+    mprotect(p, sz, PROT_NONE);
+    mprotect(p, sz, PROT_READ | PROT_WRITE | PROT_EXEC);
+    munmap(p, sz);
+    if (i % 50 == 0) DEBUGLOG("MPROTECT iteration %d complete\n", i);
+  }
+  DEBUGLOG("MPROTECT stress test PASSED\n");
+}
+
+// ---- mremap stress ----
+void test_mremap_stress() {
+  DEBUGLOG("Starting MREMAP stress test...\n");
+  for (int i = 0; i < NUM_ITERATIONS; i++) {
+    size_t old_sz = 2 * 4096;
+    void *p = mmap(NULL, old_sz, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) { perror("mremap mmap"); exit(1); }
+    memset(p, 0xAB, old_sz);
+
+    // Grow with MREMAP_MAYMOVE
+    size_t new_sz = 8 * 4096;
+    void *q = mremap(p, old_sz, new_sz, MREMAP_MAYMOVE);
+    if (q == MAP_FAILED) {
+      munmap(p, old_sz);
+      if (i % 25 == 0) DEBUGLOG("MREMAP iteration %d skipped\n", i);
+      continue;
+    }
+    memset((char *)q + old_sz, 0xCD, new_sz - old_sz);
+
+    // Shrink in place
+    void *r = mremap(q, new_sz, old_sz, 0);
+    if (r != MAP_FAILED) munmap(r, old_sz);
+    else munmap(q, new_sz);
+
+    if (i % 25 == 0) DEBUGLOG("MREMAP iteration %d complete\n", i);
+  }
+  DEBUGLOG("MREMAP stress test PASSED\n");
+}
+
+// ---- brk stress ----
+void test_brk_stress() {
+  DEBUGLOG("Starting BRK stress test...\n");
+  for (int i = 0; i < NUM_ITERATIONS * 2; i++) {
+    // brk(0) returns current break
+    void *base = sbrk(0);
+    if (base == (void *)-1) continue;
+
+    // extend by 4 pages
+    void *grown = sbrk(4 * 4096);
+    if (grown == (void *)-1) continue;
+
+    // touch the new memory
+    memset(grown, i & 0xFF, 4 * 4096);
+
+    // shrink back
+    sbrk(-(4 * 4096));
+
+    if (i % 50 == 0) DEBUGLOG("BRK iteration %d complete\n", i);
+  }
+  DEBUGLOG("BRK stress test PASSED\n");
+}
+
+// ---- madvise stress ----
+void test_madvise_stress() {
+  DEBUGLOG("Starting MADVISE stress test...\n");
+  size_t sz = 16 * 4096;
+  void *p = mmap(NULL, sz, PROT_READ | PROT_WRITE,
+                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (p == MAP_FAILED) { perror("madvise mmap"); return; }
+  memset(p, 0, sz);
+
+  for (int i = 0; i < NUM_ITERATIONS * 5; i++) {
+    madvise(p, sz, MADV_NORMAL);
+    madvise(p, sz, MADV_SEQUENTIAL);
+    madvise(p, sz, MADV_RANDOM);
+    madvise(p, sz, MADV_WILLNEED);
+    madvise(p, sz, MADV_DONTNEED);
+    if (i % 100 == 0) DEBUGLOG("MADVISE iteration %d complete\n", i);
+  }
+  munmap(p, sz);
+  DEBUGLOG("MADVISE stress test PASSED\n");
+}
+
+// ---- pipe2 stress ----
+void test_pipe2_stress() {
+  DEBUGLOG("Starting PIPE2 stress test...\n");
+  for (int i = 0; i < NUM_ITERATIONS * 5; i++) {
+    int fds[2];
+    if (pipe2(fds, O_NONBLOCK) < 0) {
+      fprintf(stderr, "pipe2 O_NONBLOCK failed: %s\n", strerror(errno)); exit(1);
+    }
+    write(fds[1], "X", 1);
+    char c;
+    read(fds[0], &c, 1);
+    close(fds[0]); close(fds[1]);
+
+    if (pipe2(fds, O_CLOEXEC) < 0) {
+      fprintf(stderr, "pipe2 O_CLOEXEC failed: %s\n", strerror(errno)); exit(1);
+    }
+    close(fds[0]); close(fds[1]);
+
+    if (i % 100 == 0) DEBUGLOG("PIPE2 iteration %d complete\n", i);
+  }
+  DEBUGLOG("PIPE2 stress test PASSED\n");
+}
+
+// ---- memfd_create + ftruncate + mmap stress ----
+void test_memfd_stress() {
+  DEBUGLOG("Starting MEMFD_CREATE stress test...\n");
+  for (int i = 0; i < NUM_ITERATIONS * 2; i++) {
+    int fd = memfd_create("stress_memfd", 0);
+    if (fd < 0) {
+      if (i == 0) DEBUGLOG("Skipping MEMFD (not implemented)\n");
+      break;
+    }
+    size_t sz = 4 * 4096;
+    ftruncate(fd, (off_t)sz);
+
+    void *p = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (p != MAP_FAILED) {
+      memset(p, i & 0xFF, sz);
+      munmap(p, sz);
+    }
+    close(fd);
+    if (i % 50 == 0) DEBUGLOG("MEMFD iteration %d complete\n", i);
+  }
+  DEBUGLOG("MEMFD_CREATE stress test PASSED\n");
+}
+
+// ---- timerfd lifecycle stress ----
+void test_timerfd_stress() {
+  DEBUGLOG("Starting TIMERFD stress test...\n");
+  for (int i = 0; i < NUM_ITERATIONS * 3; i++) {
+    int fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+    if (fd < 0) {
+      if (i == 0) DEBUGLOG("Skipping TIMERFD (not implemented)\n");
+      break;
+    }
+    struct itimerspec its = {0};
+    its.it_value.tv_sec  = 0;
+    its.it_value.tv_nsec = 1;  // 1 ns — fires essentially immediately
+    timerfd_settime(fd, 0, &its, NULL);
+
+    struct itimerspec cur = {0};
+    timerfd_gettime(fd, &cur);
+
+    // Disarm
+    struct itimerspec disarm = {0};
+    timerfd_settime(fd, 0, &disarm, NULL);
+
+    close(fd);
+    if (i % 75 == 0) DEBUGLOG("TIMERFD iteration %d complete\n", i);
+  }
+  DEBUGLOG("TIMERFD stress test PASSED\n");
+}
+
+// ---- eventfd stress ----
+void test_eventfd_stress() {
+  DEBUGLOG("Starting EVENTFD stress test...\n");
+  for (int i = 0; i < NUM_ITERATIONS * 5; i++) {
+    int fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (fd < 0) {
+      if (i == 0) DEBUGLOG("Skipping EVENTFD (not implemented)\n");
+      break;
+    }
+    uint64_t val = 42;
+    write(fd, &val, sizeof(val));
+    uint64_t rval = 0;
+    read(fd, &rval, sizeof(rval));
+    if (rval != 42) {
+      fprintf(stderr, "eventfd read mismatch: expected 42 got %lu\n", rval);
+    }
+    close(fd);
+    if (i % 100 == 0) DEBUGLOG("EVENTFD iteration %d complete\n", i);
+  }
+  DEBUGLOG("EVENTFD stress test PASSED\n");
+}
+
+// ---- inotify lifecycle stress ----
+void test_inotify_stress() {
+  DEBUGLOG("Starting INOTIFY stress test...\n");
+  for (int i = 0; i < NUM_ITERATIONS * 2; i++) {
+    int fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+    if (fd < 0) {
+      if (i == 0) DEBUGLOG("Skipping INOTIFY (not implemented)\n");
+      break;
+    }
+    // Add a watch on /tmp
+    int wd = inotify_add_watch(fd, "/tmp", IN_CREATE | IN_DELETE);
+    // Create a file to trigger the watch
+    char path[64];
+    snprintf(path, sizeof(path), "/tmp/inotify_stress_%d.tmp", i);
+    int tfd = open(path, O_CREAT | O_WRONLY, 0644);
+    if (tfd >= 0) close(tfd);
+
+    // Drain events (non-blocking)
+    char evbuf[256];
+    read(fd, evbuf, sizeof(evbuf));
+
+    if (wd >= 0) inotify_rm_watch(fd, wd);
+    unlink(path);
+    close(fd);
+    if (i % 50 == 0) DEBUGLOG("INOTIFY iteration %d complete\n", i);
+  }
+  DEBUGLOG("INOTIFY stress test PASSED\n");
+}
+
+// ---- getrandom stress ----
+void test_getrandom_stress() {
+  DEBUGLOG("Starting GETRANDOM stress test...\n");
+  uint8_t buf[64];
+  for (int i = 0; i < NUM_ITERATIONS * 10; i++) {
+    ssize_t n = getrandom(buf, sizeof(buf), 0);
+    if (n < 0) { fprintf(stderr, "getrandom failed: %s\n", strerror(errno)); exit(1); }
+    if (i % 250 == 0) DEBUGLOG("GETRANDOM iteration %d complete\n", i);
+  }
+  DEBUGLOG("GETRANDOM stress test PASSED\n");
+}
+
+// ---- clock_gettime / gettimeofday / nanosleep stress ----
+void test_clock_stress() {
+  DEBUGLOG("Starting CLOCK/TIME stress test...\n");
+  struct timespec ts;
+  struct timeval  tv;
+  struct timespec sleep_ts = {0, 0}; // zero sleep = yield
+
+  for (int i = 0; i < NUM_ITERATIONS * 10; i++) {
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    clock_gettime(CLOCK_REALTIME,  &ts);
+    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts);
+    gettimeofday(&tv, NULL);
+    nanosleep(&sleep_ts, NULL);
+    if (i % 250 == 0) DEBUGLOG("CLOCK iteration %d complete\n", i);
+  }
+  DEBUGLOG("CLOCK/TIME stress test PASSED\n");
+}
+
+// ---- uname / sysinfo / getrlimit / prlimit stress ----
+void test_sysinfo_stress() {
+  DEBUGLOG("Starting UNAME/SYSINFO/GETRLIMIT stress test...\n");
+  struct utsname uts;
+  struct sysinfo si;
+  struct rlimit rl;
+
+  for (int i = 0; i < NUM_ITERATIONS * 5; i++) {
+    uname(&uts);
+    sysinfo(&si);
+    getrlimit(RLIMIT_NOFILE, &rl);
+    getrlimit(RLIMIT_STACK,  &rl);
+    getrlimit(RLIMIT_AS,     &rl);
+
+    // prlimit: query self
+    struct rlimit new_rl = {1024, 1024};
+    struct rlimit old_rl;
+    prlimit(0, RLIMIT_NOFILE, &new_rl, &old_rl);
+    prlimit(0, RLIMIT_NOFILE, &old_rl, NULL); // restore
+
+    if (i % 100 == 0) DEBUGLOG("SYSINFO iteration %d complete\n", i);
+  }
+  DEBUGLOG("UNAME/SYSINFO/GETRLIMIT stress test PASSED\n");
+}
+
+// ---- getpid / gettid / getppid / getpgid / getpgrp / getsid stress ----
+void test_pid_query_stress() {
+  DEBUGLOG("Starting PID/TID/PGID query stress test...\n");
+  for (int i = 0; i < NUM_ITERATIONS * 20; i++) {
+    pid_t pid  = getpid();
+    pid_t tid  = syscall(SYS_gettid);
+    pid_t ppid = getppid();
+    pid_t pgid = getpgid(0);
+    pid_t pgrp = getpgrp();
+    pid_t sid  = getsid(0);
+    (void)pid; (void)tid; (void)ppid; (void)pgid; (void)pgrp; (void)sid;
+    if (i % 500 == 0) DEBUGLOG("PID QUERY iteration %d complete\n", i);
+  }
+  DEBUGLOG("PID/TID/PGID query stress test PASSED\n");
+}
+
+// ---- uid/gid getters/setters stress ----
+void test_uid_gid_stress() {
+  DEBUGLOG("Starting UID/GID stress test...\n");
+  for (int i = 0; i < NUM_ITERATIONS * 10; i++) {
+    uid_t ruid, euid, suid;
+    gid_t rgid, egid, sgid;
+
+    getuid(); geteuid();
+    getgid(); getegid();
+    getresuid(&ruid, &euid, &suid);
+    getresgid(&rgid, &egid, &sgid);
+
+    // round-trip set/get (we run as root so this succeeds)
+    setuid(0); setgid(0);
+    setresuid(0, 0, 0);
+    setresgid(0, 0, 0);
+
+    if (i % 250 == 0) DEBUGLOG("UID/GID iteration %d complete\n", i);
+  }
+  DEBUGLOG("UID/GID stress test PASSED\n");
+}
+
+// ---- prctl (PR_SET_NAME / PR_GET_NAME) stress ----
+void test_prctl_stress() {
+  DEBUGLOG("Starting PRCTL stress test...\n");
+  char name[16];
+  char orig[16];
+  prctl(PR_GET_NAME, orig, 0, 0, 0);
+
+  for (int i = 0; i < NUM_ITERATIONS * 5; i++) {
+    char setname[16];
+    snprintf(setname, sizeof(setname), "stress_%d", i % 9999);
+    prctl(PR_SET_NAME, setname, 0, 0, 0);
+    prctl(PR_GET_NAME, name, 0, 0, 0);
+    if (i % 100 == 0) DEBUGLOG("PRCTL iteration %d complete\n", i);
+  }
+  prctl(PR_SET_NAME, orig, 0, 0, 0);
+  DEBUGLOG("PRCTL stress test PASSED\n");
+}
+
+// ---- sched_yield / sched_getscheduler / sched_setscheduler /
+//      sched_getparam / sched_setparam /
+//      sched_getaffinity / sched_setaffinity stress ----
+void test_sched_stress() {
+  DEBUGLOG("Starting SCHED stress test...\n");
+  struct sched_param sp = {0};
+  cpu_set_t mask;
+  CPU_ZERO(&mask);
+  CPU_SET(0, &mask);
+
+  for (int i = 0; i < NUM_ITERATIONS * 5; i++) {
+    sched_yield();
+    sched_getscheduler(0);
+    sched_setscheduler(0, SCHED_OTHER, &sp);
+    sched_getparam(0, &sp);
+    sched_setparam(0, &sp);
+    sched_getaffinity(0, sizeof(mask), &mask);
+    sched_setaffinity(0, sizeof(mask), &mask);
+    sched_get_priority_max(SCHED_OTHER);
+    sched_get_priority_min(SCHED_OTHER);
+    if (i % 100 == 0) DEBUGLOG("SCHED iteration %d complete\n", i);
+  }
+  DEBUGLOG("SCHED stress test PASSED\n");
+}
+
+// ---- setpgid / setsid / setpriority / getpriority stress ----
+void test_process_attrs_stress() {
+  DEBUGLOG("Starting PROCESS ATTRS stress test...\n");
+  for (int i = 0; i < NUM_ITERATIONS * 3; i++) {
+    // Fork so we can call setsid/setpgid safely without affecting the harness
+    pid_t pid = fork();
+    if (pid == 0) {
+      setpgid(0, 0);
+      // setsid would fail if we are a process group leader, so only try
+      // from a process that just called setpgid(0,0) to get its own group
+      // (only succeeds if tid != pgid after setpgid, but try anyway)
+      setsid();
+      setpriority(PRIO_PROCESS, 0, 0);
+      getpriority(PRIO_PROCESS, 0);
+      exit(0);
+    } else if (pid > 0) {
+      int st;
+      waitpid(pid, &st, 0);
+    }
+    if (i % 25 == 0) DEBUGLOG("PROCESS ATTRS iteration %d complete\n", i);
+  }
+  DEBUGLOG("PROCESS ATTRS stress test PASSED\n");
+}
+
+// ---- setitimer / alarm stress ----
+void test_itimer_stress() {
+  DEBUGLOG("Starting SETITIMER/ALARM stress test...\n");
+  struct itimerval itv, old;
+
+  for (int i = 0; i < NUM_ITERATIONS * 3; i++) {
+    // Set a 100 ms timer and immediately disarm it
+    itv.it_value.tv_sec  = 0;
+    itv.it_value.tv_usec = 100000;
+    itv.it_interval.tv_sec  = 0;
+    itv.it_interval.tv_usec = 0;
+    setitimer(ITIMER_REAL, &itv, &old);
+
+    // Disarm immediately
+    itv.it_value.tv_sec  = 0;
+    itv.it_value.tv_usec = 0;
+    setitimer(ITIMER_REAL, &itv, &old);
+
+    // alarm(0) cancels any pending alarm
+    alarm(0);
+
+    if (i % 75 == 0) DEBUGLOG("ITIMER iteration %d complete\n", i);
+  }
+  DEBUGLOG("SETITIMER/ALARM stress test PASSED\n");
+}
+
+// ---- mlock / munlock stress ----
+void test_mlock_stress() {
+  DEBUGLOG("Starting MLOCK stress test...\n");
+  for (int i = 0; i < NUM_ITERATIONS * 2; i++) {
+    size_t sz = 4 * 4096;
+    void *p = mmap(NULL, sz, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) { perror("mlock mmap"); exit(1); }
+    memset(p, 0, sz);
+
+    int r = mlock(p, sz);
+    if (r == 0) munlock(p, sz);   // only unlockif lock succeeded
+
+    munmap(p, sz);
+    if (i % 50 == 0) DEBUGLOG("MLOCK iteration %d complete\n", i);
+  }
+  DEBUGLOG("MLOCK stress test PASSED\n");
+}
+
+// ---- utimensat / futimesat / utimes stress ----
+void test_utimes_stress() {
+  DEBUGLOG("Starting UTIMES/UTIMENSAT stress test...\n");
+  char path[] = "/tmp/utimes_stress.tmp";
+  int fd = open(path, O_CREAT | O_RDWR | O_TRUNC, 0644);
+  if (fd >= 0) { write(fd, "t", 1); close(fd); }
+
+  struct timespec ts[2] = {{0, 0}, {0, 0}};
+  struct timeval  tv[2] = {{0, 0}, {0, 0}};
+
+  for (int i = 0; i < NUM_ITERATIONS * 5; i++) {
+    ts[0].tv_sec = ts[1].tv_sec = (time_t)i;
+    utimensat(AT_FDCWD, path, ts, 0);
+    utimensat(AT_FDCWD, path, NULL, 0); // update to now
+
+    tv[0].tv_sec = tv[1].tv_sec = (time_t)i;
+    utimes(path, tv);
+
+    if (i % 100 == 0) DEBUGLOG("UTIMES iteration %d complete\n", i);
+  }
+  unlink(path);
+  DEBUGLOG("UTIMES/UTIMENSAT stress test PASSED\n");
+}
+
+// ---- umask stress ----
+void test_umask_stress() {
+  DEBUGLOG("Starting UMASK stress test...\n");
+  mode_t saved = umask(0);
+  for (int i = 0; i < NUM_ITERATIONS * 20; i++) {
+    umask(0022);
+    umask(0077);
+    umask(0);
+    if (i % 500 == 0) DEBUGLOG("UMASK iteration %d complete\n", i);
+  }
+  umask(saved);
+  DEBUGLOG("UMASK stress test PASSED\n");
+}
+
+// ---- openat / mkdirat / unlinkat / fchmodat / fchownat stress ----
+void test_at_variants_stress() {
+  DEBUGLOG("Starting *AT variant syscall stress test...\n");
+  int dirfd = open("/tmp", O_RDONLY | O_DIRECTORY);
+  if (dirfd < 0) { perror("at_variants open /tmp"); return; }
+
+  for (int i = 0; i < NUM_ITERATIONS * 2; i++) {
+    char name[64], subdir[64];
+    snprintf(name,   sizeof(name),   "at_stress_%d.tmp", i);
+    snprintf(subdir, sizeof(subdir), "at_stress_dir_%d", i);
+
+    // openat + close
+    int fd = openat(dirfd, name, O_CREAT | O_RDWR | O_TRUNC, 0644);
+    if (fd >= 0) {
+      write(fd, "hello", 5);
+      // fchmodat
+      fchmodat(dirfd, name, 0600, 0);
+      // fchownat
+      fchownat(dirfd, name, 0, 0, 0);
+      close(fd);
+      // unlinkat (file)
+      unlinkat(dirfd, name, 0);
+    }
+
+    // mkdirat + unlinkat (dir)
+    mkdirat(dirfd, subdir, 0755);
+    unlinkat(dirfd, subdir, AT_REMOVEDIR);
+
+    if (i % 50 == 0) DEBUGLOG("AT VARIANTS iteration %d complete\n", i);
+  }
+  close(dirfd);
+  DEBUGLOG("*AT variant syscall stress test PASSED\n");
+}
+
+// ---- vfork + execve stress (already tested separately, combine here) ----
+void test_vfork_stress() {
+  DEBUGLOG("Starting VFORK stress test...\n");
+  for (int i = 0; i < NUM_ITERATIONS / 2; i++) {
+    pid_t pid = vfork();
+    if (pid == 0) {
+      // Child: do as little as possible before exit (vfork shares address space)
+      _exit(0);
+    } else if (pid > 0) {
+      int st;
+      waitpid(pid, &st, 0);
+    }
+    if (i % 10 == 0) DEBUGLOG("VFORK iteration %d complete\n", i);
+  }
+  DEBUGLOG("VFORK stress test PASSED\n");
+}
+
+// ---- kill (self SIGCONT, ignored signals) stress ----
+void test_kill_stress() {
+  DEBUGLOG("Starting KILL stress test...\n");
+  // Explicitly ignore every signal we're going to send to ourselves.
+  // SIGCONT's POSIX default is "resume", but the kernel currently falls
+  // back to terminate for unhandled signals — set SIG_IGN to be safe.
+  struct sigaction sa = {0};
+  sa.sa_handler = SIG_IGN;
+  sigemptyset(&sa.sa_mask);
+  struct sigaction old_usr1, old_usr2, old_cont;
+  sigaction(SIGUSR1, &sa, &old_usr1);
+  sigaction(SIGUSR2, &sa, &old_usr2);
+  sigaction(SIGCONT, &sa, &old_cont);
+
+  pid_t self = getpid();
+  for (int i = 0; i < NUM_ITERATIONS * 10; i++) {
+    kill(self, SIGUSR1);
+    kill(self, SIGUSR2);
+    kill(self, SIGCONT);
+    // kill(self, 0) is a simple existence check — never delivers a signal
+    kill(self, 0);
+    if (i % 250 == 0) DEBUGLOG("KILL iteration %d complete\n", i);
+  }
+  // Restore original handlers
+  sigaction(SIGUSR1, &old_usr1, NULL);
+  sigaction(SIGUSR2, &old_usr2, NULL);
+  sigaction(SIGCONT, &old_cont, NULL);
+  DEBUGLOG("KILL stress test PASSED\n");
+}
+
+// ---- rt_sigaction / rt_sigprocmask stress ----
+void test_signal_mask_stress() {
+  DEBUGLOG("Starting SIGACTION/SIGPROCMASK stress test...\n");
+  sigset_t set, oldset;
+  sigemptyset(&set);
+  sigaddset(&set, SIGUSR1);
+  sigaddset(&set, SIGUSR2);
+
+  struct sigaction sa = {0}, old_sa;
+  sa.sa_handler = SIG_IGN;
+  sigemptyset(&sa.sa_mask);
+
+  for (int i = 0; i < NUM_ITERATIONS * 5; i++) {
+    sigaction(SIGUSR1, &sa, &old_sa);
+    sigaction(SIGUSR1, &old_sa, NULL); // restore
+
+    sigprocmask(SIG_BLOCK,   &set, &oldset);
+    sigprocmask(SIG_UNBLOCK, &set, NULL);
+    sigprocmask(SIG_SETMASK, &oldset, NULL); // restore
+
+    if (i % 100 == 0) DEBUGLOG("SIGMASK iteration %d complete\n", i);
+  }
+  DEBUGLOG("SIGACTION/SIGPROCMASK stress test PASSED\n");
+}
+
+// ---- wait4 with WNOHANG on no-child: ECHILD stress ----
+void test_wait4_stress() {
+  DEBUGLOG("Starting WAIT4 stress test...\n");
+  for (int i = 0; i < NUM_ITERATIONS * 2; i++) {
+    pid_t pid = fork();
+    if (pid == 0) {
+      // child: just exit immediately
+      _exit(i & 0xFF);
+    } else if (pid > 0) {
+      int st;
+      // Try WNOHANG first (may return 0 if child not dead yet)
+      pid_t r = waitpid(pid, &st, WNOHANG);
+      if (r == 0) {
+        // child still running; blocking wait
+        waitpid(pid, &st, 0);
+      }
+    }
+    if (i % 50 == 0) DEBUGLOG("WAIT4 iteration %d complete\n", i);
+  }
+  DEBUGLOG("WAIT4 stress test PASSED\n");
+}
+
 void check_leak(const char *test_name, long *last_mem) {
   long current_mem = get_free_mem_kb();
   if (current_mem == -1)
@@ -631,6 +1829,30 @@ int main(int argc, char **argv) {
   test_socket_stress();
   check_leak("SOCKET Stress", &current_mem);
 
+  printf("\n--- Running UNIX STREAM Stress ---\n");
+  test_unix_stream_stress();
+  check_leak("UNIX STREAM Stress", &current_mem);
+
+  printf("\n--- Running SOCKETPAIR Stress ---\n");
+  test_socketpair_stress();
+  check_leak("SOCKETPAIR Stress", &current_mem);
+
+  printf("\n--- Running UNIX DGRAM Stress ---\n");
+  test_unix_dgram_stress();
+  check_leak("UNIX DGRAM Stress", &current_mem);
+
+  printf("\n--- Running SOCKET OPTS Stress ---\n");
+  test_socket_opts_stress();
+  check_leak("SOCKET OPTS Stress", &current_mem);
+
+  printf("\n--- Running SHUTDOWN Stress ---\n");
+  test_shutdown_stress();
+  check_leak("SHUTDOWN Stress", &current_mem);
+
+  printf("\n--- Running ACCEPT4 Stress ---\n");
+  test_accept4_stress();
+  check_leak("ACCEPT4 Stress", &current_mem);
+
   printf("\n--- Running FORK Stress ---\n");
   test_fork_stress();
   check_leak("FORK Stress", &current_mem);
@@ -654,6 +1876,158 @@ int main(int argc, char **argv) {
   printf("\n--- Running EXECVE Stress ---\n");
   test_exec_stress();
   check_leak("EXECVE Stress", &current_mem);
+
+  printf("\n--- Running DUP/DUP2/FCNTL Stress ---\n");
+  test_dup_fcntl_stress();
+  check_leak("DUP/DUP2/FCNTL Stress", &current_mem);
+
+  printf("\n--- Running PREAD64/PWRITE64 Stress ---\n");
+  test_pread_pwrite_stress();
+  check_leak("PREAD64/PWRITE64 Stress", &current_mem);
+
+  printf("\n--- Running WRITEV Stress ---\n");
+  test_writev_stress();
+  check_leak("WRITEV Stress", &current_mem);
+
+  printf("\n--- Running SENDFILE Stress ---\n");
+  test_sendfile_stress();
+  check_leak("SENDFILE Stress", &current_mem);
+
+  printf("\n--- Running FTRUNCATE/FALLOCATE/FSYNC/FSTAT Stress ---\n");
+  test_ftruncate_fsync_stress();
+  check_leak("FTRUNCATE/FALLOCATE/FSYNC Stress", &current_mem);
+
+  printf("\n--- Running LSEEK Stress ---\n");
+  test_lseek_stress();
+  check_leak("LSEEK Stress", &current_mem);
+
+  printf("\n--- Running STAT Variants Stress ---\n");
+  test_stat_variants_stress();
+  check_leak("STAT Variants Stress", &current_mem);
+
+  printf("\n--- Running GETDENTS64 Stress ---\n");
+  test_getdents64_stress();
+  check_leak("GETDENTS64 Stress", &current_mem);
+
+  printf("\n--- Running STATFS/FSTATFS Stress ---\n");
+  test_statfs_stress();
+  check_leak("STATFS/FSTATFS Stress", &current_mem);
+
+  printf("\n--- Running FS OPS Stress ---\n");
+  test_fs_ops_stress();
+  check_leak("FS OPS Stress", &current_mem);
+
+  printf("\n--- Running ACCESS/FACCESSAT Stress ---\n");
+  test_access_stress();
+  check_leak("ACCESS/FACCESSAT Stress", &current_mem);
+
+  printf("\n--- Running GETCWD/CHDIR/FCHDIR Stress ---\n");
+  test_getcwd_chdir_stress();
+  check_leak("GETCWD/CHDIR Stress", &current_mem);
+
+  printf("\n--- Running MPROTECT Stress ---\n");
+  test_mprotect_stress();
+  check_leak("MPROTECT Stress", &current_mem);
+
+  printf("\n--- Running MREMAP Stress ---\n");
+  test_mremap_stress();
+  check_leak("MREMAP Stress", &current_mem);
+
+  printf("\n--- Running BRK Stress ---\n");
+  test_brk_stress();
+  check_leak("BRK Stress", &current_mem);
+
+  printf("\n--- Running MADVISE Stress ---\n");
+  test_madvise_stress();
+  check_leak("MADVISE Stress", &current_mem);
+
+  printf("\n--- Running PIPE2 Stress ---\n");
+  test_pipe2_stress();
+  check_leak("PIPE2 Stress", &current_mem);
+
+  printf("\n--- Running MEMFD_CREATE Stress ---\n");
+  test_memfd_stress();
+  check_leak("MEMFD_CREATE Stress", &current_mem);
+
+  printf("\n--- Running TIMERFD Stress ---\n");
+  test_timerfd_stress();
+  check_leak("TIMERFD Stress", &current_mem);
+
+  printf("\n--- Running EVENTFD Stress ---\n");
+  test_eventfd_stress();
+  check_leak("EVENTFD Stress", &current_mem);
+
+  printf("\n--- Running INOTIFY Stress ---\n");
+  test_inotify_stress();
+  check_leak("INOTIFY Stress", &current_mem);
+
+  printf("\n--- Running GETRANDOM Stress ---\n");
+  test_getrandom_stress();
+  check_leak("GETRANDOM Stress", &current_mem);
+
+  printf("\n--- Running CLOCK/TIME Stress ---\n");
+  test_clock_stress();
+  check_leak("CLOCK/TIME Stress", &current_mem);
+
+  printf("\n--- Running UNAME/SYSINFO/GETRLIMIT Stress ---\n");
+  test_sysinfo_stress();
+  check_leak("SYSINFO/GETRLIMIT Stress", &current_mem);
+
+  printf("\n--- Running PID/TID/PGID Query Stress ---\n");
+  test_pid_query_stress();
+  check_leak("PID Query Stress", &current_mem);
+
+  printf("\n--- Running UID/GID Stress ---\n");
+  test_uid_gid_stress();
+  check_leak("UID/GID Stress", &current_mem);
+
+  printf("\n--- Running PRCTL Stress ---\n");
+  test_prctl_stress();
+  check_leak("PRCTL Stress", &current_mem);
+
+  printf("\n--- Running SCHED Stress ---\n");
+  test_sched_stress();
+  check_leak("SCHED Stress", &current_mem);
+
+  printf("\n--- Running PROCESS ATTRS Stress ---\n");
+  test_process_attrs_stress();
+  check_leak("PROCESS ATTRS Stress", &current_mem);
+
+  printf("\n--- Running SETITIMER/ALARM Stress ---\n");
+  test_itimer_stress();
+  check_leak("SETITIMER/ALARM Stress", &current_mem);
+
+  printf("\n--- Running MLOCK Stress ---\n");
+  test_mlock_stress();
+  check_leak("MLOCK Stress", &current_mem);
+
+  printf("\n--- Running UTIMES/UTIMENSAT Stress ---\n");
+  test_utimes_stress();
+  check_leak("UTIMES/UTIMENSAT Stress", &current_mem);
+
+  printf("\n--- Running UMASK Stress ---\n");
+  test_umask_stress();
+  check_leak("UMASK Stress", &current_mem);
+
+  printf("\n--- Running *AT Variants Stress ---\n");
+  test_at_variants_stress();
+  check_leak("AT Variants Stress", &current_mem);
+
+  printf("\n--- Running VFORK Stress ---\n");
+  test_vfork_stress();
+  check_leak("VFORK Stress", &current_mem);
+
+  printf("\n--- Running KILL Stress ---\n");
+  test_kill_stress();
+  check_leak("KILL Stress", &current_mem);
+
+  printf("\n--- Running SIGACTION/SIGPROCMASK Stress ---\n");
+  test_signal_mask_stress();
+  check_leak("SIGACTION/SIGPROCMASK Stress", &current_mem);
+
+  printf("\n--- Running WAIT4 Stress ---\n");
+  test_wait4_stress();
+  check_leak("WAIT4 Stress", &current_mem);
 
   printf("Verifying memory levels...\n");
   long final_mem = get_free_mem_kb();

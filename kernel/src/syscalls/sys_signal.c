@@ -7,21 +7,139 @@
 #include "../mm/vmm.h"
 #include "../sched/sched.h"
 #include "../sched/wait.h"
+#include "../smp/cpu.h"
 #include "../socket/epoll.h"
 #include "syscall.h"
+#include <stddef.h>
 #include <stdint.h>
 
 #define SIG_BLOCK 0
 #define SIG_UNBLOCK 1
+#define X86_64_RED_ZONE_SIZE 128
 
 // Forward declarations
 static bool on_sig_stack(struct thread *t, uint64_t sp);
 #define SIG_SETMASK 2
 
+struct kernel_siginfo {
+  int32_t si_signo;
+  int32_t si_errno;
+  int32_t si_code;
+  int32_t __pad0;
+  uint8_t data[112];
+} __attribute__((packed));
+
+struct kernel_sigaltstack {
+  uint64_t ss_sp;
+  int32_t ss_flags;
+  uint32_t __pad;
+  uint64_t ss_size;
+};
+
+struct kernel_mcontext {
+  uint64_t gregs[23];
+  uint64_t fpregs;
+  uint64_t reserved[8];
+};
+
+struct kernel_ucontext {
+  uint64_t uc_flags;
+  uint64_t uc_link;
+  struct kernel_sigaltstack uc_stack;
+  struct kernel_mcontext uc_mcontext;
+  uint64_t uc_sigmask[16];
+  uint64_t fpregs_mem[64];
+};
+
 struct sigframe {
   struct registers regs;
   uint64_t mask;
-} __attribute__((packed));
+  struct kernel_siginfo info;
+  struct kernel_ucontext ucontext;
+};
+
+_Static_assert(sizeof(struct kernel_siginfo) == 128,
+               "x86_64 siginfo ABI size");
+_Static_assert(offsetof(struct sigframe, ucontext) == 312,
+               "x86_64 signal frame ucontext offset");
+
+static void restore_signal_context(struct registers *regs,
+                                   const struct kernel_ucontext *uc) {
+  const uint64_t *g = uc->uc_mcontext.gregs;
+
+  regs->r8 = g[0];
+  regs->r9 = g[1];
+  regs->r10 = g[2];
+  regs->r11 = g[3];
+  regs->r12 = g[4];
+  regs->r13 = g[5];
+  regs->r14 = g[6];
+  regs->r15 = g[7];
+  regs->rdi = g[8];
+  regs->rsi = g[9];
+  regs->rbp = g[10];
+  regs->rbx = g[11];
+  regs->rdx = g[12];
+  regs->rax = g[13];
+  regs->rcx = g[14];
+  regs->rsp = g[15];
+  regs->rip = g[16];
+  regs->rflags = g[17];
+  regs->cs = (uint16_t)g[18];
+  regs->err_code = g[19];
+  regs->int_no = g[20];
+  regs->ss = 0x23;
+}
+
+static void fill_signal_context(struct sigframe *frame, int sig,
+                                const struct thread *current) {
+  struct kernel_siginfo *info = &frame->info;
+  struct kernel_ucontext *uc = &frame->ucontext;
+  memset(info, 0, sizeof(*info));
+  memset(uc, 0, sizeof(*uc));
+
+  info->si_signo = sig;
+  info->si_code = 128; /* SI_KERNEL */
+  if (sig == SIGSEGV || sig == SIGBUS || sig == SIGILL || sig == SIGFPE) {
+    uint64_t fault_address = 0;
+    __asm__ volatile("mov %%cr2, %0" : "=r"(fault_address));
+    info->si_code = 1;
+    memcpy(info->data, &fault_address, sizeof(fault_address));
+  }
+
+  uc->uc_stack.ss_sp = current->ss_sp;
+  uc->uc_stack.ss_flags = current->ss_flags;
+  uc->uc_stack.ss_size = current->ss_size;
+
+  uint64_t *g = uc->uc_mcontext.gregs;
+  g[0] = frame->regs.r8;
+  g[1] = frame->regs.r9;
+  g[2] = frame->regs.r10;
+  g[3] = frame->regs.r11;
+  g[4] = frame->regs.r12;
+  g[5] = frame->regs.r13;
+  g[6] = frame->regs.r14;
+  g[7] = frame->regs.r15;
+  g[8] = frame->regs.rdi;
+  g[9] = frame->regs.rsi;
+  g[10] = frame->regs.rbp;
+  g[11] = frame->regs.rbx;
+  g[12] = frame->regs.rdx;
+  g[13] = frame->regs.rax;
+  g[14] = frame->regs.rcx;
+  g[15] = frame->regs.rsp;
+  g[16] = frame->regs.rip;
+  g[17] = frame->regs.rflags;
+  g[18] = frame->regs.cs;
+  g[19] = frame->regs.err_code;
+  g[20] = frame->regs.int_no;
+  g[21] = current->signal_mask;
+  if (sig == SIGSEGV || sig == SIGBUS)
+    __asm__ volatile("mov %%cr2, %0" : "=r"(g[22]));
+  uc->uc_sigmask[0] = current->signal_mask;
+  uc->uc_mcontext.fpregs = (uint64_t)&uc->fpregs_mem[0];
+  __asm__ volatile("fxsave64 %0" : "=m"(uc->fpregs_mem));
+}
 
 // rt_sigaction: Set or get signal action
 static uint64_t sys_rt_sigaction(uint64_t signum, uint64_t act_ptr,
@@ -106,28 +224,26 @@ static uint64_t sys_rt_sigreturn(struct syscall_regs *sregs) {
     process_do_exit(11); // SIGSEGV
   }
 
-  current->signal_mask = frame->mask;
+  /*
+   * Linux defines the ucontext as the restorable signal state. Keep the
+   * private register copy only as frame-building storage; restoring from the
+   * ucontext also permits SA_SIGINFO handlers to adjust their return state.
+   */
+  restore_signal_context(&frame->regs, &frame->ucontext);
+  current->signal_mask = frame->ucontext.uc_sigmask[0];
+  current->signal_mask &=
+      ~((1ULL << (SIGKILL - 1)) | (1ULL << (SIGSTOP - 1)));
+  if ((frame->regs.cs & 3) != 3 || (frame->regs.ss & 3) != 3 ||
+      frame->regs.rip >= 0x0000800000000000ULL ||
+      frame->regs.rsp >= 0x0000800000000000ULL) {
+    klog_puts("[SIGNAL] sigreturn: invalid user context\n");
+    process_do_exit(11);
+  }
+  __asm__ volatile("fxrstor64 %0" : : "m"(frame->ucontext.fpregs_mem));
 
-  // Restore state into syscall_regs
-  sregs->rax = frame->regs.rax;
-  sregs->rbx = frame->regs.rbx;
-  sregs->rbp = frame->regs.rbp;
-  sregs->r12 = frame->regs.r12;
-  sregs->r13 = frame->regs.r13;
-  sregs->r14 = frame->regs.r14;
-  sregs->r15 = frame->regs.r15;
-  sregs->rdi = frame->regs.rdi;
-  sregs->rsi = frame->regs.rsi;
-  sregs->rdx = frame->regs.rdx;
-  sregs->r10 = frame->regs.r10;
-  sregs->r8 = frame->regs.r8;
-  sregs->r9 = frame->regs.r9;
-
-  sregs->rip = frame->regs.rip;
-  sregs->rflags = frame->regs.rflags;
-  sregs->rsp = frame->regs.rsp;
-
-  return sregs->rax;
+  /* syscall_entry.asm restores the full frame with IRETQ. */
+  cpu_get_current()->sigreturn_frame = (uint64_t)&frame->regs;
+  return 0;
 }
 
 // Signal Delivery
@@ -192,6 +308,12 @@ void signal_deliver(struct registers *regs) {
     rsp = regs->rsp;
   }
 
+  /*
+   * Preserve the interrupted function's SysV x86-64 red zone. Leaf
+   * functions may keep live data in the 128 bytes immediately below RSP.
+   */
+  rsp -= X86_64_RED_ZONE_SIZE;
+
   // Push frame to the chosen stack
   rsp -= sizeof(struct sigframe);
   rsp &= ~0xFULL;
@@ -204,9 +326,14 @@ void signal_deliver(struct registers *regs) {
   struct sigframe *frame = (struct sigframe *)rsp;
   frame->regs = *regs;
   frame->mask = current->signal_mask;
+  fill_signal_context(frame, sig, current);
 
   regs->rip = (uint64_t)sa->sa_handler;
   regs->rdi = sig;
+  if (sa->sa_flags & SA_SIGINFO) {
+    regs->rsi = (uint64_t)&frame->info;
+    regs->rdx = (uint64_t)&frame->ucontext;
+  }
 
   // Set up return
   rsp -= 8;

@@ -2,7 +2,7 @@
 # AscentOS: Build ClassiCube for AscentOS
 #
 # This script cross-compiles ClassiCube (Minecraft Classic Client)
-# using the musl toolchain and TinyGL for software rendering.
+# using the musl toolchain and either Mesa GLX or the built-in SoftGPU.
 #
 # Usage:
 #   ./scripts/build-classicube.sh          # Build ClassiCube
@@ -14,7 +14,8 @@ ROOT_DIR=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 BUILD_DIR=${BUILD_DIR:-"$ROOT_DIR/build/classicube"}
 PREFIX=${MUSL_SYSROOT:-"$ROOT_DIR/toolchain/musl-sysroot"}
 INSTALL_DIR="$ROOT_DIR/userland"
-TINYGL_DIR="$PREFIX/opt/tinygl"
+MESA_ROOT=${MESA_ROOT:-"$ROOT_DIR/build/alpine/rootfs"}
+CLASSICUBE_RENDERER=${CLASSICUBE_RENDERER:-mesa}
 JOBS=$(nproc 2>/dev/null || echo 4)
 REPO_URL="https://github.com/ClassiCube/ClassiCube/archive/refs/heads/master.tar.gz"
 
@@ -79,13 +80,13 @@ build_classicube() {
     # Disable CC_BUILD_XINPUT2 if not already disabled
     sed -i 's/^#define CC_BUILD_XINPUT2/\/\/#define CC_BUILD_XINPUT2/' src/Core.h
     
-    echo "Building ClassiCube for AscentOS (X11 + Software Renderer) ..."
+    echo "Building ClassiCube for AscentOS (renderer=$CLASSICUBE_RENDERER) ..."
 
     # ClassiCube's Makefile is very flexible but we use manual compilation 
     # to ensure all AscentOS-specific flags are handled correctly.
     # We define:
     # - CC_BUILD_X11: Use X11 for windowing/input
-    # - CC_BUILD_GL1: Use OpenGL 1.1 for rendering (TinyGL)
+    # - CC_GFX_BACKEND: Select Mesa GL1 or the built-in SoftGPU
     # - CC_BUILD_POSIX: Use POSIX APIs for threading/filesystem
     # - CC_BUILD_CURL: (Disabled for now to simplify, or use wget)
     # - CC_BUILD_NOMUSIC: Disable audio for now to ensure stable first run
@@ -103,9 +104,35 @@ build_classicube() {
     CORE_SOURCES=$(ls src/*.c | grep -vE "Platform_|Window_|Graphics_|ascentos_stubs")
     BEARSSL_SOURCES=$(ls third_party/bearssl/*.c 2>/dev/null || echo "")
     BACKEND_SOURCES="src/Platform_Posix.c src/Window_X11.c src/Graphics_SoftGPU.c"
+
+
+    case "$CLASSICUBE_RENDERER" in
+        mesa)
+            echo "Using Mesa GLX renderer"
+            if [ ! -f "$MESA_ROOT/usr/lib/libGL.so" ]; then
+                echo "Error: Mesa libGL not found under $MESA_ROOT" >&2
+                exit 1
+            fi
+            CFLAGS="-O2 -fno-stack-protector \
+                    -DCC_BUILD_X11 -DCC_GFX_BACKEND=2 -DCC_BUILD_POSIX \
+                    -DCC_BUILD_NOMUSIC -I$MESA_ROOT/usr/include -I$PREFIX/include"
+            LDFLAGS="-L$MESA_ROOT/usr/lib -L$MESA_ROOT/lib \
+                     -Wl,-rpath-link,$MESA_ROOT/usr/lib \
+                     -Wl,-rpath-link,$MESA_ROOT/lib -Wl,--allow-shlib-undefined"
+            LIBS="-lGL -lX11 -ldl -lpthread -lm -lc"
+            BACKEND_SOURCES="src/Platform_Posix.c src/Window_X11.c src/Graphics_GL1.c"
+            ;;
+        softgpu)
+            echo "Using built-in SoftGPU renderer"
+            ;;
+        *)
+            echo "Error: CLASSICUBE_RENDERER must be mesa or softgpu" >&2
+            exit 2
+            ;;
+    esac
     SOURCES="$CORE_SOURCES $BEARSSL_SOURCES $BACKEND_SOURCES"
     
-    OBJ_DIR="build-ascentos"
+    OBJ_DIR="build-ascentos-$CLASSICUBE_RENDERER"
     mkdir -p "$OBJ_DIR"
 
     echo "Compiling ClassiCube sources incrementally ..."

@@ -35,11 +35,10 @@ struct drm_gem_object *drm_gem_object_create(struct drm_device *dev, size_t size
 
 void drm_gem_object_free(struct drm_device *dev, struct drm_gem_object *obj) {
     if (!obj) return;
-    
     spinlock_acquire(&dev->lock);
     list_del(&obj->list);
     spinlock_release(&dev->lock);
-
+    if (obj->free) { obj->free(dev, obj); return; }
     pmm_free_blocks((void *)obj->phys_addr, obj->size / 4096);
     kfree(obj);
 }

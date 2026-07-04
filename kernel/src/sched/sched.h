@@ -81,6 +81,7 @@ struct fd_table {
 #define SS_AUTODISARM (1U << 31)
 
 // sigaction flags
+#define SA_SIGINFO 0x00000004
 #define SA_ONSTACK 0x08000000
 #define SA_RESTORER 0x04000000
 #define SA_NODEFER 0x40000000
@@ -228,6 +229,7 @@ void sched_reap_thread(struct thread *t);
 void sched_queue_reap(struct thread *t);
 void sched_share_files(struct thread *child, struct thread *parent);
 void sched_release_files(struct thread *t);
+bool sched_ensure_files(struct thread *t);
 
 // Returns the total number of threads in the global thread list
 uint16_t sched_get_thread_count(void);

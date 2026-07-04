@@ -5,6 +5,9 @@
 #include "../../../mm/heap.h"
 #include "drm.h"
 
+typedef void (*drm_pageflip_fn_t)(struct drm_file *, uint32_t, uint32_t, uint64_t);
+extern drm_pageflip_fn_t g_drm_pageflip_fn;
+
 /* ── Global property catalogue ──────────────────────────────────────────── */
 
 static const struct drm_property_def drm_prop_catalogue[] = {
@@ -21,6 +24,8 @@ static const struct drm_property_def drm_prop_catalogue[] = {
     {DRM_PROP_ID_CRTC_H, DRM_PROP_TYPE_RANGE | DRM_PROP_FLAG_ATOMIC, "CRTC_H", 0, UINT32_MAX},
     {DRM_PROP_ID_HOTSPOT_X, DRM_PROP_TYPE_SIGNED_RANGE | DRM_PROP_FLAG_ATOMIC, "HOTSPOT_X", 0, INT32_MAX},
     {DRM_PROP_ID_HOTSPOT_Y, DRM_PROP_TYPE_SIGNED_RANGE | DRM_PROP_FLAG_ATOMIC, "HOTSPOT_Y", 0, INT32_MAX},
+    {DRM_PROP_ID_FB_DAMAGE_CLIPS, DRM_PROP_TYPE_BLOB | DRM_PROP_FLAG_ATOMIC,
+     "FB_DAMAGE_CLIPS", 0, UINT32_MAX},
     /* CRTC properties */
     {DRM_PROP_ID_ACTIVE, DRM_PROP_TYPE_RANGE | DRM_PROP_FLAG_ATOMIC, "ACTIVE", 0, 1},
     {DRM_PROP_ID_MODE_ID, DRM_PROP_FLAG_ATOMIC | DRM_PROP_TYPE_BLOB, "MODE_ID",
@@ -479,6 +484,9 @@ int atomic_apply_prop(struct drm_device *dev,
     case DRM_PROP_ID_HOTSPOT_Y:
       plane->hotspot_y = (int32_t)value;
       break;
+    case DRM_PROP_ID_FB_DAMAGE_CLIPS:
+      /* The blob payload is consumed by drm_ioctl_atomic below. */
+      break;
     default:
       return -1;
     }
@@ -602,6 +610,9 @@ int drm_ioctl_atomic(struct vfs_node *node, struct drm_file *file,
 
   spinlock_acquire(&dev->lock);
 
+  if (!test_only)
+    dev->pending_damage_valid = 0;
+
   uint32_t event_crtc_id = 0;
   uint32_t prop_offset = 0;
   for (uint32_t i = 0; i < req->count_objs; i++) {
@@ -645,6 +656,43 @@ int drm_ioctl_atomic(struct vfs_node *node, struct drm_file *file,
         event_crtc_id = (uint32_t)val;
 
       if (!test_only) {
+        if (mobj->type == DRM_MODE_OBJECT_PLANE &&
+            pid == DRM_PROP_ID_FB_DAMAGE_CLIPS && val != 0) {
+          struct drm_prop_blob *blob = drm_blob_find(dev, (uint32_t)val);
+          if (blob && blob->length >= sizeof(struct drm_mode_rect) &&
+              blob->length % sizeof(struct drm_mode_rect) == 0) {
+            const struct drm_mode_rect *rects = blob->data;
+            uint32_t count = blob->length / sizeof(*rects);
+            int32_t x1 = INT32_MAX, y1 = INT32_MAX;
+            int32_t x2 = 0, y2 = 0;
+
+            for (uint32_t r = 0; r < count; r++) {
+              if (rects[r].x2 <= rects[r].x1 ||
+                  rects[r].y2 <= rects[r].y1)
+                continue;
+              int32_t rx1 = rects[r].x1 < 0 ? 0 : rects[r].x1;
+              int32_t ry1 = rects[r].y1 < 0 ? 0 : rects[r].y1;
+              int32_t rx2 = rects[r].x2 > UINT16_MAX
+                                ? UINT16_MAX : rects[r].x2;
+              int32_t ry2 = rects[r].y2 > UINT16_MAX
+                                ? UINT16_MAX : rects[r].y2;
+              if (rx2 <= rx1 || ry2 <= ry1)
+                continue;
+              if (rx1 < x1) x1 = rx1;
+              if (ry1 < y1) y1 = ry1;
+              if (rx2 > x2) x2 = rx2;
+              if (ry2 > y2) y2 = ry2;
+            }
+
+            if (x1 < x2 && y1 < y2) {
+              dev->pending_damage.x1 = (uint16_t)x1;
+              dev->pending_damage.y1 = (uint16_t)y1;
+              dev->pending_damage.x2 = (uint16_t)x2;
+              dev->pending_damage.y2 = (uint16_t)y2;
+              dev->pending_damage_valid = 1;
+            }
+          }
+        }
         if (atomic_apply_prop(dev, mobj, pid, val) != 0) {
           klog_puts("[DRM] atomic: unknown prop_id=");
           klog_uint64(pid);
@@ -660,6 +708,11 @@ int drm_ioctl_atomic(struct vfs_node *node, struct drm_file *file,
 
   /* Fire a page-flip complete event to the calling client's queue */
   if (!test_only && (req->flags & DRM_MODE_PAGE_FLIP_EVENT)) {
+    if (g_drm_pageflip_fn) {
+      g_drm_pageflip_fn(file, event_crtc_id, 0, req->user_data);
+      spinlock_release(&dev->lock);
+      goto done;
+    }
     struct drm_event_vblank ev = {0};
     ev.base.type = DRM_EVENT_FLIP_COMPLETE;
     ev.base.length = sizeof(struct drm_event_vblank);

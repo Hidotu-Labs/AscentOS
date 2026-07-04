@@ -136,6 +136,62 @@ void *memcpy(void *dest, const void *src, size_t n) {
   return dest;
 }
 
+void *memcpy_to_wc(void *dest, const void *src, size_t n) {
+  uint8_t *d = dest;
+  const uint8_t *s = src;
+
+  /* MOVNTI requires a naturally aligned destination. Unaligned source
+   * loads are valid on x86-64 and occur for narrow damage rectangles. */
+  while (n && ((uintptr_t)d & 7)) {
+    *d++ = *s++;
+    n--;
+  }
+
+  while (n >= 64) {
+    __asm__ volatile(
+        "prefetchnta 256(%[src])\n\t"
+        "movq 0(%[src]), %%rax\n\t"
+        "movnti %%rax, 0(%[dst])\n\t"
+        "movq 8(%[src]), %%rax\n\t"
+        "movnti %%rax, 8(%[dst])\n\t"
+        "movq 16(%[src]), %%rax\n\t"
+        "movnti %%rax, 16(%[dst])\n\t"
+        "movq 24(%[src]), %%rax\n\t"
+        "movnti %%rax, 24(%[dst])\n\t"
+        "movq 32(%[src]), %%rax\n\t"
+        "movnti %%rax, 32(%[dst])\n\t"
+        "movq 40(%[src]), %%rax\n\t"
+        "movnti %%rax, 40(%[dst])\n\t"
+        "movq 48(%[src]), %%rax\n\t"
+        "movnti %%rax, 48(%[dst])\n\t"
+        "movq 56(%[src]), %%rax\n\t"
+        "movnti %%rax, 56(%[dst])"
+        :
+        : [dst] "r"(d), [src] "r"(s)
+        : "rax", "memory");
+    d += 64;
+    s += 64;
+    n -= 64;
+  }
+
+  while (n >= 8) {
+    __asm__ volatile(
+        "movq (%[src]), %%rax\n\t"
+        "movnti %%rax, (%[dst])"
+        :
+        : [dst] "r"(d), [src] "r"(s)
+        : "rax", "memory");
+    d += 8;
+    s += 8;
+    n -= 8;
+  }
+
+  while (n--)
+    *d++ = *s++;
+
+  return dest;
+}
+
 int memcmp(const void *s1, const void *s2, size_t n) {
   const unsigned char *p1 = s1, *p2 = s2;
   while (n--) {

@@ -1322,23 +1322,80 @@ static uint64_t sys_setsid(struct syscall_regs *regs) {
   return (uint64_t)current->sid;
 }
 
-// sys_setitimer
-struct timeval {
-  long tv_sec;
-  long tv_usec;
+struct kernel_timeval {
+  int64_t tv_sec;
+  int64_t tv_usec;
 };
 
-struct itimerval {
-  struct timeval it_interval;
-  struct timeval it_value;
+struct kernel_itimerval {
+  struct kernel_timeval it_interval;
+  struct kernel_timeval it_value;
 };
 
 #define ITIMER_REAL 0
 
-static uint64_t sys_setitimer(uint64_t which, uint64_t new_val_ptr,
-                              uint64_t old_val_ptr, uint64_t _a3, uint64_t _a4,
-                              uint64_t _a5) {
+static void ms_to_timeval(uint64_t ms, struct kernel_timeval *tv) {
+  tv->tv_sec = (int64_t)(ms / 1000);
+  tv->tv_usec = (int64_t)((ms % 1000) * 1000);
+}
 
+static bool timeval_to_ms(const struct kernel_timeval *tv, uint64_t *ms) {
+  if (tv->tv_sec < 0 || tv->tv_usec < 0 || tv->tv_usec >= 1000000)
+    return false;
+  if ((uint64_t)tv->tv_sec > (UINT64_MAX - 999) / 1000)
+    return false;
+  *ms = (uint64_t)tv->tv_sec * 1000 +
+        ((uint64_t)tv->tv_usec + 999) / 1000;
+  return true;
+}
+
+static uint64_t sys_setitimer(uint64_t which, uint64_t new_value_ptr,
+                              uint64_t old_value_ptr, uint64_t a3, uint64_t a4,
+                              uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+
+  if (which != ITIMER_REAL)
+    return (uint64_t)-22;
+  if (!new_value_ptr ||
+      !vmm_is_user_addr_range_valid(new_value_ptr,
+                                    sizeof(struct kernel_itimerval)))
+    return (uint64_t)-14;
+  if (old_value_ptr &&
+      !vmm_is_user_addr_range_writable(old_value_ptr,
+                                    sizeof(struct kernel_itimerval)))
+    return (uint64_t)-14;
+
+  /* Copy input first because old_value is allowed to alias new_value. */
+  struct kernel_itimerval new_value;
+  memcpy(&new_value, (const void *)new_value_ptr, sizeof(new_value));
+
+  uint64_t value_ms;
+  uint64_t interval_ms;
+  if (!timeval_to_ms(&new_value.it_value, &value_ms) ||
+      !timeval_to_ms(&new_value.it_interval, &interval_ms))
+    return (uint64_t)-22;
+
+  struct thread *t = sched_get_current();
+  if (!t)
+    return (uint64_t)-22;
+
+  uint64_t now = lapic_timer_get_ms();
+  struct kernel_itimerval old_value = {0};
+  uint64_t remaining_ms =
+      t->it_real_next > now ? t->it_real_next - now : 0;
+  ms_to_timeval(remaining_ms, &old_value.it_value);
+  ms_to_timeval(t->it_real_interval, &old_value.it_interval);
+
+  t->it_real_value = value_ms;
+  t->it_real_interval = interval_ms;
+  t->it_real_next = value_ms ? now + value_ms : 0;
+
+  if (old_value_ptr)
+    memcpy((void *)old_value_ptr, &old_value, sizeof(old_value));
+  if (t->it_real_next)
+    lapic_timer_rearm_if_earlier(t->it_real_next);
   return 0;
 }
 
@@ -1352,6 +1409,8 @@ static uint64_t sys_alarm(uint64_t seconds, uint64_t a1, uint64_t a2,
   t->it_real_value = seconds * 1000;
   t->it_real_interval = 0;
   t->it_real_next = seconds ? now + seconds * 1000 : 0;
+  if (t->it_real_next)
+    lapic_timer_rearm_if_earlier(t->it_real_next);
   return remaining;
 }
 

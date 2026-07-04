@@ -246,7 +246,9 @@ void initScene() {
 }
 
 int main(int argc, char **argv) {
-  int use_x11 = (getenv("DISPLAY") != NULL);
+  // Never seize the physical framebuffer merely because X connection failed.
+  // Bare-metal rendering must be explicitly requested with -fb.
+  int use_x11 = 1;
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "-fb") == 0)
       use_x11 = 0;
@@ -267,10 +269,9 @@ int main(int argc, char **argv) {
   if (use_x11) {
     dpy = XOpenDisplay(NULL);
     if (!dpy) {
-      fprintf(
-          stderr,
-          "Cannot open X display, falling back to bare-metal framebuffer.\n");
-      use_x11 = 0;
+      fprintf(stderr,
+              "Cannot open X display. Set DISPLAY or use -fb explicitly.\n");
+      return 1;
     }
   }
 

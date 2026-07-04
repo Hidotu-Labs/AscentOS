@@ -39,6 +39,21 @@ static void thread_set_files(struct thread *t, struct fd_table *files) {
   t->fd_paths = files ? files->fd_paths : NULL;
 }
 
+bool sched_ensure_files(struct thread *t) {
+  if (!t)
+    return false;
+  if (t->files) {
+    thread_set_files(t, t->files);
+    return true;
+  }
+
+  struct fd_table *files = fd_table_create();
+  if (!files)
+    return false;
+  thread_set_files(t, files);
+  return true;
+}
+
 void sched_release_files(struct thread *t) {
   if (!t || !t->files)
     return;
@@ -71,6 +86,7 @@ void sched_share_files(struct thread *child, struct thread *parent) {
   sched_release_files(child);
   spinlock_acquire(&parent->files->lock);
   parent->files->ref_count++;
+
   spinlock_release(&parent->files->lock);
   thread_set_files(child, parent->files);
 }
@@ -79,6 +95,30 @@ void sched_share_files(struct thread *child, struct thread *parent) {
 // destruction after they have switched off their kernel stacks.
 static struct thread *reap_queue = NULL;
 static spinlock_t reap_queue_lock = SPINLOCK_INIT;
+
+static void sched_arm_next_deadline(struct cpu_info *cpu,
+                                    struct thread *next_t) {
+  uint64_t now = lapic_timer_get_ms();
+  uint64_t deadline = 0;
+  if (next_t && !next_t->is_idle) {
+    cpu->quantum_deadline_ms = now + LAPIC_SCHED_QUANTUM_MS;
+    deadline = cpu->quantum_deadline_ms;
+  } else {
+    cpu->quantum_deadline_ms = 0;
+  }
+  for (int p = 0; p < SCHED_PRIORITY_LEVELS; p++) {
+    struct thread *head = cpu->runqueues[p];
+    if (!head) continue;
+    struct thread *t = head;
+    do {
+      if ((t->state == THREAD_SLEEPING || t->state == THREAD_BLOCKED) &&
+          t->wakeup_ticks && (!deadline || t->wakeup_ticks < deadline))
+        deadline = t->wakeup_ticks;
+      t = t->next;
+    } while (t && t != head);
+  }
+  if (deadline) lapic_timer_rearm_if_earlier(deadline);
+}
 
 // Global list of all threads (for wait4)
 struct thread *global_thread_list = NULL;
@@ -237,7 +277,19 @@ void sched_enqueue_thread(struct thread *t, struct cpu_info *explicit_cpu) {
 
   t->cpu_index = target_cpu->cpu_id;
 
+  bool kick_idle_cpu = target_cpu->current_thread == target_cpu->idle_thread;
   spinlock_release(&target_cpu->queue_lock);
+
+  // A periodic tick used to notice newly runnable work. In one-shot mode an
+  // idle CPU may have no timer armed, so explicitly force a scheduling event.
+  if (kick_idle_cpu && lapic_is_ready()) {
+    struct cpu_info *self = cpu_get_current();
+    if (target_cpu == self)
+      lapic_timer_rearm_if_earlier(lapic_timer_get_ms() + 1);
+    else
+      lapic_send_ipi(target_cpu->apic_id, IPI_VECTOR_RESCHEDULE);
+  }
+
   __asm__ volatile("sti");
 }
 
@@ -617,6 +669,8 @@ void sched_yield(void) {
     next_t = cpu->idle_thread;
   }
 
+  sched_arm_next_deadline(cpu, next_t);
+
   if (next_t && next_t != prev) {
     if (prev->state == THREAD_RUNNING) {
       prev->state = THREAD_READY;
@@ -666,19 +720,24 @@ void sched_tick(struct registers *regs) {
   struct cpu_info *cpu = cpu_get_current();
   struct thread *curr = cpu->current_thread;
   if (curr) {
-    // Account one tick (1 ms at LAPIC_TIMER_HZ=1000) of CPU time
-    curr->runtime_total++;
+    // Account elapsed runtime independently of interrupt frequency.
+    uint64_t now = lapic_timer_get_ms();
+    uint64_t elapsed = cpu->ticks ? now - cpu->ticks : 0;
+    curr->runtime_total += elapsed;
+    cpu->ticks = now;
 
-    /* ITIMER_REAL is wall-clock time, including time spent blocked.  The BSP
-     * advances every thread once per millisecond to avoid SMP double ticks. */
-    if (cpu->cpu_id == 0) {
-      uint64_t now = lapic_timer_get_ticks();
+    /* ITIMER_REAL is global and protected by tid_lock. Any CPU whose
+     * one-shot deadline fires may deliver an expired alarm. */
+    {
       spinlock_acquire(&tid_lock);
       for (struct thread *t = global_thread_list; t; t = t->global_next) {
         if (t->it_real_next && now >= t->it_real_next) {
           extern void signal_send(struct thread *, int);
           signal_send(t, SIGALRM);
-          if (t->it_real_interval) t->it_real_next = now + t->it_real_interval;
+          if (t->it_real_interval) {
+            t->it_real_next = now + t->it_real_interval;
+            lapic_timer_rearm_if_earlier(t->it_real_next);
+          }
           else { t->it_real_next = 0; t->it_real_value = 0; }
         }
       }

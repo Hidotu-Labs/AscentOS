@@ -1,12 +1,11 @@
 #!/bin/sh
 # AscentOS: Build GNU Bash 5.3 for AscentOS
 #
-# This script cross-compiles Bash using the musl toolchain, producing a
-# statically-linked bash binary that runs on AscentOS.
+# This script cross-compiles Bash using the glibc toolchain. Bash's bundled
+# allocator remains enabled; glibc provides the sbrk compatibility it needs.
 #
 # Prerequisites:
-#   - Run scripts/musl-toolchain.sh first to build the musl toolchain
-#   - Or have x86_64-linux-musl-gcc available on PATH
+#   - Run scripts/glibc-toolchain.sh first
 #
 # Usage:
 #   ./scripts/build-bash.sh          # Build and install Bash
@@ -19,23 +18,21 @@ BASH_TARBALL="bash-${BASH_VERSION_NUM}.tar.gz"
 BASH_URL="https://ftp.gnu.org/gnu/bash/${BASH_TARBALL}"
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
-BUILD_DIR=${BUILD_DIR:-"$ROOT_DIR/build/bash-${BASH_VERSION_NUM}"}
-PREFIX=${MUSL_SYSROOT:-"$ROOT_DIR/toolchain/musl-sysroot"}
+BUILD_DIR=${BUILD_DIR:-"$ROOT_DIR/build/bash-${BASH_VERSION_NUM}-glibc"}
+PREFIX=${GLIBC_SYSROOT:-"$ROOT_DIR/toolchain/glibc-sysroot"}
 BASH_INSTALL="${PREFIX}/opt/bash"
 JOBS=$(nproc 2>/dev/null || echo 4)
 
-# Find musl compiler
+# Find glibc compiler
 find_compiler() {
-    LOCAL_CC="$ROOT_DIR/toolchain/x86_64-linux-musl/bin/x86_64-linux-musl-gcc"
+    LOCAL_CC="$ROOT_DIR/toolchain/x86_64-linux-glibc/bin/x86_64-buildroot-linux-gnu-gcc"
 
     if [ -x "$LOCAL_CC" ]; then
         CC="$LOCAL_CC"
-    elif command -v x86_64-linux-musl-gcc >/dev/null 2>&1; then
-        CC="x86_64-linux-musl-gcc"
-    elif command -v musl-gcc >/dev/null 2>&1; then
-        CC="musl-gcc"
+    elif command -v x86_64-buildroot-linux-gnu-gcc >/dev/null 2>&1; then
+        CC="x86_64-buildroot-linux-gnu-gcc"
     else
-        echo "Error: No musl compiler found. Run scripts/musl-toolchain.sh first." >&2
+        echo "Error: No glibc compiler found. Run scripts/glibc-toolchain.sh first." >&2
         exit 1
     fi
 
@@ -59,8 +56,13 @@ build_bash() {
 
     # Download Bash source
     if [ ! -f "$BASH_TARBALL" ]; then
-        echo "Downloading $BASH_URL ..."
-        curl -L -o "$BASH_TARBALL" "$BASH_URL"
+        CACHED_TARBALL="$ROOT_DIR/build/bash-${BASH_VERSION_NUM}/$BASH_TARBALL"
+        if [ -f "$CACHED_TARBALL" ]; then
+            cp "$CACHED_TARBALL" "$BASH_TARBALL"
+        else
+            echo "Downloading $BASH_URL ..."
+            curl -L -o "$BASH_TARBALL" "$BASH_URL"
+        fi
     fi
 
     # Extract
@@ -134,14 +136,13 @@ build_bash() {
     export bash_cv_func_lstat=yes
 
     ./configure \
-        --host=x86_64-linux-musl \
+        --host=x86_64-buildroot-linux-gnu \
         --prefix=/opt/bash \
         --disable-nls \
-        --without-bash-malloc \
         --disable-progcomp \
         --disable-net-redirections \
-        CFLAGS=" -O2 -fno-stack-protector -I$PREFIX/include" \
-        LDFLAGS="-L$PREFIX/lib"
+        CFLAGS="-O2 -fno-stack-protector --sysroot=$PREFIX" \
+        LDFLAGS="--sysroot=$PREFIX -L$PREFIX/lib -L$PREFIX/usr/lib"
 
     echo "Building Bash (this may take a while) ..."
     make -j"$JOBS"

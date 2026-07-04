@@ -297,15 +297,9 @@ void fb_swap_buffer(void) {
   for (uint32_t y = y1; y < y2; y++) {
     uint8_t *src = (uint8_t *)backbuffer + y * fb->pitch + x1 * 4;
     uint8_t *dst = (uint8_t *)fb->address + y * fb->pitch + x1 * 4;
-    memcpy(dst, src, copy_width * 4);
+    memcpy_to_wc(dst, src, copy_width * 4);
   }
-}
-
-void fb_copy_to_backbuffer(void) {
-  if (!backbuffer)
-    return;
-  uint32_t fb_size = fb->height * fb->pitch;
-  memcpy((uint8_t *)backbuffer, (uint8_t *)fb->address, fb_size);
+  __asm__ volatile("sfence" ::: "memory");
 }
 
 // /dev/fb0 VFS node
@@ -331,7 +325,8 @@ static uint32_t fb_vfs_write(struct vfs_node *node, uint32_t offset,
   }
 
   // Write directly to framebuffer for text mode
-  memcpy((uint8_t *)fb->address + offset, buffer, size);
+  memcpy_to_wc((uint8_t *)fb->address + offset, buffer, size);
+  __asm__ volatile("sfence" ::: "memory");
 
   return size;
 }
@@ -832,7 +827,8 @@ static int fb_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
 
     // Copy entire X11 backbuffer to hardware framebuffer
     // This is the "page flip" - atomic swap of entire frame
-    memcpy((uint8_t *)fb->address, (uint8_t *)x11_backbuffer, fb_size);
+    memcpy_to_wc((uint8_t *)fb->address, (uint8_t *)x11_backbuffer, fb_size);
+    __asm__ volatile("sfence" ::: "memory");
 
     // Update yoffset if requested (for virtual screen panning)
     struct fb_var_screeninfo *var = (struct fb_var_screeninfo *)arg;

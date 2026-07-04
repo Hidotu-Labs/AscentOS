@@ -1,4 +1,5 @@
 #include "drivers/storage/ahci.h"
+#include "apic/lapic_timer.h"
 #include "console/console.h"
 #include "console/klog.h"
 #include "drivers/pci/pci.h"
@@ -208,11 +209,21 @@ static int ahci_io(ahci_port_t *port, uint64_t lba, uint32_t count, void *buf,
   cmdfis->countl = count & 0xFF;
   cmdfis->counth = (count >> 8) & 0xFF;
 
-  // Issue command
-  while (port->tfd & (0x80 | 0x08))
-    ; // Wait until drive not busy or drq
+  // Issue command, but never let a wedged controller freeze the kernel.
+  uint64_t deadline = lapic_timer_get_ms() + 5000;
+  while (port->tfd & (0x80 | 0x08)) {
+    if (lapic_timer_get_ms() >= deadline) {
+      console_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET
+                   " AHCI timeout waiting for BSY/DRQ to clear\n");
+      pmm_free_blocks(bounce_phys, pages);
+      if (drive) spinlock_release(&drive->lock);
+      return -1;
+    }
+    __asm__ volatile("pause");
+  }
 
   port->ci = 1 << slot;
+  deadline = lapic_timer_get_ms() + 5000;
 
   // Wait for completion
   while (1) {
@@ -223,8 +234,23 @@ static int ahci_io(ahci_port_t *port, uint64_t lba, uint32_t count, void *buf,
       console_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " AHCI Disk Error during wait: IS=");
       // Note: we'd ideally dump more regs here
       pmm_free_blocks(bounce_phys, pages);
+      if (drive) spinlock_release(&drive->lock);
       return -1;
     }
+    if (lapic_timer_get_ms() >= deadline) {
+      console_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET
+                   " AHCI command timeout: CI=");
+      print_uint64(port->ci);
+      console_puts(" TFD=");
+      print_uint64(port->tfd);
+      console_puts(" IS=");
+      print_uint64(port->is);
+      console_puts("\n");
+      pmm_free_blocks(bounce_phys, pages);
+      if (drive) spinlock_release(&drive->lock);
+      return -1;
+    }
+    __asm__ volatile("pause");
   }
 
   if (!is_write) {

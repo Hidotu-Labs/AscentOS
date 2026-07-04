@@ -58,7 +58,8 @@
 #define DRM_IOCTL_MODE_ADDFB2 0xC06864B8
 #define DRM_IOCTL_MODE_CREATE_LEASE 0xC01864C6
 #define DRM_IOCTL_MODE_SETPROPERTY 0xC01064AB
-#define DRM_IOCTL_MODE_DIRTYFB 0x401064B1
+#define DRM_IOCTL_MODE_DIRTYFB 0xC01864B1
+#define DRM_IOCTL_MODE_DIRTYFB_LEGACY 0x401064B1
 
 #define DRM_CLIENT_CAP_STEREO_3D 1
 #define DRM_CLIENT_CAP_UNIVERSAL_PLANES 2
@@ -153,6 +154,12 @@ struct drm_mode_crtc_page_flip {
   uint32_t flags;
   uint32_t reserved;
   uint64_t user_data;
+};
+
+struct drm_clip_rect { uint16_t x1, y1, x2, y2; };
+struct drm_mode_fb_dirty_cmd {
+  uint32_t fb_id, flags, color, num_clips;
+  uint64_t clips_ptr;
 };
 
 #define DRM_MODE_PAGE_FLIP_EVENT 0x01
@@ -311,6 +318,18 @@ struct drm_prop_value {
 
 #define DRM_MAX_OBJ_PROPS 16
 
+struct drm_stats {
+  uint64_t commits;
+  uint64_t full_commits;
+  uint64_t damage_commits;
+  uint64_t direct_scanout_commits;
+  uint64_t empty_commits;
+  uint64_t copy_batches;
+  uint64_t bytes_copied;
+  uint64_t copy_cycles;
+  uint64_t max_copy_cycles;
+};
+
 struct drm_device {
   const char *name;
   uint32_t minor;
@@ -326,6 +345,10 @@ struct drm_device {
   uint32_t next_blob_id;
   uint32_t next_prime_id;
   uint32_t client_caps; /* global caps (legacy path) */
+
+  /* Damage from the latest atomic request, consumed by drm.c immediately. */
+  uint8_t pending_damage_valid;
+  struct drm_clip_rect pending_damage;
 };
 
 struct drm_mode_object {
@@ -418,7 +441,8 @@ struct drm_pending_event {
 #define DRM_PROP_ID_TYPE 15
 #define DRM_PROP_ID_HOTSPOT_X 16
 #define DRM_PROP_ID_HOTSPOT_Y 17
-#define DRM_PROP_ID_MAX 18
+#define DRM_PROP_ID_FB_DAMAGE_CLIPS 18
+#define DRM_PROP_ID_MAX 19
 
 #define DRM_PLANE_TYPE_OVERLAY 0
 #define DRM_PLANE_TYPE_PRIMARY 1
@@ -438,6 +462,14 @@ struct drm_prop_blob {
   uint32_t length;
   void *data;
   struct list_head list;
+};
+
+/* Payload used by the standard FB_DAMAGE_CLIPS blob property. */
+struct drm_mode_rect {
+  int32_t x1;
+  int32_t y1;
+  int32_t x2;
+  int32_t y2;
 };
 
 /* ── Atomic ioctl structs ────────────────────────────────────────────────── */
@@ -547,6 +579,7 @@ struct drm_framebuffer_full {
 
 void drm_init(void);
 void drm_register_vfs(void);
+void drm_stats_snapshot(struct drm_stats *out);
 
 void drm_obj_add_prop(struct drm_mode_object *obj, uint32_t prop_id,
                       uint64_t default_val);
@@ -570,6 +603,8 @@ struct drm_gem_object {
   struct list_head list;
   struct list_head file_list;
   int refcount;
+  uint64_t (*get_page_phys)(struct drm_gem_object *obj, uint32_t page);
+  void (*free)(struct drm_device *dev, struct drm_gem_object *obj);
 };
 
 #endif

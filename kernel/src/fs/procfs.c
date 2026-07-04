@@ -1,7 +1,9 @@
 #include "fs/procfs.h"
 #include "apic/lapic_timer.h"
 #include "drivers/storage/block.h"
+#include "drivers/gpu/drm/drm.h"
 #include "drivers/timer/rtc.h"
+#include "cpu/tsc.h"
 #include "fs/ramfs.h"
 #include "fs/vfs.h"
 #include "lib/string.h"
@@ -29,6 +31,47 @@ uint32_t procfs_meminfo_read(vfs_node_t *node, uint32_t offset, uint32_t size,
       (unsigned long long)free_kb,
       (unsigned long long)free_kb,
       (unsigned long long)total_kb);
+
+  node->length = (uint32_t)len;
+  if (offset >= (uint32_t)len)
+    return 0;
+  if (offset + size > (uint32_t)len)
+    size = (uint32_t)len - offset;
+  memcpy(buffer, buf + offset, size);
+  return size;
+}
+
+static uint32_t procfs_drmstats_read(vfs_node_t *node, uint32_t offset,
+                                     uint32_t size, uint8_t *buffer) {
+  char buf[768];
+  struct drm_stats stats;
+  drm_stats_snapshot(&stats);
+
+  uint64_t average_cycles = stats.copy_batches
+                                ? stats.copy_cycles / stats.copy_batches : 0;
+  int len = snprintf(buf, sizeof(buf),
+      "commits: %llu\n"
+      "full_commits: %llu\n"
+      "damage_commits: %llu\n"
+      "direct_scanout_commits: %llu\n"
+      "empty_commits: %llu\n"
+      "copy_batches: %llu\n"
+      "bytes_copied: %llu\n"
+      "copy_cycles: %llu\n"
+      "average_copy_cycles: %llu\n"
+      "max_copy_cycles: %llu\n"
+      "tsc_khz: %llu\n",
+      (unsigned long long)stats.commits,
+      (unsigned long long)stats.full_commits,
+      (unsigned long long)stats.damage_commits,
+      (unsigned long long)stats.direct_scanout_commits,
+      (unsigned long long)stats.empty_commits,
+      (unsigned long long)stats.copy_batches,
+      (unsigned long long)stats.bytes_copied,
+      (unsigned long long)stats.copy_cycles,
+      (unsigned long long)average_cycles,
+      (unsigned long long)stats.max_copy_cycles,
+      (unsigned long long)tsc_get_freq_khz());
 
   node->length = (uint32_t)len;
   if (offset >= (uint32_t)len)
@@ -751,9 +794,9 @@ static vfs_node_t *make_pid_dir(uint32_t pid) {
 
 // Number of static entries in the procfs root (excluding . and ..)
 // These are the nodes added by procfs_init before we install our hooks:
-//   meminfo cpuinfo partitions mounts uptime stat loadavg heapinfo cmdline
-//   → 9
-#define PROCFS_STATIC_ENTRIES 9
+//   meminfo drmstats cpuinfo partitions mounts uptime stat loadavg heapinfo
+//   cmdline → 10
+#define PROCFS_STATIC_ENTRIES 10
 
 static int procfs_self_readlink(vfs_node_t *node, char *buf, uint32_t size) {
   (void)node;
@@ -921,6 +964,18 @@ void procfs_init(void) {
       meminfo_node->length = 512; // Dummy size, redefined on read
 
       ramfs_mount_node(procfs_root, meminfo_node);
+    }
+
+    // Add /proc/drmstats
+    vfs_node_t *drmstats_node = kmalloc(sizeof(vfs_node_t));
+    if (drmstats_node) {
+      vfs_node_init(drmstats_node);
+      strncpy(drmstats_node->name, "drmstats", 127);
+      drmstats_node->flags = FS_FILE | FS_PERSISTENT;
+      drmstats_node->mask = 0444;
+      drmstats_node->read = procfs_drmstats_read;
+      drmstats_node->length = 768;
+      ramfs_mount_node(procfs_root, drmstats_node);
     }
 
     // Add /proc/cpuinfo

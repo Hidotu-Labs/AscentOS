@@ -8,6 +8,21 @@
 #include "../../../mm/vmm.h"
 
 struct drm_device global_drm_dev;
+static struct drm_stats drm_perf_stats;
+
+static inline uint64_t drm_read_cycles(void) {
+  uint32_t lo, hi;
+  __asm__ volatile("lfence; rdtsc" : "=a"(lo), "=d"(hi) : : "memory");
+  return ((uint64_t)hi << 32) | lo;
+}
+
+void drm_stats_snapshot(struct drm_stats *out) {
+  if (!out)
+    return;
+  spinlock_acquire(&global_drm_dev.lock);
+  *out = drm_perf_stats;
+  spinlock_release(&global_drm_dev.lock);
+}
 
 /* ── External symbols ────────────────────────────────────────────────────── */
 extern struct drm_gem_object *drm_gem_object_create(struct drm_device *dev,
@@ -62,6 +77,37 @@ extern struct drm_gem_object *drm_prime_import(int prime_fd);
 extern int drm_ioctl_addfb2(struct drm_file *file, struct drm_device *dev,
                             uint64_t arg);
 
+/* ── virtio-gpu hook pointers (NULL = use Limine software blit) ──────────── */
+typedef void (*drm_commit_damage_fn_t)(struct drm_device *dev,
+                                        const struct drm_clip_rect *clips,
+                                        uint32_t num_clips,
+                                        uint32_t target_fb_id);
+drm_commit_damage_fn_t g_drm_commit_damage_fn = NULL;
+
+typedef void (*drm_pageflip_fn_t)(struct drm_file *file,
+                                   uint32_t crtc_id, uint32_t fb_id,
+                                   uint64_t user_data);
+drm_pageflip_fn_t g_drm_pageflip_fn = NULL;
+
+typedef void (*drm_cursor_fn_t)(uint32_t crtc_id, uint32_t handle,
+                                 int32_t x, int32_t y,
+                                 int32_t hot_x, int32_t hot_y);
+drm_cursor_fn_t g_drm_cursor_fn = NULL;
+
+typedef int (*drm_create_dumb_fn_t)(struct drm_device *dev,
+                                     uint32_t width, uint32_t height,
+                                     uint32_t bpp,
+                                     struct drm_gem_object **obj_out);
+drm_create_dumb_fn_t g_drm_create_dumb_fn = NULL;
+
+typedef void (*drm_set_fb_fn_t)(uint32_t crtc_id, struct drm_framebuffer *fb);
+drm_set_fb_fn_t g_drm_set_fb_fn = NULL;
+
+typedef void (*drm_get_modes_fn_t)(uint32_t connector_id,
+                                    struct drm_mode_modeinfo *modes,
+                                    uint32_t *count);
+drm_get_modes_fn_t g_drm_get_modes_fn = NULL;
+
 /* ── Helper: get drm_file from node->device ──────────────────────────────── */
 /*
  * The VFS node's device pointer is set to drm_file* on open (per-client node).
@@ -101,15 +147,34 @@ static void drm_close(struct vfs_node *node) {
 }
 
 /* ── Display Commit (Software Blit) ─────────────────────────────────────── */
-static void drm_commit(struct drm_device *dev) {
+static void drm_commit_damage(struct drm_device *dev,
+                              const struct drm_clip_rect *clips,
+                              uint32_t num_clips, uint32_t target_fb_id) {
+  /* Delegate to virtio-gpu when it owns the display */
+  if (g_drm_commit_damage_fn) {
+    g_drm_commit_damage_fn(dev, clips, num_clips, target_fb_id);
+    return;
+  }
   if (!dev)
     return;
   spinlock_acquire(&dev->lock);
+  uint64_t start_cycles = drm_read_cycles();
+  uint64_t copied_bytes = 0;
+  bool wrote_wc = false;
+  bool saw_direct_scanout = false;
+
+  drm_perf_stats.commits++;
+  if (clips && num_clips)
+    drm_perf_stats.damage_commits++;
+  else
+    drm_perf_stats.full_commits++;
+
   struct drm_mode_object *obj;
   list_for_each_entry(obj, &dev->kms_objects, list) {
     if (obj->type == DRM_MODE_OBJECT_CRTC) {
       struct drm_crtc *crtc = (struct drm_crtc *)obj;
-      if (crtc->fb && crtc->fb->gem_obj && crtc->fb->gem_obj->virt_addr) {
+      if ((!target_fb_id || (crtc->fb && crtc->fb->base.id == target_fb_id)) &&
+          crtc->fb && crtc->fb->gem_obj && crtc->fb->gem_obj->virt_addr) {
         void *hw_fb = fb_get_base();
         if (hw_fb) {
           uint32_t width = fb_get_width();
@@ -117,7 +182,39 @@ static void drm_commit(struct drm_device *dev) {
           uint32_t hw_pitch = fb_get_pitch();
           uint32_t sw_pitch = crtc->fb->pitch;
 
-          if (hw_pitch == sw_pitch) {
+          bool direct_scanout = crtc->fb->gem_obj->virt_addr == hw_fb &&
+                                sw_pitch == hw_pitch;
+          if (direct_scanout)
+            saw_direct_scanout = true;
+
+          if (!direct_scanout && clips && num_clips) {
+            uint32_t cpp = crtc->fb->bpp / 8;
+            if (!cpp) cpp = 4;
+            for (uint32_t i = 0; i < num_clips; i++) {
+              uint32_t x1 = clips[i].x1, y1 = clips[i].y1;
+              uint32_t x2 = clips[i].x2, y2 = clips[i].y2;
+              if (x1 > width) x1 = width;
+              if (x2 > width) x2 = width;
+              if (y1 > height) y1 = height;
+              if (y2 > height) y2 = height;
+              if (x2 <= x1 || y2 <= y1) continue;
+              size_t xoff = (size_t)x1 * cpp;
+              if (xoff >= hw_pitch || xoff >= sw_pitch) continue;
+              size_t line_bytes = (size_t)(x2 - x1) * cpp;
+              if (line_bytes > hw_pitch - xoff)
+                line_bytes = hw_pitch - xoff;
+              if (line_bytes > sw_pitch - xoff)
+                line_bytes = sw_pitch - xoff;
+              for (uint32_t y = y1; y < y2; y++)
+                memcpy_to_wc((uint8_t *)hw_fb +
+                                 (size_t)y * hw_pitch + xoff,
+                             (uint8_t *)crtc->fb->gem_obj->virt_addr +
+                                 (size_t)y * sw_pitch + xoff,
+                             line_bytes);
+              copied_bytes += (uint64_t)line_bytes * (y2 - y1);
+              wrote_wc = true;
+            }
+          } else if (!direct_scanout && hw_pitch == sw_pitch) {
 #if DRM_DEBUG_LOGGING
             klog_puts("[DRM] Blit: fast copy, size=");
             klog_uint64((size_t)height * hw_pitch);
@@ -142,10 +239,11 @@ static void drm_commit(struct drm_device *dev) {
             }
 #endif
 
-            memcpy(hw_fb, crtc->fb->gem_obj->virt_addr,
-                   (size_t)height * hw_pitch);
-            __asm__ volatile("sfence" ::: "memory");
-          } else {
+            memcpy_to_wc(hw_fb, crtc->fb->gem_obj->virt_addr,
+                         (size_t)height * hw_pitch);
+            copied_bytes += (uint64_t)height * hw_pitch;
+            wrote_wc = true;
+          } else if (!direct_scanout) {
             uint32_t copy_len = width * 4;
             if (copy_len > hw_pitch)
               copy_len = hw_pitch;
@@ -177,16 +275,21 @@ static void drm_commit(struct drm_device *dev) {
 #endif
 
             for (uint32_t y = 0; y < height; y++) {
-              memcpy((uint8_t *)hw_fb + y * hw_pitch,
-                     (uint8_t *)crtc->fb->gem_obj->virt_addr + y * sw_pitch,
-                     copy_len);
+              memcpy_to_wc(
+                  (uint8_t *)hw_fb + y * hw_pitch,
+                  (uint8_t *)crtc->fb->gem_obj->virt_addr + y * sw_pitch,
+                  copy_len);
             }
-            __asm__ volatile("sfence" ::: "memory");
+            copied_bytes += (uint64_t)copy_len * height;
+            wrote_wc = true;
           }
 
           struct drm_plane *cursor = crtc->cursor;
           if (cursor && cursor->fb && cursor->fb->gem_obj &&
-              cursor->fb->gem_obj->virt_addr && cursor->fb->bpp == 32) {
+              cursor->fb->gem_obj->virt_addr && cursor->fb->bpp == 32 &&
+              cursor->fb->gem_obj->cache_mode == DRM_GEM_CACHE_WB &&
+              crtc->fb->bpp == 32 &&
+              crtc->fb->gem_obj->cache_mode == DRM_GEM_CACHE_WB) {
             uint32_t src_x = cursor->src_x >> 16;
             uint32_t src_y = cursor->src_y >> 16;
             uint32_t src_w = cursor->src_w ? (cursor->src_w >> 16) : 0;
@@ -209,18 +312,24 @@ static void drm_commit(struct drm_device *dev) {
             int32_t cx = cursor->crtc_x - cursor->hotspot_x;
             int32_t cy = cursor->crtc_y - cursor->hotspot_y;
             uint8_t *src_base = (uint8_t *)cursor->fb->gem_obj->virt_addr;
+            uint8_t *primary_base =
+                (uint8_t *)crtc->fb->gem_obj->virt_addr;
             uint8_t *dst_base = (uint8_t *)hw_fb;
             for (uint32_t sy = 0; sy < ch; sy++) {
               int32_t dy = cy + (int32_t)sy;
-              if (dy < 0 || dy >= (int32_t)height)
+              if (dy < 0 || dy >= (int32_t)height ||
+                  dy >= (int32_t)crtc->fb->height)
                 continue;
               uint32_t *src =
                   (uint32_t *)(src_base + (src_y + sy) * cursor->fb->pitch) +
                   src_x;
+              uint32_t *background =
+                  (uint32_t *)(primary_base + (uint32_t)dy * sw_pitch);
               uint32_t *dst = (uint32_t *)(dst_base + (uint32_t)dy * hw_pitch);
               for (uint32_t sx = 0; sx < cw; sx++) {
                 int32_t dx = cx + (int32_t)sx;
-                if (dx < 0 || dx >= (int32_t)width)
+                if (dx < 0 || dx >= (int32_t)width ||
+                    dx >= (int32_t)crtc->fb->width)
                   continue;
                 uint32_t sp = src[sx];
                 uint32_t a = sp >> 24;
@@ -229,7 +338,8 @@ static void drm_commit(struct drm_device *dev) {
                 if (a == 255) {
                   dst[dx] = sp;
                 } else {
-                  uint32_t dp = dst[dx];
+                  /* Never read the WC scanout. Blend over the WB primary. */
+                  uint32_t dp = background[dx];
                   uint32_t sr = (sp >> 16) & 0xff;
                   uint32_t sg = (sp >> 8) & 0xff;
                   uint32_t sb = sp & 0xff;
@@ -241,16 +351,57 @@ static void drm_commit(struct drm_device *dev) {
                   uint32_t b = (sb * a + db * (255 - a)) / 255;
                   dst[dx] = 0xff000000 | (r << 16) | (g << 8) | b;
                 }
+                copied_bytes += sizeof(uint32_t);
+                wrote_wc = true;
               }
             }
-            __asm__ volatile("sfence" ::: "memory");
           cursor_done:;
           }
         }
       }
     }
   }
+
+  if (wrote_wc) {
+    __asm__ volatile("sfence" ::: "memory");
+    uint64_t elapsed = drm_read_cycles() - start_cycles;
+    drm_perf_stats.copy_batches++;
+    drm_perf_stats.bytes_copied += copied_bytes;
+    drm_perf_stats.copy_cycles += elapsed;
+    if (elapsed > drm_perf_stats.max_copy_cycles)
+      drm_perf_stats.max_copy_cycles = elapsed;
+  } else if (!saw_direct_scanout) {
+    drm_perf_stats.empty_commits++;
+  }
+  if (saw_direct_scanout)
+    drm_perf_stats.direct_scanout_commits++;
+
   spinlock_release(&dev->lock);
+}
+
+static void drm_commit(struct drm_device *dev) {
+  drm_commit_damage(dev, NULL, 0, 0);
+}
+
+/* Consume damage recorded while applying the immediately preceding atomic
+ * request.  If userspace did not provide FB_DAMAGE_CLIPS, preserve the
+ * conservative full-frame fallback. */
+static void drm_commit_atomic(struct drm_device *dev) {
+  struct drm_clip_rect damage;
+  bool have_damage = false;
+
+  spinlock_acquire(&dev->lock);
+  if (dev->pending_damage_valid) {
+    damage = dev->pending_damage;
+    dev->pending_damage_valid = 0;
+    have_damage = true;
+  }
+  spinlock_release(&dev->lock);
+
+  if (have_damage)
+    drm_commit_damage(dev, &damage, 1, 0);
+  else
+    drm_commit(dev);
 }
 
 /* ── Per-client open / close ─────────────────────────────────────────────── */
@@ -462,6 +613,20 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     klog_puts(" flags=0x");
     klog_hex32(c->flags);
     klog_puts("\n");
+
+    if (g_drm_create_dumb_fn) {
+      struct drm_gem_object *obj = NULL;
+      int rc = g_drm_create_dumb_fn(dev, c->width, c->height, c->bpp, &obj);
+      if (rc != 0 || !obj) return rc ? rc : -12;
+      uint32_t local_h = drm_file_gem_register(file, obj);
+      if (!local_h) { drm_gem_object_free(dev, obj); return -12; }
+      c->pitch = c->width * (c->bpp / 8);
+      c->size = obj->size;
+      c->handle = local_h;
+      return 0;
+    }
+
+    /* Dumb/render buffers stay WB. Only the fixed physical scanout is WC. */
     c->pitch = (c->width * (c->bpp / 8) + 63) & ~63;
     c->size = (uint64_t)c->pitch * c->height;
     struct drm_gem_object *obj = drm_gem_object_create(dev, c->size);
@@ -791,8 +956,17 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     }
     c->count_props = prop_count;
 
+    uint32_t mode_capacity = c->count_modes;
     c->count_modes = 1;
-    if (c->modes_ptr) {
+    if (g_drm_get_modes_fn) {
+      if (c->modes_ptr) {
+        uint32_t mode_count = mode_capacity;
+        g_drm_get_modes_fn(c->connector_id,
+                           (struct drm_mode_modeinfo *)c->modes_ptr,
+                           &mode_count);
+        c->count_modes = mode_count;
+      }
+    } else if (c->modes_ptr) {
       struct drm_mode_modeinfo *m = (struct drm_mode_modeinfo *)c->modes_ptr;
       m->clock = 60000;
       m->hdisplay = fb_get_width();
@@ -920,8 +1094,11 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     if (crtc_cmd->fb_id && (!fb_obj || fb_obj->type != DRM_MODE_OBJECT_FB))
       klog_puts("[DRM] SETCRTC warning: fb id not found\n");
     struct drm_crtc *crtc = (struct drm_crtc *)crtc_obj;
-    if (fb_obj && fb_obj->type == DRM_MODE_OBJECT_FB)
+    if (fb_obj && fb_obj->type == DRM_MODE_OBJECT_FB) {
       crtc->fb = (struct drm_framebuffer *)fb_obj;
+      if (g_drm_set_fb_fn)
+        g_drm_set_fb_fn(crtc->base.id, crtc->fb);
+    }
     spinlock_release(&dev->lock);
     drm_commit(dev);
     return 0;
@@ -951,15 +1128,23 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     }
     struct drm_crtc *crtc = (struct drm_crtc *)crtc_obj;
     crtc->fb = (struct drm_framebuffer *)fb_obj;
+    if (g_drm_set_fb_fn)
+      g_drm_set_fb_fn(crtc->base.id, crtc->fb);
     if (flip->flags & DRM_MODE_PAGE_FLIP_EVENT) {
-      struct drm_event_vblank ev = {0};
-      ev.base.type = DRM_EVENT_FLIP_COMPLETE;
-      ev.base.length = sizeof(ev);
-      ev.user_data = flip->user_data;
-      drm_fill_vblank_event(&ev, flip->crtc_id);
+      /* Register flip with virtio hook first so it can record file+user_data */
+      if (g_drm_pageflip_fn)
+        g_drm_pageflip_fn(file, flip->crtc_id, flip->fb_id, flip->user_data);
       spinlock_release(&dev->lock);
       drm_commit(dev);
-      drm_file_send_event(file, &ev, node);
+      /* If no virtio hook took ownership, deliver event via legacy path */
+      if (!g_drm_pageflip_fn) {
+        struct drm_event_vblank ev = {0};
+        ev.base.type = DRM_EVENT_FLIP_COMPLETE;
+        ev.base.length = sizeof(ev);
+        ev.user_data = flip->user_data;
+        drm_fill_vblank_event(&ev, flip->crtc_id);
+        drm_file_send_event(file, &ev, node);
+      }
       return 0;
     }
     spinlock_release(&dev->lock);
@@ -975,7 +1160,7 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
 #if DRM_DEBUG_LOGGING
       klog_puts("[DRM] ATOMIC commit triggering drm_commit\n");
 #endif
-      drm_commit(dev);
+      drm_commit_atomic(dev);
     }
     return ret;
   }
@@ -986,8 +1171,18 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
   case DRM_IOCTL_MODE_SETPROPERTY:
     return 0; /* stub */
   case DRM_IOCTL_MODE_DIRTYFB:
-    drm_commit(dev);
+  case DRM_IOCTL_MODE_DIRTYFB_LEGACY: {
+    struct drm_mode_fb_dirty_cmd *dirty = (void *)arg;
+    if (!dirty) return -14;
+    if (!dirty->num_clips || !dirty->clips_ptr) {
+      drm_commit(dev);
+      return 0;
+    }
+    if (dirty->num_clips > 4096) return -22;
+    drm_commit_damage(dev, (const struct drm_clip_rect *)dirty->clips_ptr,
+                      dirty->num_clips, dirty->fb_id);
     return 0;
+  }
   case DRM_IOCTL_MODE_CREATEPROPBLOB: {
     struct drm_mode_create_blob *b = (struct drm_mode_create_blob *)arg;
     if (!b->data || !b->length)
@@ -1139,6 +1334,18 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     }
 
     spinlock_release(&dev->lock);
+    /* Notify virtio cursor hook before the Limine software blit */
+    if (g_drm_cursor_fn) {
+      spinlock_acquire(&dev->lock);
+      struct drm_mode_object *cobj;
+      uint32_t found_crtc_id = 0;
+      list_for_each_entry(cobj, &dev->kms_objects, list) {
+        if (cobj->type == DRM_MODE_OBJECT_CRTC) { found_crtc_id = cobj->id; break; }
+      }
+      spinlock_release(&dev->lock);
+      if (found_crtc_id)
+        g_drm_cursor_fn(found_crtc_id, cur->handle, cur->x, cur->y, 0, 0);
+    }
     drm_commit(dev);
     return 0;
   }
@@ -1253,6 +1460,8 @@ static uint64_t drm_vfs_mmap(vfs_node_t *node, uint64_t addr, uint64_t length,
 
   /* Resolve the opaque MAP_DUMB token to an object owned by this DRM file. */
   enum drm_gem_cache_mode cache_mode = DRM_GEM_CACHE_WB;
+  struct drm_gem_object *mapped_obj = NULL;
+  uint64_t mapped_offset = 0;
   bool found = false;
   spinlock_acquire(&file->lock);
   for (uint32_t i = 1; i < DRM_MAX_HANDLES_PER_FILE; i++) {
@@ -1264,6 +1473,8 @@ static uint64_t drm_vfs_mmap(vfs_node_t *node, uint64_t addr, uint64_t length,
         length <= candidate->size - object_offset) {
       cache_mode = candidate->cache_mode;
       found = true;
+      mapped_obj = candidate;
+      mapped_offset = object_offset;
       break;
     }
   }
@@ -1273,6 +1484,8 @@ static uint64_t drm_vfs_mmap(vfs_node_t *node, uint64_t addr, uint64_t length,
         length <= file->hw_fb_gem->size - object_offset) {
       cache_mode = file->hw_fb_gem->cache_mode;
       found = true;
+      mapped_obj = file->hw_fb_gem;
+      mapped_offset = object_offset;
     }
   }
   spinlock_release(&file->lock);
@@ -1293,8 +1506,15 @@ static uint64_t drm_vfs_mmap(vfs_node_t *node, uint64_t addr, uint64_t length,
     page_flags |= PAGE_FLAG_PWT | PAGE_FLAG_PCD | PAGE_FLAG_PAT;
   uint32_t num_pages = (length + 4095) / 4096;
   uint64_t *pml4 = vmm_get_active_pml4();
-  for (uint32_t i = 0; i < num_pages; i++)
-    vmm_map_page(pml4, vaddr + i * 4096, phys + i * 4096, page_flags);
+  for (uint32_t i = 0; i < num_pages; i++) {
+    uint64_t page_offset = mapped_offset + (uint64_t)i * 4096;
+    uint64_t page_phys = mapped_obj->get_page_phys
+        ? mapped_obj->get_page_phys(mapped_obj, (uint32_t)(page_offset / 4096))
+        : mapped_obj->phys_addr + page_offset;
+    if (!page_phys || !vmm_map_page(pml4, vaddr + (uint64_t)i * 4096,
+                                    page_phys, page_flags))
+      return (uint64_t)-1;
+  }
   return vaddr;
 }
 

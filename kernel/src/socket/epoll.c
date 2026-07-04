@@ -571,10 +571,15 @@ int epoll_alloc_fd(eventpoll_t *ep) {
   node->device = ep;
   node->wait_queue = &ep->wq;
 
-  // Set epoll VFS operations
+  // Set epoll VFS operations.
+  // NOTE: node->open is intentionally left NULL for the same reason as
+  // socket_alloc_fd: epoll_vfs_open calls epoll_get, but vfs_close only fires
+  // the close handler once (at node refcount 0).  Registering open would
+  // cause epoll_get on every fork without a matching epoll_put, leaking the
+  // eventpoll object after the child exits.
   node->read = epoll_vfs_read;
   node->write = epoll_vfs_write;
-  node->open = epoll_vfs_open;
+  node->open = NULL;
   node->close = epoll_vfs_close;
   node->poll = epoll_vfs_poll;
 
@@ -583,9 +588,9 @@ int epoll_alloc_fd(eventpoll_t *ep) {
   t->fds[fd] = node;
   t->fd_offsets[fd] = 0;
 
-  // vfs_node_init() created the node with refcount 1; that initial node
-  // reference is the fd-table ownership. The epoll object's initial
-  // reference is transferred to the node and released by epoll_vfs_close().
+  // vfs_node_init() set node->refcount = 1: the fd-table's reference.
+  // ep->refcount = 1 (from epoll_create): the VFS node's reference.
+  // The last vfs_close fires epoll_vfs_close once and destroys the instance.
 
   return fd;
 }

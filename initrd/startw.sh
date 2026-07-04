@@ -41,8 +41,9 @@ LOG=/tmp/weston-debug.log
 echo "[startw] starting weston at $(date)" > $LOG
 
 renderer=pixman
-case "${ASCENT_RENDERER:-llvmpipe}" in
+case "${ASCENT_RENDERER:-pixman}" in
     llvmpipe|gl)
+        renderer=gl
         # Force GBM through its software-device creation path. Do not use
         # MESA_LOADER_DRIVER_OVERRIDE=kms_swrast: that takes GBM's hardware
         # path and calls a callback which software KMS does not provide.
@@ -52,7 +53,9 @@ case "${ASCENT_RENDERER:-llvmpipe}" in
         ;;
     pixman)
         renderer=pixman
-        unset GBM_ALWAYS_SOFTWARE LIBGL_ALWAYS_SOFTWARE GALLIUM_DRIVER
+        unset GBM_ALWAYS_SOFTWARE
+        export LIBGL_ALWAYS_SOFTWARE=1
+        export GALLIUM_DRIVER=llvmpipe
         ;;
     *)
         echo "[startw] unknown ASCENT_RENDERER='$ASCENT_RENDERER'" >> $LOG
@@ -61,7 +64,7 @@ case "${ASCENT_RENDERER:-llvmpipe}" in
         ;;
 esac
 
-echo "[startw] renderer: ${ASCENT_RENDERER:-llvmpipe}" >> $LOG
+echo "[startw] renderer: ${ASCENT_RENDERER:-pixman}" >> $LOG
 
 weston \
     --backend=drm-backend.so \

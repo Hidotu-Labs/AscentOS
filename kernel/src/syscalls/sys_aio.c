@@ -202,6 +202,7 @@ void timerfd_tick(void) {
                 uint64_t iv = ctx->interval_sec * 1000 + ctx->interval_nsec / 1000000;
                 if (iv == 0) iv = 1;
                 ctx->expire_ms = now + iv;
+                lapic_timer_rearm_if_earlier(ctx->expire_ms);
             } else {
                 ctx->expire_ms = 0;
             }
@@ -374,6 +375,8 @@ static uint64_t sys_timerfd_settime(uint64_t fd, uint64_t flags_arg,
         }
     }
     spinlock_release(&ctx->lock);
+    if (ctx->expire_ms)
+        lapic_timer_rearm_if_earlier(ctx->expire_ms);
     return 0;
 }
 

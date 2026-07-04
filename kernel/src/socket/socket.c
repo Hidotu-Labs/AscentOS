@@ -493,10 +493,18 @@ int socket_alloc_fd(socket_t *sock) {
   node->device = sock;
   node->wait_queue = sock->wait_queue;
 
-  // Set socket VFS operations
+  // Set socket VFS operations.
+  // NOTE: node->open is intentionally left NULL.  socket_vfs_open calls
+  // socket_get, but vfs_close only fires the close handler once (when
+  // node->refcount reaches 0).  If node->open were set, fork would call
+  // socket_get for every inherited fd, but socket_vfs_close would only run
+  // once, leaving sock->refcount permanently elevated after the child exits.
+  // Leaving node->open = NULL means sock->refcount stays at 1 (owned by the
+  // VFS node) and socket_vfs_close drops it to 0 exactly once — when the
+  // last file-table reference (parent or child) is closed.
   node->read = socket_vfs_read;
   node->write = socket_vfs_write;
-  node->open = socket_vfs_open;
+  node->open = NULL;
   node->close = socket_vfs_close;
   node->poll = socket_vfs_poll;
   node->ioctl = socket_vfs_ioctl;
@@ -506,9 +514,9 @@ int socket_alloc_fd(socket_t *sock) {
   t->fds[fd] = node;
   t->fd_offsets[fd] = 0;
 
-  // node->refcount starts at 1 (from vfs_node_init), representing the fd
-  // table's reference.  sock->refcount starts at 1 (from socket_create),
-  // representing the VFS node's reference.  No extra get/put needed here.
+  // node->refcount = 1 (from vfs_node_init) — the fd-table's reference.
+  // sock->refcount = 1 (from socket_create) — the VFS node's reference.
+  // These are balanced: the last vfs_close fires socket_vfs_close once.
 
   return fd;
 }

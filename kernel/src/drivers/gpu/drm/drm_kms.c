@@ -37,6 +37,7 @@ struct drm_plane *drm_plane_create(struct drm_device *dev, uint32_t possible_crt
     drm_obj_add_prop(&plane->base, DRM_PROP_ID_CRTC_H,  0);
     drm_obj_add_prop(&plane->base, DRM_PROP_ID_HOTSPOT_X, 0);
     drm_obj_add_prop(&plane->base, DRM_PROP_ID_HOTSPOT_Y, 0);
+    drm_obj_add_prop(&plane->base, DRM_PROP_ID_FB_DAMAGE_CLIPS, 0);
     return plane;
 }
 

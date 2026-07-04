@@ -8,11 +8,11 @@ syscall_entry:
 
     swapgs
 
-    mov gs:[336], rsp
+    mov gs:[368], rsp
 
     mov rsp, gs:[24]
 
-    push qword gs:[336] ; User RSP
+    push qword gs:[368] ; User RSP
     push r11           ; User RFLAGS
     push rcx           ; User RIP
 
@@ -35,6 +35,11 @@ syscall_entry:
 
     mov rdi, rbp
     call syscall_dispatcher
+
+    ; rt_sigreturn requires IRETQ to restore user RCX and R11.
+    mov rax, gs:[384]
+    test rax, rax
+    jnz .sigreturn_iret
 
     mov rsp, rbp
 
@@ -64,3 +69,34 @@ syscall_entry:
 
     ; Return to user mode safely
     o64 sysret
+
+.sigreturn_iret:
+    mov qword gs:[384], 0
+
+    ; Build SS:RSP:RFLAGS:CS:RIP from struct registers.
+    push qword [rax + 168]
+    push qword [rax + 160]
+    push qword [rax + 152]
+    push qword [rax + 144]
+    push qword [rax + 136]
+
+    ; Keep RAX as the frame pointer until all other GPRs are restored.
+    mov r15, [rax + 0]
+    mov r14, [rax + 8]
+    mov r13, [rax + 16]
+    mov r12, [rax + 24]
+    mov r11, [rax + 32]
+    mov r10, [rax + 40]
+    mov r9,  [rax + 48]
+    mov r8,  [rax + 56]
+    mov rbp, [rax + 64]
+    mov rdi, [rax + 72]
+    mov rsi, [rax + 80]
+    mov rdx, [rax + 88]
+    mov rcx, [rax + 96]
+    mov rbx, [rax + 104]
+    mov rax, [rax + 112]
+
+    cli
+    swapgs
+    iretq

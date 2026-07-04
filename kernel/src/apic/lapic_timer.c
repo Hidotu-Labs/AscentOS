@@ -3,6 +3,7 @@
 #include "../cpu/isr.h"
 #include "../console/console.h"
 #include "../console/klog.h"
+#include "../cpu/tsc.h"
 #include "../io/io.h"
 #include "../sched/sched.h"
 #include "../smp/cpu.h"
@@ -14,8 +15,23 @@
 #define CALIBRATION_MS 10       // How long to measure (10 ms)
 
 // State
-static volatile uint64_t lapic_timer_ticks = 0;
 static uint32_t          ticks_per_ms      = 0;   // LAPIC decrements per ms
+static uint64_t          boot_tsc          = 0;
+
+static uint64_t monotonic_ms(void) {
+    uint64_t khz = tsc_get_freq_khz();
+    if (khz == 0) return 0;
+    return (rdtsc() - boot_tsc) / khz;
+}
+
+static uint32_t deadline_to_initial_count(uint64_t deadline_ms) {
+    uint64_t now = monotonic_ms();
+    uint64_t delay_ms = deadline_ms > now ? deadline_ms - now : 1;
+    uint64_t max_ms = 0xffffffffULL / ticks_per_ms;
+    if (delay_ms > max_ms) delay_ms = max_ms;
+    uint64_t count = delay_ms * ticks_per_ms;
+    return (uint32_t)(count ? count : 1);
+}
 
 // Helpers
 static void print_hex32(uint32_t num) {
@@ -27,15 +43,10 @@ static void print_hex32(uint32_t num) {
 
 // Timer ISR
 void lapic_timer_handler(struct registers *regs) {
-    // Only the primary core increments the global system uptime.
-    // This prevents time from running 4x faster on a 4-core system.
     struct cpu_info *cpu = cpu_get_current();
-    if (cpu && cpu->status == CPU_STATUS_BSP) {
-        lapic_timer_ticks++;
-        /* Fire any expired timerfd instances */
-        extern void timerfd_tick(void);
-        timerfd_tick();
-    }
+    if (cpu) cpu->timer_deadline_ms = 0;
+    extern void timerfd_tick(void);
+    timerfd_tick();
 
     // Send EOI BEFORE context switch. This is a special case - normally
     // isr_handler sends EOI after the handler returns. But the scheduler
@@ -108,6 +119,7 @@ void lapic_timer_init(void) {
     klog_puts("[INFO] Calibrating LAPIC timer against PIT...\n");
 
     ticks_per_ms = calibrate_lapic_timer();
+    boot_tsc = rdtsc();
 
     klog_puts("     LAPIC ticks/ms: 0x");
     print_hex32(ticks_per_ms);
@@ -123,52 +135,49 @@ void lapic_timer_init(void) {
     // Register ISR for our timer vector
     register_interrupt_handler(LAPIC_TIMER_VECTOR, lapic_timer_handler);
 
-    // Calculate initial count for 1 ms period (LAPIC_TIMER_HZ = 1000)
-    uint32_t init_count = ticks_per_ms * (1000 / LAPIC_TIMER_HZ);
-
-    // Set divider to 16 (same as calibration)
+    // One-shot mode; scheduler and timer users arm the earliest deadline.
     lapic_write(LAPIC_TIMER_DIV, LAPIC_TIMER_DIV_16);
-
-    // Program periodic mode with our vector
-    lapic_write(LAPIC_LVT_TIMER, LAPIC_TIMER_PERIODIC | LAPIC_TIMER_VECTOR);
-
-    // Start counting!
-    lapic_write(LAPIC_TIMER_INIT, init_count);
-
-    klog_puts("[OK] LAPIC Timer started: ");
-    klog_uint64(LAPIC_TIMER_HZ);
-    klog_puts(" Hz periodic (vector ");
+    lapic_write(LAPIC_LVT_TIMER, LAPIC_TIMER_ONESHOT | LAPIC_TIMER_VECTOR);
+    klog_puts("[OK] LAPIC Timer started: one-shot (vector ");
     klog_uint64(LAPIC_TIMER_VECTOR);
     klog_puts(")\n");
+    lapic_timer_arm_at(monotonic_ms() + LAPIC_SCHED_QUANTUM_MS);
 }
 
 void lapic_timer_init_ap(void) {
-    if (ticks_per_ms == 0) return; // BSP should have calibrated this
-
-    uint32_t init_count = ticks_per_ms * (1000 / LAPIC_TIMER_HZ);
-
-    // Set divider to 16
+    if (ticks_per_ms == 0) return;
     lapic_write(LAPIC_TIMER_DIV, LAPIC_TIMER_DIV_16);
-
-    // Program periodic mode with our vector
-    lapic_write(LAPIC_LVT_TIMER, LAPIC_TIMER_PERIODIC | LAPIC_TIMER_VECTOR);
-
-    // Start counting
-    lapic_write(LAPIC_TIMER_INIT, init_count);
+    lapic_write(LAPIC_LVT_TIMER, LAPIC_TIMER_ONESHOT | LAPIC_TIMER_VECTOR);
+    lapic_timer_arm_at(monotonic_ms() + LAPIC_SCHED_QUANTUM_MS);
 }
 
 uint64_t lapic_timer_get_ticks(void) {
-    return lapic_timer_ticks;
+    return monotonic_ms();
 }
 
 uint64_t lapic_timer_get_ms(void) {
-    // Each tick is 1 ms when LAPIC_TIMER_HZ == 1000
-    return lapic_timer_ticks * (1000 / LAPIC_TIMER_HZ);
+    return monotonic_ms();
+}
+
+void lapic_timer_arm_at(uint64_t deadline_ms) {
+    if (!ticks_per_ms || !lapic_is_ready()) return;
+    struct cpu_info *cpu = cpu_get_current();
+    if (cpu) cpu->timer_deadline_ms = deadline_ms;
+    lapic_write(LAPIC_LVT_TIMER, LAPIC_TIMER_ONESHOT | LAPIC_TIMER_VECTOR);
+    lapic_write(LAPIC_TIMER_INIT, deadline_to_initial_count(deadline_ms));
+}
+
+void lapic_timer_rearm_if_earlier(uint64_t deadline_ms) {
+    struct cpu_info *cpu = cpu_get_current();
+    if (!cpu || cpu->timer_deadline_ms == 0 ||
+        deadline_ms < cpu->timer_deadline_ms)
+        lapic_timer_arm_at(deadline_ms);
 }
 
 void lapic_timer_sleep(uint32_t ms) {
-    uint64_t target = lapic_timer_ticks + ms;
-    while (lapic_timer_ticks < target) {
+    uint64_t target = monotonic_ms() + ms;
+    while (monotonic_ms() < target) {
+        lapic_timer_rearm_if_earlier(target);
         __asm__ volatile("hlt");
     }
 }
