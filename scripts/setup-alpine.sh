@@ -508,24 +508,26 @@ EOF
 echo "[*] Configuring Xorg DRM/modesetting..."
 XORG_CONF_DIR="${ROOTFS_DIR}/etc/X11/xorg.conf.d"
 mkdir -p "${XORG_CONF_DIR}"
+rm -f "${ROOTFS_DIR}/usr/share/X11/xorg.conf.d/40-libinput.conf"
 cat > "${XORG_CONF_DIR}/10-modesetting.conf" <<EOF
 Section "Device"
     Identifier  "Card0"
     Driver      "modesetting"
+    Option      "SWcursor" "true"
 EndSection
 
 Section "InputClass"
-    Identifier "libinput pointer catchall"
+    Identifier "AscentOS evdev pointer"
     MatchIsPointer "on"
     MatchDevicePath "/dev/input/event*"
-    Driver "libinput"
+    Driver "evdev"
 EndSection
 
 Section "InputClass"
-    Identifier "libinput keyboard catchall"
+    Identifier "AscentOS evdev keyboard"
     MatchIsKeyboard "on"
     MatchDevicePath "/dev/input/event*"
-    Driver "libinput"
+    Driver "evdev"
 EndSection
 EOF
 

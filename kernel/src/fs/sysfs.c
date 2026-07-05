@@ -515,12 +515,12 @@ void sysfs_init(void) {
     // /sys/class/drm/
     sysfs_symlink(card0_dir, "subsystem", "../../../../../class/drm");
     sysfs_symlink(card0_dir, "device", "../..");
-    // Also add uevent files up the device tree (wlroots walks up looking for
-    // them)
-    sysfs_mkfile(drm_dev, "uevent", "SUBSYSTEM=drm\n");
+    // Keep the intermediate drm/ and pci0000:00/ directories as plain sysfs
+    // containers. Giving either a uevent file makes libudev treat it as a
+    // device, but neither has a subsystem; Xorg then dereferences a NULL
+    // subsystem while walking from card0 to its PCI parent.
     sysfs_mkfile(gpu_dev, "uevent",
                  "DRIVER=bochs-drm\nPCI_ID=1234:1111\nSUBSYSTEM=pci\n");
-    sysfs_mkfile(pci_seg, "uevent", "SUBSYSTEM=pci\n");
     sysfs_symlink(gpu_dev, "subsystem", "../../../bus/pci");
 
     // Mesa reads vendor/device/class from /sys/dev/char/226:0/device/vendor

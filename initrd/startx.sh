@@ -1,17 +1,47 @@
 #!/bin/sh
-# Xfbdev ile X server başlat ve IceWM + xclock + st çalıştır
+# Xorg modesetting/DRM ile X server başlat ve IceWM + xclock + st çalıştır
 # Alpine package integration via setup-alpine.sh provides additional userland tools
 
 rm -f "/tmp/.X0-lock"
+rm -f "/tmp/.X11-unix/X0"
 
-# X server'ı arka planda başlat
-Xfbdev -retro -xkbdir /share/X11/xkb \
-    -mouse evdev,,device=/dev/input/event1 \
-    -keybd evdev,,device=/dev/input/event0 &
 
 # DISPLAY ortam değişkenini ayarla
 export DISPLAY=:0
 export HOME=/root
+# The modesetting DDX uses the AscentOS KMS device at /dev/dri/card0.
+XORG="${XORG:-/usr/libexec/Xorg}"
+if [ ! -x "$XORG" ]; then
+    XORG=/usr/bin/Xorg
+fi
+if [ ! -x "$XORG" ]; then
+    echo "Hata: Xorg bulunamadı. scripts/setup-alpine.sh çalıştırın."
+    exit 1
+fi
+
+"$XORG" "$DISPLAY" -retro -noreset -nolisten tcp \
+    -configdir /etc/X11/xorg.conf.d \
+    -logfile /tmp/Xorg.0.log &
+XORG_PID=$!
+
+ready=0
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if [ -S /tmp/.X11-unix/X0 ]; then
+        ready=1
+        break
+    fi
+    if ! kill -0 "$XORG_PID" 2>/dev/null; then
+        echo "Hata: Xorg başlatılamadı; /tmp/Xorg.0.log dosyasına bakın."
+        exit 1
+    fi
+    sleep 1
+done
+if [ "$ready" != 1 ]; then
+    echo "Hata: Xorg zaman aşımına uğradı; /tmp/Xorg.0.log dosyasına bakın."
+    kill "$XORG_PID" 2>/dev/null
+    exit 1
+fi
+
 
 # IceWM configuration setup
 export HOME=/root

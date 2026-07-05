@@ -1,5 +1,5 @@
 NAME=x11
-DESCRIPTION="Xfbdev desktop session"
+DESCRIPTION="Xorg DRM desktop session"
 TYPE=foreground
 ENABLED=no
 COMMAND=/bin/startx.sh

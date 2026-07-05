@@ -39,10 +39,9 @@ To build the full suite of ported tools (Bash, X11, etc.), run these scripts in 
 ```bash
 ./scripts/build-bash.sh      && \
 ./scripts/build-coreutils.sh && \
-./scripts/build-tar.sh       && \
 ./scripts/build-tcc.sh       && \
-./scripts/build-tinygl.sh    && \
-./scripts/port-x11.sh
+./scripts/setup-alpine.sh       && \
+./scripts/build-tinygl.sh
 ```
 
 ---
