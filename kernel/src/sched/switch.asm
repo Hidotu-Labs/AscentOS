@@ -24,6 +24,10 @@ switch_context:
     ; Load new stack pointer from new_t->rsp (offset 0)
     mov rsp, [rsi]
 
+    ; The old kernel stack is no longer in use. Clear this actual CPU's
+    ; stack hazard here; a resumed C frame may hold a stale CPU pointer.
+    mov qword [gs:376], 0
+
     ; Restore FPU state from new thread (at offset 16 in struct thread)
     fxrstor64 [rsi + 16]
 

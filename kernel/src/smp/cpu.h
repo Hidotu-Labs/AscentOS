@@ -42,12 +42,17 @@ struct cpu_info {
   uint64_t timer_deadline_ms;   // Absolute deadline currently armed in LAPIC
   uint64_t quantum_deadline_ms; // End of the current scheduler quantum
   uint64_t scratch_rsp;
-  uint64_t reserved;
+  // The old task whose kernel stack switch_context is still using.  This is
+  // distinct from current_thread, which is published before the assembly
+  // stack handoff so interrupts observe the arriving task.
+  struct thread *switching_from;
   uint64_t sigreturn_frame;
 } __attribute__((aligned(64)));
 
 _Static_assert(offsetof(struct cpu_info, scratch_rsp) == 368,
                "update syscall_entry.asm scratch_rsp offset");
+_Static_assert(offsetof(struct cpu_info, switching_from) == 376,
+               "update switch.asm switching_from offset");
 _Static_assert(offsetof(struct cpu_info, sigreturn_frame) == 384,
                "update syscall_entry.asm sigreturn offset");
 

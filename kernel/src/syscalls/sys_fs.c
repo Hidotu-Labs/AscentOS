@@ -14,6 +14,8 @@
 #include "syscall.h"
 #include <stdint.h>
 
+#define AT_REMOVEDIR 0x200
+
 // ---------------------------------------------------------------------------
 // vfs_resolve_symlink_node — resolve WITHOUT following the final symlink
 // ---------------------------------------------------------------------------
@@ -224,7 +226,7 @@ static uint64_t sys_mkdirat(uint64_t dirfd, uint64_t pathname, uint64_t mode,
 
 static uint64_t sys_unlinkat(uint64_t dirfd, uint64_t pathname, uint64_t flags,
                               uint64_t a3, uint64_t a4, uint64_t a5) {
-    (void)flags; (void)a3; (void)a4; (void)a5;
+    (void)a3; (void)a4; (void)a5;
     const char *path = (const char *)pathname;
     if (!path) return (uint64_t)-14;
 
@@ -293,7 +295,9 @@ static uint64_t sys_unlinkat(uint64_t dirfd, uint64_t pathname, uint64_t flags,
     }
 
     unix_unbind_by_path(full_path);
-    return vfs_unlink(parent, file_name) == 0 ? 0 : (uint64_t)-2;
+    int result = (flags & AT_REMOVEDIR) ? vfs_rmdir(parent, file_name)
+                                        : vfs_unlink(parent, file_name);
+    return result == 0 ? 0 : (uint64_t)-2;
 }
 
 static uint64_t sys_unlink(uint64_t pathname_ptr, uint64_t a1, uint64_t a2,

@@ -12,6 +12,8 @@
 #include "../mm/vmm.h"
 #include "../smp/cpu.h"
 
+extern uint64_t futex_wake_user(uint32_t *uaddr, uint32_t count);
+
 static void ipi_reschedule_handler(struct registers *regs) {
   (void)regs;
   // EOI is handled by isr_handler
@@ -95,6 +97,18 @@ void sched_share_files(struct thread *child, struct thread *parent) {
 // destruction after they have switched off their kernel stacks.
 static struct thread *reap_queue = NULL;
 static spinlock_t reap_queue_lock = SPINLOCK_INIT;
+
+static bool sched_thread_off_cpu(struct thread *t) {
+  for (uint32_t i = 0; i < cpu_get_count(); i++) {
+    struct cpu_info *cpu = cpu_get_info(i);
+    if (!cpu || cpu->status == CPU_STATUS_OFFLINE)
+      continue;
+    if (__atomic_load_n(&cpu->current_thread, __ATOMIC_ACQUIRE) == t ||
+        __atomic_load_n(&cpu->switching_from, __ATOMIC_ACQUIRE) == t)
+      return false;
+  }
+  return true;
+}
 
 static void sched_arm_next_deadline(struct cpu_info *cpu,
                                     struct thread *next_t) {
@@ -530,7 +544,7 @@ void sched_yield(void) {
     spinlock_acquire(&reap_queue_lock);
     struct thread **link = &reap_queue;
     while (*link) {
-      if (*link != prev) {
+      if (*link != prev && sched_thread_off_cpu(*link)) {
         victim = *link;
         *link = victim->reap_next;
         victim->reap_next = NULL;
@@ -676,6 +690,11 @@ void sched_yield(void) {
       prev->state = THREAD_READY;
     }
     next_t->state = THREAD_RUNNING;
+    // current_thread must describe the arriving task before interrupts can
+    // run on it, but publishing it alone does not mean the old kernel stack
+    // is unused yet. Keep a separate hazard pointer until switch_context has
+    // actually loaded the new RSP. A remote reaper must check both fields.
+    __atomic_store_n(&cpu->switching_from, prev, __ATOMIC_RELEASE);
     cpu->current_thread = next_t;
 
     cpu->stack_top = (next_t->stack_base + next_t->stack_size) & ~0xFULL;
@@ -1000,21 +1019,22 @@ void sched_reap_thread(struct thread *t) {
   klog_uint64(t->tid);
   klog_puts("\n");
 
-  // 1. Remove from lists (global, parent hierarchy, runqueue)
-  // We do runqueue first as it uses CPU locks, then global/parent using
-  // tid_lock.
-  klog_puts("[REAP] Step 1: remove from runqueue\n");
-  remove_from_runqueue(t);
-
-  // 1.25 Ensure the thread is not currently active on any CPU (race prevention)
+  // A detached task publishes itself to the reap queue before sched_yield()
+  // removes it from its runqueue. Wait for that self-dequeue and the following
+  // stack switch before attempting any cleanup. Removing it remotely first
+  // makes its own scheduler pass search forever for an already-unlinked task.
   for (uint32_t i = 0; i < cpu_get_count(); i++) {
     struct cpu_info *cpu_local = cpu_get_info(i);
-    while (cpu_local->current_thread == t) {
+    while (__atomic_load_n(&cpu_local->current_thread, __ATOMIC_ACQUIRE) == t ||
+           __atomic_load_n(&cpu_local->switching_from, __ATOMIC_ACQUIRE) == t) {
       __asm__ volatile("pause");
     }
   }
 
-  klog_puts("[REAP] Step 2: remove from lists\n");
+  // DEAD and ZOMBIE tasks remove themselves from the owning runqueue under
+  // its queue lock before switching away. Repeating that operation here can
+  // race queue migration and is unnecessary after the off-CPU check above.
+  klog_puts("[REAP] Step 1: remove from lists\n");
   spinlock_acquire(&tid_lock);
 
   // 1.5 Remove from global thread list
@@ -1041,6 +1061,20 @@ void sched_reap_thread(struct thread *t) {
     }
   }
   spinlock_release(&tid_lock);
+
+  // Complete CLONE_CHILD_CLEARTID only after the task is off-CPU and has
+  // been claimed by the reaper. A futex join then implies reclamation is in
+  // progress, rather than merely that userspace cleanup has started.
+  if (t->tid_address && t->cr3 &&
+      (uint64_t)t->tid_address <= USER_SPACE_LIMIT) {
+    uint64_t phys =
+        vmm_virt_to_phys((uint64_t *)t->cr3, (uint64_t)t->tid_address);
+    if (phys != 0) {
+      __atomic_store_n((uint32_t *)(phys + pmm_get_hhdm_offset()), 0,
+                       __ATOMIC_RELEASE);
+      futex_wake_user((uint32_t *)t->tid_address, 1);
+    }
+  }
 
   // 3. Free fork_ctx (saved register state)
   klog_puts("[REAP] Step 3: free fork_ctx\n");

@@ -119,25 +119,6 @@ void process_do_exit(uint64_t status) {
     }
   }
 
-  // Linux clear-child-TID semantics: publish zero only after ordinary task
-  // cleanup is complete, then wake one futex waiter joining this thread.
-  if (current && current->tid_address && current->cr3 &&
-      vmm_is_user_addr_range_writable((uint64_t)current->tid_address,
-                                      sizeof(uint32_t))) {
-    uint64_t phys = vmm_virt_to_phys((uint64_t *)current->cr3,
-                                     (uint64_t)current->tid_address);
-    if (phys != 0) {
-      *(uint32_t *)(phys + pmm_get_hhdm_offset()) = 0;
-      futex_wake_user((uint32_t *)current->tid_address, 1);
-    }
-  }
-
-  // Reaping handles the address-space reference after this task is off-CPU.
-  if (current && current->cr3) {
-    struct cpu_info *cpu = cpu_get_current();
-    __asm__ volatile("mov %0, %%cr3" :: "r"(cpu->kernel_cr3) : "memory");
-  }
-
   if (current && current->is_forked_child) {
     current->exit_status = (int)status;
 
@@ -155,6 +136,12 @@ void process_do_exit(uint64_t status) {
     if (!(current->clone_flags & CLONE_THREAD) && current->parent &&
         current->parent->state == THREAD_BLOCKED) {
       current->parent->state = THREAD_READY;
+    }
+
+    // Reaping handles the address-space reference after this task is off-CPU.
+    if (current->cr3) {
+      struct cpu_info *cpu = cpu_get_current();
+      __asm__ volatile("mov %0, %%cr3" :: "r"(cpu->kernel_cr3) : "memory");
     }
 
     // Sleep forever; the parent will reap us.
@@ -690,9 +677,9 @@ uint64_t sys_fork(struct syscall_regs *regs) {
       spinlock_init(&child->mm->lock);
     }
     memcpy(child->cwd_path, parent->cwd_path, sizeof(child->cwd_path));
+    // sched_create_kernel_thread() already inherited and referenced the
+    // parent's CWD. Do not take a second, unmatched reference here.
     child->cwd_node = parent->cwd_node;
-    if (child->cwd_node)
-      vfs_open(child->cwd_node);
     memcpy(child->signal_handlers, parent->signal_handlers,
            sizeof(child->signal_handlers));
     child->fs_base = parent->fs_base;

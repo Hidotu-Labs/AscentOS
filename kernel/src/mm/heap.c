@@ -18,6 +18,13 @@ static spinlock_t heap_lock = SPINLOCK_INIT;
 static uint64_t current_heap_vaddr = KERNEL_HEAP_BASE;
 bool heap_initialized = false;
 
+#define HEAP_FREE_EXTENTS 256
+struct heap_free_extent {
+  uint64_t vaddr;
+  size_t pages;
+};
+static struct heap_free_extent free_extents[HEAP_FREE_EXTENTS];
+
 struct slab_cache;
 
 struct slab {
@@ -54,9 +61,67 @@ static struct slab_cache caches[] = {
 
 // Virtual address space bumper
 static uint64_t allocate_virtual_space(size_t pages) {
+  for (size_t i = 0; i < HEAP_FREE_EXTENTS; i++) {
+    if (free_extents[i].pages < pages)
+      continue;
+    uint64_t vaddr = free_extents[i].vaddr;
+    free_extents[i].vaddr += pages * PAGE_SIZE;
+    free_extents[i].pages -= pages;
+    if (free_extents[i].pages == 0)
+      free_extents[i].vaddr = 0;
+    return vaddr;
+  }
+
   uint64_t vaddr = current_heap_vaddr;
   current_heap_vaddr += pages * PAGE_SIZE;
   return vaddr;
+}
+
+static void release_virtual_space(uint64_t vaddr, size_t pages) {
+  if (!vaddr || !pages)
+    return;
+
+  if (vaddr + pages * PAGE_SIZE == current_heap_vaddr) {
+    current_heap_vaddr = vaddr;
+    bool merged;
+    do {
+      merged = false;
+      for (size_t i = 0; i < HEAP_FREE_EXTENTS; i++) {
+        if (free_extents[i].pages &&
+            free_extents[i].vaddr + free_extents[i].pages * PAGE_SIZE ==
+                current_heap_vaddr) {
+          current_heap_vaddr = free_extents[i].vaddr;
+          free_extents[i].vaddr = 0;
+          free_extents[i].pages = 0;
+          merged = true;
+          break;
+        }
+      }
+    } while (merged);
+    return;
+  }
+
+  for (size_t i = 0; i < HEAP_FREE_EXTENTS; i++) {
+    if (!free_extents[i].pages)
+      continue;
+    if (free_extents[i].vaddr + free_extents[i].pages * PAGE_SIZE == vaddr) {
+      free_extents[i].pages += pages;
+      return;
+    }
+    if (vaddr + pages * PAGE_SIZE == free_extents[i].vaddr) {
+      free_extents[i].vaddr = vaddr;
+      free_extents[i].pages += pages;
+      return;
+    }
+  }
+
+  for (size_t i = 0; i < HEAP_FREE_EXTENTS; i++) {
+    if (free_extents[i].pages == 0) {
+      free_extents[i].vaddr = vaddr;
+      free_extents[i].pages = pages;
+      return;
+    }
+  }
 }
 
 void heap_init(void) {
@@ -308,6 +373,7 @@ void kfree(void *ptr) {
     }
 
     pmm_free_pages((void *)phys_addr, pages);
+    release_virtual_space(page_base, pages);
 
     spinlock_release(&heap_lock);
     return;

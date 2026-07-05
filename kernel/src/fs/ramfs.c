@@ -327,6 +327,7 @@ static int ramfs_mknod(vfs_node_t *node, char *name, uint16_t permission,
 }
 
 static int ramfs_unlink(vfs_node_t *node, char *name);
+static int ramfs_rmdir(vfs_node_t *node, char *name);
 static int ramfs_rename(vfs_node_t *node, char *old_name, char *new_name);
 
 static int ramfs_mkdir(vfs_node_t *node, char *name, uint16_t permission) {
@@ -343,6 +344,7 @@ static int ramfs_mkdir(vfs_node_t *node, char *name, uint16_t permission) {
   new_node->create = ramfs_create;
   new_node->mkdir = ramfs_mkdir;
   new_node->unlink = ramfs_unlink;
+  new_node->rmdir = ramfs_rmdir;
   new_node->rename = ramfs_rename;
   new_node->mknod = ramfs_mknod;
   new_node->chmod = ramfs_chmod;
@@ -404,6 +406,34 @@ static int ramfs_unlink(vfs_node_t *node, char *name) {
   return -1; // Not found
 }
 
+static int ramfs_rmdir(vfs_node_t *node, char *name) {
+  if (!node || (node->flags & FS_TYPE_MASK) != FS_DIRECTORY || !node->device)
+    return -1;
+  ramfs_dir_t *dir = (ramfs_dir_t *)node->device;
+  child_node_t *prev = NULL;
+  child_node_t *curr = dir->children;
+  while (curr) {
+    if (strcmp(curr->node->name, name) == 0) {
+      if ((curr->node->flags & FS_TYPE_MASK) != FS_DIRECTORY)
+        return -1;
+      ramfs_dir_t *child_dir = (ramfs_dir_t *)curr->node->device;
+      if (!child_dir || child_dir->children)
+        return -1;
+      if (prev)
+        prev->next = curr->next;
+      else
+        dir->children = curr->next;
+      kfree(child_dir);
+      kfree(curr->node);
+      kfree(curr);
+      return 0;
+    }
+    prev = curr;
+    curr = curr->next;
+  }
+  return -1;
+}
+
 // ramfs_rename: Rename a file within the same directory
 static int ramfs_rename(vfs_node_t *node, char *old_name, char *new_name) {
   if (!node || (node->flags & FS_TYPE_MASK) != FS_DIRECTORY || !node->device)
@@ -439,6 +469,7 @@ void ramfs_init(void) {
   root->create = ramfs_create;
   root->mkdir = ramfs_mkdir;
   root->unlink = ramfs_unlink;
+  root->rmdir = ramfs_rmdir;
   root->rename = ramfs_rename;
   root->mknod = ramfs_mknod;
 
@@ -482,6 +513,7 @@ void ramfs_mount_on(vfs_node_t *node) {
   node->create = ramfs_create;
   node->mkdir = ramfs_mkdir;
   node->unlink = ramfs_unlink;
+  node->rmdir = ramfs_rmdir;
   node->rename = ramfs_rename;
   node->mknod = ramfs_mknod;
   node->chmod = ramfs_chmod;

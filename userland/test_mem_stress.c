@@ -178,6 +178,55 @@ long get_free_mem_kb() {
   return atol(p);
 }
 
+/*
+ * The kernel intentionally retains empty VMA and kmalloc slab pages for
+ * reuse. Prime the peak allocation shapes exercised by the first two tests
+ * before taking the baseline, so bounded cache growth is not reported as a
+ * leak. A genuine per-iteration leak will still reduce MemFree during the
+ * measured stress loops.
+ */
+static int prime_mmap_vfs_caches(void) {
+  void *blocks[NUM_BLOCKS];
+  int mapped = 0;
+
+  for (; mapped < NUM_BLOCKS; mapped++) {
+    blocks[mapped] = mmap(NULL, BLOCK_SIZE, PROT_READ | PROT_WRITE,
+                          MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (blocks[mapped] == MAP_FAILED)
+      break;
+    memset(blocks[mapped], 0, BLOCK_SIZE);
+  }
+  for (int i = 0; i < mapped; i++)
+    munmap(blocks[i], BLOCK_SIZE);
+  if (mapped != NUM_BLOCKS)
+    return -1;
+
+  const char *path = "/tmp/.mem_stress_warmup";
+  int fd = open(path, O_CREAT | O_RDWR | O_TRUNC, 0600);
+  if (fd < 0)
+    return -1;
+  char byte = 0;
+  int ok = write(fd, &byte, 1) == 1;
+  close(fd);
+  if (unlink(path) < 0)
+    ok = 0;
+  return ok ? 0 : -1;
+}
+
+static int prime_wait4_caches(void) {
+  pid_t pid = fork();
+  if (pid < 0)
+    return -1;
+  if (pid == 0)
+    _exit(0);
+
+  int status;
+  pid_t result = waitpid(pid, &status, WNOHANG);
+  if (result == 0)
+    result = waitpid(pid, &status, 0);
+  return result == pid ? 0 : -1;
+}
+
 void test_mmap_stress() {
   DEBUGLOG("Starting MMAP/MUNMAP stress test...\n");
   void *blocks[NUM_BLOCKS];
@@ -1785,6 +1834,15 @@ int main(int argc, char **argv) {
   // first-ever lifecycle would mislabel bounded cache growth as a leak.
   if (epoll_lifecycle_once() < 0) {
     printf("CRITICAL: epoll allocator warm-up failed: %s\n", strerror(errno));
+    return 1;
+  }
+  if (prime_mmap_vfs_caches() < 0) {
+    printf("CRITICAL: mmap/VFS allocator warm-up failed: %s\n",
+           strerror(errno));
+    return 1;
+  }
+  if (prime_wait4_caches() < 0) {
+    printf("CRITICAL: wait4 allocator warm-up failed: %s\n", strerror(errno));
     return 1;
   }
 

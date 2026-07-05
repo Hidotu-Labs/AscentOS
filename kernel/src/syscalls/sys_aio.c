@@ -563,6 +563,13 @@ static uint64_t sys_pipe(uint64_t pipefd_ptr, uint64_t a1, uint64_t a2,
 // inotify
 // ---------------------------------------------------------------------------
 
+static void inotify_close(vfs_node_t *node) {
+    if (!node || !node->device) return;
+    inotify_instance_t *instance = (inotify_instance_t *)node->device;
+    memset(instance, 0, sizeof(*instance));
+    node->device = NULL;
+}
+
 static uint64_t sys_inotify_init(uint64_t a1, uint64_t a2, uint64_t a3,
                                   uint64_t a4, uint64_t a5, uint64_t a6) {
     (void)a1; (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
@@ -590,10 +597,11 @@ static uint64_t sys_inotify_init(uint64_t a1, uint64_t a2, uint64_t a3,
     node->flags = FS_CHARDEV;
     node->mask  = 0600;
     node->impl  = instance->instance_id;
+    node->device = instance;
+    node->close = inotify_close;
     node->name[0] = '\0';
     strcat(node->name, "inotify");
 
-    vfs_open(node);
     t->fds[fd]        = node;
     t->fd_offsets[fd] = 0;
     strcpy(t->fd_paths[fd], "inotify");
@@ -662,6 +670,15 @@ static uint64_t sys_inotify_add_watch(uint64_t fd, uint64_t pathname,
 
 #define MFD_CLOEXEC      0x0001U
 #define MFD_ALLOW_SEALING 0x0002U
+
+static void memfd_close(vfs_node_t *node) {
+    if (!node || !node->device) return;
+
+    ramfs_file_t *file = (ramfs_file_t *)node->device;
+    ramfs_free_file_data(file);
+    kfree(file);
+    node->device = NULL;
+}
 
 static uint64_t memfd_mmap(vfs_node_t *node, uint64_t addr, uint64_t length,
                             uint64_t prot, uint64_t flags, uint64_t offset) {
@@ -799,8 +816,8 @@ static uint64_t sys_memfd_create(uint64_t name_ptr, uint64_t flags_arg,
     node->truncate  = ramfs_truncate;
     node->fallocate = ramfs_fallocate;
     node->mmap      = memfd_mmap;
+    node->close     = memfd_close;
 
-    vfs_open(node);
     t->fds[fd]        = node;
     t->fd_offsets[fd] = 0;
     strcpy(t->fd_paths[fd], node_name);
