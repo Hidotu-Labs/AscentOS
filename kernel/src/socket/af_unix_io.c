@@ -119,7 +119,6 @@ ssize_t unix_send_impl(socket_t *sock, const void *buf, size_t len, int flags) {
       if (space > 0) {
         current->state = THREAD_RUNNING;
       } else {
-        spinlock_release(&peer->recv_lock);
         sched_yield();
       }
 
@@ -155,17 +154,10 @@ ssize_t unix_send_impl(socket_t *sock, const void *buf, size_t len, int flags) {
     if (peer->parent && peer->parent->wait_queue)
       wait_queue_wake_all((wait_queue_t *)peer->parent->wait_queue);
 
-    if (peer->parent && peer->parent->node) {
-      klog_puts("[UNIX_SEND_NOTIFY] peer_node=");
-      klog_uint64((uint64_t)peer->parent->node);
-      klog_puts("\n");
+    if (peer->parent && peer->parent->node)
       epoll_notify_event(peer->parent->node, EPOLLIN | EPOLLRDNORM);
-    } else if (peer->parent) {
-      klog_puts("[UNIX_SEND_NOTIFY] node NULL, fallback notify_socket fd=");
-      klog_uint64((uint64_t)peer->parent->fd);
-      klog_puts("\n");
+    else if (peer->parent)
       epoll_notify_socket(peer->parent->fd, EPOLLIN);
-    }
   }
 
   bool closed = sock->closing || peer_sock->closing;
@@ -321,14 +313,6 @@ ssize_t unix_sendmsg_impl(socket_t *sock, struct msghdr *msg, int flags) {
   for (size_t i = 0; i < msg->msg_iovlen; i++)
     total_len += msg->msg_iov[i].iov_len;
 
-  klog_puts("[UNIX_SEND] tid=");
-  klog_uint64(current ? (uint64_t)current->tid : 0);
-  klog_puts(" -> peer=");
-  klog_uint64((uint64_t)(uintptr_t)peer);
-  klog_puts(" len=");
-  klog_uint64((uint64_t)total_len);
-  klog_puts("\n");
-
   // Hold peer->recv_lock for the entire sendmsg so SCM delivery is atomic.
   spinlock_acquire(&peer->recv_lock);
 
@@ -378,23 +362,12 @@ ssize_t unix_sendmsg_impl(socket_t *sock, struct msghdr *msg, int flags) {
       int count = (int)((cmsg->cmsg_len - CMSG_ALIGN(sizeof(struct cmsghdr))) /
                         sizeof(int));
 
-      klog_puts("[SCM_SEND] storing in peer unix_sock=");
-      klog_uint64((uint64_t)(uintptr_t)peer);
-      klog_puts("\n");
-
       for (int i = 0; i < count && peer->scm_count < 16; i++) {
         int fd = fds[i];
         if (fd >= 0 && fd < MAX_FDS && current->fds[fd]) {
           vfs_node_t *node = current->fds[fd];
           vfs_open(node);
           peer->scm_nodes[peer->scm_count++] = node;
-          klog_puts("[SCM_SEND] queued fd=");
-          klog_uint64((uint64_t)fd);
-          klog_puts(" node=");
-          klog_puts(node->name);
-          klog_puts(" to peer scm_count=");
-          klog_uint64((uint64_t)peer->scm_count);
-          klog_puts("\n");
         }
       }
     }
@@ -437,18 +410,10 @@ ssize_t unix_sendmsg_impl(socket_t *sock, struct msghdr *msg, int flags) {
   if (peer->parent && peer->parent->wait_queue)
     wait_queue_wake_all((wait_queue_t *)peer->parent->wait_queue);
 
-  if (peer->parent && peer->parent->node) {
-    klog_puts("[UNIX_SENDMSG_NOTIFY] peer_node=");
-    klog_uint64((uint64_t)peer->parent->node);
-    klog_puts("\n");
+  if (peer->parent && peer->parent->node)
     epoll_notify_event(peer->parent->node, EPOLLIN | EPOLLRDNORM);
-  } else {
-    klog_puts("[UNIX_SENDMSG_NOTIFY] peer->parent->node is NULL, notify_socket fd=");
-    klog_uint64((uint64_t)(peer->parent ? peer->parent->fd : -1));
-    klog_puts("\n");
-    if (peer->parent)
-      epoll_notify_socket(peer->parent->fd, EPOLLIN);
-  }
+  else if (peer->parent)
+    epoll_notify_socket(peer->parent->fd, EPOLLIN);
 
   socket_put(peer_sock);
   return total_sent;
@@ -503,16 +468,6 @@ ssize_t unix_recvmsg_impl(socket_t *sock, struct msghdr *msg, int flags) {
   // recv_lock held; also acquire sock->lock to dequeue SCM nodes atomically.
   // Lock order: recv_lock → parent->lock  (same as sendmsg)
   spinlock_acquire(&sock->lock);
-
-  klog_puts("[SCM_RECV] reading from unix_sock=");
-  klog_uint64((uint64_t)(uintptr_t)usk);
-  klog_puts(" scm_count=");
-  klog_uint64((uint64_t)usk->scm_count);
-  klog_puts(" msg_control=");
-  klog_uint64((uint64_t)(uintptr_t)msg->msg_control);
-  klog_puts(" msg_controllen=");
-  klog_uint64((uint64_t)msg->msg_controllen);
-  klog_puts("\n");
 
   if (usk->scm_count > 0 && msg->msg_control &&
       msg->msg_controllen >= CMSG_SPACE(sizeof(int))) {

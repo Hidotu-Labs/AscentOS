@@ -316,6 +316,7 @@ install_apk "libpulse" "community"
 install_apk "xkeyboard-config" "main"
 install_apk "font-dejavu" "main"
 install_apk "sl" "community"
+install_apk "gifsicle" "community"
 
 # GTK2 Development headers (for host compilation)
 echo "[*] Installing GTK 2.0 development packages..."

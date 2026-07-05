@@ -429,7 +429,11 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
   // EARLY CR3 SWITCH:
   struct thread *current = sched_get_current();
   uint64_t old_cr3 = current->cr3;
+  struct mm_struct *old_mm = current->mm;
   struct vma_list old_vmas;
+  uint64_t old_brk_base = old_mm->brk_base;
+  uint64_t old_brk_current = old_mm->brk_current;
+  uint64_t old_mmap_next_addr = old_mm->mmap_next_addr;
   bool shared_mm = false;
 
   // Unshare mm_struct if shared (e.g. after vfork or in a thread)
@@ -463,33 +467,34 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
   current->cr3 = (uint64_t)new_pml4;
   __asm__ volatile("mov %0, %%cr3" ::"r"(current->cr3) : "memory");
 
-  // If this was a vfork child, unblock the parent now that we have a private
-  // address space.
-  if (current->clone_flags & CLONE_VFORK) {
-    if (current->parent && current->parent->state == THREAD_BLOCKED) {
-      current->parent->state = THREAD_READY;
-    }
-    current->clone_flags &= ~CLONE_VFORK; // Only unblock once
-  }
-
-  // Reset memory management state for the new program
+  // Reset memory placement for the candidate image. Process-visible state is
+  // reset only after loading succeeds so a failed exec is non-destructive.
   mm_reset_mmap_state(current);
-  current->fs_base = 0;
-  current->gs_base = 0;
-
-  // Reset signal handlers to SIG_DFL after exec (POSIX requirement).
-  // Stale handler addresses pointing into the old address space would
-  // cause a jump to an invalid RIP on the next signal delivery.
-  memset(current->signal_handlers, 0, sizeof(current->signal_handlers));
-  current->pending_signals = 0;
 
   elf_info_t elf_info = {0};
   if (!elf_load(path, new_pml4, &elf_info)) {
     // Revert CR3
     current->cr3 = old_cr3;
     __asm__ volatile("mov %0, %%cr3" ::"r"(current->cr3) : "memory");
-    // Restore old VMA list
-    current->mm->vmas = old_vmas;
+    if (shared_mm) {
+      // A vfork/CLONE_VM exec temporarily detached from the shared mm.
+      // ENOEXEC (including a #! script) must leave the caller on the original
+      // address space with its program break intact.
+      struct mm_struct *failed_mm = current->mm;
+      vma_list_destroy(&failed_mm->vmas);
+      kfree(failed_mm);
+
+      current->mm = old_mm;
+      spinlock_acquire(&old_mm->lock);
+      old_mm->ref_count++;
+      spinlock_release(&old_mm->lock);
+    } else {
+      vma_list_destroy(&current->mm->vmas);
+      current->mm->vmas = old_vmas;
+      current->mm->brk_base = old_brk_base;
+      current->mm->brk_current = old_brk_current;
+      current->mm->mmap_next_addr = old_mmap_next_addr;
+    }
     kfree(path);
     for (int i = 0; i < argc; i++)
       kfree(k_argv[i]);
@@ -502,10 +507,25 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
     return (uint64_t)-8; // ENOEXEC
   }
 
+  current->fs_base = 0;
+  current->gs_base = 0;
+
+  // Reset signal handlers to SIG_DFL after exec (POSIX requirement).
+  memset(current->signal_handlers, 0, sizeof(current->signal_handlers));
+  current->pending_signals = 0;
+
   // We are now safely loaded into the new address space!
   uint64_t user_rsp = process_build_initial_stack(
       ASCENTOS_USER_STACK_TOP, path, (const char **)k_argv,
       (const char **)k_envp, &elf_info);
+
+  // Do not release a vfork parent until exec has actually succeeded. The
+  // child needs the shared address space intact to handle ENOEXEC fallbacks.
+  if (current->clone_flags & CLONE_VFORK) {
+    if (current->parent && current->parent->state == THREAD_BLOCKED)
+      current->parent->state = THREAD_READY;
+    current->clone_flags &= ~CLONE_VFORK;
+  }
 
   uint64_t actual_entry =
       elf_info.interp_base ? elf_info.interp_entry : elf_info.entry;

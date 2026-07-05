@@ -136,7 +136,7 @@ run-fat32: edk2-ovmf $(IMAGE_NAME).iso fat32_test.img
 
 # Create a 64MB ext2 disk image with sample files for testing
 disk.img: userland/test_net_phase6.elf userland/test_net_phase7.elf userland/test_net_phase9.elf userland/test_net_phase10.elf userland/test_net_phase11.elf userland/dns_lookup.elf
-disk.img: assets/boot.wav assets/test.wav assets/jane.mp3 assets/mc9.mp3 assets/train.mp3 assets/test.bmp assets/test.tar assets/room.png assets/logo.png userland/forkit.elf userland/about.elf userland/hello.elf userland/hello_glibc.elf userland/malloc_test_glibc.elf userland/booter.elf userland/reboot.elf userland/shutdown.elf userland/apm.elf userland/test_cpp.elf userland/test_cow.elf userland/test_syscalls.elf userland/test_kilo_syscalls.elf userland/test_wait4_complex.elf userland/kilo.elf userland/test_args.elf userland/test_stat.elf userland/ls.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/test_mmap_shared_private.elf userland/asplay.elf userland/showbmp.elf userland/test_uname_pipe.elf userland/test_pipe_fork.elf userland/test_sys_access.elf userland/test_sys_cwd.elf userland/test_newfstatat.elf userland/test_unlink_rename.elf userland/kria.elf userland/doom.elf userland/poll_test.elf userland/pty_test.elf userland/test_tcc_libc.c userland/test_mm.c userland/test_mmap_perf.elf userland/test_invlpg_bench.elf userland/test_mmap_stress.elf userland/test_page_cache.elf userland/test_dynamic.elf userland/test_dup.elf userland/test_attrib.elf userland/test_symlink.elf userland/test_cred.elf userland/test_time.elf userland/test_tsc_manual.elf userland/test_unix_sock.elf userland/test_unix_fdpass.elf userland/test_fb.elf userland/test_events.elf userland/test_read.elf userland/test_socket_phase3.elf userland/test_socket_phase3_advanced.elf userland/test_socket_phase3_megastress.elf userland/test_socket_phase4.elf userland/test_socket_phase5.elf userland/test_socket_phase6.elf userland/test_socket_phase7.elf userland/test_socket_phase7_advanced.elf userland/test_socket_phase8.elf userland/test_socket_phase9.elf userland/test_socket_phase10.elf userland/test_socket_phase11.elf userland/test_signal_subsystem.elf userland/xeyes.elf userland/test_x11_simple.elf userland/xrootcursor.elf userland/xkbcomp.elf userland/test_shared_irq.elf userland/jwm.elf userland/doom_x11.elf userland/gtk_test.elf userland/tinywl.elf userland/tglgears_fb.elf userland/tglgears_drm.elf userland/tglhello_drm.elf userland/drm_bench.elf userland/test_drm_kms.elf userland/test_drm_flip.elf userland/test_drm_atomic.elf userland/test_drm_epoll.elf userland/test_clone_futex.elf userland/test_clone_futex_stress.elf userland/test_mem_stress.elf userland/test_io_leak.elf userland/panic_test.elf userland/fault_mon.elf userland/crash.elf userland/classicube.elf userland/test_sdl2.elf userland/terrain.png userland/texpacks/classicube.zip userland/netlink_test.elf userland/test_timer_sid.elf userland/ltp_timerfd.elf userland/ltp_epoll.elf initrd/startx.sh initrd/startw.sh initrd/weston.ini userland/ascentd.elf $(ASCENTD_CONFIG_FILES)
+disk.img: assets/boot.wav assets/test.wav assets/jane.mp3 assets/mc9.mp3 assets/train.mp3 assets/test.bmp assets/test.tar assets/room.png assets/logo.png assets/linus.gif userland/forkit.elf userland/about.elf userland/hello.elf userland/hello_glibc.elf userland/malloc_test_glibc.elf userland/booter.elf userland/reboot.elf userland/shutdown.elf userland/apm.elf userland/test_cpp.elf userland/test_cow.elf userland/test_syscalls.elf userland/test_kilo_syscalls.elf userland/test_wait4_complex.elf userland/kilo.elf userland/test_args.elf userland/test_stat.elf userland/ls.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/test_mmap_shared_private.elf userland/asplay.elf userland/showbmp.elf userland/test_uname_pipe.elf userland/test_pipe_fork.elf userland/test_sys_access.elf userland/test_sys_cwd.elf userland/test_newfstatat.elf userland/test_unlink_rename.elf userland/kria.elf userland/doom.elf userland/poll_test.elf userland/pty_test.elf userland/test_tcc_libc.c userland/test_mm.c userland/test_mmap_perf.elf userland/test_invlpg_bench.elf userland/test_mmap_stress.elf userland/test_page_cache.elf userland/test_dynamic.elf userland/test_dup.elf userland/test_attrib.elf userland/test_symlink.elf userland/test_cred.elf userland/test_time.elf userland/test_tsc_manual.elf userland/test_unix_sock.elf userland/test_unix_fdpass.elf userland/test_fb.elf userland/test_events.elf userland/test_read.elf userland/test_socket_phase3.elf userland/test_socket_phase3_advanced.elf userland/test_socket_phase3_megastress.elf userland/test_socket_phase4.elf userland/test_socket_phase5.elf userland/test_socket_phase6.elf userland/test_socket_phase7.elf userland/test_socket_phase7_advanced.elf userland/test_socket_phase8.elf userland/test_socket_phase9.elf userland/test_socket_phase10.elf userland/test_socket_phase11.elf userland/test_signal_subsystem.elf userland/xeyes.elf userland/test_x11_simple.elf userland/xrootcursor.elf userland/xkbcomp.elf userland/test_shared_irq.elf userland/jwm.elf userland/doom_x11.elf userland/gtk_test.elf userland/tinywl.elf userland/tglgears_fb.elf userland/tglgears_drm.elf userland/tglhello_drm.elf userland/drm_bench.elf userland/test_drm_kms.elf userland/test_drm_flip.elf userland/test_drm_atomic.elf userland/test_drm_epoll.elf userland/test_clone_futex.elf userland/test_clone_futex_stress.elf userland/test_mem_stress.elf userland/test_io_leak.elf userland/panic_test.elf userland/fault_mon.elf userland/crash.elf userland/classicube.elf userland/test_sdl2.elf userland/terrain.png userland/texpacks/classicube.zip userland/netlink_test.elf userland/test_timer_sid.elf userland/ltp_timerfd.elf userland/ltp_epoll.elf initrd/startx.sh initrd/startw.sh initrd/weston.ini userland/ascentd.elf $(ASCENTD_CONFIG_FILES)
 	@echo "Creating root filesystem (ext3)..."
 	rm -f ./part.img
 	dd if=/dev/zero of=./part.img bs=1M count=2047
@@ -301,6 +301,8 @@ disk.img: assets/boot.wav assets/test.wav assets/jane.mp3 assets/mc9.mp3 assets/
 		echo "write assets/room.png assets/room.png"; \
 		echo "rm assets/logo.png"; \
 		echo "write assets/logo.png assets/logo.png"; \
+		echo "rm assets/linus.gif"; \
+		echo "write assets/linus.gif assets/linus.gif"; \
 		echo "rm test.krx"; \
 		echo "write userland/kria-lang/test.krx test.krx"; \
 		echo "rm hello.krx"; \
@@ -413,8 +415,8 @@ disk.img: assets/boot.wav assets/test.wav assets/jane.mp3 assets/mc9.mp3 assets/
 		echo "write userland/texpacks/classicube.zip texpacks/classicube.zip"; \
 		echo "rm texpacks/default.zip"; \
 		echo "write userland/texpacks/classicube.zip texpacks/default.zip"; \
-		echo "rm bin/forkit"; \
-		echo "write userland/forkit.elf bin/forkit"; \
+		echo "rm bin/forkit.elf"; \
+		echo "write userland/forkit.elf bin/forkit.elf"; \
 		echo "rm bin/fault_mon"; \
 		echo "write userland/fault_mon.elf bin/fault_mon"; \
 		echo "rm bin/crash"; \
@@ -426,6 +428,37 @@ disk.img: assets/boot.wav assets/test.wav assets/jane.mp3 assets/mc9.mp3 assets/
 	debugfs -w -R "write /tmp/classicube_options.txt options.txt" ./part.img >/dev/null 2>&1 || true
 	rm -f /tmp/classicube_options.txt
 	rm -f /tmp/ascentos_hello.txt /tmp/ascentos_readme.txt
+	@echo "Installing Forkit assets (fonts + test pages) into disk image..."
+	@{ \
+		echo "cd /"; \
+		echo "mkdir usr"; \
+		echo "mkdir usr/share"; \
+		echo "mkdir usr/share/forkit"; \
+		echo "mkdir usr/share/forkit/assets"; \
+		echo "mkdir usr/share/forkit/assets/fonts"; \
+		echo "rm usr/share/forkit/assets/test.html"; \
+		echo "write build/forkit/assets/test.html usr/share/forkit/assets/test.html"; \
+		echo "rm usr/share/forkit/assets/html-test.html"; \
+		echo "write build/forkit/assets/html-test.html usr/share/forkit/assets/html-test.html"; \
+		echo "rm usr/share/forkit/assets/css-test.html"; \
+		echo "write build/forkit/assets/css-test.html usr/share/forkit/assets/css-test.html"; \
+		echo "rm usr/share/forkit/assets/js-test.html"; \
+		echo "write build/forkit/assets/js-test.html usr/share/forkit/assets/js-test.html"; \
+		echo "rm usr/share/forkit/assets/fonts/NotoSans-Regular.ttf"; \
+		echo "write build/forkit/assets/fonts/NotoSans-Regular.ttf usr/share/forkit/assets/fonts/NotoSans-Regular.ttf"; \
+		echo "rm usr/share/forkit/assets/fonts/NotoSans-Bold.ttf"; \
+		echo "write build/forkit/assets/fonts/NotoSans-Bold.ttf usr/share/forkit/assets/fonts/NotoSans-Bold.ttf"; \
+		echo "rm usr/share/forkit/assets/fonts/NotoSans-Italic.ttf"; \
+		echo "write build/forkit/assets/fonts/NotoSans-Italic.ttf usr/share/forkit/assets/fonts/NotoSans-Italic.ttf"; \
+		echo "rm usr/share/forkit/assets/fonts/NotoSans-BoldItalic.ttf"; \
+		echo "write build/forkit/assets/fonts/NotoSans-BoldItalic.ttf usr/share/forkit/assets/fonts/NotoSans-BoldItalic.ttf"; \
+		echo "rm usr/share/forkit/assets/fonts/NotoSansMono-Regular.ttf"; \
+		echo "write build/forkit/assets/fonts/NotoSansMono-Regular.ttf usr/share/forkit/assets/fonts/NotoSansMono-Regular.ttf"; \
+		echo "rm usr/share/forkit/assets/fonts/NotoSansMono-Bold.ttf"; \
+		echo "write build/forkit/assets/fonts/NotoSansMono-Bold.ttf usr/share/forkit/assets/fonts/NotoSansMono-Bold.ttf"; \
+		echo "rm bin/forkit"; \
+		echo "write userland/forkit-launch.sh bin/forkit"; \
+	} | debugfs -w ./part.img >/dev/null 2>&1 || true
 	@if [ -d build/alpine/rootfs ]; then \
 		echo "Populating Alpine Linux rootfs into disk image..."; \
 		./scripts/populate-ext2-dir.sh ./part.img build/alpine/rootfs /; \

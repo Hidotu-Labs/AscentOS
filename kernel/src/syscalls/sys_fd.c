@@ -533,6 +533,34 @@ static uint64_t sys_writev(uint64_t fd, uint64_t iov_u, uint64_t iovcnt,
     return (uint64_t)-22;
 
   struct user_iovec *iov = (struct user_iovec *)iov_u;
+  if (!is_user_ptr(iov_u) ||
+      !vmm_is_user_addr_range_valid(iov_u, iovcnt * sizeof(*iov)))
+    return (uint64_t)-14;
+
+  for (uint64_t i = 0; i < iovcnt; i++) {
+    if (iov[i].iov_len > 0 &&
+        (!is_user_ptr(iov[i].iov_base) ||
+         !vmm_is_user_addr_range_valid(iov[i].iov_base, iov[i].iov_len)))
+      return (uint64_t)-14;
+  }
+
+  /* A socket writev is one send operation.  Splitting it into write calls can
+   * interleave vector fragments with another writer and corrupt protocols. */
+  socket_t *sock = socket_from_fd((int)fd);
+  if (sock && socket_try_get(sock)) {
+    if (sock->closing) {
+      socket_put(sock);
+      return (uint64_t)-32;
+    }
+    struct msghdr msg = {0};
+    msg.msg_iov = (struct iovec *)iov;
+    msg.msg_iovlen = (size_t)iovcnt;
+    ssize_t ret = sock->ops && sock->ops->sendmsg
+                      ? sock->ops->sendmsg(sock, &msg, 0)
+                      : -95;
+    socket_put(sock);
+    return (uint64_t)ret;
+  }
 
   size_t total = 0;
   for (uint64_t i = 0; i < iovcnt; i++) {
@@ -542,9 +570,8 @@ static uint64_t sys_writev(uint64_t fd, uint64_t iov_u, uint64_t iovcnt,
       continue;
 
     int64_t w = fd_write((int)fd, (const void *)base, (size_t)len);
-    if (w < 0) {
-      return (uint64_t)w;
-    }
+    if (w < 0)
+      return total > 0 ? total : (uint64_t)w;
     total += (size_t)w;
     if ((size_t)w != len)
       break;
