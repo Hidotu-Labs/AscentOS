@@ -536,7 +536,9 @@ void signal_send_pgid(uint32_t pgid, int sig) {
 
   struct thread *t = global_thread_list;
   while (t) {
-    if (t->pgid == pgid) {
+    struct thread *sender = sched_get_current();
+    if (t->pgid == pgid && (!sender || sender->euid == 0 ||
+        sender->uid == t->uid || sender->euid == t->uid)) {
       t->pending_signals |= (1ULL << (sig - 1));
       // Wake the thread if it is blocked/sleeping so it can deliver the signal
       if (t->state == THREAD_SLEEPING || t->state == THREAD_BLOCKED) {
@@ -570,6 +572,11 @@ static uint64_t sys_kill(uint64_t pid_val, uint64_t sig, uint64_t a2,
     struct thread *t = global_thread_list;
     while (t) {
       if (t->tid == (uint32_t)(pid > 0 ? pid : -pid)) {
+        if (current && current->euid != 0 && current->uid != t->uid &&
+            current->euid != t->uid) {
+          spinlock_release(&tid_lock);
+          return (uint64_t)-1;
+        }
         found = true;
         break;
       }
@@ -596,6 +603,11 @@ static uint64_t sys_kill(uint64_t pid_val, uint64_t sig, uint64_t a2,
   struct thread *t = global_thread_list;
   while (t) {
     if (t->tid == (uint32_t)pid) {
+      if (current && current->euid != 0 && current->uid != t->uid &&
+          current->euid != t->uid) {
+        spinlock_release(&tid_lock);
+        return (uint64_t)-1;
+      }
       t->pending_signals |= (1ULL << (sig - 1));
       break;
     }

@@ -135,7 +135,7 @@ int main(int argc, char *argv[]) {
                        "size='xx-large'>OS</span>");
   gtk_box_pack_start(GTK_BOX(main_vbox), title_label, FALSE, FALSE, 0);
 
-  GtkWidget *version_label = gtk_label_new("Version 0.1.0-alpha");
+  GtkWidget *version_label = gtk_label_new("Version 2.0.0-beta");
   gtk_widget_set_opacity(version_label, 0.6);
   gtk_box_pack_start(GTK_BOX(main_vbox), version_label, FALSE, FALSE, 5);
 

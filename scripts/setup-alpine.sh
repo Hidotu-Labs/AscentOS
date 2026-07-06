@@ -541,8 +541,8 @@ exec openbox-session
 EOF
 chmod +x "${ROOTFS_DIR}/etc/skel/.xinitrc"
 
-# Also place it at /root/.xinitrc since root is the typical user
-cp "${ROOTFS_DIR}/etc/skel/.xinitrc" "${ROOTFS_DIR}/root/.xinitrc"
+# Root's home is / on AscentOS.
+cp "${ROOTFS_DIR}/etc/skel/.xinitrc" "${ROOTFS_DIR}/.xinitrc"
 
 # Minimal Openbox rc.xml (no dbus dependency, clean keybinds)
 mkdir -p "${ROOTFS_DIR}/etc/xdg/openbox"
@@ -679,6 +679,10 @@ ln -sf /bin/busybox "${ROOTFS_DIR}/usr/bin/tar"
 ln -sf /bin/busybox "${ROOTFS_DIR}/usr/bin/xz"
 ln -sf /bin/busybox "${ROOTFS_DIR}/usr/bin/unzip"
 ln -sf /bin/busybox "${ROOTFS_DIR}/usr/bin/zip"
+
+# 4d. Configure local users and groups without shadow databases
+echo "[*] Configuring passwd/group databases (no shadow)..."
+"${ROOT_DIR}/scripts/configure-accounts.sh" "${ROOTFS_DIR}"
 
 # 5. Inject custom binaries
 echo "[*] Injecting custom binaries into rootfs..."

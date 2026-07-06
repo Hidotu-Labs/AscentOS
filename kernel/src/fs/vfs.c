@@ -3,10 +3,43 @@
 #include "../lib/string.h"
 #include "../mm/heap.h"
 #include "../mm/pmm.h"
+#include "../sched/sched.h"
 
 #define PHYS_TO_VIRT(p) ((void *)((uint64_t)(p) + pmm_get_hhdm_offset()))
 
 vfs_node_t *fs_root = 0;
+
+bool vfs_in_group(uint32_t gid) {
+  struct thread *t = sched_get_current();
+  if (!t) return gid == 0;
+  if (t->fsgid == gid || t->egid == gid || t->gid == gid) return true;
+  for (uint32_t i = 0; i < t->supplementary_group_count; i++)
+    if (t->supplementary_groups[i] == gid) return true;
+  return false;
+}
+
+bool vfs_access(vfs_node_t *node, uint32_t requested) {
+  if (!node) return false;
+  struct thread *t = sched_get_current();
+  if (!t || t->euid == 0) {
+    if ((requested & 1) && !(node->mask & 0111) &&
+        (node->flags & FS_TYPE_MASK) != FS_DIRECTORY) return false;
+    return true;
+  }
+  uint32_t bits = node->mask & 7;
+  if (t->fsuid == node->uid) bits = (node->mask >> 6) & 7;
+  else if (vfs_in_group(node->gid)) bits = (node->mask >> 3) & 7;
+  return (bits & requested) == requested;
+}
+
+bool vfs_may_remove(vfs_node_t *parent, vfs_node_t *target) {
+  struct thread *t = sched_get_current();
+  if (!t || t->euid == 0) return true;
+  if (!vfs_access(parent, 3)) return false;
+  if ((parent->mask & 01000) && t->fsuid != parent->uid &&
+      (!target || t->fsuid != target->uid)) return false;
+  return true;
+}
 
 typedef struct vfs_mount_entry {
   vfs_node_t *mountpoint;
@@ -138,6 +171,10 @@ uint32_t vfs_write(vfs_node_t *node, uint32_t offset, uint32_t size,
                    uint8_t *buffer) {
   if (!node)
     return 0;
+
+  struct thread *t = sched_get_current();
+  if (size && t && t->euid != 0 && (node->mask & 06000))
+    vfs_chmod(node, (uint16_t)(node->mask & ~06000));
 
   if (node->write) {
     return node->write(node, offset, size, buffer);
@@ -382,6 +419,8 @@ vfs_node_t *vfs_resolve_path_at(vfs_node_t *dir, const char *path) {
 
     if (strcmp(comp, ".") == 0)
       continue;
+
+    if (!vfs_access(current, 1)) goto fail;
 
     vfs_node_t *next = vfs_finddir(current, comp);
     if (!next) {

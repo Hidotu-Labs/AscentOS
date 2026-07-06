@@ -1,4 +1,5 @@
 NAME=console
-DESCRIPTION="interactive root shell"
+DESCRIPTION="interactive multi-user login"
 TYPE=foreground
-COMMAND=/bin/bash
+RESPAWN=yes
+COMMAND=/bin/ascent-login

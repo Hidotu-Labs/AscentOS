@@ -242,6 +242,7 @@ struct user_iovec {
 // console termios (defined in sys_ioctl.c, used in sys_fd.c registration)
 // ---------------------------------------------------------------------------
 #include "../drivers/pty.h"
+#include "../drivers/gpu/drm/drm.h"
 #include "../fb/terminal.h"
 extern struct termios console_termios;
 

@@ -380,7 +380,7 @@ uint64_t process_build_initial_stack(uint64_t stack_top, const char *path,
                                      const elf_info_t *elf_info) {
   // Create a default environment if none provided
   const char *default_envp[] = {"PATH=/opt/bash/bin:/opt/tcc/bin:/",
-                                "HOME=/root",
+                                "HOME=/",
                                 "TERM=xterm-256color",
                                 "USER=root",
                                 "PS1=\033[0;32mRoot@AscentOS\033[0m:\\w\\$ ",

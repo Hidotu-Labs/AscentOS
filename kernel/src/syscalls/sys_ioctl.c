@@ -257,6 +257,15 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
     break;
   }
   default:
+    klog_puts("[IOCTL] ENOTTY fd=");
+    klog_uint64(fd);
+    klog_puts(" request=0x");
+    klog_hex32((uint32_t)request);
+    if (t && fd < MAX_FDS && t->fds[fd]) {
+      klog_puts(" node=");
+      klog_puts(t->fds[fd]->name);
+    }
+    klog_puts("\n");
     ret = (uint64_t)-25; // ENOTTY
     break;
   }

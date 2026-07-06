@@ -153,6 +153,9 @@ static uint64_t sys_mkdir(uint64_t pathname, uint64_t mode, uint64_t a2,
 
     if (!parent || (parent->flags & FS_TYPE_MASK) != FS_DIRECTORY)
         return (uint64_t)-20;
+    if (!vfs_access(parent, 3)) return (uint64_t)-13;
+    mode &= ~t->umask;
+    if (parent->mask & 02000) mode |= 02000;
 
     if (vfs_mkdir(parent, dir_name, (uint16_t)mode) != 0) {
         vfs_node_t *existing = vfs_finddir(parent, dir_name);
@@ -160,6 +163,9 @@ static uint64_t sys_mkdir(uint64_t pathname, uint64_t mode, uint64_t a2,
             return 0;
         return (uint64_t)-17;
     }
+    vfs_node_t *created = vfs_finddir(parent, dir_name);
+    if (created) vfs_chown(created, t->fsuid,
+        (parent->mask & 02000) ? parent->gid : t->fsgid);
     return 0;
 }
 
@@ -215,8 +221,14 @@ static uint64_t sys_mkdirat(uint64_t dirfd, uint64_t pathname, uint64_t mode,
 
     if (!parent || (parent->flags & FS_TYPE_MASK) != FS_DIRECTORY)
         return (uint64_t)-20;
+    if (!vfs_access(parent, 3)) return (uint64_t)-13;
+    mode &= ~t->umask;
+    if (parent->mask & 02000) mode |= 02000;
     if (vfs_mkdir(parent, dir_name, (uint16_t)mode) != 0)
         return (uint64_t)-17;
+    vfs_node_t *created = vfs_finddir(parent, dir_name);
+    if (created) vfs_chown(created, t->fsuid,
+        (parent->mask & 02000) ? parent->gid : t->fsgid);
     return 0;
 }
 
@@ -276,6 +288,9 @@ static uint64_t sys_unlinkat(uint64_t dirfd, uint64_t pathname, uint64_t flags,
 
     if (!parent || (parent->flags & FS_TYPE_MASK) != FS_DIRECTORY)
         return (uint64_t)-2;
+    vfs_node_t *victim = vfs_finddir(parent, file_name);
+    if (!victim) return (uint64_t)-2;
+    if (!vfs_may_remove(parent, victim)) return (uint64_t)-13;
 
     // Build full path for socket unbinding
     char full_path[256];
@@ -313,6 +328,7 @@ static uint64_t sys_unlink(uint64_t pathname_ptr, uint64_t a1, uint64_t a2,
     vfs_node_t *target = vfs_finddir(parent, name);
     if (!target) return (uint64_t)-2;
     if ((target->flags & FS_TYPE_MASK) == FS_DIRECTORY) return (uint64_t)-21;
+    if (!vfs_may_remove(parent, target)) return (uint64_t)-13;
 
     struct thread *t = sched_get_current();
     if (t) {
@@ -340,6 +356,7 @@ static uint64_t sys_rmdir(uint64_t pathname_ptr, uint64_t a1, uint64_t a2,
     vfs_node_t *target = vfs_finddir(parent, name);
     if (!target) return (uint64_t)-2;
     if ((target->flags & FS_TYPE_MASK) != FS_DIRECTORY) return (uint64_t)-20;
+    if (!vfs_may_remove(parent, target)) return (uint64_t)-13;
     return vfs_rmdir(parent, name) == 0 ? 0 : (uint64_t)-1;
 }
 
@@ -361,7 +378,10 @@ static uint64_t sys_rename(uint64_t oldpath_ptr, uint64_t newpath_ptr,
     if (!old_parent) return (uint64_t)-2;
     if (!new_parent) return (uint64_t)-2;
 
-    if (!vfs_finddir(old_parent, old_name)) return (uint64_t)-2;
+    vfs_node_t *old_node = vfs_finddir(old_parent, old_name);
+    if (!old_node) return (uint64_t)-2;
+    if (!vfs_may_remove(old_parent, old_node) || !vfs_access(new_parent, 3))
+        return (uint64_t)-13;
 
     if (old_parent == new_parent || old_parent->inode == new_parent->inode) {
         return vfs_rename(old_parent, old_name, new_name) == 0 ? 0 : (uint64_t)-1;
@@ -384,6 +404,7 @@ static uint64_t sys_symlink(uint64_t target_ptr, uint64_t linkpath_ptr,
     char link_name[128];
     vfs_node_t *parent = resolve_parent_and_name(linkpath, link_name, sizeof(link_name));
     if (!parent) return (uint64_t)-2;
+    if (!vfs_access(parent, 3)) return (uint64_t)-13;
     if (vfs_finddir(parent, link_name)) return (uint64_t)-17;
 
     char target_buf[256];
@@ -482,6 +503,7 @@ static uint64_t sys_link(uint64_t oldpath_ptr, uint64_t newpath_ptr,
 
     if (!parent || (parent->flags & FS_TYPE_MASK) != FS_DIRECTORY)
         return (uint64_t)-20;
+    if (!vfs_access(parent, 3)) return (uint64_t)-13;
     if (vfs_finddir(parent, file_name)) return (uint64_t)-17;
     if (vfs_create(parent, file_name, src->mask & 0777) != 0)
         return (uint64_t)-1;
@@ -519,6 +541,7 @@ static uint64_t sys_chmod(uint64_t pathname_ptr, uint64_t mode, uint64_t a2,
     }
     vfs_node_t *node = vfs_resolve_path_at(base, path);
     if (!node) return (uint64_t)-2;
+    if (t && t->euid != 0 && t->fsuid != node->uid) return (uint64_t)-1;
     return vfs_chmod(node, (uint16_t)mode) == 0 ? 0 : (uint64_t)-1;
 }
 
@@ -538,7 +561,34 @@ static uint64_t sys_chown(uint64_t pathname_ptr, uint64_t owner,
     if (!node) return (uint64_t)-2;
     uint32_t uid = (owner == (uint64_t)-1) ? node->uid : (uint32_t)owner;
     uint32_t gid = (group == (uint64_t)-1) ? node->gid : (uint32_t)group;
+    if (t && t->euid != 0) {
+        if (t->fsuid != node->uid || uid != node->uid || !vfs_in_group(gid))
+            return (uint64_t)-1;
+    }
+    if (uid != node->uid || gid != node->gid) node->mask &= ~06000;
     return vfs_chown(node, uid, gid) == 0 ? 0 : (uint64_t)-1;
+}
+
+static uint64_t sys_fchown(uint64_t fd, uint64_t owner, uint64_t group,
+                            uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a3; (void)a4; (void)a5;
+    struct thread *t = sched_get_current();
+    if (!t || fd >= MAX_FDS || !t->fds[fd]) return (uint64_t)-9;
+    vfs_node_t *node = t->fds[fd];
+    uint32_t uid = (owner == (uint64_t)-1) ? node->uid : (uint32_t)owner;
+    uint32_t gid = (group == (uint64_t)-1) ? node->gid : (uint32_t)group;
+    if (t->euid != 0 &&
+        (t->fsuid != node->uid || uid != node->uid || !vfs_in_group(gid)))
+        return (uint64_t)-1;
+    if (uid != node->uid || gid != node->gid)
+        vfs_chmod(node, (uint16_t)(node->mask & ~06000));
+    return vfs_chown(node, uid, gid) == 0 ? 0 : (uint64_t)-1;
+}
+
+static uint64_t sys_lchown(uint64_t pathname_ptr, uint64_t owner,
+                            uint64_t group, uint64_t a3, uint64_t a4,
+                            uint64_t a5) {
+    return sys_chown(pathname_ptr, owner, group, a3, a4, a5);
 }
 
 static uint64_t sys_fchmod(uint64_t fd, uint64_t mode, uint64_t a2,
@@ -546,7 +596,8 @@ static uint64_t sys_fchmod(uint64_t fd, uint64_t mode, uint64_t a2,
     (void)a2; (void)a3; (void)a4; (void)a5;
     struct thread *t = sched_get_current();
     if (!t || fd >= MAX_FDS || !t->fds[fd]) return (uint64_t)-9;
-    t->fds[fd]->mask = (uint32_t)(mode & 0777);
+    if (t->euid != 0 && t->fsuid != t->fds[fd]->uid) return (uint64_t)-1;
+    if (vfs_chmod(t->fds[fd], (uint16_t)mode) != 0) return (uint64_t)-1;
     return 0;
 }
 
@@ -571,6 +622,7 @@ static uint64_t sys_fchmodat(uint64_t dirfd, uint64_t pathname_ptr,
     }
     vfs_node_t *node = vfs_resolve_path_at(base, path);
     if (!node) return (uint64_t)-2;
+    if (t && t->euid != 0 && t->fsuid != node->uid) return (uint64_t)-1;
     return vfs_chmod(node, (uint16_t)mode) == 0 ? 0 : (uint64_t)-1;
 }
 
@@ -597,6 +649,10 @@ static uint64_t sys_fchownat(uint64_t dirfd, uint64_t pathname_ptr,
     if (!node) return (uint64_t)-2;
     uint32_t uid = (owner == (uint64_t)-1) ? node->uid : (uint32_t)owner;
     uint32_t gid = (group == (uint64_t)-1) ? node->gid : (uint32_t)group;
+    if (t && t->euid != 0 &&
+        (t->fsuid != node->uid || uid != node->uid || !vfs_in_group(gid)))
+        return (uint64_t)-1;
+    if (uid != node->uid || gid != node->gid) node->mask &= ~06000;
     return vfs_chown(node, uid, gid) == 0 ? 0 : (uint64_t)-1;
 }
 
@@ -635,14 +691,8 @@ static uint64_t do_sys_access(int dirfd, const char *path, uint64_t mode,
     }
     if (!node) return (uint64_t)-2;
 
-    if (mode != 0) {
-        bool can_read  = (node->mask & 0444) != 0;
-        bool can_write = (node->mask & 0222) != 0;
-        bool can_exec  = (node->mask & 0111) != 0;
-        if ((mode & 4) && !can_read)  return (uint64_t)-13;
-        if ((mode & 2) && !can_write) return (uint64_t)-13;
-        if ((mode & 1) && !can_exec)  return (uint64_t)-13;
-    }
+    if (mode & ~7) return (uint64_t)-22;
+    if (mode && !vfs_access(node, (uint32_t)mode)) return (uint64_t)-13;
     return 0;
 }
 
@@ -670,6 +720,7 @@ static uint64_t sys_fchdir(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4,
     if (!t) return (uint64_t)-1;
     if (fd >= MAX_FDS || !t->fds[fd]) return (uint64_t)-9;
     if ((t->fds[fd]->flags & FS_TYPE_MASK) != FS_DIRECTORY) return (uint64_t)-20;
+    if (!vfs_access(t->fds[fd], 1)) return (uint64_t)-13;
 
     if (t->fd_paths[fd][0]) {
         strncpy(t->cwd_path, t->fd_paths[fd], sizeof(t->cwd_path) - 1);
@@ -723,6 +774,8 @@ void syscall_register_fs(void) {
     syscall_register(SYS_LINK,       sys_link);
     syscall_register(SYS_CHMOD,      sys_chmod);
     syscall_register(SYS_CHOWN,      sys_chown);
+    syscall_register(SYS_FCHOWN,     sys_fchown);
+    syscall_register(SYS_LCHOWN,     sys_lchown);
     syscall_register(SYS_FCHMOD,     sys_fchmod);
     syscall_register(SYS_FCHMODAT,   sys_fchmodat);
     syscall_register(SYS_FCHOWNAT,   sys_fchownat);

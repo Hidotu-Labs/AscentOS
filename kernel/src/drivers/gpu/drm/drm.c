@@ -135,7 +135,7 @@ static struct drm_mode_object *drm_mode_object_find(struct drm_device *dev,
  * The clone's device pointer is already set to the drm_file by drm_dri_finddir.
  */
 static void drm_open(struct vfs_node *node) {
-  /* Nothing extra needed — drm_file was allocated in drm_dri_finddir */
+  /* Per-client DRM nodes use normal VFS fd reference counting. */
   (void)node;
 }
 
@@ -422,33 +422,67 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
 
   /* ── Version / caps ──────────────────────────────────────────────── */
   case DRM_IOCTL_VERSION: {
+    klog_puts("[DRM] VERSION ioctl\n");
     struct drm_version *v = (struct drm_version *)arg;
+    static const char name[] = "ascentdrm";
+    static const char date[] = "20260706";
+    static const char desc[] = "AscentOS DRM/KMS";
+    size_t name_len = v->name_len;
+    size_t date_len = v->date_len;
+    size_t desc_len = v->desc_len;
+
     v->version_major = 1;
     v->version_minor = 0;
     v->version_patchlevel = 0;
-    /* Always report the true string lengths so userspace can allocate */
-    v->name_len = 12; /* "AscentOS DRM" */
-    v->date_len = 8;  /* "20260528" */
-    v->desc_len = 27; /* "AscentOS Graphics Subsystem" */
-    /* Only write strings if userspace provided buffers */
-    if (v->name && v->name_len > 0) {
-      size_t copy = v->name_len < 13 ? v->name_len : 13;
-      memcpy(v->name, "AscentOS DRM", copy);
-      if (copy < v->name_len)
+
+    if (v->name && name_len > 0) {
+      size_t copy = (sizeof(name) - 1 < name_len) ? sizeof(name) - 1 : name_len;
+      memcpy(v->name, name, copy);
+      if (copy < name_len)
         v->name[copy] = '\0';
     }
-    if (v->date && v->date_len > 0) {
-      size_t copy = v->date_len < 9 ? v->date_len : 9;
-      memcpy(v->date, "20260528", copy);
-      if (copy < v->date_len)
+    if (v->date && date_len > 0) {
+      size_t copy = (sizeof(date) - 1 < date_len) ? sizeof(date) - 1 : date_len;
+      memcpy(v->date, date, copy);
+      if (copy < date_len)
         v->date[copy] = '\0';
     }
-    if (v->desc && v->desc_len > 0) {
-      size_t copy = v->desc_len < 28 ? v->desc_len : 28;
-      memcpy(v->desc, "AscentOS Graphics Subsystem", copy);
-      if (copy < v->desc_len)
+    if (v->desc && desc_len > 0) {
+      size_t copy = (sizeof(desc) - 1 < desc_len) ? sizeof(desc) - 1 : desc_len;
+      memcpy(v->desc, desc, copy);
+      if (copy < desc_len)
         v->desc[copy] = '\0';
     }
+
+    v->name_len = sizeof(name) - 1;
+    v->date_len = sizeof(date) - 1;
+    v->desc_len = sizeof(desc) - 1;
+    return 0;
+  }
+  case DRM_IOCTL_GET_UNIQUE: {
+    klog_puts("[DRM] GET_UNIQUE ioctl\n");
+    struct drm_unique *u = (struct drm_unique *)arg;
+    static const char busid[] = "platform:ascentdrm:0";
+    size_t unique_len = u->unique_len;
+
+    if (u->unique && unique_len > 0) {
+      size_t copy =
+          (sizeof(busid) - 1 < unique_len) ? sizeof(busid) - 1 : unique_len;
+      memcpy(u->unique, busid, copy);
+      if (copy < unique_len)
+        u->unique[copy] = '\0';
+    }
+
+    u->unique_len = sizeof(busid) - 1;
+    return 0;
+  }
+  case DRM_IOCTL_SET_VERSION: {
+    klog_puts("[DRM] SET_VERSION ioctl\n");
+    struct drm_set_version *sv = (struct drm_set_version *)arg;
+    sv->drm_di_major = 1;
+    sv->drm_di_minor = 4;
+    sv->drm_dd_major = 1;
+    sv->drm_dd_minor = 0;
     return 0;
   }
   case DRM_IOCTL_GET_CAP: {
@@ -1441,6 +1475,9 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
   case DRM_IOCTL_MODE_SETGAMMA:
     return 0; /* stub */
   default:
+    klog_puts("[DRM] unknown ioctl request=0x");
+    klog_hex32(request);
+    klog_puts("\n");
     return -25; /* ENOTTY */
   }
 }
@@ -1622,9 +1659,12 @@ static vfs_node_t *drm_dri_finddir(vfs_node_t *dir, char *name) {
   clone->read = drm_read;
   clone->poll = drm_poll;
   clone->wait_queue = &file->event_wq;
-  clone->refcount = 0; /* vfs_open will bump to 1 */
+  clone->refcount = 0; /* first vfs_open() creates the fd reference */
 
   return clone;
+}
+vfs_node_t *drm_create_client_node(void) {
+  return drm_dri_finddir(NULL, "card0");
 }
 
 /* ── Init ────────────────────────────────────────────────────────────────── */
@@ -1679,6 +1719,7 @@ void drm_register_vfs(void) {
 
   /* Keep enumeration consistent with the dynamic per-open node factory.
    * Mesa scans /dev/dri before opening a preferred KMS/render device. */
+  dri_dir->flags |= FS_DENTRY_NOCACHE;
   dri_dir->readdir = drm_dri_readdir;
   dri_dir->finddir = drm_dri_finddir;
 

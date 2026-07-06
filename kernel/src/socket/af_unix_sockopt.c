@@ -122,9 +122,9 @@ int unix_getsockopt_impl(socket_t *sock, int level, int optname,
       return -107; // ENOTCONN
     }
     struct ucred_local *cred = (struct ucred_local *)optval;
-    cred->pid = 1; // Placeholder
-    cred->uid = 0;
-    cred->gid = 0;
+    cred->pid = usk->peer->owner_pid;
+    cred->uid = usk->peer->owner_uid;
+    cred->gid = usk->peer->owner_gid;
     *optlen = (int)UCRED_SIZE;
     return 0;
   }

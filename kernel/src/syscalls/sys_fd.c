@@ -5,6 +5,7 @@
 #include "../console/console.h"
 #include "../console/klog.h"
 #include "../fb/framebuffer.h"
+#include "../drivers/gpu/drm/drm.h"
 #include "../font/font.h"
 #include "../fs/procfs.h"
 #include "../fs/ramfs.h"
@@ -94,6 +95,12 @@ static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags,
     dev_path = path + 4;
 
   if (dev_path) {
+    if (strcmp(dev_path, "dri/card0") == 0) {
+      node = drm_create_client_node();
+      if (!node)
+        return (uint64_t)-12;
+    }
+
     if (strcmp(dev_path, "ptmx") == 0) {
       int pty_index = pty_alloc_pair();
       if (pty_index < 0)
@@ -142,6 +149,8 @@ static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags,
       strcpy(node->name, dev_path);
       node->flags = FS_CHARDEV;
       node->mask = 0620;
+      node->uid = t->euid;
+      node->gid = t->egid;
       node->read = pty_slave_read;
       node->write = pty_slave_write;
       node->ioctl = pty_slave_ioctl;
@@ -163,7 +172,8 @@ static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags,
       }
     }
 
-    node = fb_lookup_device((char *)dev_path);
+    if (!node)
+      node = fb_lookup_device((char *)dev_path);
   }
 
   if (!node)
@@ -208,18 +218,26 @@ static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags,
 
       if (!parent || (parent->flags & FS_TYPE_MASK) != FS_DIRECTORY)
         return (uint64_t)-20;
+      if (!vfs_access(parent, 3)) return (uint64_t)-13;
 
-      mode = mode & ~0022;
+      mode &= ~t->umask;
       if (vfs_create(parent, file_name, (uint16_t)mode) != 0)
         return (uint64_t)-17;
 
       node = vfs_finddir(parent, file_name);
-      if (!node)
-        return (uint64_t)-2;
+      if (!node) return (uint64_t)-2;
+      uint32_t new_gid = (parent->mask & 02000) ? parent->gid : t->fsgid;
+      vfs_chown(node, t->fsuid, new_gid);
     } else {
       return (uint64_t)-2; // ENOENT
     }
   }
+
+  uint32_t requested = 0;
+  if ((flags & O_ACCMODE) == O_RDONLY) requested = 4;
+  else if ((flags & O_ACCMODE) == O_WRONLY) requested = 2;
+  else if ((flags & O_ACCMODE) == O_RDWR) requested = 6;
+  if (requested && !vfs_access(node, requested)) return (uint64_t)-13;
 
   if ((flags & O_TRUNC) && node->flags == FS_FILE)
     node->length = 0;

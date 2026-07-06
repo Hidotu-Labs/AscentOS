@@ -97,6 +97,7 @@ static bool fb_try_drm_device(void) {
   }
 
   klog_puts("[FB] DRM device detected at /dev/dri/card0\n");
+  vfs_close(drm_device);
   return true;
 }
 
@@ -474,10 +475,13 @@ static uint32_t canon_pos = 0;
 static uint32_t console_pgid = 0;
 
 static void console_vfs_open(vfs_node_t *node) {
-  (void)node;
   struct thread *t = sched_get_current();
   if (t && console_pgid == 0) {
     console_pgid = t->pgid;
+  }
+  if (t && !t->ctty && t->sid == t->tid &&
+      ((node->inode >> 8) & 0xFF) == 4) {
+    t->ctty = node;
   }
 }
 static void console_vfs_close(vfs_node_t *node) { (void)node; }
@@ -861,6 +865,8 @@ static int fb_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
 #define KDGKBMODE 0x4B44
 #define KDSKBMODE 0x4B45
 #define VT_RELDISP 0x5605
+#define TIOCSCTTY 0x540E
+#define TIOCNOTTY 0x5422
 
 #define K_RAW 0x00
 #define K_XLATE 0x01
@@ -951,6 +957,22 @@ static int tty0_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
   }
   case KDSKBMODE: {
     current_kb_mode = (int)arg;
+    return 0;
+  }
+  case TIOCSCTTY: {
+    struct thread *current = sched_get_current();
+    if (!current || current->sid != current->tid)
+      return -1;
+    if (current->ctty && current->ctty != node && arg != 1)
+      return -1;
+    current->ctty = node;
+    return 0;
+  }
+  case TIOCNOTTY: {
+    struct thread *current = sched_get_current();
+    if (!current || !current->ctty)
+      return -25;
+    current->ctty = NULL;
     return 0;
   }
   case TIOCGPGRP: {

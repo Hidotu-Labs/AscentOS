@@ -276,6 +276,10 @@ static uint64_t sys_chdir(uint64_t path_ptr, uint64_t a1, uint64_t a2,
 
   if ((node->flags & FS_TYPE_MASK) != FS_DIRECTORY)
     return (uint64_t)-20; // ENOTDIR
+  if (!vfs_access(node, 1)) {
+    vfs_close(node);
+    return (uint64_t)-13;
+  }
 
   // If validation passes, update thread
   if (current->cwd_node)
@@ -389,6 +393,20 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
   if (!path)
     return (uint64_t)-12;
   memcpy(path, user_path, path_len + 1);
+
+  struct thread *exec_thread = sched_get_current();
+  vfs_node_t *exec_base = (user_path[0] == 47) ? fs_root :
+      (exec_thread && exec_thread->cwd_node ? exec_thread->cwd_node : fs_root);
+  vfs_node_t *exec_node = vfs_resolve_path_at(exec_base, user_path);
+  if (!exec_node || !vfs_access(exec_node, 1)) {
+    if (exec_node) vfs_close(exec_node);
+    kfree(path);
+    return (uint64_t)-13;
+  }
+  uint32_t exec_mode = exec_node->mask;
+  uint32_t exec_uid = exec_node->uid;
+  uint32_t exec_gid = exec_node->gid;
+  vfs_close(exec_node);
 
   int argc = 0;
   if (user_argv)
@@ -506,6 +524,11 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
     // vmm_destroy_pml4 or similar, but for now we focus on the reported leak.
     return (uint64_t)-8; // ENOEXEC
   }
+
+  if (exec_mode & 04000)
+    current->euid = current->suid = current->fsuid = exec_uid;
+  if (exec_mode & 02000)
+    current->egid = current->sgid = current->fsgid = exec_gid;
 
   current->fs_base = 0;
   current->gs_base = 0;
@@ -711,6 +734,11 @@ uint64_t sys_fork(struct syscall_regs *regs) {
     child->egid = parent->egid;
     child->suid = parent->suid;
     child->sgid = parent->sgid;
+    child->fsuid = parent->fsuid;
+    child->fsgid = parent->fsgid;
+    child->supplementary_group_count = parent->supplementary_group_count;
+    memcpy(child->supplementary_groups, parent->supplementary_groups,
+           sizeof(child->supplementary_groups));
     child->ctty = parent->ctty; // Inherit controlling terminal
 
     // Inherit comm name — forked child keeps the parent's name until exec
@@ -862,6 +890,13 @@ static uint64_t sys_clone_internal(struct syscall_regs *regs, uint64_t flags,
   child->gid = parent->gid;
   child->euid = parent->euid;
   child->egid = parent->egid;
+  child->suid = parent->suid;
+  child->sgid = parent->sgid;
+  child->fsuid = parent->fsuid;
+  child->fsgid = parent->fsgid;
+  child->supplementary_group_count = parent->supplementary_group_count;
+  memcpy(child->supplementary_groups, parent->supplementary_groups,
+         sizeof(child->supplementary_groups));
   child->pgid = parent->pgid;
   memcpy(child->signal_handlers, parent->signal_handlers,
          sizeof(child->signal_handlers));
@@ -1165,15 +1200,37 @@ static uint64_t sys_getresgid(struct syscall_regs *regs) {
 
 // sys_setresuid
 static uint64_t sys_setresuid(struct syscall_regs *regs) {
-  (void)regs;
-  // Stub: accept any uid changes silently (we're always root)
+  uint32_t ruid = (uint32_t)regs->rdi, euid = (uint32_t)regs->rsi;
+  uint32_t suid = (uint32_t)regs->rdx;
+  struct thread *t = sched_get_current();
+  if (!t) return (uint64_t)-1;
+  if (t->euid != 0) {
+    if (ruid != UINT32_MAX && ruid != t->uid && ruid != t->euid && ruid != t->suid) return (uint64_t)-1;
+    if (euid != UINT32_MAX && euid != t->uid && euid != t->euid && euid != t->suid) return (uint64_t)-1;
+    if (suid != UINT32_MAX && suid != t->uid && suid != t->euid && suid != t->suid) return (uint64_t)-1;
+  }
+  if (ruid != UINT32_MAX) t->uid = ruid;
+  if (euid != UINT32_MAX) t->euid = euid;
+  if (suid != UINT32_MAX) t->suid = suid;
+  t->fsuid = t->euid;
   return 0;
 }
 
 // sys_setresgid
 static uint64_t sys_setresgid(struct syscall_regs *regs) {
-  (void)regs;
-  // Stub: accept any gid changes silently (we're always root)
+  uint32_t rgid = (uint32_t)regs->rdi, egid = (uint32_t)regs->rsi;
+  uint32_t sgid = (uint32_t)regs->rdx;
+  struct thread *t = sched_get_current();
+  if (!t) return (uint64_t)-1;
+  if (t->euid != 0) {
+    if (rgid != UINT32_MAX && rgid != t->gid && rgid != t->egid && rgid != t->sgid) return (uint64_t)-1;
+    if (egid != UINT32_MAX && egid != t->gid && egid != t->egid && egid != t->sgid) return (uint64_t)-1;
+    if (sgid != UINT32_MAX && sgid != t->gid && sgid != t->egid && sgid != t->sgid) return (uint64_t)-1;
+  }
+  if (rgid != UINT32_MAX) t->gid = rgid;
+  if (egid != UINT32_MAX) t->egid = egid;
+  if (sgid != UINT32_MAX) t->sgid = sgid;
+  t->fsgid = t->egid;
   return 0;
 }
 
@@ -1183,9 +1240,13 @@ static uint64_t sys_setuid(struct syscall_regs *regs) {
   struct thread *t = sched_get_current();
   if (!t)
     return (uint64_t)-1;
-  t->uid = uid;
-  t->euid = uid;
-  t->suid = uid;
+  if (t->euid == 0) {
+    t->uid = t->euid = t->suid = t->fsuid = uid;
+  } else if (uid == t->uid || uid == t->suid) {
+    t->euid = t->fsuid = uid;
+  } else {
+    return (uint64_t)-1;
+  }
   return 0;
 }
 
@@ -1195,9 +1256,13 @@ static uint64_t sys_setgid(struct syscall_regs *regs) {
   struct thread *t = sched_get_current();
   if (!t)
     return (uint64_t)-1;
-  t->gid = gid;
-  t->egid = gid;
-  t->sgid = gid;
+  if (t->euid == 0) {
+    t->gid = t->egid = t->sgid = t->fsgid = gid;
+  } else if (gid == t->gid || gid == t->sgid) {
+    t->egid = t->fsgid = gid;
+  } else {
+    return (uint64_t)-1;
+  }
   return 0;
 }
 
@@ -1209,7 +1274,9 @@ static uint64_t sys_setfsuid(struct syscall_regs *regs) {
     return (uint64_t)-1;
   // Return the previous fsuid value
   uint32_t old_fsuid = t->fsuid;
-  t->fsuid = fsuid;
+  if (t->euid == 0 || fsuid == t->uid || fsuid == t->euid ||
+      fsuid == t->suid || fsuid == t->fsuid)
+    t->fsuid = fsuid;
   return old_fsuid;
 }
 
@@ -1221,8 +1288,37 @@ static uint64_t sys_setfsgid(struct syscall_regs *regs) {
     return (uint64_t)-1;
   // Return the previous fsgid value
   uint32_t old_fsgid = t->fsgid;
-  t->fsgid = fsgid;
+  if (t->euid == 0 || fsgid == t->gid || fsgid == t->egid ||
+      fsgid == t->sgid || fsgid == t->fsgid)
+    t->fsgid = fsgid;
   return old_fsgid;
+}
+
+static uint64_t sys_getgroups(struct syscall_regs *regs) {
+  int size = (int)regs->rdi;
+  uint32_t *list = (uint32_t *)regs->rsi;
+  struct thread *t = sched_get_current();
+  if (!t || size < 0) return (uint64_t)-22;
+  if (size == 0) return t->supplementary_group_count;
+  if ((uint32_t)size < t->supplementary_group_count) return (uint64_t)-22;
+  if (!list || !vmm_is_user_addr_range_writable((uint64_t)list,
+      t->supplementary_group_count * sizeof(uint32_t))) return (uint64_t)-14;
+  memcpy(list, t->supplementary_groups,
+         t->supplementary_group_count * sizeof(uint32_t));
+  return t->supplementary_group_count;
+}
+
+static uint64_t sys_setgroups(struct syscall_regs *regs) {
+  uint32_t size = (uint32_t)regs->rdi;
+  const uint32_t *list = (const uint32_t *)regs->rsi;
+  struct thread *t = sched_get_current();
+  if (!t || t->euid != 0) return (uint64_t)-1;
+  if (size > MAX_SUPPLEMENTARY_GROUPS) return (uint64_t)-22;
+  if (size && (!list || !vmm_is_user_addr_range_valid((uint64_t)list,
+      size * sizeof(uint32_t)))) return (uint64_t)-14;
+  if (size) memcpy(t->supplementary_groups, list, size * sizeof(uint32_t));
+  t->supplementary_group_count = size;
+  return 0;
 }
 
 // sys_getppid
@@ -1593,6 +1689,8 @@ static uint64_t sys_sched_setparam(uint64_t pid, uint64_t param_ptr,
       pid == 0 ? current : sched_get_thread_by_tid((uint32_t)pid);
   if (!target)
     return (uint64_t)-3; // ESRCH
+  if (current->euid != 0 && current->uid != target->uid &&
+      current->euid != target->uid) return (uint64_t)-1;
 
   if (!param_ptr || !vmm_is_user_addr_range_valid(param_ptr, sizeof(int)))
     return (uint64_t)-14; // EFAULT
@@ -1710,7 +1808,16 @@ static uint64_t sys_setpriority(uint64_t which, uint64_t who, uint64_t prio,
   if (which > PRIO_USER)
     return (uint64_t)-22; // EINVAL
 
-  (void)who;
+  struct thread *current = sched_get_current();
+  if (!current) return (uint64_t)-1;
+  if (which == PRIO_PROCESS) {
+    struct thread *target = who == 0 ? current : sched_get_thread_by_tid((uint32_t)who);
+    if (!target) return (uint64_t)-3;
+    if (current->euid != 0 && current->uid != target->uid &&
+        current->euid != target->uid) return (uint64_t)-1;
+  } else if (current->euid != 0) {
+    return (uint64_t)-1;
+  }
 
   // Stub: accept any priority change silently
   return 0;
@@ -1854,6 +1961,8 @@ void syscall_register_process(void) {
   syscall_register_raw(SYS_SETSID, sys_setsid);
   syscall_register_raw(SYS_SETUID, sys_setuid);
   syscall_register_raw(SYS_SETGID, sys_setgid);
+  syscall_register_raw(SYS_GETGROUPS, sys_getgroups);
+  syscall_register_raw(SYS_SETGROUPS, sys_setgroups);
   syscall_register_raw(SYS_SETFSUID, sys_setfsuid);
   syscall_register_raw(SYS_SETFSGID, sys_setfsgid);
   syscall_register(SYS_GETRLIMIT, sys_getrlimit);

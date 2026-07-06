@@ -188,6 +188,30 @@ static uint64_t futex_wait(uint32_t *uaddr, uint32_t val,
   return 0;
 }
 
+uint64_t futex_wake_phys(uint64_t phys, uint32_t val) {
+  futex_init_once();
+  if (phys == 0) return (uint64_t)(-(int64_t)EFAULT);
+  uint32_t bucket = futex_hash_key(phys);
+  uint32_t woken = 0;
+  spinlock_acquire(&futex_hash[bucket].lock);
+  struct futex_waiter **pp = &futex_hash[bucket].head;
+  while (*pp && woken < val) {
+    struct futex_waiter *w = *pp;
+    if (w->phys_addr == phys) {
+      if (w->thread && w->thread->state == THREAD_BLOCKED) {
+        w->thread->state = THREAD_READY;
+        w->thread->wakeup_ticks = 0;
+        woken++;
+      }
+      *pp = w->next;
+    } else {
+      pp = &w->next;
+    }
+  }
+  spinlock_release(&futex_hash[bucket].lock);
+  return (uint64_t)woken;
+}
+
 // FUTEX_WAKE
 // Wake at most `val` threads waiting on the futex at *uaddr.
 // Returns the number of threads woken.
@@ -198,31 +222,7 @@ static uint64_t futex_wake(uint32_t *uaddr, uint32_t val) {
   if (phys == 0)
     return (uint64_t)(-(int64_t)EFAULT);
 
-  uint32_t bucket = futex_hash_key(phys);
-  uint32_t woken = 0;
-
-  spinlock_acquire(&futex_hash[bucket].lock);
-
-  struct futex_waiter **pp = &futex_hash[bucket].head;
-  while (*pp && woken < val) {
-    struct futex_waiter *w = *pp;
-    if (w->phys_addr == phys) {
-      // Wake this thread
-      if (w->thread && w->thread->state == THREAD_BLOCKED) {
-        w->thread->state = THREAD_READY;
-        w->thread->wakeup_ticks = 0; // Cancel timeout
-        woken++;
-      }
-      // Remove from list
-      *pp = w->next;
-    } else {
-      pp = &w->next;
-    }
-  }
-
-  spinlock_release(&futex_hash[bucket].lock);
-
-  return (uint64_t)woken;
+  return futex_wake_phys(phys, val);
 }
 
 // FUTEX_REQUEUE

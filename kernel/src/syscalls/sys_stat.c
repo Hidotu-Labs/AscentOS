@@ -21,7 +21,7 @@ void fill_kstat(struct kstat *ks, vfs_node_t *node) {
     ks->st_ino   = (uint64_t)node->inode;
     ks->st_nlink = 1;
 
-    uint32_t mode = node->mask & 0777;
+    uint32_t mode = node->mask & 07777;
     switch (node->flags & FS_TYPE_MASK) {
     case FS_FILE:      mode |= 0100000; break;
     case FS_DIRECTORY: mode |= 0040000; break;
@@ -171,7 +171,7 @@ static uint64_t sys_statx(uint64_t dirfd, uint64_t path_ptr, uint64_t flags,
     stx->stx_uid     = node->uid;
     stx->stx_gid     = node->gid;
 
-    uint32_t mode = node->mask & 0777;
+    uint32_t mode = node->mask & 07777;
     switch (node->flags & FS_TYPE_MASK) {
     case FS_FILE:      mode |= 0100000; break;
     case FS_DIRECTORY: mode |= 0040000; break;

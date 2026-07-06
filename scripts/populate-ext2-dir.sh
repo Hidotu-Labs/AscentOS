@@ -69,6 +69,8 @@ ensure_dir_cmds "$DST_DIR"
     rel_path=${dir_path#./}
     [ "$rel_path" = "." ] && continue
     echo "mkdir $DST_DIR/$rel_path" >> "$CMDS_FILE"
+    mode=$(stat -c %a "$dir_path")
+    echo "set_inode_field $DST_DIR/$rel_path mode 040$mode" >> "$CMDS_FILE"
   done
 
   # Then write files and symlinks
@@ -79,6 +81,8 @@ ensure_dir_cmds "$DST_DIR"
       echo "symlink $DST_DIR/$rel_path $target" >> "$CMDS_FILE"
     else
       echo "write $SRC_DIR/$rel_path $DST_DIR/$rel_path" >> "$CMDS_FILE"
+      mode=$(stat -c %a "$file_path")
+      echo "set_inode_field $DST_DIR/$rel_path mode 0100$mode" >> "$CMDS_FILE"
     fi
   done
 )

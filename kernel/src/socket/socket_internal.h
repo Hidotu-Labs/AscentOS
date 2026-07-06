@@ -29,6 +29,9 @@ typedef struct unix_sock {
   // Connection state
   struct unix_sock *peer;     // Connected peer
   struct unix_sock *listener; // Listening socket we're connecting to
+  uint32_t owner_pid;
+  uint32_t owner_uid;
+  uint32_t owner_gid;
   int backlog;                // Listen backlog
   int accept_queue_len;       // Current accept queue length
 

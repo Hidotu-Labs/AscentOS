@@ -8,7 +8,11 @@ rm -f "/tmp/.X11-unix/X0"
 
 # DISPLAY ortam değişkenini ayarla
 export DISPLAY=:0
-export HOME=/root
+: "${HOME:=/}"
+export HOME
+export XAUTHORITY="$HOME/.Xauthority"
+uid=$(id -u)
+XORG_LOG="$HOME/Xorg.log"
 # The modesetting DDX uses the AscentOS KMS device at /dev/dri/card0.
 XORG="${XORG:-/usr/libexec/Xorg}"
 if [ ! -x "$XORG" ]; then
@@ -21,7 +25,7 @@ fi
 
 "$XORG" "$DISPLAY" -retro -noreset -nolisten tcp \
     -configdir /etc/X11/xorg.conf.d \
-    -logfile /tmp/Xorg.0.log &
+    -logfile "$XORG_LOG" &
 XORG_PID=$!
 
 ready=0
@@ -31,26 +35,28 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
         break
     fi
     if ! kill -0 "$XORG_PID" 2>/dev/null; then
-        echo "Hata: Xorg başlatılamadı; /tmp/Xorg.0.log dosyasına bakın."
+        echo "Hata: Xorg başlatılamadı; $XORG_LOG dosyasına bakın."
         exit 1
     fi
     sleep 1
 done
 if [ "$ready" != 1 ]; then
-    echo "Hata: Xorg zaman aşımına uğradı; /tmp/Xorg.0.log dosyasına bakın."
+    echo "Hata: Xorg zaman aşımına uğradı; $XORG_LOG dosyasına bakın."
     kill "$XORG_PID" 2>/dev/null
     exit 1
 fi
 
 
 # IceWM configuration setup
-export HOME=/root
-mkdir -p /root/.icewm
+: "${HOME:=/}"
+export HOME
+export XAUTHORITY="$HOME/.Xauthority"
+mkdir -p "$HOME/.icewm"
 if [ -d /etc/icewm ]; then
-    cp -f /etc/icewm/icewmrc /root/.icewm/icewmrc 2>/dev/null || true
-    cp -f /etc/icewm/winoptions /root/.icewm/winoptions 2>/dev/null || true
+    cp -f /etc/icewm/icewmrc "$HOME/.icewm/icewmrc" 2>/dev/null || true
+    cp -f /etc/icewm/winoptions "$HOME/.icewm/winoptions" 2>/dev/null || true
 fi
-export ICEWM_PRIVCFG=/root/.icewm
+export ICEWM_PRIVCFG="$HOME/.icewm"
 
 # IceWM (Pencere yöneticisi önce başlatılmalı)
 if [ -x /usr/bin/icewm ]; then
@@ -90,9 +96,9 @@ export LD_LIBRARY_PATH=/usr/lib:/lib:/usr/local/lib:$LD_LIBRARY_PATH
 # st (suckless terminal from Alpine)
 # Set PS1/PATH in environment so bash picks them up even without rcfile
 export PATH=/opt/coreutils/bin:/opt/bash/bin:/bin:/usr/local/bin:/usr/bin:/opt/tcc/bin
-export BASH_ENV=/root/.bashrc
+export BASH_ENV="$HOME/.bashrc"
 ST_SHELL="/bin/bash"
-ST_RCFILE="/root/.bashrc"
+ST_RCFILE="$HOME/.bashrc"
 if [ -x /usr/bin/st ]; then
     echo "st (Alpine) başlatılıyor..."
     /usr/bin/st -T "st" -e "$ST_SHELL" --noprofile --rcfile "$ST_RCFILE" &

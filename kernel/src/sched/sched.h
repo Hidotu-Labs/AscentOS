@@ -7,6 +7,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#define MAX_SUPPLEMENTARY_GROUPS 32
+
 // Forward declaration for embedded wait queue entry
 struct wait_queue_entry;
 typedef struct wait_queue_entry wait_queue_entry_t;
@@ -163,6 +165,8 @@ struct thread {
   uint32_t sgid;               // Saved set-group-ID
   uint32_t fsuid;              // File system User ID
   uint32_t fsgid;              // File system Group ID
+  uint32_t supplementary_groups[MAX_SUPPLEMENTARY_GROUPS];
+  uint32_t supplementary_group_count;
   uint32_t umask;              // File creation mask
 
   // Real-time interval timer (ITIMER_REAL)

@@ -10,6 +10,7 @@
 #include "../lib/string.h"
 #include "../lock/spinlock.h"
 #include "../mm/pmm.h"
+#include "../fs/vfs.h"
 #include "../mm/shm.h"
 #include "../mm/vma.h"
 #include "../mm/vmm.h"
@@ -34,6 +35,8 @@ struct shm_segment {
   uint32_t nattch;      // Number of current attaches
   uint32_t perm_mode;   // Permission bits
   uint32_t creator_pid; // PID of creator
+  uint32_t creator_uid;
+  uint32_t creator_gid;
   uint32_t last_pid;    // PID of last shmat/shmdt
 };
 
@@ -137,8 +140,11 @@ int64_t sys_shmget(uint64_t key, uint64_t size, uint64_t shmflg, uint64_t a3,
   seg->creator_pid = 0;
 
   struct thread *t = sched_get_current();
-  if (t)
-    seg->creator_pid = t->tid;
+  if (t) {
+    seg->creator_pid = t->tgid;
+    seg->creator_uid = t->euid;
+    seg->creator_gid = t->egid;
+  }
 
   uint32_t id = seg->shmid;
 
@@ -187,6 +193,17 @@ int64_t sys_shmat(uint64_t shmid, uint64_t shmaddr, uint64_t shmflg,
   if (!t) {
     spinlock_release(&shm_lock);
     return -1; // EPERM
+  }
+
+  uint32_t requested = (shmflg & SHM_RDONLY) ? 4 : 6;
+  if (t->euid != 0) {
+    uint32_t allowed = seg->perm_mode & 7;
+    if (t->euid == seg->creator_uid) allowed = (seg->perm_mode >> 6) & 7;
+    else if (vfs_in_group(seg->creator_gid)) allowed = (seg->perm_mode >> 3) & 7;
+    if ((allowed & requested) != requested) {
+      spinlock_release(&shm_lock);
+      return -13;
+    }
   }
 
   uint64_t aligned_size = PAGE_ALIGN_UP(seg->size);
@@ -382,6 +399,11 @@ int64_t sys_shmctl(uint64_t shmid, uint64_t cmd, uint64_t buf, uint64_t a3,
   }
 
   if (cmd == IPC_RMID) {
+    struct thread *caller = sched_get_current();
+    if (!caller || (caller->euid != 0 && caller->euid != seg->creator_uid)) {
+      spinlock_release(&shm_lock);
+      return -1;
+    }
     if (seg->nattch == 0) {
       // No attaches — free immediately
       for (uint32_t i = 0; i < seg->num_pages; i++) {
@@ -411,8 +433,8 @@ int64_t sys_shmctl(uint64_t shmid, uint64_t cmd, uint64_t buf, uint64_t a3,
     memset(ds, 0, sizeof(struct shmid_ds));
 
     ds->shm_perm.__key = seg->key;
-    ds->shm_perm.uid = 0;
-    ds->shm_perm.gid = 0;
+    ds->shm_perm.uid = seg->creator_uid;
+    ds->shm_perm.gid = seg->creator_gid;
     ds->shm_perm.mode = seg->perm_mode;
 
     ds->shm_segsz = PAGE_ALIGN_UP(seg->size);

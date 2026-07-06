@@ -12,7 +12,7 @@
 #include "../mm/vmm.h"
 #include "../smp/cpu.h"
 
-extern uint64_t futex_wake_user(uint32_t *uaddr, uint32_t count);
+extern uint64_t futex_wake_phys(uint64_t phys, uint32_t count);
 
 static void ipi_reschedule_handler(struct registers *regs) {
   (void)regs;
@@ -335,6 +335,8 @@ struct thread *sched_create_kernel_thread(void (*entry)(void),
     vfs_open(t->cwd_node);
   t->umask = 0022;
   t->uid = t->gid = t->euid = t->egid = t->suid = t->sgid = 0;
+  t->fsuid = t->fsgid = 0;
+  t->supplementary_group_count = 0;
 
   // Root kernel threads get their own MM by default.
   // fork/clone/exec will replace/refcount this later as needed.
@@ -1072,7 +1074,7 @@ void sched_reap_thread(struct thread *t) {
     if (phys != 0) {
       __atomic_store_n((uint32_t *)(phys + pmm_get_hhdm_offset()), 0,
                        __ATOMIC_RELEASE);
-      futex_wake_user((uint32_t *)t->tid_address, 1);
+      futex_wake_phys(phys, 1);
     }
   }
 

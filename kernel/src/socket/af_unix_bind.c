@@ -76,11 +76,19 @@ static int unix_bind_fs(unix_sock_t *usk, struct sockaddr_un *sun, int addrlen) 
     }
   }
 
-  int ret = vfs_mknod(parent, name, 0777, FS_SOCKET, usk->parent);
+  if (!current_thread || !vfs_access(parent, 3))
+    return -13; // EACCES
+
+  uint16_t mode = (uint16_t)(0777 & ~current_thread->umask);
+  int ret = vfs_mknod(parent, name, mode, FS_SOCKET, usk->parent);
   if (ret < 0)
     return ret;
 
   usk->parent->node = vfs_finddir(parent, name);
+  if (!usk->parent->node)
+    return -2; // ENOENT
+  vfs_chown(usk->parent->node, current_thread->fsuid,
+            current_thread->fsgid);
 
   memcpy(&usk->addr, sun, addrlen);
   usk->addr_len = addrlen;

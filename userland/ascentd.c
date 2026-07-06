@@ -201,7 +201,8 @@ static int builtin_runtime_dirs(void) {
   chmod("/tmp", 01777);
   mkdir("/tmp/.X11-unix", 01777);
   chmod("/tmp/.X11-unix", 01777);
-  mkdir("/root", 0755);
+  unlink("/tmp/.X0-lock");
+  unlink("/tmp/.X11-unix/X0");
   return 0;
 }
 
@@ -310,6 +311,14 @@ static int start_service(const char *service_name, bool allow_disabled) {
     }
 
     return run_service_process(&svc, false);
+  }
+
+  if (svc.respawn) {
+    for (;;) {
+      int rc = run_service_process(&svc, true);
+      log_msg("%s stopped with status %d; restarting in 2s", svc.name, rc);
+      sleep(2);
+    }
   }
 
   return run_service_process(&svc, true);
@@ -422,9 +431,10 @@ static int boot_target(void) {
   for (int i = 0; i < count; i++)
     start_service(services[i], false);
 
-  log_msg("target finished; opening emergency shell");
-  execl("/bin/bash", "/bin/bash", NULL);
-  return 127;
+  log_msg("boot target is running");
+  for (;;)
+    pause();
+  return 0;
 }
 
 int main(int argc, char **argv) {

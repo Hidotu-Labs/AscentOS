@@ -256,6 +256,13 @@ int unix_create(socket_t *sock, int protocol) {
 
   memset(usk, 0, sizeof(unix_sock_t));
 
+  struct thread *owner = sched_get_current();
+  if (owner) {
+    usk->owner_pid = owner->tgid;
+    usk->owner_uid = owner->euid;
+    usk->owner_gid = owner->egid;
+  }
+
   usk->parent           = sock;
   usk->peer             = NULL;
   usk->listener         = NULL;

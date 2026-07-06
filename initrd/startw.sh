@@ -1,13 +1,34 @@
 #!/bin/sh
 # Minimal startw.sh for AscentOS
 
-export XDG_RUNTIME_DIR=/tmp/wayland
-mkdir -p $XDG_RUNTIME_DIR
-rm -f $XDG_RUNTIME_DIR/wayland-0*
+uid=$(id -u)
+: "${XDG_RUNTIME_DIR:=/tmp/ascent-runtime-$uid}"
+export XDG_RUNTIME_DIR
+mkdir -p "$XDG_RUNTIME_DIR"
+chmod 0700 "$XDG_RUNTIME_DIR" || exit 1
+rm -f "$XDG_RUNTIME_DIR"/wayland-0*
 
+SEATD_PID=
+if command -v seatd >/dev/null 2>&1; then
+    # This seatd build has a fixed socket path (/run/seatd.sock).
+    # Point libseat/Weston at the same path so it can actually connect.
+    export SEATD_SOCK="/run/seatd.sock"
+    rm -f "$SEATD_SOCK"
+    if [ "$uid" -eq 0 ]; then
+        seatd -u "${USER:-root}" &
+    else
+        seatd &
+    fi
+    SEATD_PID=$!
+    sleep 1
+else
+    export LIBSEAT_BACKEND=direct
+fi
 
-seatd -u root &
-sleep 1
+cleanup() {
+    [ -z "$SEATD_PID" ] || kill "$SEATD_PID" 2>/dev/null || true
+}
+trap cleanup EXIT HUP INT TERM
 
 # Native DRM cursor path is enabled; do not force userspace cursor.
 # export WLR_NO_HARDWARE_CURSORS=1
@@ -30,14 +51,14 @@ export WLR_DRM_NO_ATOMIC=1
 # MODE_CURSOR/CURSOR2 or the KMS cursor plane path now.
 # (
 #     export DISPLAY=:0
-#     export HOME=/root
+#     export HOME=/
 #     if [ -x /bin/xrootcursor ]; then
 #         /bin/xrootcursor 80 >>/tmp/xrootcursor.log 2>&1
 #     fi
 # ) &
 
 # Redirect all output to a log file so it survives a crash
-LOG=/tmp/weston-debug.log
+LOG="/tmp/weston-$uid.log"
 echo "[startw] starting weston at $(date)" > $LOG
 
 renderer=pixman

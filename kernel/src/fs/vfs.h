@@ -140,6 +140,9 @@ typedef struct vfs_node {
 } vfs_node_t;
 
 extern vfs_node_t *fs_root;
+bool vfs_in_group(uint32_t gid);
+bool vfs_access(vfs_node_t *node, uint32_t requested);
+bool vfs_may_remove(vfs_node_t *parent, vfs_node_t *target);
 
 // Standard API wrapper functions
 uint32_t vfs_read(vfs_node_t *node, uint32_t offset, uint32_t size,

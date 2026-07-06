@@ -23,8 +23,11 @@
 
 // Standard DRM IOCTLs (simplified)
 #define DRM_IOCTL_VERSION 0xC0406400
+#define DRM_IOCTL_GET_UNIQUE 0xC0106401
+#define DRM_IOCTL_SET_VERSION 0xC0106407
 #define DRM_IOCTL_GET_CAP 0xC010640C
-#define DRM_IOCTL_GEM_CREATE 0xC0106401
+/* Ascent private GEM stress-test ioctl; Linux 0x6401 is GET_UNIQUE. */
+#define DRM_IOCTL_GEM_CREATE 0xC01064E0
 #define DRM_IOCTL_GEM_FREE 0x40086402
 #define DRM_IOCTL_GEM_MMAP 0xC0106403
 #define DRM_IOCTL_WAIT_VBLANK 0xC018643A
@@ -277,6 +280,18 @@ struct drm_version {
   char *date;
   size_t desc_len;
   char *desc;
+};
+
+struct drm_unique {
+  size_t unique_len;
+  char *unique;
+};
+
+struct drm_set_version {
+  int drm_di_major;
+  int drm_di_minor;
+  int drm_dd_major;
+  int drm_dd_minor;
 };
 
 struct drm_get_cap {
@@ -578,6 +593,7 @@ struct drm_framebuffer_full {
 };
 
 void drm_init(void);
+vfs_node_t *drm_create_client_node(void);
 void drm_register_vfs(void);
 void drm_stats_snapshot(struct drm_stats *out);
 
