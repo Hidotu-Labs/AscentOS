@@ -153,14 +153,13 @@ static uint64_t sys_mkdir(uint64_t pathname, uint64_t mode, uint64_t a2,
 
     if (!parent || (parent->flags & FS_TYPE_MASK) != FS_DIRECTORY)
         return (uint64_t)-20;
+    vfs_node_t *existing = vfs_finddir(parent, dir_name);
+    if (existing) return (uint64_t)-17;
     if (!vfs_access(parent, 3)) return (uint64_t)-13;
     mode &= ~t->umask;
     if (parent->mask & 02000) mode |= 02000;
 
     if (vfs_mkdir(parent, dir_name, (uint16_t)mode) != 0) {
-        vfs_node_t *existing = vfs_finddir(parent, dir_name);
-        if (existing && (existing->flags & FS_TYPE_MASK) == FS_DIRECTORY)
-            return 0;
         return (uint64_t)-17;
     }
     vfs_node_t *created = vfs_finddir(parent, dir_name);
@@ -221,6 +220,8 @@ static uint64_t sys_mkdirat(uint64_t dirfd, uint64_t pathname, uint64_t mode,
 
     if (!parent || (parent->flags & FS_TYPE_MASK) != FS_DIRECTORY)
         return (uint64_t)-20;
+    vfs_node_t *existing = vfs_finddir(parent, dir_name);
+    if (existing) return (uint64_t)-17;
     if (!vfs_access(parent, 3)) return (uint64_t)-13;
     mode &= ~t->umask;
     if (parent->mask & 02000) mode |= 02000;

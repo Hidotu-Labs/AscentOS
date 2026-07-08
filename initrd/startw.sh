@@ -4,25 +4,26 @@
 uid=$(id -u)
 : "${XDG_RUNTIME_DIR:=/tmp/ascent-runtime-$uid}"
 export XDG_RUNTIME_DIR
-mkdir -p "$XDG_RUNTIME_DIR"
+if [ ! -d "$XDG_RUNTIME_DIR" ]; then
+    mkdir "$XDG_RUNTIME_DIR" || exit 1
+fi
 chmod 0700 "$XDG_RUNTIME_DIR" || exit 1
 rm -f "$XDG_RUNTIME_DIR"/wayland-0*
 
 SEATD_PID=
-if command -v seatd >/dev/null 2>&1; then
+if [ -S /run/seatd.sock ]; then
+    export SEATD_SOCK="/run/seatd.sock"
+elif command -v seatd >/dev/null 2>&1 && [ "$uid" -eq 0 ]; then
     # This seatd build has a fixed socket path (/run/seatd.sock).
-    # Point libseat/Weston at the same path so it can actually connect.
+    # Root can create that socket as a fallback when AscentD did not start it.
     export SEATD_SOCK="/run/seatd.sock"
     rm -f "$SEATD_SOCK"
-    if [ "$uid" -eq 0 ]; then
-        seatd -u "${USER:-root}" &
-    else
-        seatd &
-    fi
+    seatd -u "${USER:-root}" &
     SEATD_PID=$!
     sleep 1
 else
-    export LIBSEAT_BACKEND=direct
+    echo "[startw] /run/seatd.sock is missing; start the AscentD seatd service first" >&2
+    exit 1
 fi
 
 cleanup() {
@@ -92,3 +93,11 @@ weston \
     --renderer="$renderer" \
     -c /etc/weston.ini \
     --log=$LOG
+status=$?
+if [ "$status" -ne 0 ]; then
+    echo "[startw] weston exited with status $status"
+    echo "[startw] --- $LOG ---"
+    cat "$LOG" 2>/dev/null || true
+    echo "[startw] --- end $LOG ---"
+fi
+exit "$status"

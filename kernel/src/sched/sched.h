@@ -247,6 +247,16 @@ void sched_reparent_children(struct thread *parent);
 
 int alloc_fd(struct thread *t);
 
+/*
+ * Returns true if the calling thread has at least one unmasked pending signal.
+ * Used by blocking syscalls to break out of their wait loops and return
+ * -EINTR, allowing signal delivery before re-entering the syscall.
+ */
+static inline bool thread_has_pending_signal(struct thread *t) {
+  if (!t) return false;
+  return (t->pending_signals & ~t->signal_mask) != 0;
+}
+
 // Userspace Management
 #include "elf.h"
 #include <stdbool.h>

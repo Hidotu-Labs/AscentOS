@@ -48,10 +48,17 @@ ssize_t raw_icmp_recv(struct raw_icmp_socket*s,void*buf,size_t n,uint32_t*src,bo
    spinlock_release(&lock);return(ssize_t)copy;}spinlock_release(&lock);
   struct thread *current=sched_get_current();
   if(nb)return-11;
+  /* Check for pending signals before blocking so we don't miss one that
+   * arrived between the empty-queue check and the yield below. */
+  if(thread_has_pending_signal(current))return-4; /* -EINTR */
   if(s->wait){struct thread*t=current;
    wait_queue_entry_t e={.thread=t,.next=NULL};wait_queue_add(s->wait,&e);
    spinlock_acquire(&lock);bool empty=s->tail==s->head;if(empty)t->state=THREAD_BLOCKED;spinlock_release(&lock);
-   if(!empty)wait_queue_wake_one(s->wait);sched_yield();wait_queue_remove(s->wait,&e);}else sched_yield();
+   if(!empty)wait_queue_wake_one(s->wait);sched_yield();wait_queue_remove(s->wait,&e);
+   /* Woken up — if a signal is pending (e.g. SIGALRM) return EINTR so the
+    * syscall exit path can deliver it before ping loops back. */
+   if(thread_has_pending_signal(t))return-4; /* -EINTR */
+  }else sched_yield();
  }
 }
 bool raw_icmp_readable(struct raw_icmp_socket*s) {

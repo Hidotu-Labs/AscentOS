@@ -510,24 +510,37 @@ XORG_CONF_DIR="${ROOTFS_DIR}/etc/X11/xorg.conf.d"
 mkdir -p "${XORG_CONF_DIR}"
 rm -f "${ROOTFS_DIR}/usr/share/X11/xorg.conf.d/40-libinput.conf"
 cat > "${XORG_CONF_DIR}/10-modesetting.conf" <<EOF
+Section "ServerLayout"
+    Identifier  "AscentLayout"
+    Screen      0 "Screen0" 0 0
+    InputDevice "Keyboard0" "CoreKeyboard"
+    InputDevice "Mouse0" "CorePointer"
+    Option      "AutoAddDevices" "false"
+EndSection
+
 Section "Device"
     Identifier  "Card0"
     Driver      "modesetting"
     Option      "SWcursor" "true"
 EndSection
 
-Section "InputClass"
-    Identifier "AscentOS evdev pointer"
-    MatchIsPointer "on"
-    MatchDevicePath "/dev/input/event*"
-    Driver "evdev"
+Section "Screen"
+    Identifier  "Screen0"
+    Device      "Card0"
 EndSection
 
-Section "InputClass"
-    Identifier "AscentOS evdev keyboard"
-    MatchIsKeyboard "on"
-    MatchDevicePath "/dev/input/event*"
-    Driver "evdev"
+Section "InputDevice"
+    Identifier  "Keyboard0"
+    Driver      "evdev"
+    Option      "Device" "/dev/input/event0"
+    Option      "CoreKeyboard" "true"
+EndSection
+
+Section "InputDevice"
+    Identifier  "Mouse0"
+    Driver      "evdev"
+    Option      "Device" "/dev/input/event1"
+    Option      "CorePointer" "true"
 EndSection
 EOF
 

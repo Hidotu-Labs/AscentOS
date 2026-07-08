@@ -488,10 +488,14 @@ static void console_vfs_close(vfs_node_t *node) { (void)node; }
 
 static uint32_t console_vfs_read(struct vfs_node *node, uint32_t offset,
                                  uint32_t size, uint8_t *buffer) {
-  (void)node;
   (void)offset;
   if (size == 0)
     return 0;
+
+  // Non-blocking: return EAGAIN immediately if no input is available
+  int nonblocking = node && (node->flags & FS_NONBLOCK);
+  if (nonblocking && !keyboard_has_char())
+    return (uint32_t)-11; // EAGAIN
 
   // Helper: check ISIG and send signal for a character.
   // Returns true if the character was consumed as a signal (don't buffer it).
@@ -511,6 +515,10 @@ static uint32_t console_vfs_read(struct vfs_node *node, uint32_t offset,
   } while (0)
 
   if (console_termios.c_lflag & ICANON) {
+    // Non-blocking + canonical: if no complete line buffered, return EAGAIN
+    if (nonblocking && canon_pos >= canon_len && !keyboard_has_char())
+      return (uint32_t)-11; // EAGAIN
+
     // If we have data in the canon buffer, return it first
     if (canon_pos < canon_len) {
       uint32_t to_copy = canon_len - canon_pos;
@@ -579,6 +587,12 @@ static uint32_t console_vfs_read(struct vfs_node *node, uint32_t offset,
     // Non-canonical mode (raw-ish)
     uint32_t count = 0;
     while (count < size) {
+      // In non-blocking mode only consume what's already queued
+      if (!keyboard_has_char()) {
+        if (nonblocking || count > 0)
+          break;
+        // Blocking mode with no chars yet: wait for one
+      }
       char c = keyboard_get_char();
 
       // ICRNL: Map CR to NL on input
@@ -594,10 +608,9 @@ static uint32_t console_vfs_read(struct vfs_node *node, uint32_t offset,
       }
 
       buffer[count++] = (uint8_t)c;
-
-      if (!keyboard_has_char())
-        break;
     }
+    if (count == 0 && nonblocking)
+      return (uint32_t)-11; // EAGAIN
     return count;
   }
 #undef CONSOLE_CHECK_ISIG

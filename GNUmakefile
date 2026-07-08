@@ -36,6 +36,65 @@ GLIBC_CC := $(GLIBC_TOOLCHAIN_BIN)/x86_64-buildroot-linux-gnu-gcc
 GLIBC_USER_CFLAGS := -O2 -Wall -Wextra -fno-stack-protector \
 	--sysroot=$(GLIBC_SYSROOT)
 
+# Alpine rootfs sysroot (built by scripts/setup-alpine.sh)
+ALPINE_SYSROOT := $(CURDIR)/build/alpine/rootfs
+
+# GTK2 test - include/lib flags
+GTK2_INCLUDES := \
+	-I$(ALPINE_SYSROOT)/usr/include/gtk-2.0 \
+	-I$(ALPINE_SYSROOT)/usr/lib/gtk-2.0/include \
+	-I$(ALPINE_SYSROOT)/usr/include/glib-2.0 \
+	-I$(ALPINE_SYSROOT)/usr/lib/glib-2.0/include \
+	-I$(ALPINE_SYSROOT)/usr/include/pango-1.0 \
+	-I$(ALPINE_SYSROOT)/usr/include/harfbuzz \
+	-I$(ALPINE_SYSROOT)/usr/include/cairo \
+	-I$(ALPINE_SYSROOT)/usr/include/gdk-pixbuf-2.0 \
+	-I$(ALPINE_SYSROOT)/usr/include/atk-1.0 \
+	-I$(ALPINE_SYSROOT)/usr/include/pixman-1 \
+	-I$(ALPINE_SYSROOT)/usr/include/freetype2 \
+	-I$(ALPINE_SYSROOT)/usr/include/libpng16
+GTK2_LIBS := \
+	-L$(ALPINE_SYSROOT)/usr/lib -L$(ALPINE_SYSROOT)/lib \
+	-lgtk-x11-2.0 -lgdk-x11-2.0 -lpangocairo-1.0 -lpango-1.0 -latk-1.0 \
+	-lcairo -lgdk_pixbuf-2.0 -lgio-2.0 -lgobject-2.0 -lglib-2.0 \
+	-ljpeg -lmount -lblkid -leconf -lintl -lXrandr -lXinerama \
+	-lgraphite2 -lXcomposite -lXdamage
+GTK2_LDFLAGS := \
+	-Wl,-dynamic-linker,/lib/ld-musl-x86_64.so.1 \
+	-Wl,-rpath,/usr/lib \
+	-Wl,-rpath-link,$(ALPINE_SYSROOT)/usr/lib
+
+# GTK3 test - include/lib flags
+GTK3_INCLUDES := \
+	-I$(ALPINE_SYSROOT)/usr/include/gtk-3.0 \
+	-I$(ALPINE_SYSROOT)/usr/include/glib-2.0 \
+	-I$(ALPINE_SYSROOT)/usr/lib/glib-2.0/include \
+	-I$(ALPINE_SYSROOT)/usr/include/pango-1.0 \
+	-I$(ALPINE_SYSROOT)/usr/include/harfbuzz \
+	-I$(ALPINE_SYSROOT)/usr/include/cairo \
+	-I$(ALPINE_SYSROOT)/usr/include/gdk-pixbuf-2.0 \
+	-I$(ALPINE_SYSROOT)/usr/include/atk-1.0 \
+	-I$(ALPINE_SYSROOT)/usr/include/pixman-1 \
+	-I$(ALPINE_SYSROOT)/usr/include/freetype2 \
+	-I$(ALPINE_SYSROOT)/usr/include/libpng16 \
+	-I$(ALPINE_SYSROOT)/usr/include/at-spi2-atk/2.0 \
+	-I$(ALPINE_SYSROOT)/usr/include/at-spi-2.0 \
+	-I$(ALPINE_SYSROOT)/usr/include/dbus-1.0 \
+	-I$(ALPINE_SYSROOT)/usr/lib/dbus-1.0/include \
+	-I$(ALPINE_SYSROOT)/usr/include/epoxy
+GTK3_LIBS := \
+	-L$(ALPINE_SYSROOT)/usr/lib -L$(ALPINE_SYSROOT)/lib \
+	-lgtk-3 -lgdk-3 -lpangocairo-1.0 -lpango-1.0 -latk-1.0 -latk-bridge-2.0 \
+	-lcairo-gobject -lcairo -lgdk_pixbuf-2.0 -lgio-2.0 -lgobject-2.0 -lglib-2.0 \
+	-lepoxy -ldbus-1 -lX11 -lXext -lXrender -lXi -lXcursor -lXfixes \
+	-lwayland-client -lwayland-cursor -lwayland-egl \
+	-lXrandr -lXinerama -lXcomposite -lXdamage \
+	-lfontconfig -lfreetype -lpng16 -lz -lm
+GTK3_LDFLAGS := \
+	-Wl,-dynamic-linker,/lib/ld-musl-x86_64.so.1 \
+	-Wl,-rpath,/usr/lib \
+	-Wl,-rpath-link,$(ALPINE_SYSROOT)/usr/lib:$(ALPINE_SYSROOT)/lib
+
 .PHONY: all
 all: $(IMAGE_NAME).iso
 
@@ -135,9 +194,9 @@ run-fat32: edk2-ovmf $(IMAGE_NAME).iso fat32_test.img
 		$(QEMUFLAGS)
 
 # Create a 64MB ext2 disk image with sample files for testing
-disk.img: scripts/configure-accounts.sh userland/ascent-account userland/test_accounts.sh userland/ascent-login.elf userland/test_graphics_session.elf
+disk.img: scripts/configure-accounts.sh userland/ascent-account userland/test_accounts.sh userland/ascent-login.elf
 disk.img:  userland/dns_lookup.elf
-disk.img: assets/boot.wav assets/test.wav assets/jane.mp3 assets/mc9.mp3 assets/train.mp3 assets/test.bmp assets/test.tar assets/room.png assets/logo.png assets/linus.gif userland/forkit.elf userland/about.elf userland/hello_glibc.elf userland/booter.elf userland/reboot.elf userland/shutdown.elf userland/apm.elf userland/test_cpp.elf  userland/kilo.elf  userland/ls.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/asplay.elf userland/kria.elf userland/doom.elf userland/xrootcursor.elf  userland/jwm.elf userland/doom_x11.elf userland/gtk_test.elf userland/tinywl.elf userland/tglgears_fb.elf userland/tglgears_drm.elf userland/tglhello_drm.elf userland/test_mem_stress.elf userland/classicube.elf userland/terrain.png userland/texpacks/classicube.zip initrd/startx.sh initrd/startw.sh initrd/weston.ini userland/ascentd.elf $(ASCENTD_CONFIG_FILES)
+disk.img: assets/boot.wav assets/test.wav assets/jane.mp3 assets/mc9.mp3 assets/train.mp3 assets/test.bmp assets/test.tar assets/room.png assets/logo.png assets/linus.gif userland/forkit.elf userland/about.elf userland/hello_glibc.elf userland/booter.elf userland/reboot.elf userland/shutdown.elf userland/apm.elf userland/test_cpp.elf  userland/kilo.elf  userland/ls.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/asplay.elf userland/kria.elf userland/doom.elf userland/xrootcursor.elf  userland/jwm.elf userland/doom_x11.elf userland/gtk_test.elf userland/tglgears_fb.elf userland/tglgears_drm.elf userland/tglhello_drm.elf userland/test_mem_stress.elf userland/classicube.elf userland/terrain.png userland/texpacks/classicube.zip initrd/startx.sh initrd/startw.sh initrd/weston.ini userland/ascentd.elf $(ASCENTD_CONFIG_FILES)
 	@echo "Creating root filesystem (ext3)..."
 	rm -f ./part.img
 	dd if=/dev/zero of=./part.img bs=1M count=2047
@@ -156,10 +215,6 @@ disk.img: assets/boot.wav assets/test.wav assets/jane.mp3 assets/mc9.mp3 assets/
 		echo "write userland/ascentd.elf bin/ascentd"; \
 		echo "rm bin/ascent-login"; \
 		echo "write userland/ascent-login.elf bin/ascent-login"; \
-		echo "rm bin/test_graphics_session"; \
-		echo "write userland/test_graphics_session.elf bin/test_graphics_session"; \
-		echo "rm bin/tinywl"; \
-		echo "write userland/tinywl.elf bin/tinywl"; \
 		echo "rm bin/xrootcursor"; \
 		echo "write userland/xrootcursor.elf bin/xrootcursor"; \
 		echo "mkdir etc"; \
@@ -405,7 +460,7 @@ disk.img: assets/boot.wav assets/test.wav assets/jane.mp3 assets/mc9.mp3 assets/
 		debugfs -w -R "mkdir .config" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "mkdir .config/fastfetch" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "mkdir fastfetch" ./part.img >/dev/null 2>&1 || true; \
-		echo '{"logo": {"source": "/fastfetch/logo.txt", "type": "auto"}, "modules": ["title", "separator", "os", "host", "kernel", "uptime", "packages", "shell", "display", "de", "wm", "wmtheme", "theme", "icons", "font", "cursor", "terminal", "terminalfont", "cpu", "gpu", "memory", "swap", "disk", "battery", "poweradapter", "locale", "break", "colors"]}' > /tmp/ff_config.jsonc; \
+		echo '{"logo": {"source": "/fastfetch/logo.txt", "type": "auto"}, "modules": ["title", "separator", "os", "host", "kernel", "uptime", "packages", {"type": "shell", "format": "bash"}, "display", "de", "wm", "wmtheme", "theme", "icons", "font", "cursor", "terminal", "terminalfont", "cpu", "gpu", "memory", "swap", "disk", "battery", "poweradapter", "locale", "break", "colors"]}' > /tmp/ff_config.jsonc; \
 		debugfs -w -R "rm .config/fastfetch/config.jsonc" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "write /tmp/ff_config.jsonc .config/fastfetch/config.jsonc" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "rm fastfetch/config.jsonc" ./part.img >/dev/null 2>&1 || true; \
@@ -463,7 +518,6 @@ disk.img: assets/boot.wav assets/test.wav assets/jane.mp3 assets/mc9.mp3 assets/
 		echo "set_inode_field bin/forkit mode 0100755"; \
 		echo "set_inode_field bin/test_cred mode 0100755"; \
 		echo "set_inode_field bin/test_accounts mode 0100755"; \
-		echo "set_inode_field bin/test_graphics_session mode 0100755"; \
 		echo "set_inode_field home/ascent uid 1000"; \
 		echo "set_inode_field home/ascent gid 1000"; \
 	} | debugfs -w ./part.img >/dev/null 2>&1 || true
@@ -565,11 +619,6 @@ musl-toolchain: $(MUSL_LIBC)
 test-phase6-login:
 	./scripts/test-phase6-login.sh
 
-.PHONY: test-graphics-session
-test-graphics-session: userland/test_graphics_session.elf
-	./scripts/test-graphics-session.sh
-
-
 userland/ascentd.elf: userland/ascentd.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/ascentd.c -o userland/ascentd.elf
@@ -577,10 +626,6 @@ userland/ascentd.elf: userland/ascentd.c $(MUSL_LIBC)
 userland/ascent-login.elf: userland/ascent-login.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/ascent-login.c -lcrypt -o userland/ascent-login.elf
-
-userland/test_graphics_session.elf: userland/test_graphics_session.c $(MUSL_LIBC)
-	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
-		userland/test_graphics_session.c -o userland/test_graphics_session.elf
 
 userland/hello_glibc.elf: userland/hello_glibc.c
 	$(GLIBC_CC) $(GLIBC_USER_CFLAGS) \
@@ -670,12 +715,33 @@ userland/doom.elf: doomgeneric $(MUSL_LIBC)
 clean-doom:
 	$(MAKE) -C userland -f Makefile.ascentos clean
 
-userland/gtk_test.elf: userland/gtk_test.c scripts/build-gtktest.sh scripts/setup-alpine.sh
-	./scripts/build-gtktest.sh
+userland/gtk_test.elf: userland/gtk_test.c scripts/setup-alpine.sh
+	@if [ ! -d "$(ALPINE_SYSROOT)" ]; then \
+		echo "Error: Alpine rootfs not found. Run scripts/setup-alpine.sh first."; \
+		exit 1; \
+	fi
+	@echo "[*] Compiling userland/gtk_test.c (GTK2) ..."
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" \
+		$(MUSL_TOOLCHAIN_BIN)/x86_64-linux-musl-gcc -O2 \
+		userland/gtk_test.c \
+		-o userland/gtk_test.elf \
+		$(GTK2_INCLUDES) \
+		$(GTK2_LIBS) \
+		$(GTK2_LDFLAGS)
 
-userland/tinywl.elf: userland/tinywl.c scripts/build-tinywl.sh scripts/setup-alpine.sh
-	chmod +x scripts/build-tinywl.sh
-	./scripts/build-tinywl.sh
+userland/gtk3_test.elf: userland/gtk3_test.c scripts/setup-alpine.sh
+	@if [ ! -d "$(ALPINE_SYSROOT)" ]; then \
+		echo "Error: Alpine rootfs not found. Run scripts/setup-alpine.sh first."; \
+		exit 1; \
+	fi
+	@echo "[*] Compiling userland/gtk3_test.c (GTK3) ..."
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" \
+		$(MUSL_TOOLCHAIN_BIN)/x86_64-linux-musl-gcc -O2 \
+		userland/gtk3_test.c \
+		-o userland/gtk3_test.elf \
+		$(GTK3_INCLUDES) \
+		$(GTK3_LIBS) \
+		$(GTK3_LDFLAGS)
 
 userland/tglgears_fb.elf: userland/tglgears_fb.c $(MUSL_LIBC) scripts/build-tinygl.sh
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \

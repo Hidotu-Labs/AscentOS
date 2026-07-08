@@ -89,6 +89,10 @@ int main(void) {
           st.st_uid == getuid(),
           "Wayland runtime directory is private and user-owned");
 
+    errno = 0;
+    check(mkdir("/tmp", 01777) < 0 && errno == EEXIST,
+          "mkdir of existing /tmp reports EEXIST for mkdir -p compatibility");
+
     check_device("/dev/dri/card0", O_RDWR);
     check_device("/dev/input/event0", O_RDONLY);
     check_device("/dev/input/event1", O_RDONLY);
