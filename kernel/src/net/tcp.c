@@ -918,3 +918,18 @@ bool net_phase8_init(void)
 
     return ok;
 }
+
+int tcp_get_snapshot(struct tcp_entry_snapshot *out, int max) {
+    int n = 0;
+    for (int i = 0; i < TCP_MAX_TCBS && n < max; i++) {
+        if (!tcbs[i].used || tcbs[i].address_family == 6)
+            continue;
+        out[n].local_ip    = tcbs[i].local_ip;
+        out[n].remote_ip   = tcbs[i].remote_ip;
+        out[n].local_port  = tcbs[i].local_port;
+        out[n].remote_port = tcbs[i].remote_port;
+        out[n].state       = (uint8_t)tcbs[i].state;
+        n++;
+    }
+    return n;
+}

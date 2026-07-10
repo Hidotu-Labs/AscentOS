@@ -1,6 +1,8 @@
 #!/bin/sh
 # Xorg modesetting/DRM ile X server başlat ve IceWM + xclock + st çalıştır
 # Alpine package integration via setup-alpine.sh provides additional userland tools
+#
+# Set ASCENT_SESSION=xfce4 to launch XFCE4 instead of IceWM.
 
 rm -f "/tmp/.X0-lock"
 rm -f "/tmp/.X11-unix/X0"
@@ -46,6 +48,44 @@ if [ "$ready" != 1 ]; then
     exit 1
 fi
 
+# ── XFCE4 session ────────────────────────────────────────────────────────
+if [ "${ASCENT_SESSION:-}" = "xfce4" ]; then
+    echo "[startx] Starting XFCE4 session..."
+    export XDG_SESSION_TYPE=x11
+    export XDG_CURRENT_DESKTOP=XFCE
+    export XDG_CONFIG_HOME="${HOME}/.config"
+    export XDG_DATA_HOME="${HOME}/.local/share"
+    export XDG_CACHE_HOME="${HOME}/.cache"
+    mkdir -p "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME"
+    export PATH=/opt/coreutils/bin:/opt/bash/bin:/bin:/usr/local/bin:/usr/bin:/opt/tcc/bin:$PATH
+    export LD_LIBRARY_PATH=/usr/lib:/lib:/usr/local/lib:$LD_LIBRARY_PATH
+
+    # Copy default xfce4 config on first run
+    if [ ! -d "$XDG_CONFIG_HOME/xfce4" ] && [ -d /etc/xdg/xfce4 ]; then
+        cp -r /etc/xdg/xfce4 "$XDG_CONFIG_HOME/xfce4"
+    fi
+
+    # Load X resources if available
+    if command -v xrdb >/dev/null 2>&1; then
+        xrdb -merge "$HOME/.Xresources" 2>/dev/null || true
+    fi
+
+    # Start D-Bus session daemon then launch xfce4-session directly.
+    # We do NOT call startxfce4 — it tries to spawn a second Xorg.
+    if command -v dbus-run-session >/dev/null 2>&1; then
+        exec dbus-run-session -- xfce4-session
+    elif command -v dbus-launch >/dev/null 2>&1; then
+        eval "$(dbus-launch --sh-syntax --exit-with-session)"
+        exec xfce4-session
+    else
+        exec xfce4-session
+    fi
+    # fallback: keep Xorg alive
+    wait "$XORG_PID"
+    exit $?
+fi
+
+# ── Default: IceWM session (original behaviour) ───────────────────────────
 
 # IceWM configuration setup
 : "${HOME:=/}"

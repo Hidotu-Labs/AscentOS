@@ -1,15 +1,10 @@
-// ext2_block.c — Block I/O, superblock/BGDT persistence, block-number
-// mapping, and block/inode allocation & deallocation.
-
 #include "ext2_internal.h"
-
-// ── Timestamp helper ─────────────────────────────────────────────────────────
+#include "drivers/timer/rtc.h"
+#include "fs/ext4/ext4_extent.h"
 
 uint32_t ext2_current_time(void) {
-  return (uint32_t)(lapic_timer_get_ms() / 1000);
+  return (uint32_t)rtc_get_timestamp();
 }
-
-// ── Block I/O ────────────────────────────────────────────────────────────────
 
 int ext2_read_block(ext2_mount_t *mnt, uint32_t block_num, void *buffer) {
   if (block_num == 0) {
@@ -17,7 +12,6 @@ int ext2_read_block(ext2_mount_t *mnt, uint32_t block_num, void *buffer) {
     return 0;
   }
 
-  // Check cache
   for (int i = 0; i < 32; i++) {
     if (mnt->cache[i].data && mnt->cache[i].num == block_num) {
       memcpy(buffer, mnt->cache[i].data, mnt->block_size);
@@ -32,7 +26,6 @@ int ext2_read_block(ext2_mount_t *mnt, uint32_t block_num, void *buffer) {
   if (err)
     return err;
 
-  // Add to cache (simple round-robin replacement based on block_num)
   int idx = block_num % 32;
   if (!mnt->cache[idx].data)
     mnt->cache[idx].data = kmalloc(mnt->block_size);
@@ -49,7 +42,6 @@ int ext2_write_block(ext2_mount_t *mnt, uint32_t block_num,
   if (block_num == 0)
     return -1;
 
-  // Update cache if present
   for (int i = 0; i < 32; i++) {
     if (mnt->cache[i].data && mnt->cache[i].num == block_num) {
       memcpy(mnt->cache[i].data, buffer, mnt->block_size);
@@ -62,8 +54,6 @@ int ext2_write_block(ext2_mount_t *mnt, uint32_t block_num,
   uint32_t sectors     = mnt->block_size / 512;
   return mnt->dev->write_sectors(mnt->dev, lba, sectors, buffer);
 }
-
-// ── Superblock / BGDT persistence ────────────────────────────────────────────
 
 int ext2_write_superblock(ext2_mount_t *mnt) {
   uint8_t buf[1024];
@@ -99,23 +89,6 @@ int ext2_write_bgdt(ext2_mount_t *mnt) {
   return 0;
 }
 
-// ── Inode I/O ────────────────────────────────────────────────────────────────
-
-/*
- * EXT2_INODE_STACK_BUF_MAX — largest block size we will hold on the stack.
- *
- * ext2 block sizes are 1024 << s_log_block_size: 1 KB, 2 KB, 4 KB, or 8 KB.
- * 4096 is by far the most common.  Holding 4 KB on the kernel stack is fine
- * (kernel thread stacks are 8 KB; the inode I/O functions are not deeply
- * nested).  8 KB would consume the entire stack, so we heap-allocate for that
- * rare case.
- *
- * Both ext2_read_inode and ext2_write_inode use this same pattern:
- *   - Declare a 4096-byte stack array.
- *   - If block_size <= 4096: point block_buf at the stack array, no alloc.
- *   - Else:                  kmalloc as before, set heap_used flag.
- *   - On every return path:  kfree only when heap_used is true.
- */
 #define EXT2_INODE_STACK_BUF_MAX 4096
 
 int ext2_read_inode(ext2_mount_t *mnt, uint32_t inode_num,
@@ -180,24 +153,22 @@ int ext2_write_inode(ext2_mount_t *mnt, uint32_t inode_num,
   }
 
   memcpy(block_buf + offset_within_block, inode, sizeof(ext2_inode_t));
-  err = ext2_write_block(mnt, inode_table_block + block_offset, block_buf);
+  err = ext3_journal_block(mnt, inode_table_block + block_offset, block_buf);
   if (heap_used) kfree(block_buf);
   return err;
 }
 
-// ── Block-number mapping ──────────────────────────────────────────────────────
-
 uint32_t ext2_get_block_num(ext2_mount_t *mnt, ext2_inode_t *inode,
                              uint32_t logical_block) {
+  if (inode->i_flags & EXT4_EXTENTS_FL)
+    return ext4_get_block_num(mnt, inode, logical_block);
   uint32_t ptrs_per_block = mnt->block_size / 4;
 
-  // Direct blocks (0..11)
   if (logical_block < EXT2_DIRECT_BLOCKS)
     return inode->i_block[logical_block];
 
   logical_block -= EXT2_DIRECT_BLOCKS;
 
-  // Singly indirect
   if (logical_block < ptrs_per_block) {
     if (inode->i_block[12] == 0)
       return 0;
@@ -212,7 +183,6 @@ uint32_t ext2_get_block_num(ext2_mount_t *mnt, ext2_inode_t *inode,
 
   logical_block -= ptrs_per_block;
 
-  // Doubly indirect
   if (logical_block < ptrs_per_block * ptrs_per_block) {
     if (inode->i_block[13] == 0)
       return 0;
@@ -235,7 +205,6 @@ uint32_t ext2_get_block_num(ext2_mount_t *mnt, ext2_inode_t *inode,
 
   logical_block -= ptrs_per_block * ptrs_per_block;
 
-  // Triply indirect
   if (logical_block <
       (uint64_t)ptrs_per_block * ptrs_per_block * ptrs_per_block) {
     if (inode->i_block[14] == 0)
@@ -272,14 +241,13 @@ uint32_t ext2_get_block_num(ext2_mount_t *mnt, ext2_inode_t *inode,
     return result;
   }
 
-  return 0; // Beyond addressable range
+  return 0;
 }
 
 int ext2_set_block_num(ext2_mount_t *mnt, ext2_inode_t *inode,
                        uint32_t logical_block, uint32_t disk_block) {
   uint32_t ptrs_per_block = mnt->block_size / 4;
 
-  // Direct blocks
   if (logical_block < EXT2_DIRECT_BLOCKS) {
     inode->i_block[logical_block] = disk_block;
     return 0;
@@ -287,7 +255,6 @@ int ext2_set_block_num(ext2_mount_t *mnt, ext2_inode_t *inode,
 
   logical_block -= EXT2_DIRECT_BLOCKS;
 
-  // Singly indirect
   if (logical_block < ptrs_per_block) {
     if (inode->i_block[12] == 0) {
       uint32_t new_block = ext2_alloc_block(mnt);
@@ -310,7 +277,6 @@ int ext2_set_block_num(ext2_mount_t *mnt, ext2_inode_t *inode,
 
   logical_block -= ptrs_per_block;
 
-  // Doubly indirect
   if (logical_block < ptrs_per_block * ptrs_per_block) {
     if (inode->i_block[13] == 0) {
       uint32_t new_block = ext2_alloc_block(mnt);
@@ -357,7 +323,6 @@ int ext2_set_block_num(ext2_mount_t *mnt, ext2_inode_t *inode,
 
   logical_block -= ptrs_per_block * ptrs_per_block;
 
-  // Triply indirect
   if (logical_block <
       (uint64_t)ptrs_per_block * ptrs_per_block * ptrs_per_block) {
     if (inode->i_block[14] == 0) {
@@ -431,10 +396,8 @@ int ext2_set_block_num(ext2_mount_t *mnt, ext2_inode_t *inode,
     return 0;
   }
 
-  return -1; // Beyond addressable range
+  return -1;
 }
-
-// ── Block / Inode allocation ──────────────────────────────────────────────────
 
 uint32_t ext2_alloc_block(ext2_mount_t *mnt) {
   ext3_journal_start(mnt);
@@ -507,7 +470,7 @@ uint32_t ext2_alloc_inode(ext2_mount_t *mnt) {
 
         ext3_journal_stop(mnt);
         kfree(bitmap);
-        return g * mnt->inodes_per_group + i + 1; // 1-indexed
+        return g * mnt->inodes_per_group + i + 1;
       }
     }
   }
@@ -578,8 +541,6 @@ int ext2_free_inode(ext2_mount_t *mnt, uint32_t inode_num) {
   return 0;
 }
 
-// ── Indirect-block tree freeing ───────────────────────────────────────────────
-
 void ext2_free_indirect(ext2_mount_t *mnt, uint32_t indirect_block) {
   if (indirect_block == 0)
     return;
@@ -629,6 +590,15 @@ void ext2_free_tindirect(ext2_mount_t *mnt, uint32_t tindirect_block) {
 }
 
 void ext2_free_all_blocks(ext2_mount_t *mnt, ext2_inode_t *inode) {
+  if (ext4_inode_has_extents(inode)) {
+    ext4_extent_free_all(mnt, inode);
+    return;
+  }
+  if ((inode->i_mode & 0xF000) == EXT2_S_IFLNK && inode->i_blocks == 0) {
+    memset(inode->i_block, 0, sizeof(inode->i_block));
+    inode->i_size = 0;
+    return;
+  }
   for (int i = 0; i < EXT2_DIRECT_BLOCKS; i++) {
     if (inode->i_block[i]) {
       ext2_free_block(mnt, inode->i_block[i]);

@@ -41,6 +41,7 @@
 
 #include "fb/framebuffer.h"
 #include "fs/ext2.h"
+#include "fs/ext4.h"
 #include "fs/fat32.h"
 #include "fs/procfs.h"
 #include "fs/ramfs.h"
@@ -409,6 +410,9 @@ void kmain_high_half(void) {
                                " Attempting to mount root from partition: ");
       klog_puts(boot_dev->name);
       klog_puts("...\n");
+      if (ext4_mount_root(boot_dev) == 0) {
+        goto mount_success;
+      }
       if (ext2_mount_root(boot_dev) == 0) {
         goto mount_success;
       }
@@ -422,6 +426,9 @@ void kmain_high_half(void) {
                              " Attempting to mount root from raw device: ");
     klog_puts(boot_dev->name);
     klog_puts("...\n");
+    if (ext4_mount_root(boot_dev) == 0) {
+      goto mount_success;
+    }
     if (ext2_mount_root(boot_dev) == 0) {
       goto mount_success;
     }

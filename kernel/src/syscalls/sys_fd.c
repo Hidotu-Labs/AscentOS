@@ -17,6 +17,9 @@
 #include "../socket/socket.h"
 #include "sys_io_shared.h"
 #include "syscall.h"
+#include "../fs/ext2.h"
+#include "../fs/ext4.h"
+#include "../drivers/storage/block.h"
 #include <stdint.h>
 
 // ---------------------------------------------------------------------------
@@ -900,9 +903,50 @@ static uint64_t sys_fadvise64(uint64_t fd, uint64_t offset, uint64_t len,
   return 0;
 }
 
-// ---------------------------------------------------------------------------
-// Registration — called from syscall_register_io() in sys_io_register.c
-// ---------------------------------------------------------------------------
+static uint64_t sys_mount(uint64_t source_ptr, uint64_t target_ptr,
+                          uint64_t fstype_ptr, uint64_t flags,
+                          uint64_t data_ptr, uint64_t a5) {
+    (void)fstype_ptr;
+    (void)flags;
+    (void)data_ptr;
+    (void)a5;
+
+    const char *source = (const char *)source_ptr;
+    const char *target = (const char *)target_ptr;
+
+    if (!source || !target)
+        return (uint64_t)-14;
+
+    vfs_node_t *mountpoint = vfs_resolve_path(target);
+    if (!mountpoint)
+        return (uint64_t)-2;
+    if ((mountpoint->flags & FS_TYPE_MASK) != FS_DIRECTORY)
+        return (uint64_t)-20;
+
+    const char *dev_name = source;
+    if (strncmp(source, "/dev/", 5) == 0)
+        dev_name = source + 5;
+
+    struct block_device *dev = NULL;
+    int n = block_count();
+    for (int i = 0; i < n; i++) {
+        struct block_device *d = block_get(i);
+        if (d && strcmp(d->name, dev_name) == 0) {
+            dev = d;
+            break;
+        }
+    }
+
+    if (!dev)
+        return (uint64_t)-6;
+
+    if (ext4_mount(dev, mountpoint) == 0)
+        return 0;
+    if (ext2_mount(dev, mountpoint) == 0)
+        return 0;
+
+    return (uint64_t)-22;
+}
 
 void syscall_register_fd(void) {
   syscall_register(SYS_READ, sys_read);
@@ -922,6 +966,7 @@ void syscall_register_fd(void) {
   syscall_register(SYS_FALLOCATE, sys_fallocate);
   syscall_register(SYS_FLOCK, sys_flock);
   syscall_register(SYS_FSYNC, sys_fsync);
+  syscall_register(SYS_MOUNT, sys_mount);
   syscall_register(SYS_SENDFILE, sys_sendfile);
   syscall_register(SYS_FADVISE64, sys_fadvise64);
 }

@@ -1,9 +1,4 @@
-// ext2_dir.c — Directory operations: readdir, finddir, add/remove entry,
-// emptiness check, and the create/mkdir VFS callbacks.
-
 #include "ext2_internal.h"
-
-// ── readdir ──────────────────────────────────────────────────────────────────
 
 struct dirent *ext2_readdir_impl(vfs_node_t *node, uint32_t index) {
   ext2_mount_t *mnt = (ext2_mount_t *)node->device;
@@ -60,8 +55,6 @@ struct dirent *ext2_readdir_impl(vfs_node_t *node, uint32_t index) {
   kfree(block_buf);
   return NULL;
 }
-
-// ── finddir ──────────────────────────────────────────────────────────────────
 
 vfs_node_t *ext2_finddir_impl(vfs_node_t *node, char *name) {
   ext2_mount_t *mnt = (ext2_mount_t *)node->device;
@@ -130,8 +123,6 @@ vfs_node_t *ext2_finddir_impl(vfs_node_t *node, char *name) {
   return NULL;
 }
 
-// ── Add directory entry ───────────────────────────────────────────────────────
-
 int ext2_add_dir_entry(ext2_mount_t *mnt, uint32_t dir_inode_num,
                        uint32_t child_inode_num, const char *name,
                        uint8_t file_type) {
@@ -190,7 +181,6 @@ int ext2_add_dir_entry(ext2_mount_t *mnt, uint32_t dir_inode_num,
     byte_pos += entry->rec_len;
   }
 
-  // No space in existing blocks — allocate a new directory block
   uint32_t new_block = ext2_alloc_block(mnt);
   if (!new_block) {
     kfree(block_buf);
@@ -216,8 +206,6 @@ int ext2_add_dir_entry(ext2_mount_t *mnt, uint32_t dir_inode_num,
   kfree(block_buf);
   return 0;
 }
-
-// ── Remove directory entry ────────────────────────────────────────────────────
 
 int ext2_remove_dir_entry(ext2_mount_t *mnt, uint32_t dir_inode_num,
                           const char *name) {
@@ -287,8 +275,6 @@ int ext2_remove_dir_entry(ext2_mount_t *mnt, uint32_t dir_inode_num,
   return -1;
 }
 
-// ── Directory emptiness check ─────────────────────────────────────────────────
-
 bool ext2_dir_is_empty(ext2_mount_t *mnt, uint32_t inode_num) {
   ext2_inode_t inode;
   if (ext2_read_inode(mnt, inode_num, &inode))
@@ -333,8 +319,6 @@ bool ext2_dir_is_empty(ext2_mount_t *mnt, uint32_t inode_num) {
   return true;
 }
 
-// ── VFS create (new regular file) ────────────────────────────────────────────
-
 int ext2_create_impl(vfs_node_t *node, char *name, uint16_t permission) {
   ext2_mount_t *mnt = (ext2_mount_t *)node->device;
   if (!mnt)
@@ -367,8 +351,6 @@ int ext2_create_impl(vfs_node_t *node, char *name, uint16_t permission) {
 
   return 0;
 }
-
-// ── VFS mkdir (new directory) ─────────────────────────────────────────────────
 
 int ext2_mkdir_impl(vfs_node_t *node, char *name, uint16_t permission) {
   ext2_mount_t *mnt = (ext2_mount_t *)node->device;
@@ -403,7 +385,6 @@ int ext2_mkdir_impl(vfs_node_t *node, char *name, uint16_t permission) {
   if (!block_buf)
     return -1;
 
-  // "." entry
   ext2_dirent_t *dot = (ext2_dirent_t *)block_buf;
   dot->inode     = new_ino;
   dot->rec_len   = 12;
@@ -411,7 +392,6 @@ int ext2_mkdir_impl(vfs_node_t *node, char *name, uint16_t permission) {
   dot->file_type = EXT2_FT_DIR;
   dot->name[0]   = '.';
 
-  // ".." entry — takes the rest of the block
   ext2_dirent_t *dotdot = (ext2_dirent_t *)(block_buf + 12);
   dotdot->inode     = node->inode;
   dotdot->rec_len   = (uint16_t)(mnt->block_size - 12);
@@ -429,7 +409,6 @@ int ext2_mkdir_impl(vfs_node_t *node, char *name, uint16_t permission) {
   if (ext2_add_dir_entry(mnt, node->inode, new_ino, name, EXT2_FT_DIR))
     return -1;
 
-  // Increment parent's link count for the new ".."
   ext2_inode_t parent_inode;
   if (ext2_read_inode(mnt, node->inode, &parent_inode) == 0) {
     parent_inode.i_links_count++;

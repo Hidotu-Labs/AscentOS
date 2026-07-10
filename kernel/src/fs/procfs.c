@@ -358,6 +358,46 @@ uint32_t procfs_heapinfo_read(vfs_node_t *node, uint32_t offset, uint32_t size,
   return size;
 }
 
+uint32_t procfs_version_read(vfs_node_t *node, uint32_t offset, uint32_t size,
+                             uint8_t *buffer) {
+  char buf[256];
+  int len = snprintf(buf, sizeof(buf),
+      "Ascension version 2.0.0-beta (gcc) "
+      "#1 SMP AscentOS\n");
+
+  node->length = (uint32_t)len;
+  if (offset >= (uint32_t)len)
+    return 0;
+  if (offset + size > (uint32_t)len)
+    size = (uint32_t)len - offset;
+  memcpy(buffer, buf + offset, size);
+  return size;
+}
+
+uint32_t procfs_filesystems_read(vfs_node_t *node, uint32_t offset,
+                                 uint32_t size, uint8_t *buffer) {
+  // List the filesystem types the kernel supports.
+  // "nodev" prefix means the fs doesn't require a block device.
+  const char *fs =
+      "nodev\tsysfs\n"
+      "nodev\ttmpfs\n"
+      "nodev\tdevtmpfs\n"
+      "nodev\tproc\n"
+      "nodev\tdevfs\n"
+      "nodev\tramfs\n"
+      "\text2\n"
+      "\text3\n";
+
+  uint32_t len = (uint32_t)strlen(fs);
+  node->length = len;
+  if (offset >= len)
+    return 0;
+  if (offset + size > len)
+    size = len - offset;
+  memcpy(buffer, fs + offset, size);
+  return size;
+}
+
 uint32_t procfs_cmdline_read(vfs_node_t *node, uint32_t offset, uint32_t size,
                              uint8_t *buffer) {
   (void)node;
@@ -795,8 +835,8 @@ static vfs_node_t *make_pid_dir(uint32_t pid) {
 // Number of static entries in the procfs root (excluding . and ..)
 // These are the nodes added by procfs_init before we install our hooks:
 //   meminfo drmstats cpuinfo partitions mounts uptime stat loadavg heapinfo
-//   cmdline → 10
-#define PROCFS_STATIC_ENTRIES 10
+//   cmdline version filesystems net → 13
+#define PROCFS_STATIC_ENTRIES 13
 
 static int procfs_self_readlink(vfs_node_t *node, char *buf, uint32_t size) {
   (void)node;
@@ -1070,10 +1110,329 @@ void procfs_init(void) {
       ramfs_mount_node(procfs_root, cmdline_node);
     }
 
+    // Add /proc/version
+    vfs_node_t *version_node = kmalloc(sizeof(vfs_node_t));
+    if (version_node) {
+      vfs_node_init(version_node);
+      strncpy(version_node->name, "version", 127);
+      version_node->flags = FS_FILE | FS_PERSISTENT;
+      version_node->mask = 0444;
+      version_node->read = procfs_version_read;
+      version_node->length = 256;
+      ramfs_mount_node(procfs_root, version_node);
+    }
+
+    // Add /proc/filesystems
+    vfs_node_t *filesystems_node = kmalloc(sizeof(vfs_node_t));
+    if (filesystems_node) {
+      vfs_node_init(filesystems_node);
+      strncpy(filesystems_node->name, "filesystems", 127);
+      filesystems_node->flags = FS_FILE | FS_PERSISTENT;
+      filesystems_node->mask = 0444;
+      filesystems_node->read = procfs_filesystems_read;
+      filesystems_node->length = 128;
+      ramfs_mount_node(procfs_root, filesystems_node);
+    }
+
+    // Add /proc/net/ subdirectory
+    procfs_net_init(procfs_root);
+
     // Install dynamic PID hooks on top of the ramfs root.
     // These wrap the ramfs readdir/finddir to also expose live per-PID dirs.
     procfs_root->flags |= FS_DENTRY_NOCACHE;
     procfs_root->readdir = procfs_root_readdir;
     procfs_root->finddir = procfs_root_finddir;
   }
+}
+
+// =============================================================================
+// /proc/net/
+// =============================================================================
+
+#include "net/core.h"
+#include "net/ipv4.h"
+#include "net/tcp.h"
+#include "net/udp.h"
+
+// Helper: format a big-endian IPv4 address as the 8-char hex string Linux uses
+// in /proc/net/tcp and /proc/net/udp  (host byte-order, little-endian on x86).
+static void fmt_ipv4_hex(char *out, uint32_t ip) {
+    // Linux stores the address in native 32-bit little-endian order.
+    // On x86 that means byte0=LSB, so we just print the uint32 as hex.
+    const char *hex = "0123456789ABCDEF";
+    for (int i = 7; i >= 0; i--) {
+        out[i] = hex[ip & 0xF];
+        ip >>= 4;
+    }
+    out[8] = '\0';
+}
+
+// Helper: format port as 4-char uppercase hex.
+static void fmt_port_hex(char *out, uint16_t port) {
+    const char *hex = "0123456789ABCDEF";
+    out[0] = hex[(port >> 12) & 0xF];
+    out[1] = hex[(port >>  8) & 0xF];
+    out[2] = hex[(port >>  4) & 0xF];
+    out[3] = hex[(port      ) & 0xF];
+    out[4] = '\0';
+}
+
+// Map enum tcp_state → Linux /proc/net/tcp state byte.
+static uint8_t tcp_state_to_linux(uint8_t s) {
+    // Linux numbering (1-based):
+    //  01 ESTABLISHED  02 SYN_SENT  03 SYN_RECV  04 FIN_WAIT1
+    //  05 FIN_WAIT2    06 TIME_WAIT 07 CLOSE      08 CLOSE_WAIT
+    //  09 LAST_ACK     0A LISTEN    0B CLOSING
+    switch (s) {
+    case 0:  return 0x07; // TCP_CLOSED     → CLOSE
+    case 1:  return 0x0A; // TCP_LISTEN     → LISTEN
+    case 2:  return 0x02; // TCP_SYN_SENT
+    case 3:  return 0x03; // TCP_SYN_RECEIVED
+    case 4:  return 0x01; // TCP_ESTABLISHED
+    case 5:  return 0x04; // TCP_FIN_WAIT_1
+    case 6:  return 0x05; // TCP_FIN_WAIT_2
+    case 7:  return 0x08; // TCP_CLOSE_WAIT
+    case 8:  return 0x09; // TCP_LAST_ACK
+    case 9:  return 0x06; // TCP_TIME_WAIT
+    default: return 0x07;
+    }
+}
+
+// ---- /proc/net/dev ----------------------------------------------------------
+// Format:
+//   Inter-|   Receive                                                ...
+//    face |bytes    packets errs drop ...
+//      lo:      0       0    0    0 ...
+//    eth0:   1234      10    0    0 ...
+
+static uint32_t procfs_net_dev_read(vfs_node_t *node, uint32_t offset,
+                                    uint32_t size, uint8_t *buffer) {
+    char *buf = kmalloc(2048);
+    if (!buf) return 0;
+
+    int pos = snprintf(buf, 2048,
+        "Inter-|   Receive                                                |  Transmit\n"
+        " face |bytes    packets errs drop fifo frame compressed multicast|"
+        "bytes    packets errs drop fifo colls carrier compressed\n");
+
+    // Loopback stub
+    pos += snprintf(buf + pos, 2048 - pos,
+        "    lo:       0       0    0    0    0     0          0         0"
+        "        0       0    0    0    0     0       0          0\n");
+
+    struct net_device *dev = net_device_default();
+    if (dev) {
+        pos += snprintf(buf + pos, 2048 - pos,
+            "%6s: %llu %llu    0    0    0     0          0         0"
+            " %llu %llu    0    0    0     0       0          0\n",
+            dev->name,
+            (unsigned long long)dev->stats.rx_bytes,
+            (unsigned long long)dev->stats.rx_packets,
+            (unsigned long long)dev->stats.tx_bytes,
+            (unsigned long long)dev->stats.tx_packets);
+    }
+
+    node->length = (uint32_t)pos;
+    if (offset >= (uint32_t)pos) { kfree(buf); return 0; }
+    if (offset + size > (uint32_t)pos) size = (uint32_t)pos - offset;
+    memcpy(buffer, buf + offset, size);
+    kfree(buf);
+    return size;
+}
+
+// ---- /proc/net/tcp ----------------------------------------------------------
+// Each line: sl  local_address  rem_address  st  tx_queue:rx_queue  ...
+
+static uint32_t procfs_net_tcp_read(vfs_node_t *node, uint32_t offset,
+                                    uint32_t size, uint8_t *buffer) {
+    struct tcp_entry_snapshot snaps[TCP_MAX_TCBS];
+    int n = tcp_get_snapshot(snaps, TCP_MAX_TCBS);
+
+    char *buf = kmalloc(256 + n * 128);
+    if (!buf) return 0;
+
+    int pos = snprintf(buf, 256,
+        "  sl  local_address rem_address   st tx_queue rx_queue "
+        "tr tm->when retrnsmt   uid  timeout inode\n");
+
+    char lip[9], rip[9], lport[5], rport[5];
+    for (int i = 0; i < n; i++) {
+        fmt_ipv4_hex(lip,   snaps[i].local_ip);
+        fmt_ipv4_hex(rip,   snaps[i].remote_ip);
+        fmt_port_hex(lport, snaps[i].local_port);
+        fmt_port_hex(rport, snaps[i].remote_port);
+        uint8_t st = tcp_state_to_linux(snaps[i].state);
+        pos += snprintf(buf + pos, 128,
+            "%4d: %s:%s %s:%s %02X 00000000:00000000 00 00000000 0 0 0\n",
+            i, lip, lport, rip, rport, st);
+    }
+
+    node->length = (uint32_t)pos;
+    if (offset >= (uint32_t)pos) { kfree(buf); return 0; }
+    if (offset + size > (uint32_t)pos) size = (uint32_t)pos - offset;
+    memcpy(buffer, buf + offset, size);
+    kfree(buf);
+    return size;
+}
+
+// ---- /proc/net/udp ----------------------------------------------------------
+
+static uint32_t procfs_net_udp_read(vfs_node_t *node, uint32_t offset,
+                                    uint32_t size, uint8_t *buffer) {
+    struct udp_entry_snapshot snaps[UDP_MAX_SOCKETS];
+    int n = udp_get_snapshot(snaps, UDP_MAX_SOCKETS);
+
+    char *buf = kmalloc(256 + n * 128);
+    if (!buf) return 0;
+
+    int pos = snprintf(buf, 256,
+        "  sl  local_address rem_address   st tx_queue rx_queue "
+        "tr tm->when retrnsmt   uid  timeout inode ref pointer drops\n");
+
+    char lip[9], rip[9], lport[5], rport[5];
+    for (int i = 0; i < n; i++) {
+        fmt_ipv4_hex(lip,   snaps[i].local_ip);
+        fmt_ipv4_hex(rip,   snaps[i].remote_ip);
+        fmt_port_hex(lport, snaps[i].local_port);
+        fmt_port_hex(rport, snaps[i].remote_port);
+        // UDP state: 07 = CLOSE (unconnected), 01 = ESTABLISHED (connected)
+        uint8_t st = snaps[i].connected ? 0x01 : 0x07;
+        pos += snprintf(buf + pos, 128,
+            "%4d: %s:%s %s:%s %02X 00000000:00000000 00 00000000 0 0 0 0\n",
+            i, lip, lport, rip, rport, st);
+    }
+
+    node->length = (uint32_t)pos;
+    if (offset >= (uint32_t)pos) { kfree(buf); return 0; }
+    if (offset + size > (uint32_t)pos) size = (uint32_t)pos - offset;
+    memcpy(buffer, buf + offset, size);
+    kfree(buf);
+    return size;
+}
+
+// ---- /proc/net/route --------------------------------------------------------
+// Iface  Destination  Gateway  Flags  RefCnt  Use  Metric  Mask  MTU  Window  IRTT
+
+static uint32_t procfs_net_route_read(vfs_node_t *node, uint32_t offset,
+                                      uint32_t size, uint8_t *buffer) {
+    char buf[512];
+
+    int pos = snprintf(buf, sizeof(buf),
+        "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\t"
+        "MTU\tWindow\tIRTT\n");
+
+    const struct ipv4_config *cfg = ipv4_get_config();
+    struct net_device *dev = net_device_default();
+    const char *ifname = dev ? dev->name : "eth0";
+
+    if (cfg && cfg->address) {
+        // Network route: destination = address & mask, gateway = 0.0.0.0
+        uint32_t net_dst = cfg->address & cfg->netmask;
+        pos += snprintf(buf + pos, (int)sizeof(buf) - pos,
+            "%s\t%08X\t%08X\t0001\t0\t0\t0\t%08X\t0\t0\t0\n",
+            ifname, net_dst, 0U, cfg->netmask);
+
+        // Default route: destination = 0.0.0.0, gateway = gateway
+        if (cfg->gateway) {
+            pos += snprintf(buf + pos, (int)sizeof(buf) - pos,
+                "%s\t%08X\t%08X\t0003\t0\t0\t100\t%08X\t0\t0\t0\n",
+                ifname, 0U, cfg->gateway, 0U);
+        }
+    }
+
+    node->length = (uint32_t)pos;
+    if (offset >= (uint32_t)pos) return 0;
+    if (offset + size > (uint32_t)pos) size = (uint32_t)pos - offset;
+    memcpy(buffer, buf + offset, size);
+    return size;
+}
+
+// ---- /proc/net/if_inet6 -----------------------------------------------------
+// One line per IPv6-capable interface. We only have loopback for now.
+// Format: addr devindex prefixlen scope flags ifname
+
+static uint32_t procfs_net_if_inet6_read(vfs_node_t *node, uint32_t offset,
+                                         uint32_t size, uint8_t *buffer) {
+    (void)node;
+    // Loopback ::1 only
+    const char *data =
+        "00000000000000000000000000000001 01 80 10 80       lo\n";
+    uint32_t len = (uint32_t)strlen(data);
+    if (offset >= len) return 0;
+    if (offset + size > len) size = len - offset;
+    memcpy(buffer, data + offset, size);
+    return size;
+}
+
+// ---- /proc/net/sockstat -----------------------------------------------------
+
+static uint32_t procfs_net_sockstat_read(vfs_node_t *node, uint32_t offset,
+                                         uint32_t size, uint8_t *buffer) {
+    struct tcp_entry_snapshot tcp_snaps[TCP_MAX_TCBS];
+    int tcp_n = tcp_get_snapshot(tcp_snaps, TCP_MAX_TCBS);
+
+    struct udp_entry_snapshot udp_snaps[UDP_MAX_SOCKETS];
+    int udp_n = udp_get_snapshot(udp_snaps, UDP_MAX_SOCKETS);
+
+    // Count established TCP connections
+    int tcp_estab = 0;
+    for (int i = 0; i < tcp_n; i++)
+        if (tcp_state_to_linux(tcp_snaps[i].state) == 0x01)
+            tcp_estab++;
+
+    char buf[256];
+    int len = snprintf(buf, sizeof(buf),
+        "sockets: used %d\n"
+        "TCP: inuse %d orphan 0 tw 0 alloc %d mem 0\n"
+        "UDP: inuse %d mem 0\n"
+        "RAW: inuse 0\n"
+        "FRAG: inuse 0 memory 0\n",
+        tcp_n + udp_n,
+        tcp_estab, tcp_n,
+        udp_n);
+
+    node->length = (uint32_t)len;
+    if (offset >= (uint32_t)len) return 0;
+    if (offset + size > (uint32_t)len) size = (uint32_t)len - offset;
+    memcpy(buffer, buf + offset, size);
+    return size;
+}
+
+// ---- wire everything into a /proc/net/ directory ----------------------------
+
+void procfs_net_init(vfs_node_t *procfs_root) {
+    // Create the /proc/net directory node
+    vfs_node_t *net_dir = kmalloc(sizeof(vfs_node_t));
+    if (!net_dir) return;
+    vfs_node_init(net_dir);
+    strcpy(net_dir->name, "net");
+    net_dir->flags = FS_DIRECTORY | FS_PERSISTENT;
+    net_dir->mask  = 0555;
+    ramfs_mount_on(net_dir);
+
+    // Helper macro to reduce boilerplate
+#define ADD_NET_FILE(fname, rfunc, flen)                      \
+    do {                                                       \
+        vfs_node_t *_n = kmalloc(sizeof(vfs_node_t));         \
+        if (_n) {                                              \
+            vfs_node_init(_n);                                 \
+            strncpy(_n->name, fname, 127);                     \
+            _n->flags  = FS_FILE | FS_PERSISTENT;              \
+            _n->mask   = 0444;                                 \
+            _n->read   = rfunc;                                \
+            _n->length = flen;                                 \
+            ramfs_mount_node(net_dir, _n);                     \
+        }                                                      \
+    } while (0)
+
+    ADD_NET_FILE("dev",      procfs_net_dev_read,      2048);
+    ADD_NET_FILE("tcp",      procfs_net_tcp_read,      4096);
+    ADD_NET_FILE("udp",      procfs_net_udp_read,      4096);
+    ADD_NET_FILE("route",    procfs_net_route_read,     512);
+    ADD_NET_FILE("if_inet6", procfs_net_if_inet6_read,  128);
+    ADD_NET_FILE("sockstat", procfs_net_sockstat_read,  256);
+
+#undef ADD_NET_FILE
+
+    ramfs_mount_node(procfs_root, net_dir);
 }

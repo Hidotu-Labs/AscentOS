@@ -349,6 +349,7 @@ install_apk "libxfixes-dev" "main"
 install_apk "xorgproto" "main"
 install_apk "python3" "main"
 install_apk "dbus-dev" "main"
+install_apk "dbus" "main"
 install_apk "nano" "main"
 
 # Compiler / toolchain tools for AUR package compilation
@@ -376,6 +377,51 @@ install_apk "libseat-dev" "community"
 install_apk "vulkan-loader-dev" "main"
 install_apk "mesa-dev" "main"
 install_apk "mesa" "main"
+
+# ── XFCE4 Desktop Environment ────────────────────────────────────────────
+# XFCE4 runs on top of XWayland (Weston provides the Wayland compositor;
+# XFCE4 components run as X11 clients on the embedded XWayland display).
+echo "[*] Installing XFCE4 desktop environment..."
+install_apk "xfce4" "community"
+install_apk "xfce4-session" "community"
+install_apk "xfwm4" "community"
+install_apk "xfdesktop" "community"
+install_apk "xfce4-panel" "community"
+install_apk "xfce4-settings" "community"
+install_apk "xfce4-terminal" "community"
+install_apk "xfconf" "community"
+install_apk "libxfce4util" "community"
+install_apk "libxfce4ui" "community"
+install_apk "garcon" "community"
+install_apk "exo" "community"
+install_apk "thunar" "community"
+install_apk "thunar-volman" "community"
+install_apk "tumbler" "community"
+install_apk "xfce4-appfinder" "community"
+install_apk "xfce4-power-manager" "community"
+install_apk "xfce4-notifyd" "community"
+install_apk "xfce4-screensaver" "community"
+
+# Plugins commonly expected to exist at XFCE4 startup
+install_apk "xfce4-panel-dev" "community"
+install_apk "xfce4-battery-plugin" "community"
+install_apk "xfce4-clipman-plugin" "community" "edge"
+install_apk "xfce4-systemload-plugin" "community" "edge"
+install_apk "xfce4-whiskermenu-plugin" "community"
+
+# Additional XFCE4 dependencies
+install_apk "libnotify" "community"
+install_apk "notification-daemon" "testing" "edge"
+install_apk "polkit" "community"
+install_apk "polkit-elogind" "community"
+install_apk "upower" "community"
+
+# xfce4-session hard dependency — libwnck3
+install_apk "libwnck3" "community"
+# xrdb is called by startxfce4 / .xinitrc to load X resources
+install_apk "xrdb" "community"
+# xhost needed by some XFCE4 components when switching displays
+install_apk "xhost" "community"
 
 # Mousepad (Text Editor) + GTK Plumbing
 install_apk "libpng" "main"
@@ -635,6 +681,106 @@ EOF
 
 
 
+# 4c-xfce. Configure XFCE4 session to launch inside XWayland
+# Weston starts XWayland automatically (xwayland=true in weston.ini).
+# We provide a startxfce4 wrapper that points at the XWayland display
+# Weston exports (typically :10), and a D-Bus session so XFCE4 can talk
+# to its own daemons.
+echo "[*] Configuring XFCE4 session for XWayland..."
+mkdir -p "${ROOTFS_DIR}/usr/bin"
+cat > "${ROOTFS_DIR}/usr/bin/start-xfce4-wayland" << 'XFCE_EOF'
+#!/bin/sh
+# start-xfce4-wayland — launch XFCE4 on the XWayland display that Weston
+# exports.  Run this from a weston-terminal or from the Weston launcher.
+#
+# Weston exports XWayland as DISPLAY=:10 by default; try :10 first,
+# then scan :0..:9 as fallback.
+find_xwayland_display() {
+    for d in 10 0 1 2 3 4 5; do
+        if [ -S "/tmp/.X11-unix/X${d}" ]; then
+            echo ":${d}"
+            return 0
+        fi
+    done
+    echo ":10"   # best guess even if socket not yet visible
+}
+
+export DISPLAY="${DISPLAY:-$(find_xwayland_display)}"
+export XDG_SESSION_TYPE=x11
+export XDG_CURRENT_DESKTOP=XFCE
+
+# Ensure XDG dirs exist
+export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-${HOME}/.config}"
+export XDG_DATA_HOME="${XDG_DATA_HOME:-${HOME}/.local/share}"
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-${HOME}/.cache}"
+mkdir -p "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME"
+
+# Bootstrap D-Bus session if not already present
+if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
+    eval "$(dbus-launch --sh-syntax --exit-with-session)" 2>/dev/null || true
+fi
+
+exec startxfce4
+XFCE_EOF
+chmod +x "${ROOTFS_DIR}/usr/bin/start-xfce4-wayland"
+
+# Drop a minimal xfce4-session.xml so first-run doesn't open the wizard
+XFCE_SESSION_DIR="${ROOTFS_DIR}/etc/xdg/xfce4/xfconf/xfce-perchannel-xml"
+mkdir -p "${XFCE_SESSION_DIR}"
+cat > "${XFCE_SESSION_DIR}/xfce4-session.xml" << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xfce4-session" version="1.0">
+  <property name="general" type="empty">
+    <property name="SaveOnExit" type="bool" value="false"/>
+    <property name="SessionName" type="string" value="Default"/>
+  </property>
+  <property name="startup" type="empty">
+    <property name="screensaver-delay" type="uint" value="0"/>
+  </property>
+  <property name="splash-screen" type="empty">
+    <property name="engine" type="string" value=""/>
+  </property>
+</channel>
+EOF
+
+# xfwm4 compositor settings — disable compositing (no GPU acceleration)
+cat > "${XFCE_SESSION_DIR}/xfwm4.xml" << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xfwm4" version="1.0">
+  <property name="general" type="empty">
+    <property name="use_compositing" type="bool" value="false"/>
+    <property name="vblank_mode" type="string" value="off"/>
+    <property name="sync_to_vblank" type="bool" value="false"/>
+  </property>
+</channel>
+EOF
+
+# xfce4-panel minimal layout (clock + app-menu only — avoids missing-plugin errors)
+cat > "${XFCE_SESSION_DIR}/xfce4-panel.xml" << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xfce4-panel" version="1.0">
+  <property name="panels" type="array">
+    <value type="int" value="1"/>
+    <property name="panel-1" type="empty">
+      <property name="position" type="string" value="p=6;x=0;y=0"/>
+      <property name="length" type="uint" value="100"/>
+      <property name="position-locked" type="bool" value="true"/>
+      <property name="size" type="uint" value="28"/>
+      <property name="plugin-ids" type="array">
+        <value type="int" value="1"/>
+        <value type="int" value="2"/>
+        <value type="int" value="3"/>
+      </property>
+    </property>
+  </property>
+  <property name="plugins" type="empty">
+    <property name="plugin-1" type="string" value="applicationsmenu"/>
+    <property name="plugin-2" type="string" value="tasklist"/>
+    <property name="plugin-3" type="string" value="clock"/>
+  </property>
+</channel>
+EOF
+
 # 4. Create weston.ini
 echo "[*] Creating /etc/weston.ini..."
 mkdir -p "${ROOTFS_DIR}/etc"
@@ -674,6 +820,10 @@ cursor-size=24
 [launcher]
 icon=/usr/share/weston/icon_terminal.png
 path=/usr/bin/weston-terminal
+
+[launcher]
+icon=/usr/share/pixmaps/xfce4-session.png
+path=/usr/bin/start-xfce4-wayland
 
 [launcher]
 icon=/usr/share/pixmaps/netsurf.xpm

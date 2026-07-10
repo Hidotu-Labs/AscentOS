@@ -1,12 +1,8 @@
 #ifndef FS_EXT2_INTERNAL_H
 #define FS_EXT2_INTERNAL_H
 
-// Internal header shared between ext2 sub-modules.
-// Not part of the public ext2 API — do not include from outside the ext2
-// implementation files.
-
 #include "ext2.h"
-#include "ext3.h"
+#include "fs/ext3/ext3.h"
 #include "console/klog.h"
 #include "lib/string.h"
 #include "mm/heap.h"
@@ -15,41 +11,30 @@
 #include "apic/lapic_timer.h"
 #include <stdbool.h>
 
-// ── ext2_block.c ─────────────────────────────────────────────────────────────
-
-// Superblock / BGDT persistence (also used by alloc helpers)
 int  ext2_write_superblock(ext2_mount_t *mnt);
 int  ext2_write_bgdt(ext2_mount_t *mnt);
 
-// Block-number mapping
 uint32_t ext2_get_block_num(ext2_mount_t *mnt, ext2_inode_t *inode,
                             uint32_t logical_block);
 int      ext2_set_block_num(ext2_mount_t *mnt, ext2_inode_t *inode,
                             uint32_t logical_block, uint32_t disk_block);
 
-// Allocation / deallocation
 uint32_t ext2_alloc_block(ext2_mount_t *mnt);
 uint32_t ext2_alloc_inode(ext2_mount_t *mnt);
 int      ext2_free_block(ext2_mount_t *mnt, uint32_t block_num);
 int      ext2_free_inode(ext2_mount_t *mnt, uint32_t inode_num);
 
-// Free indirect-block trees (used by ext2_file.c / ext2_dir.c)
 void ext2_free_indirect(ext2_mount_t *mnt, uint32_t indirect_block);
 void ext2_free_dindirect(ext2_mount_t *mnt, uint32_t dindirect_block);
 void ext2_free_tindirect(ext2_mount_t *mnt, uint32_t tindirect_block);
 void ext2_free_all_blocks(ext2_mount_t *mnt, ext2_inode_t *inode);
-
-// ── ext2_inode.c ─────────────────────────────────────────────────────────────
 
 int          ext2_write_inode(ext2_mount_t *mnt, uint32_t inode_num,
                               const ext2_inode_t *inode);
 vfs_node_t  *ext2_make_vfs_node(ext2_mount_t *mnt, uint32_t inode_num,
                                 ext2_inode_t *inode);
 
-// Timestamp helper (returns approximate seconds since boot)
 uint32_t ext2_current_time(void);
-
-// ── ext2_dir.c ───────────────────────────────────────────────────────────────
 
 int              ext2_add_dir_entry(ext2_mount_t *mnt, uint32_t dir_inode_num,
                                     uint32_t child_inode_num, const char *name,
@@ -58,13 +43,10 @@ int              ext2_remove_dir_entry(ext2_mount_t *mnt, uint32_t dir_inode_num
                                        const char *name);
 bool             ext2_dir_is_empty(ext2_mount_t *mnt, uint32_t inode_num);
 
-// VFS callbacks (also needed by ext2_mount.c when wiring up mountpoints)
 struct dirent   *ext2_readdir_impl(vfs_node_t *node, uint32_t index);
 vfs_node_t      *ext2_finddir_impl(vfs_node_t *node, char *name);
 int              ext2_create_impl(vfs_node_t *node, char *name, uint16_t permission);
 int              ext2_mkdir_impl(vfs_node_t *node, char *name, uint16_t permission);
-
-// ── ext2_file.c ──────────────────────────────────────────────────────────────
 
 uint32_t ext2_read_impl(vfs_node_t *node, uint32_t offset, uint32_t size,
                         uint8_t *buffer);
@@ -84,4 +66,6 @@ int ext2_chown_impl(vfs_node_t *node, uint32_t uid, uint32_t gid);
 int ext2_mknod_impl(vfs_node_t *node, char *name, uint16_t permission,
                     uint32_t flags, void *device);
 
-#endif // FS_EXT2_INTERNAL_H
+ext2_mount_t *ext2_init_mount(struct block_device *dev);
+
+#endif

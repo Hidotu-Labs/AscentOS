@@ -18,5 +18,11 @@ uint32_t procfs_uptime_read(struct vfs_node *node, uint32_t offset,
                             uint32_t size, uint8_t *buffer);
 uint32_t procfs_stat_read(struct vfs_node *node, uint32_t offset, uint32_t size,
                           uint8_t *buffer);
+uint32_t procfs_version_read(struct vfs_node *node, uint32_t offset,
+                             uint32_t size, uint8_t *buffer);
+uint32_t procfs_filesystems_read(struct vfs_node *node, uint32_t offset,
+                                 uint32_t size, uint8_t *buffer);
+
+void procfs_net_init(struct vfs_node *procfs_root);
 
 #endif

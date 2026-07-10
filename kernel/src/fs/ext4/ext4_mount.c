@@ -1,0 +1,389 @@
+#include "ext4.h"
+#include "ext4_extent.h"
+#include "fs/ext2/ext2_internal.h"
+#include "console/klog.h"
+#include "mm/heap.h"
+#include "lib/string.h"
+
+uint32_t ext4_read_impl(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+    ext2_mount_t *mnt = (ext2_mount_t *)node->device;
+    if (!mnt) return 0;
+
+    ext2_inode_t inode;
+    if (ext2_read_inode(mnt, node->inode, &inode)) return 0;
+
+    if (!ext4_inode_has_extents(&inode))
+        return ext2_read_impl(node, offset, size, buffer);
+
+    if (offset >= inode.i_size) return 0;
+    if (offset + size > inode.i_size) size = inode.i_size - offset;
+
+    uint32_t bytes_read = 0;
+    uint8_t *block_buf = kmalloc(mnt->block_size);
+    if (!block_buf) return 0;
+
+    while (bytes_read < size) {
+        uint32_t cur = offset + bytes_read;
+        uint32_t lblock = cur / mnt->block_size;
+        uint32_t off_in = cur % mnt->block_size;
+        uint32_t to_copy = mnt->block_size - off_in;
+        if (to_copy > size - bytes_read) to_copy = size - bytes_read;
+
+        uint32_t disk_block = ext4_get_block_num(mnt, &inode, lblock);
+        if (disk_block == 0) {
+            memset(buffer + bytes_read, 0, to_copy);
+        } else {
+            ext2_read_block(mnt, disk_block, block_buf);
+            memcpy(buffer + bytes_read, block_buf + off_in, to_copy);
+        }
+        bytes_read += to_copy;
+    }
+
+    kfree(block_buf);
+    return bytes_read;
+}
+
+uint32_t ext4_write_impl(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+    ext2_mount_t *mnt = (ext2_mount_t *)node->device;
+    if (!mnt) return 0;
+
+    ext2_inode_t inode;
+    if (ext2_read_inode(mnt, node->inode, &inode)) return 0;
+    if (!ext4_inode_has_extents(&inode))
+        return ext2_write_impl(node, offset, size, buffer);
+
+    uint8_t *block_buf = kmalloc(mnt->block_size);
+    if (!block_buf) return 0;
+    if (ext3_journal_start(mnt) != 0) {
+        kfree(block_buf);
+        return 0;
+    }
+
+    uint32_t bytes_written = 0;
+    while (bytes_written < size) {
+        uint32_t current = offset + bytes_written;
+        uint32_t logical = current / mnt->block_size;
+        uint32_t in_block = current % mnt->block_size;
+        uint32_t count = mnt->block_size - in_block;
+        if (count > size - bytes_written) count = size - bytes_written;
+
+        uint32_t disk_block = ext4_get_block_num(mnt, &inode, logical);
+        if (!disk_block) {
+            uint64_t allocated = 0;
+            if (ext4_alloc_extent(mnt, &inode, node->inode, logical, 1,
+                                  &allocated) != 0)
+                break;
+            disk_block = (uint32_t)allocated;
+            inode.i_blocks += mnt->block_size / 512;
+            memset(block_buf, 0, mnt->block_size);
+        } else if (in_block || count < mnt->block_size) {
+            if (ext2_read_block(mnt, disk_block, block_buf) != 0)
+                break;
+        }
+
+        memcpy(block_buf + in_block, buffer + bytes_written, count);
+        if (ext2_write_block(mnt, disk_block, block_buf) != 0)
+            break;
+        bytes_written += count;
+    }
+
+    if (offset + bytes_written > inode.i_size)
+        inode.i_size = offset + bytes_written;
+    uint32_t now = ext2_current_time();
+    inode.i_mtime = now;
+    inode.i_ctime = now;
+    ext2_write_inode(mnt, node->inode, &inode);
+    ext3_journal_stop(mnt);
+    node->length = inode.i_size;
+    kfree(block_buf);
+    return bytes_written;
+}
+
+int ext4_create_impl(vfs_node_t *node, char *name, uint16_t permission) {
+    if (ext2_create_impl(node, name, permission) != 0)
+        return -1;
+    vfs_node_t *created = ext2_finddir_impl(node, name);
+    if (!created)
+        return -1;
+    ext2_mount_t *mnt = (ext2_mount_t *)node->device;
+    ext2_inode_t inode;
+    int result = ext2_read_inode(mnt, created->inode, &inode);
+    if (result == 0) {
+        ext4_extent_init_inode(&inode);
+        result = ext3_journal_start(mnt);
+        if (result == 0) {
+            result = ext2_write_inode(mnt, created->inode, &inode);
+            ext3_journal_stop(mnt);
+        }
+    }
+    kfree(created);
+    return result;
+}
+
+void ext4_log_flags(ext4_mount_t *mnt) {
+    klog_puts("[EXT4] compat=0x");
+    klog_uint64(mnt->base.sb.s_feature_compat);
+    klog_puts(" incompat=0x");
+    klog_uint64(mnt->base.sb.s_feature_incompat);
+    klog_puts("\n");
+}
+
+static ext4_mount_t *ext4_init_mount(struct block_device *dev) {
+    uint8_t sb_buf[1024];
+    if (dev->read_sectors(dev, 2, 2, sb_buf)) {
+        klog_puts("[EXT4] Failed to read superblock sectors.\n");
+        return NULL;
+    }
+
+    ext2_superblock_t *sb = (ext2_superblock_t *)sb_buf;
+    if (sb->s_magic != EXT2_MAGIC) {
+        klog_puts("[EXT4] Invalid magic number.\n");
+        return NULL;
+    }
+
+    if (!(sb->s_feature_incompat & EXT4_FEATURE_INCOMPAT_EXTENTS)) {
+        return NULL;
+    }
+
+    ext4_mount_t *mnt = kmalloc(sizeof(ext4_mount_t));
+    if (!mnt)
+        return NULL;
+    memset(mnt, 0, sizeof(ext4_mount_t));
+
+    ext2_mount_t *base = &mnt->base;
+
+    base->dev = dev;
+    memcpy(&base->sb, sb, sizeof(ext2_superblock_t));
+    base->block_size      = 1024 << base->sb.s_log_block_size;
+    base->inodes_per_group = base->sb.s_inodes_per_group;
+    base->inode_size      = (base->sb.s_rev_level >= 1)
+                                ? base->sb.s_inode_size
+                                : EXT2_GOOD_OLD_INODE_SIZE;
+    base->groups_count    =
+        (base->sb.s_blocks_count + base->sb.s_blocks_per_group - 1) /
+        base->sb.s_blocks_per_group;
+
+    klog_puts("[EXT4] Mounting... INCOMPAT: ");
+    if (base->sb.s_feature_incompat & EXT4_FEATURE_INCOMPAT_EXTENTS) klog_puts("extents ");
+    if (base->sb.s_feature_incompat & EXT4_FEATURE_INCOMPAT_64BIT)   klog_puts("64bit ");
+    klog_puts("\n");
+    ext4_log_flags(mnt);
+
+    klog_puts("[EXT4] Superblock validated:\n");
+    klog_puts("       Block size:   "); klog_uint64(base->block_size);  klog_puts(" bytes\n");
+    klog_puts("       Total blocks: "); klog_uint64(base->sb.s_blocks_count); klog_puts("\n");
+    klog_puts("       Total inodes: "); klog_uint64(base->sb.s_inodes_count); klog_puts("\n");
+    klog_puts("       Block groups: "); klog_uint64(base->groups_count); klog_puts("\n");
+    klog_puts("       Inode size:   "); klog_uint64(base->inode_size);  klog_puts(" bytes\n");
+
+    uint32_t bgdt_block  = base->sb.s_first_data_block + 1;
+    uint32_t bgdt_size   = base->groups_count * sizeof(ext2_bgd_t);
+    uint32_t bgdt_blocks = (bgdt_size + base->block_size - 1) / base->block_size;
+
+    base->bgdt = kmalloc(bgdt_blocks * base->block_size);
+    if (!base->bgdt) {
+        kfree(mnt);
+        return NULL;
+    }
+
+    for (uint32_t i = 0; i < bgdt_blocks; i++) {
+        if (ext2_read_block(base, bgdt_block + i,
+                            (uint8_t *)base->bgdt + i * base->block_size)) {
+            klog_puts("[EXT4] Failed to read BGDT.\n");
+            kfree(base->bgdt);
+            kfree(mnt);
+            return NULL;
+        }
+    }
+
+    ext3_init_journal(base);
+    klog_puts("[EXT4] Block Group Descriptor Table loaded.\n");
+    return mnt;
+}
+
+int ext4_mount(struct block_device *dev, vfs_node_t *mountpoint) {
+    if (!dev || !mountpoint)
+        return -1;
+
+    klog_puts("[EXT4] Probing block device '");
+    klog_puts(dev->name);
+    klog_puts("' for ext4 filesystem...\n");
+
+    ext4_mount_t *mnt = ext4_init_mount(dev);
+    if (!mnt)
+        return -1;
+
+    ext2_mount_t *base = &mnt->base;
+
+    ext2_inode_t root_inode;
+    if (ext2_read_inode(base, EXT2_ROOT_INODE, &root_inode)) {
+        klog_puts("[EXT4] Failed to read root inode.\n");
+        kfree(base->bgdt);
+        kfree(mnt);
+        return -1;
+    }
+
+    if ((root_inode.i_mode & 0xF000) != EXT2_S_IFDIR) {
+        klog_puts("[EXT4] Root inode is not a directory!\n");
+        kfree(base->bgdt);
+        kfree(mnt);
+        return -1;
+    }
+
+    vfs_node_t *root_vfs = ext2_make_vfs_node(base, EXT2_ROOT_INODE, &root_inode);
+    if (!root_vfs) {
+        kfree(base->bgdt);
+        kfree(mnt);
+        return -1;
+    }
+
+    strcpy(root_vfs->name, "mnt");
+    base->root_node = root_vfs;
+
+    mountpoint->flags   = FS_DIRECTORY;
+    mountpoint->inode   = EXT2_ROOT_INODE;
+    mountpoint->length  = root_inode.i_size;
+    mountpoint->device  = base;
+    mountpoint->read    = ext4_read_impl;
+    mountpoint->write   = ext4_write_impl;
+    mountpoint->readdir = ext2_readdir_impl;
+    mountpoint->finddir = ext2_finddir_impl;
+    mountpoint->create  = ext4_create_impl;
+    mountpoint->mkdir   = ext4_mkdir_impl;
+    mountpoint->unlink  = ext2_unlink_impl;
+    mountpoint->rmdir   = ext2_rmdir_impl;
+    mountpoint->symlink = ext2_symlink_impl;
+    mountpoint->rename  = ext2_rename_impl;
+    mountpoint->chmod   = ext2_chmod_impl;
+    mountpoint->chown   = ext2_chown_impl;
+    mountpoint->statfs  = ext4_statfs_impl;
+
+    return 0;
+}
+
+int ext4_mount_root(struct block_device *dev) {
+    if (!dev)
+        return -1;
+
+    klog_puts("[EXT4] Probing block device '");
+    klog_puts(dev->name);
+    klog_puts("' for ext4 filesystem (as root)...\n");
+
+    ext4_mount_t *mnt = ext4_init_mount(dev);
+    if (!mnt)
+        return -1;
+
+    ext2_mount_t *base = &mnt->base;
+
+    ext2_inode_t root_inode;
+    if (ext2_read_inode(base, EXT2_ROOT_INODE, &root_inode)) {
+        klog_puts("[EXT4] Failed to read root inode.\n");
+        kfree(base->bgdt);
+        kfree(mnt);
+        return -1;
+    }
+
+    if ((root_inode.i_mode & 0xF000) != EXT2_S_IFDIR) {
+        klog_puts("[EXT4] Root inode is not a directory!\n");
+        kfree(base->bgdt);
+        kfree(mnt);
+        return -1;
+    }
+
+    vfs_node_t *root_vfs = ext2_make_vfs_node(base, EXT2_ROOT_INODE, &root_inode);
+    if (!root_vfs) {
+        kfree(base->bgdt);
+        kfree(mnt);
+        return -1;
+    }
+
+    strcpy(root_vfs->name, "/");
+    base->root_node = root_vfs;
+
+    fs_root = root_vfs;
+
+    klog_puts("[OK] Ext4 filesystem mounted as root (/)\n");
+    return 0;
+}
+int ext4_mkdir_impl(vfs_node_t *node, char *name, uint16_t permission) {
+    if (ext2_mkdir_impl(node, name, permission) != 0)
+        return -1;
+
+    vfs_node_t *created = ext2_finddir_impl(node, name);
+    if (!created)
+        return -1;
+
+    ext2_mount_t *mnt = (ext2_mount_t *)node->device;
+    ext2_inode_t inode;
+    int result = ext2_read_inode(mnt, created->inode, &inode);
+    if (result == 0) {
+        uint32_t data_block = inode.i_block[0];
+        ext4_extent_init_inode(&inode);
+        result = ext4_extent_insert(mnt, &inode, created->inode, 0,
+                                    data_block, 1);
+        if (result == 0) {
+            result = ext3_journal_start(mnt);
+            if (result == 0) {
+                result = ext2_write_inode(mnt, created->inode, &inode);
+                ext3_journal_stop(mnt);
+            }
+        }
+    }
+
+    kfree(created);
+    return result;
+}
+
+int ext4_truncate_impl(vfs_node_t *node, uint32_t new_len) {
+    if (!node || (node->flags & FS_TYPE_MASK) != FS_FILE || !node->device)
+        return -1;
+
+    ext2_mount_t *mnt = (ext2_mount_t *)node->device;
+    ext2_inode_t inode;
+    if (ext2_read_inode(mnt, node->inode, &inode) != 0)
+        return -1;
+    if (!ext4_inode_has_extents(&inode))
+        return ext2_truncate_impl(node, new_len);
+    if (ext3_journal_start(mnt) != 0)
+        return -1;
+
+    int result = ext4_extent_truncate(mnt, &inode, new_len);
+    if (result == 0) {
+        uint32_t now = ext2_current_time();
+        inode.i_mtime = now;
+        inode.i_ctime = now;
+        result = ext2_write_inode(mnt, node->inode, &inode);
+    }
+    ext3_journal_stop(mnt);
+    if (result == 0)
+        node->length = new_len;
+    return result;
+}
+
+int ext4_statfs_impl(vfs_node_t *node, struct statfs_buf *buf) {
+    if (!node || !node->device || !buf)
+        return -1;
+
+    ext2_mount_t *mnt = (ext2_mount_t *)node->device;
+    uint8_t sb_buf[1024];
+    if (mnt->dev->read_sectors(mnt->dev, 2, 2, sb_buf) == 0)
+        memcpy(&mnt->sb, sb_buf, sizeof(mnt->sb));
+
+    uint64_t block_size = 1024ULL << mnt->sb.s_log_block_size;
+    buf->f_type = 0xEF53;
+    buf->f_bsize = block_size;
+    buf->f_blocks = mnt->sb.s_blocks_count;
+    buf->f_bfree = mnt->sb.s_free_blocks_count;
+    buf->f_bavail =
+        mnt->sb.s_free_blocks_count > mnt->sb.s_r_blocks_count
+            ? mnt->sb.s_free_blocks_count - mnt->sb.s_r_blocks_count
+            : 0;
+    buf->f_files = mnt->sb.s_inodes_count;
+    buf->f_ffree = mnt->sb.s_free_inodes_count;
+    buf->f_fsid[0] = 0;
+    buf->f_fsid[1] = 0;
+    buf->f_namelen = 255;
+    buf->f_frsize = block_size;
+    buf->f_flags = 0;
+    return 0;
+}

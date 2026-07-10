@@ -1,10 +1,7 @@
-// ext2_inode.c — VFS node construction from ext2 inodes.
-
 #include "ext2_internal.h"
+#include "fs/ext4/ext4.h"
 #include "syscalls/syscall.h"
 
-// Forward declarations of VFS callbacks (defined in their respective modules)
-// needed when wiring up the vfs_node_t function pointers.
 extern uint32_t      ext2_read_impl(vfs_node_t *, uint32_t, uint32_t, uint8_t *);
 extern uint32_t      ext2_write_impl(vfs_node_t *, uint32_t, uint32_t, uint8_t *);
 extern int           ext2_truncate_impl(vfs_node_t *, uint32_t);
@@ -47,8 +44,10 @@ vfs_node_t *ext2_make_vfs_node(ext2_mount_t *mnt, uint32_t inode_num,
     node->flags   = FS_DIRECTORY;
     node->readdir = ext2_readdir_impl;
     node->finddir = ext2_finddir_impl;
-    node->create  = ext2_create_impl;
-    node->mkdir   = ext2_mkdir_impl;
+    node->create  = (mnt->sb.s_feature_incompat & EXT4_FEATURE_INCOMPAT_EXTENTS)
+                        ? ext4_create_impl : ext2_create_impl;
+    node->mkdir   = (mnt->sb.s_feature_incompat & EXT4_FEATURE_INCOMPAT_EXTENTS)
+                        ? ext4_mkdir_impl : ext2_mkdir_impl;
     node->unlink  = ext2_unlink_impl;
     node->rmdir   = ext2_rmdir_impl;
     node->symlink = ext2_symlink_impl;
@@ -58,9 +57,15 @@ vfs_node_t *ext2_make_vfs_node(ext2_mount_t *mnt, uint32_t inode_num,
     node->mknod   = ext2_mknod_impl;
   } else if (type == EXT2_S_IFREG) {
     node->flags    = FS_FILE;
-    node->read     = ext2_read_impl;
-    node->write    = ext2_write_impl;
-    node->truncate = ext2_truncate_impl;
+    if (mnt->sb.s_feature_incompat & EXT4_FEATURE_INCOMPAT_EXTENTS) {
+      node->read  = ext4_read_impl;
+      node->write = ext4_write_impl;
+    } else {
+      node->read  = ext2_read_impl;
+      node->write = ext2_write_impl;
+    }
+    node->truncate = (mnt->sb.s_feature_incompat & EXT4_FEATURE_INCOMPAT_EXTENTS)
+                         ? ext4_truncate_impl : ext2_truncate_impl;
     node->mmap     = ext2_mmap_impl;
     node->chmod    = ext2_chmod_impl;
     node->chown    = ext2_chown_impl;
@@ -74,6 +79,9 @@ vfs_node_t *ext2_make_vfs_node(ext2_mount_t *mnt, uint32_t inode_num,
     node->chmod = ext2_chmod_impl;
     node->chown = ext2_chown_impl;
   }
+
+  if (mnt->sb.s_feature_incompat & EXT4_FEATURE_INCOMPAT_EXTENTS)
+    node->statfs = ext4_statfs_impl;
 
   return node;
 }

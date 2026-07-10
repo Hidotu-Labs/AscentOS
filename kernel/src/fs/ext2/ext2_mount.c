@@ -1,11 +1,6 @@
-// ext2_mount.c — ext2_mount() and ext2_mount_root().
-
 #include "ext2_internal.h"
 
-// Shared helper: allocate and populate an ext2_mount_t from a block device.
-// Returns NULL on failure. Caller must kfree mnt->bgdt and mnt on error paths.
-static ext2_mount_t *ext2_init_mount(struct block_device *dev) {
-  // Read the superblock (byte offset 1024, sectors 2-3)
+ext2_mount_t *ext2_init_mount(struct block_device *dev) {
   uint8_t sb_buf[1024];
   if (dev->read_sectors(dev, 2, 2, sb_buf)) {
     klog_puts("[EXT2] Failed to read superblock sectors.\n");
@@ -41,7 +36,6 @@ static ext2_mount_t *ext2_init_mount(struct block_device *dev) {
   klog_puts("       Block groups: "); klog_uint64(mnt->groups_count); klog_puts("\n");
   klog_puts("       Inode size:   "); klog_uint64(mnt->inode_size);  klog_puts(" bytes\n");
 
-  // Read Block Group Descriptor Table
   uint32_t bgdt_block  = mnt->sb.s_first_data_block + 1;
   uint32_t bgdt_size   = mnt->groups_count * sizeof(ext2_bgd_t);
   uint32_t bgdt_blocks = (bgdt_size + mnt->block_size - 1) / mnt->block_size;
@@ -66,21 +60,18 @@ static ext2_mount_t *ext2_init_mount(struct block_device *dev) {
   return mnt;
 }
 
-// ── ext2_statfs ───────────────────────────────────────────────────────────────
-
 static int ext2_statfs_impl(vfs_node_t *node, struct statfs_buf *buf) {
   ext2_mount_t *mnt = (ext2_mount_t *)node->device;
   if (!mnt)
     return -1;
 
-  // Re-read the superblock so free block/inode counts are fresh
   uint8_t sb_buf[1024];
   if (mnt->dev->read_sectors(mnt->dev, 2, 2, sb_buf) == 0)
     memcpy(&mnt->sb, sb_buf, sizeof(ext2_superblock_t));
 
   uint64_t block_size = (uint64_t)(1024 << mnt->sb.s_log_block_size);
 
-  buf->f_type    = 0xEF53; // EXT2_SUPER_MAGIC
+  buf->f_type    = 0xEF53;
   buf->f_bsize   = block_size;
   buf->f_blocks  = (uint64_t)mnt->sb.s_blocks_count;
   buf->f_bfree   = (uint64_t)mnt->sb.s_free_blocks_count;
@@ -97,8 +88,6 @@ static int ext2_statfs_impl(vfs_node_t *node, struct statfs_buf *buf) {
   return 0;
 }
 
-// ── ext2_mount ────────────────────────────────────────────────────────────────
-
 int ext2_mount(struct block_device *dev, vfs_node_t *mountpoint) {
   if (!dev || !mountpoint)
     return -1;
@@ -111,7 +100,6 @@ int ext2_mount(struct block_device *dev, vfs_node_t *mountpoint) {
   if (!mnt)
     return -1;
 
-  // Read the root inode (always inode 2)
   ext2_inode_t root_inode;
   if (ext2_read_inode(mnt, EXT2_ROOT_INODE, &root_inode)) {
     klog_puts("[EXT2] Failed to read root inode.\n");
@@ -138,7 +126,6 @@ int ext2_mount(struct block_device *dev, vfs_node_t *mountpoint) {
   strcpy(root_vfs->name, "mnt");
   mnt->root_node = root_vfs;
 
-  // Wire up the mountpoint node with ext2 callbacks
   mountpoint->flags   = FS_DIRECTORY;
   mountpoint->inode   = EXT2_ROOT_INODE;
   mountpoint->length  = root_inode.i_size;
@@ -159,8 +146,6 @@ int ext2_mount(struct block_device *dev, vfs_node_t *mountpoint) {
   return 0;
 }
 
-// ── ext2_mount_root ───────────────────────────────────────────────────────────
-
 int ext2_mount_root(struct block_device *dev) {
   if (!dev)
     return -1;
@@ -173,7 +158,6 @@ int ext2_mount_root(struct block_device *dev) {
   if (!mnt)
     return -1;
 
-  // Read the root inode (always inode 2)
   ext2_inode_t root_inode;
   if (ext2_read_inode(mnt, EXT2_ROOT_INODE, &root_inode)) {
     klog_puts("[EXT2] Failed to read root inode.\n");
@@ -201,7 +185,6 @@ int ext2_mount_root(struct block_device *dev) {
   mnt->root_node = root_vfs;
   root_vfs->statfs = ext2_statfs_impl;
 
-  // Replace fs_root with the ext2 root
   fs_root = root_vfs;
 
   ext3_init_journal(mnt);

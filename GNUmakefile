@@ -101,20 +101,6 @@ all: $(IMAGE_NAME).iso
 .PHONY: run
 run: run-$(ARCH)
 
-.PHONY: run-net
-run-net: edk2-ovmf $(IMAGE_NAME).iso disk.img
-	qemu-system-$(ARCH) \
-		-M q35 \
-		-drive if=pflash,unit=0,format=raw,file=edk2-ovmf/ovmf-code-$(ARCH).fd,readonly=on \
-		-cdrom $(IMAGE_NAME).iso \
-		-drive file=disk.img,format=raw,if=ide \
-		-smp 4 \
-		-serial stdio \
-		-display none \
-		-device rtl8139,netdev=net0 \
-		-netdev user,id=net0 \
-		$(QEMUFLAGS)
-
 .PHONY: run-x86_64
 run-x86_64: edk2-ovmf $(IMAGE_NAME).iso disk.img nvme.img
 	qemu-system-$(ARCH) \
@@ -175,6 +161,10 @@ run-ata: edk2-ovmf $(IMAGE_NAME).iso disk.img
 fat32_test.img:
 	./scripts/create-fat32-test.sh
 
+.PHONY: test-jbd2
+test-jbd2: $(IMAGE_NAME).iso
+	./scripts/test-jbd2-replay.sh $(IMAGE_NAME).iso
+
 .PHONY: run-fat32
 run-fat32: edk2-ovmf $(IMAGE_NAME).iso fat32_test.img
 	qemu-system-$(ARCH) \
@@ -196,11 +186,13 @@ run-fat32: edk2-ovmf $(IMAGE_NAME).iso fat32_test.img
 # Create a 64MB ext2 disk image with sample files for testing
 disk.img: scripts/configure-accounts.sh userland/ascent-account userland/test_accounts.sh userland/ascent-login.elf
 disk.img:  userland/dns_lookup.elf
-disk.img: assets/boot.wav assets/test.wav assets/jane.mp3 assets/mc9.mp3 assets/train.mp3 assets/test.bmp assets/test.tar assets/room.png assets/logo.png assets/linus.gif userland/forkit.elf userland/about.elf userland/hello_glibc.elf userland/booter.elf userland/reboot.elf userland/shutdown.elf userland/apm.elf userland/test_cpp.elf  userland/kilo.elf  userland/ls.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/asplay.elf userland/kria.elf userland/doom.elf userland/xrootcursor.elf  userland/jwm.elf userland/doom_x11.elf userland/gtk_test.elf userland/tglgears_fb.elf userland/tglgears_drm.elf userland/tglhello_drm.elf userland/test_mem_stress.elf userland/classicube.elf userland/terrain.png userland/texpacks/classicube.zip initrd/startx.sh initrd/startw.sh initrd/weston.ini userland/ascentd.elf $(ASCENTD_CONFIG_FILES)
-	@echo "Creating root filesystem (ext3)..."
+disk.img: assets/boot.wav assets/test.wav assets/jane.mp3 assets/doom1.wad assets/mc9.mp3 assets/train.mp3 assets/test.bmp assets/test.tar assets/room.png assets/logo.png assets/linus.gif userland/forkit.elf userland/about.elf userland/hello_glibc.elf userland/booter.elf userland/reboot.elf userland/shutdown.elf userland/apm.elf userland/test_cpp.elf  userland/kilo.elf  userland/ls.elf userland/lspci.elf userland/lsblk.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/asplay.elf userland/kria.elf userland/doom.elf userland/xrootcursor.elf  userland/jwm.elf userland/doom_x11.elf userland/gtk_test.elf userland/tglgears_fb.elf userland/tglgears_drm.elf userland/tglhello_drm.elf userland/test_mem_stress.elf userland/classicube.elf userland/terrain.png userland/texpacks/classicube.zip initrd/startx.sh initrd/startw.sh initrd/weston.ini userland/ascentd.elf $(ASCENTD_CONFIG_FILES)
+	@echo "Creating root filesystem (ext4)..."
 	rm -f ./part.img
 	dd if=/dev/zero of=./part.img bs=1M count=2047
-	mkfs.ext3 -F -b 1024 -I 128 ./part.img
+	mkfs.ext4 -F -b 1024 -I 128 \
+		-O extent,filetype,has_journal,^dir_index,^64bit,^metadata_csum,^flex_bg,^huge_file,^dir_nlink,^extra_isize,^metadata_csum_seed,^orphan_file \
+		./part.img
 	@echo "Populating root filesystem..."
 	@{ \
 		echo "cd /"; \
@@ -266,6 +258,10 @@ disk.img: assets/boot.wav assets/test.wav assets/jane.mp3 assets/mc9.mp3 assets/
 		echo "write userland/test_cpp.elf bin/test_cpp"; \
 		echo "rm bin/ls"; \
 		echo "write userland/ls.elf bin/ls"; \
+		echo "rm bin/lspci"; \
+		echo "write userland/lspci.elf bin/lspci"; \
+		echo "rm bin/lsblk"; \
+		echo "write userland/lsblk.elf bin/lsblk"; \
 		echo "rm bin/readelf"; \
 		echo "write userland/readelf.elf bin/readelf"; \
 		echo "rm bin/pong"; \
@@ -293,6 +289,8 @@ disk.img: assets/boot.wav assets/test.wav assets/jane.mp3 assets/mc9.mp3 assets/
 		echo "rm test.wav"; \
 		echo "write assets/test.wav test.wav"; \
 		echo "rm boot.wav"; \
+		echo "write assets/doom1.wad doom1.wad"; \
+		echo "rm doom1.wad"; \
 		echo "write assets/boot.wav boot.wav"; \
 		echo "rm jane.mp3"; \
 		echo "write assets/jane.mp3 jane.mp3"; \
@@ -394,6 +392,15 @@ disk.img: assets/boot.wav assets/test.wav assets/jane.mp3 assets/mc9.mp3 assets/
 		echo "rm librt.so.1"; \
 		echo "rm libutil.so.1"; \
 	} | debugfs -w ./part.img >/dev/null 2>&1 || true
+	@# Restore real glibc libs to /lib so glibc-linked binaries (coreutils sleep,
+	@# mkdir etc.) resolve symbols correctly. musl stub at /lib/libc.so.6 lacks
+	@# glibc-specific symbols like re_syntax_options which crashes those binaries.
+	@if [ -f toolchain/glibc-sysroot/lib/libc.so.6 ]; then \
+		echo "Restoring real glibc libc.so.6 to /lib..."; \
+		debugfs -w -R "write toolchain/glibc-sysroot/lib/libc.so.6 lib/libc.so.6" ./part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write toolchain/glibc-sysroot/lib/libm.so.6 lib/libm.so.6" ./part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write toolchain/glibc-sysroot/lib/ld-linux-x86-64.so.2 lib/ld-linux-x86-64.so.2" ./part.img >/dev/null 2>&1 || true; \
+	fi
 	@echo "Populating root filesystem with additional tools..."
 
 	@if [ -d build/tcc-glibc-install/opt/tcc ]; then \
@@ -646,6 +653,14 @@ userland/kilo.elf: userland/kilo.c $(MUSL_LIBC)
 userland/ls.elf: userland/ls.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/ls.c -o userland/ls.elf
+
+userland/lspci.elf: userland/lspci.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/lspci.c -o userland/lspci.elf
+
+userland/lsblk.elf: userland/lsblk.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/lsblk.c -o userland/lsblk.elf
 
 userland/readelf.elf: userland/readelf.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \

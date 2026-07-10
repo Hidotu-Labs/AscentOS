@@ -289,3 +289,20 @@ bool net_phase6_init(void) {
     net_print_stats(net_device_default());
     return passed;
 }
+
+int udp_get_snapshot(struct udp_entry_snapshot *out, int max) {
+    int n = 0;
+    spinlock_acquire(&table_lock);
+    for (int i = 0; i < UDP_MAX_SOCKETS && n < max; i++) {
+        if (!sockets[i].used || !sockets[i].bound)
+            continue;
+        out[n].local_ip    = sockets[i].local_ip;
+        out[n].local_port  = sockets[i].local_port;
+        out[n].remote_ip   = sockets[i].remote_ip;
+        out[n].remote_port = sockets[i].remote_port;
+        out[n].connected   = sockets[i].connected;
+        n++;
+    }
+    spinlock_release(&table_lock);
+    return n;
+}

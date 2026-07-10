@@ -62,4 +62,14 @@ void udp_deliver(uint32_t src_ip, uint16_t src_port,
 bool net_phase6_init(void);
 bool net_phase6_selftest(void);
 
+/* Snapshot of one UDP socket for /proc/net/udp */
+struct udp_entry_snapshot {
+    uint32_t local_ip, remote_ip;
+    uint16_t local_port, remote_port;
+    bool     connected;
+};
+
+/* Fill up to 'max' entries; returns number filled. */
+int udp_get_snapshot(struct udp_entry_snapshot *out, int max);
+
 #endif

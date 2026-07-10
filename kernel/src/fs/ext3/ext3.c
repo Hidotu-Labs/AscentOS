@@ -1,4 +1,5 @@
 #include "ext3.h"
+#include "fs/ext4/ext4.h"
 #include "console/klog.h"
 #include "lib/string.h"
 #include "mm/heap.h"
@@ -7,19 +8,77 @@
 static int ext3_recover_journal(ext2_mount_t *mnt, jbd_superblock_t *jsb,
                                 ext2_inode_t *j_inode);
 
-// Internal state for the current active transaction
-static struct {
-  bool active;
-  uint32_t sequence;
-  uint32_t start_block; // Current write position in journal
-  ext2_inode_t journal_inode;
-  uint8_t *desc_block_buf;
-  uint32_t blocks_in_trans;
-} current_trans = {0};
+static ext4_journal_state_t legacy_trans = {0};
+
+static ext4_journal_state_t *ext3_journal_state(ext2_mount_t *mnt) {
+  if (mnt->sb.s_feature_incompat & EXT4_FEATURE_INCOMPAT_EXTENTS)
+    return &((ext4_mount_t *)mnt)->journal;
+  return &legacy_trans;
+}
+
+int ext3_journal_test_commit(ext2_mount_t *mnt, uint32_t block_nr,
+                             const void *data) {
+  ext4_journal_state_t *trans = ext3_journal_state(mnt);
+  if (ext3_journal_start(mnt) != 0)
+    return -1;
+  if (trans->depth != 1 || ext3_journal_block(mnt, block_nr, data) != 0) {
+    trans->active = false;
+    trans->depth = 0;
+    return -1;
+  }
+
+  jbd_block_tag_t *tag = (jbd_block_tag_t *)(trans->desc_block_buf +
+      sizeof(jbd_header_t));
+  tag->t_flags |= __builtin_bswap32(JBD_FLAG_LAST_TAG);
+
+  uint32_t desc_phys = ext2_get_block_num(mnt, &trans->journal_inode,
+                                          trans->start_block);
+  if (!desc_phys || ext2_write_block(mnt, desc_phys, trans->desc_block_buf) != 0)
+    goto fail;
+
+  uint8_t *commit_buf = kmalloc(mnt->block_size);
+  if (!commit_buf)
+    goto fail;
+  memset(commit_buf, 0, mnt->block_size);
+  jbd_header_t *commit = (jbd_header_t *)commit_buf;
+  commit->h_magic = __builtin_bswap32(EXT3_JOURNAL_MAGIC_NUMBER);
+  commit->h_blocktype = __builtin_bswap32(JBD_COMMIT_BLOCK);
+  commit->h_sequence = __builtin_bswap32(trans->sequence);
+  uint32_t commit_phys = ext2_get_block_num(
+      mnt, &trans->journal_inode, trans->start_block + 2);
+  int rc = !commit_phys || ext2_write_block(mnt, commit_phys, commit_buf) != 0;
+  kfree(commit_buf);
+  if (rc)
+    goto fail;
+
+  uint8_t *sb_buf = kmalloc(mnt->block_size);
+  if (!sb_buf)
+    goto fail;
+  uint32_t sb_phys = ext2_get_block_num(mnt, &trans->journal_inode, 0);
+  if (!sb_phys || ext2_read_block(mnt, sb_phys, sb_buf) != 0) {
+    kfree(sb_buf);
+    goto fail;
+  }
+  ((jbd_superblock_t *)sb_buf)->s_start = __builtin_bswap32(trans->start_block);
+  rc = ext2_write_block(mnt, sb_phys, sb_buf);
+  kfree(sb_buf);
+  if (rc)
+    goto fail;
+
+  trans->active = false;
+  trans->depth = 0;
+  return 0;
+
+fail:
+  trans->active = false;
+  trans->depth = 0;
+  return -1;
+}
 
 void ext3_init_journal(ext2_mount_t *mnt) {
+  ext4_journal_state_t *trans = ext3_journal_state(mnt);
   if (!(mnt->sb.s_feature_compat & EXT3_FEATURE_COMPAT_HAS_JOURNAL)) {
-    return; // No journal
+    return;
   }
 
   uint32_t journal_ino = mnt->sb.s_journal_inum;
@@ -28,13 +87,13 @@ void ext3_init_journal(ext2_mount_t *mnt) {
     return;
   }
 
-  if (ext2_read_inode(mnt, journal_ino, &current_trans.journal_inode) != 0) {
+  if (ext2_read_inode(mnt, journal_ino, &trans->journal_inode) != 0) {
     klog_puts("[EXT3] Failed to read journal inode\n");
     return;
   }
 
   uint32_t disk_block =
-      ext2_get_block_num(mnt, &current_trans.journal_inode, 0);
+      ext2_get_block_num(mnt, &trans->journal_inode, 0);
   if (!disk_block) {
     klog_puts("[EXT3] Journal inode has no blocks\n");
     return;
@@ -55,18 +114,23 @@ void ext3_init_journal(ext2_mount_t *mnt) {
   jbd_superblock_t *jsb = (jbd_superblock_t *)buf;
 
   uint32_t magic = __builtin_bswap32(jsb->s_header.h_magic);
-  if (magic != EXT3_JOURNAL_MAGIC_NUMBER) {
-    klog_puts("[EXT3] Invalid journal magic\n");
+  uint32_t type = __builtin_bswap32(jsb->s_header.h_blocktype);
+  uint32_t block_size = __builtin_bswap32(jsb->s_blocksize);
+  uint32_t incompat = __builtin_bswap32(jsb->s_feature_incompat);
+  if (magic != EXT3_JOURNAL_MAGIC_NUMBER ||
+      (type != JBD_SUPERBLOCK_V1 && type != JBD_SUPERBLOCK_V2) ||
+      block_size != mnt->block_size || incompat != 0) {
+    klog_puts("[JBD2] Unsupported journal format.\n");
     kfree(buf);
     return;
   }
 
-  current_trans.sequence = __builtin_bswap32(jsb->s_sequence);
+  trans->sequence = __builtin_bswap32(jsb->s_sequence);
   uint32_t start = __builtin_bswap32(jsb->s_start);
 
-  klog_puts("[EXT3] Found valid JBD journal!\n");
+  klog_puts("[JBD2] Found valid journal.\n");
   klog_puts("       Sequence:  ");
-  klog_uint64(current_trans.sequence);
+  klog_uint64(trans->sequence);
   klog_puts("\n");
   klog_puts("       Start:     ");
   klog_uint64(start);
@@ -74,7 +138,12 @@ void ext3_init_journal(ext2_mount_t *mnt) {
 
   if (start != 0) {
     klog_puts("[EXT3] Journal requires recovery!\n");
-    ext3_recover_journal(mnt, jsb, &current_trans.journal_inode);
+    if (ext3_recover_journal(mnt, jsb, &trans->journal_inode) == 0) {
+      trans->sequence++;
+      jsb->s_sequence = __builtin_bswap32(trans->sequence);
+      jsb->s_start = 0;
+      ext2_write_block(mnt, disk_block, buf);
+    }
   } else {
     klog_puts("[EXT3] Journal is clean.\n");
   }
@@ -83,53 +152,53 @@ void ext3_init_journal(ext2_mount_t *mnt) {
 }
 
 int ext3_journal_start(ext2_mount_t *mnt) {
+  ext4_journal_state_t *trans = ext3_journal_state(mnt);
   if (!(mnt->sb.s_feature_compat & EXT3_FEATURE_COMPAT_HAS_JOURNAL))
     return 0;
-  if (current_trans.active)
-    return -1;
+  if (trans->active) {
+    trans->depth++;
+    return 0;
+  }
 
-  current_trans.active = true;
-  current_trans.blocks_in_trans = 0;
+  trans->active = true;
+  trans->depth = 1;
+  trans->blocks_in_trans = 0;
 
-  // Simple impl: start at block 1 of journal for each txn
-  current_trans.start_block = 1;
+  trans->start_block = 1;
 
-  // Setup descriptor block buffer
-  if (!current_trans.desc_block_buf)
-    current_trans.desc_block_buf = kmalloc(mnt->block_size);
-  memset(current_trans.desc_block_buf, 0, mnt->block_size);
+  if (!trans->desc_block_buf)
+    trans->desc_block_buf = kmalloc(mnt->block_size);
+  memset(trans->desc_block_buf, 0, mnt->block_size);
 
-  jbd_header_t *h = (jbd_header_t *)current_trans.desc_block_buf;
+  jbd_header_t *h = (jbd_header_t *)trans->desc_block_buf;
   h->h_magic = __builtin_bswap32(EXT3_JOURNAL_MAGIC_NUMBER);
   h->h_blocktype = __builtin_bswap32(JBD_DESCRIPTOR_BLOCK);
-  h->h_sequence = __builtin_bswap32(current_trans.sequence);
+  h->h_sequence = __builtin_bswap32(trans->sequence);
 
   return 0;
 }
 
 int ext3_journal_block(ext2_mount_t *mnt, uint32_t block_nr, const void *data) {
-  if (!current_trans.active)
+  ext4_journal_state_t *trans = ext3_journal_state(mnt);
+  if (!trans->active)
     return ext2_write_block(mnt, block_nr, data);
 
-  // 1. Add tag to descriptor block
-  uint32_t tag_offset = sizeof(jbd_header_t) + (current_trans.blocks_in_trans *
+  uint32_t tag_offset = sizeof(jbd_header_t) + (trans->blocks_in_trans *
                                                 sizeof(jbd_block_tag_t));
   if (tag_offset + sizeof(jbd_block_tag_t) > mnt->block_size) {
     return -1;
   }
 
   jbd_block_tag_t *tag =
-      (jbd_block_tag_t *)(current_trans.desc_block_buf + tag_offset);
+      (jbd_block_tag_t *)(trans->desc_block_buf + tag_offset);
   tag->t_blocknr = __builtin_bswap32(block_nr);
   tag->t_flags = 0;
 
-  // 2. Write data block to journal
   uint32_t journal_data_pos =
-      current_trans.start_block + 1 + current_trans.blocks_in_trans;
+      trans->start_block + 1 + trans->blocks_in_trans;
   uint32_t phys_pos =
-      ext2_get_block_num(mnt, &current_trans.journal_inode, journal_data_pos);
+      ext2_get_block_num(mnt, &trans->journal_inode, journal_data_pos);
 
-  // Handle Escaping
   uint8_t *safe_data = (uint8_t *)data;
   if (*(const uint32_t *)data == __builtin_bswap32(EXT3_JOURNAL_MAGIC_NUMBER)) {
     tag->t_flags |= __builtin_bswap32(JBD_FLAG_ESCAPE);
@@ -137,63 +206,70 @@ int ext3_journal_block(ext2_mount_t *mnt, uint32_t block_nr, const void *data) {
 
   ext2_write_block(mnt, phys_pos, safe_data);
 
-  current_trans.blocks_in_trans++;
+  int cache_idx = block_nr % 32;
+  if (!mnt->cache[cache_idx].data)
+    mnt->cache[cache_idx].data = kmalloc(mnt->block_size);
+  if (mnt->cache[cache_idx].data) {
+    mnt->cache[cache_idx].num = block_nr;
+    memcpy(mnt->cache[cache_idx].data, data, mnt->block_size);
+  }
+
+  trans->blocks_in_trans++;
   return 0;
 }
 
 int ext3_journal_stop(ext2_mount_t *mnt) {
-  if (!current_trans.active)
+  ext4_journal_state_t *trans = ext3_journal_state(mnt);
+  if (!trans->active)
     return 0;
+  if (trans->depth > 1) {
+    trans->depth--;
+    return 0;
+  }
 
-  // 1. Mark last tag
-  if (current_trans.blocks_in_trans > 0) {
+  if (trans->blocks_in_trans > 0) {
     uint32_t last_tag_off =
         sizeof(jbd_header_t) +
-        ((current_trans.blocks_in_trans - 1) * sizeof(jbd_block_tag_t));
+        ((trans->blocks_in_trans - 1) * sizeof(jbd_block_tag_t));
     jbd_block_tag_t *tag =
-        (jbd_block_tag_t *)(current_trans.desc_block_buf + last_tag_off);
+        (jbd_block_tag_t *)(trans->desc_block_buf + last_tag_off);
     tag->t_flags |= __builtin_bswap32(JBD_FLAG_LAST_TAG);
   }
 
-  // 2. Write descriptor block
-  uint32_t desc_phys = ext2_get_block_num(mnt, &current_trans.journal_inode,
-                                          current_trans.start_block);
-  ext2_write_block(mnt, desc_phys, current_trans.desc_block_buf);
+  uint32_t desc_phys = ext2_get_block_num(mnt, &trans->journal_inode,
+                                          trans->start_block);
+  ext2_write_block(mnt, desc_phys, trans->desc_block_buf);
 
-  // 3. Write commit block
   uint8_t *commit_buf = kmalloc(mnt->block_size);
   memset(commit_buf, 0, mnt->block_size);
   jbd_header_t *ch = (jbd_header_t *)commit_buf;
   ch->h_magic = __builtin_bswap32(EXT3_JOURNAL_MAGIC_NUMBER);
   ch->h_blocktype = __builtin_bswap32(JBD_COMMIT_BLOCK);
-  ch->h_sequence = __builtin_bswap32(current_trans.sequence);
+  ch->h_sequence = __builtin_bswap32(trans->sequence);
 
   uint32_t commit_pos =
-      current_trans.start_block + 1 + current_trans.blocks_in_trans;
+      trans->start_block + 1 + trans->blocks_in_trans;
   uint32_t commit_phys =
-      ext2_get_block_num(mnt, &current_trans.journal_inode, commit_pos);
+      ext2_get_block_num(mnt, &trans->journal_inode, commit_pos);
   ext2_write_block(mnt, commit_phys, commit_buf);
   kfree(commit_buf);
 
-  // 4. Update journal superblock to mark "Start" (simulating a crash window
-  // here)
   uint8_t *sb_buf = kmalloc(mnt->block_size);
-  uint32_t sb_phys = ext2_get_block_num(mnt, &current_trans.journal_inode, 0);
+  uint32_t sb_phys = ext2_get_block_num(mnt, &trans->journal_inode, 0);
   ext2_read_block(mnt, sb_phys, sb_buf);
   jbd_superblock_t *jsb = (jbd_superblock_t *)sb_buf;
-  jsb->s_start = __builtin_bswap32(current_trans.start_block);
+  jsb->s_start = __builtin_bswap32(trans->start_block);
   ext2_write_block(mnt, sb_phys, sb_buf);
 
-  // 5. Commit to real file system
-  for (uint32_t i = 0; i < current_trans.blocks_in_trans; i++) {
+  for (uint32_t i = 0; i < trans->blocks_in_trans; i++) {
     uint32_t tag_off = sizeof(jbd_header_t) + (i * sizeof(jbd_block_tag_t));
     jbd_block_tag_t *tag =
-        (jbd_block_tag_t *)(current_trans.desc_block_buf + tag_off);
+        (jbd_block_tag_t *)(trans->desc_block_buf + tag_off);
     uint32_t target_nr = __builtin_bswap32(tag->t_blocknr);
 
-    uint32_t j_data_pos = current_trans.start_block + 1 + i;
+    uint32_t j_data_pos = trans->start_block + 1 + i;
     uint32_t j_phys =
-        ext2_get_block_num(mnt, &current_trans.journal_inode, j_data_pos);
+        ext2_get_block_num(mnt, &trans->journal_inode, j_data_pos);
 
     uint8_t *tmp = kmalloc(mnt->block_size);
     ext2_read_block(mnt, j_phys, tmp);
@@ -201,11 +277,11 @@ int ext3_journal_stop(ext2_mount_t *mnt) {
     kfree(tmp);
   }
 
-  current_trans.sequence++;
-  current_trans.active = false;
+  trans->sequence++;
+  trans->active = false;
+  trans->depth = 0;
 
-  // 6. Finalize journal superblock (mark clean)
-  jsb->s_sequence = __builtin_bswap32(current_trans.sequence);
+  jsb->s_sequence = __builtin_bswap32(trans->sequence);
   jsb->s_start = 0;
   ext2_write_block(mnt, sb_phys, sb_buf);
   kfree(sb_buf);
@@ -252,7 +328,7 @@ static int ext3_recover_journal(ext2_mount_t *mnt, jbd_superblock_t *jsb,
             ext2_get_block_num(mnt, j_inode, curr_journal_block);
         ext2_read_block(mnt, data_phys, data_buf);
 
-        if (__builtin_bswap32(flags) & JBD_FLAG_ESCAPE) {
+        if (flags & JBD_FLAG_ESCAPE) {
           uint32_t magic = __builtin_bswap32(EXT3_JOURNAL_MAGIC_NUMBER);
           memcpy(data_buf, &magic, 4);
         }
@@ -262,7 +338,7 @@ static int ext3_recover_journal(ext2_mount_t *mnt, jbd_superblock_t *jsb,
         klog_puts("\n");
         ext2_write_block(mnt, target_block, data_buf);
 
-        if (__builtin_bswap32(flags) & JBD_FLAG_LAST_TAG)
+        if (flags & JBD_FLAG_LAST_TAG)
           break;
         tag_offset += sizeof(jbd_block_tag_t);
       }

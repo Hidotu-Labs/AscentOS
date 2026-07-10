@@ -1,11 +1,6 @@
-// ext2_file.c — File I/O, mmap, symlink, unlink/rmdir, rename, chmod/chown,
-// and mknod VFS callbacks.
-
 #include "ext2_internal.h"
 #include "mm/vmm.h"
 #include "syscalls/syscall.h"
-
-// ── Read ──────────────────────────────────────────────────────────────────────
 
 uint32_t ext2_read_impl(vfs_node_t *node, uint32_t offset, uint32_t size,
                         uint8_t *buffer) {
@@ -50,8 +45,6 @@ uint32_t ext2_read_impl(vfs_node_t *node, uint32_t offset, uint32_t size,
   return bytes_read;
 }
 
-// ── Truncate ──────────────────────────────────────────────────────────────────
-
 int ext2_truncate_impl(vfs_node_t *node, uint32_t new_len) {
   if (!node || node->flags != FS_FILE || !node->device)
     return -1;
@@ -66,8 +59,6 @@ int ext2_truncate_impl(vfs_node_t *node, uint32_t new_len) {
 
   return ext2_write_inode(mnt, node->inode, &inode);
 }
-
-// ── Write ─────────────────────────────────────────────────────────────────────
 
 uint32_t ext2_write_impl(vfs_node_t *node, uint32_t offset, uint32_t size,
                          uint8_t *buffer) {
@@ -127,8 +118,6 @@ uint32_t ext2_write_impl(vfs_node_t *node, uint32_t offset, uint32_t size,
   return bytes_written;
 }
 
-// ── mmap ──────────────────────────────────────────────────────────────────────
-
 #define EXT2_MAP_FIXED 0x10
 
 uint64_t ext2_mmap_impl(vfs_node_t *node, uint64_t addr, uint64_t length,
@@ -152,11 +141,8 @@ uint64_t ext2_mmap_impl(vfs_node_t *node, uint64_t addr, uint64_t length,
     return (uint64_t)-1;
   }
 
-  // Demand paging handles the actual page population.
   return vaddr;
 }
-
-// ── Symlink read/write ────────────────────────────────────────────────────────
 
 int ext2_readlink_impl(vfs_node_t *node, char *buf, uint32_t size) {
   ext2_mount_t *mnt = (ext2_mount_t *)node->device;
@@ -174,7 +160,6 @@ int ext2_readlink_impl(vfs_node_t *node, char *buf, uint32_t size) {
   if (link_len == 0)
     return -1;
 
-  // Fast symlink: stored directly in i_block (up to 60 bytes, i_blocks == 0)
   if (inode.i_blocks == 0 && link_len <= 60) {
     uint32_t copy_len = (link_len < size - 1) ? link_len : size - 1;
     memcpy(buf, (const char *)inode.i_block, copy_len);
@@ -182,7 +167,6 @@ int ext2_readlink_impl(vfs_node_t *node, char *buf, uint32_t size) {
     return (int)copy_len;
   }
 
-  // Slow symlink: stored in a data block
   uint32_t copy_len  = (link_len < size - 1) ? link_len : size - 1;
   uint32_t bytes_read = ext2_read_impl(node, 0, copy_len, (uint8_t *)buf);
   buf[bytes_read] = '\0';
@@ -242,8 +226,6 @@ int ext2_symlink_impl(vfs_node_t *node, char *name, char *target) {
   return 0;
 }
 
-// ── Rename ────────────────────────────────────────────────────────────────────
-
 int ext2_rename_impl(vfs_node_t *node, char *old_name, char *new_name) {
   ext2_mount_t *mnt = (ext2_mount_t *)node->device;
   if (!mnt)
@@ -289,8 +271,6 @@ int ext2_rename_impl(vfs_node_t *node, char *old_name, char *new_name) {
   return 0;
 }
 
-// ── chmod / chown ─────────────────────────────────────────────────────────────
-
 int ext2_chmod_impl(vfs_node_t *node, uint16_t permission) {
   ext2_mount_t *mnt = (ext2_mount_t *)node->device;
   if (!mnt)
@@ -331,8 +311,6 @@ int ext2_chown_impl(vfs_node_t *node, uint32_t uid, uint32_t gid) {
   return 0;
 }
 
-// ── Unlink ────────────────────────────────────────────────────────────────────
-
 int ext2_unlink_impl(vfs_node_t *node, char *name) {
   ext2_mount_t *mnt = (ext2_mount_t *)node->device;
   if (!mnt)
@@ -361,7 +339,7 @@ int ext2_unlink_impl(vfs_node_t *node, char *name) {
 
   if (inode.i_links_count == 0) {
     ext2_free_all_blocks(mnt, &inode);
-    inode.i_dtime = 1;
+    inode.i_dtime = ext2_current_time();
     ext2_write_inode(mnt, target_ino, &inode);
     ext2_free_inode(mnt, target_ino);
   } else {
@@ -371,8 +349,6 @@ int ext2_unlink_impl(vfs_node_t *node, char *name) {
   ext3_journal_stop(mnt);
   return 0;
 }
-
-// ── Rmdir ─────────────────────────────────────────────────────────────────────
 
 int ext2_rmdir_impl(vfs_node_t *node, char *name) {
   ext2_mount_t *mnt = (ext2_mount_t *)node->device;
@@ -404,7 +380,7 @@ int ext2_rmdir_impl(vfs_node_t *node, char *name) {
 
   ext2_free_all_blocks(mnt, &inode);
   inode.i_links_count = 0;
-  inode.i_dtime       = 1;
+  inode.i_dtime       = ext2_current_time();
   ext2_write_inode(mnt, target_ino, &inode);
   ext2_free_inode(mnt, target_ino);
 
@@ -422,8 +398,6 @@ int ext2_rmdir_impl(vfs_node_t *node, char *name) {
 
   return 0;
 }
-
-// ── Mknod ─────────────────────────────────────────────────────────────────────
 
 int ext2_mknod_impl(vfs_node_t *node, char *name, uint16_t permission,
                     uint32_t flags, void *device) {

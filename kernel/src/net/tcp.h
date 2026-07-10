@@ -29,6 +29,16 @@ struct tcp_stats {
   uint64_t duplicates, out_of_order, timeouts;
 };
 
+/* Snapshot of one TCP connection for /proc/net/tcp */
+struct tcp_entry_snapshot {
+  uint32_t local_ip, remote_ip;
+  uint16_t local_port, remote_port;
+  uint8_t  state;   /* enum tcp_state value */
+};
+
+/* Fill up to 'max' entries; returns number filled. */
+int tcp_get_snapshot(struct tcp_entry_snapshot *out, int max);
+
 void tcp_init(void);
 void tcp_input_ipv4(uint32_t src, uint32_t dst, const uint8_t *, size_t);
 void tcp_input_ipv6(const uint8_t src[16], const uint8_t dst[16],
