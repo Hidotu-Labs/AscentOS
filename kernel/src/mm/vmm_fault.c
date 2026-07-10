@@ -354,7 +354,8 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
           memset(PHYS_TO_VIRT((uint64_t)nf), 0, 4096);
         }
 
-        vfs_cache_insert(node, cur_off, (uint64_t)nf);
+        if (!vfs_cache_insert(node, cur_off, (uint64_t)nf))
+          pmm_free_page(nf);
       }
 
       cached = vfs_cache_lookup(node, file_offset);

@@ -1,4 +1,6 @@
 #include "ext2_internal.h"
+#include "fs/ext4/ext4_dir_index.h"
+#include "fs/ext4/ext4_extent.h"
 
 struct dirent *ext2_readdir_impl(vfs_node_t *node, uint32_t index) {
   ext2_mount_t *mnt = (ext2_mount_t *)node->device;
@@ -129,6 +131,9 @@ int ext2_add_dir_entry(ext2_mount_t *mnt, uint32_t dir_inode_num,
   ext2_inode_t dir_inode;
   if (ext2_read_inode(mnt, dir_inode_num, &dir_inode))
     return -1;
+  if (dir_inode.i_flags & EXT2_INDEX_FL)
+    return ext4_dx_add_entry(mnt, dir_inode_num, &dir_inode,
+                             child_inode_num, name, file_type);
 
   uint32_t name_len = strlen(name);
   uint32_t needed   = ((8 + name_len) + 3) & ~3u;
@@ -173,7 +178,7 @@ int ext2_add_dir_entry(ext2_mount_t *mnt, uint32_t dir_inode_num,
 
       uint32_t disk_block =
           ext2_get_block_num(mnt, &dir_inode, byte_pos / mnt->block_size);
-      ext2_write_block(mnt, disk_block, block_buf);
+      ext3_journal_block(mnt, disk_block, block_buf);
       kfree(block_buf);
       return 0;
     }
@@ -200,7 +205,7 @@ int ext2_add_dir_entry(ext2_mount_t *mnt, uint32_t dir_inode_num,
   new_entry->file_type = file_type;
   memcpy(new_entry->name, name, name_len);
 
-  ext2_write_block(mnt, new_block, block_buf);
+  ext3_journal_block(mnt, new_block, block_buf);
   ext2_write_inode(mnt, dir_inode_num, &dir_inode);
 
   kfree(block_buf);
@@ -260,7 +265,7 @@ int ext2_remove_dir_entry(ext2_mount_t *mnt, uint32_t dir_inode_num,
         }
         uint32_t disk_block = ext2_get_block_num(
             mnt, &dir_inode, current_block_start / mnt->block_size);
-        ext2_write_block(mnt, disk_block, block_buf);
+        ext3_journal_block(mnt, disk_block, block_buf);
         kfree(block_buf);
         return 0;
       }
@@ -343,6 +348,9 @@ int ext2_create_impl(vfs_node_t *node, char *name, uint16_t permission) {
   new_inode.i_ctime   = now;
   new_inode.i_mtime   = now;
 
+  if (mnt->sb.s_feature_incompat & EXT4_FEATURE_INCOMPAT_EXTENTS)
+    ext4_extent_init_inode(&new_inode);
+
   if (ext2_write_inode(mnt, new_ino, &new_inode))
     return -1;
 
@@ -381,6 +389,12 @@ int ext2_mkdir_impl(vfs_node_t *node, char *name, uint16_t permission) {
   new_inode.i_ctime = now;
   new_inode.i_mtime = now;
 
+  if (mnt->sb.s_feature_incompat & EXT4_FEATURE_INCOMPAT_EXTENTS) {
+    ext4_extent_init_inode(&new_inode);
+    if (ext4_extent_insert(mnt, &new_inode, new_ino, 0, data_block, 1) != 0)
+      return -1;
+  }
+
   uint8_t *block_buf = kcalloc(1, mnt->block_size);
   if (!block_buf)
     return -1;
@@ -400,7 +414,7 @@ int ext2_mkdir_impl(vfs_node_t *node, char *name, uint16_t permission) {
   dotdot->name[0]   = '.';
   dotdot->name[1]   = '.';
 
-  ext2_write_block(mnt, data_block, block_buf);
+  ext3_journal_block(mnt, data_block, block_buf);
   kfree(block_buf);
 
   if (ext2_write_inode(mnt, new_ino, &new_inode))

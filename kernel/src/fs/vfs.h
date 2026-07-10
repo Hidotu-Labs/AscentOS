@@ -188,10 +188,12 @@ int vfs_get_mounts(vfs_mount_info_t *buffer, int max_count);
 // Page Cache API
 vfs_page_t *vfs_cache_lookup(vfs_node_t *node, uint32_t offset);
 vfs_page_t *vfs_cache_insert(vfs_node_t *node, uint32_t offset, uint64_t frame);
+size_t vfs_cache_page_count(void);
 void vfs_cache_invalidate(vfs_node_t *node, uint32_t offset);
 void vfs_cache_invalidate_range(vfs_node_t *node, uint32_t offset,
                                 uint32_t length);
 void vfs_cache_clear(vfs_node_t *node);
+void vfs_cache_clear_unused(vfs_node_t *node);
 void vfs_cache_sync(vfs_node_t *node);
 vfs_page_t *vfs_cache_get_or_create(vfs_node_t *node, uint32_t offset);
 

@@ -100,23 +100,11 @@ uint32_t ext4_write_impl(vfs_node_t *node, uint32_t offset, uint32_t size, uint8
 }
 
 int ext4_create_impl(vfs_node_t *node, char *name, uint16_t permission) {
-    if (ext2_create_impl(node, name, permission) != 0)
-        return -1;
-    vfs_node_t *created = ext2_finddir_impl(node, name);
-    if (!created)
-        return -1;
     ext2_mount_t *mnt = (ext2_mount_t *)node->device;
-    ext2_inode_t inode;
-    int result = ext2_read_inode(mnt, created->inode, &inode);
-    if (result == 0) {
-        ext4_extent_init_inode(&inode);
-        result = ext3_journal_start(mnt);
-        if (result == 0) {
-            result = ext2_write_inode(mnt, created->inode, &inode);
-            ext3_journal_stop(mnt);
-        }
-    }
-    kfree(created);
+    if (!mnt || ext3_journal_start(mnt) != 0)
+        return -1;
+    int result = ext2_create_impl(node, name, permission);
+    ext3_journal_stop(mnt);
     return result;
 }
 
@@ -306,31 +294,11 @@ int ext4_mount_root(struct block_device *dev) {
     return 0;
 }
 int ext4_mkdir_impl(vfs_node_t *node, char *name, uint16_t permission) {
-    if (ext2_mkdir_impl(node, name, permission) != 0)
-        return -1;
-
-    vfs_node_t *created = ext2_finddir_impl(node, name);
-    if (!created)
-        return -1;
-
     ext2_mount_t *mnt = (ext2_mount_t *)node->device;
-    ext2_inode_t inode;
-    int result = ext2_read_inode(mnt, created->inode, &inode);
-    if (result == 0) {
-        uint32_t data_block = inode.i_block[0];
-        ext4_extent_init_inode(&inode);
-        result = ext4_extent_insert(mnt, &inode, created->inode, 0,
-                                    data_block, 1);
-        if (result == 0) {
-            result = ext3_journal_start(mnt);
-            if (result == 0) {
-                result = ext2_write_inode(mnt, created->inode, &inode);
-                ext3_journal_stop(mnt);
-            }
-        }
-    }
-
-    kfree(created);
+    if (!mnt || ext3_journal_start(mnt) != 0)
+        return -1;
+    int result = ext2_mkdir_impl(node, name, permission);
+    ext3_journal_stop(mnt);
     return result;
 }
 

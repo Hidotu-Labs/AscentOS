@@ -1,9 +1,19 @@
 #include "vmm.h"
 #include "../console/klog.h"
+#include "../fs/vfs.h"
 #include "pmm.h"
 #include "vma.h"
 #include <stddef.h>
 #include <stdint.h>
+
+static void reclaim_unmapped_file_cache(struct vma *v) {
+  if (!v)
+    return;
+  reclaim_unmapped_file_cache(v->left);
+  reclaim_unmapped_file_cache(v->right);
+  if (v->file_node)
+    vfs_cache_clear_unused((vfs_node_t *)v->file_node);
+}
 
 void vmm_free_user_pages(uint64_t cr3) {
   if (cr3 == 0)
@@ -143,5 +153,9 @@ void vmm_free_user_pages_vma(uint64_t cr3, struct vma_list *vmas) {
     pmm_free_page((void *)pdpt_phys);
   }
 
+  /* PTE teardown above dropped this process's references to file-backed
+   * pages. Return cache pages that now have no mappings to the PMM; cache
+   * pages still mapped by another process retain their extra references. */
+  reclaim_unmapped_file_cache(vmas->root);
   pmm_free_page((void *)cr3);
 }

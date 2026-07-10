@@ -19,17 +19,22 @@ uint32_t procfs_meminfo_read(vfs_node_t *node, uint32_t offset, uint32_t size,
 
   uint64_t total_kb = pmm_get_usable_memory() / 1024;
   uint64_t free_kb  = (uint64_t)pmm_get_free_pages() * 4096 / 1024;
+  uint64_t cached_kb = (uint64_t)vfs_cache_page_count() * 4096 / 1024;
+  uint64_t available_kb = free_kb + cached_kb;
+  if (available_kb > total_kb)
+    available_kb = total_kb;
 
   int len = snprintf(buf, sizeof(buf),
       "MemTotal:       %llu kB\n"
       "MemFree:        %llu kB\n"
       "MemAvailable:   %llu kB\n"
       "Buffers:        0 kB\n"
-      "Cached:         0 kB\n"
+      "Cached:         %llu kB\n"
       "MemUsable:      %llu kB\n",
       (unsigned long long)total_kb,
       (unsigned long long)free_kb,
-      (unsigned long long)free_kb,
+      (unsigned long long)available_kb,
+      (unsigned long long)cached_kb,
       (unsigned long long)total_kb);
 
   node->length = (uint32_t)len;
@@ -702,6 +707,15 @@ static struct dirent *procfs_pid_fd_readdir(vfs_node_t *node, uint32_t index) {
 
 // Synthesise a /proc/<pid>/ directory node on demand
 
+typedef struct procfs_pid_cache_entry {
+  uint32_t pid;
+  vfs_node_t *dir;
+  struct procfs_pid_cache_entry *next;
+} procfs_pid_cache_entry_t;
+
+static procfs_pid_cache_entry_t *procfs_pid_cache;
+static spinlock_t procfs_pid_cache_lock = SPINLOCK_INIT;
+
 static vfs_node_t *make_pid_dir(uint32_t pid) {
   vfs_node_t *dir = kmalloc(sizeof(vfs_node_t));
   if (!dir)
@@ -712,6 +726,7 @@ static vfs_node_t *make_pid_dir(uint32_t pid) {
   dir->mask = 0555;
   dir->inode = 0x10000 + pid;
   ramfs_mount_on(dir);
+  dir->flags |= FS_DENTRY_NOCACHE;
 
   // stat
   vfs_node_t *stat_node = kmalloc(sizeof(vfs_node_t));
@@ -800,6 +815,7 @@ static vfs_node_t *make_pid_dir(uint32_t pid) {
     task_dir->flags = FS_DIRECTORY;
     task_dir->mask = 0555;
     ramfs_mount_on(task_dir);
+    task_dir->flags |= FS_DENTRY_NOCACHE;
 
     // task/<pid>/ sub-directory
     vfs_node_t *tid_dir = kmalloc(sizeof(vfs_node_t));
@@ -809,6 +825,7 @@ static vfs_node_t *make_pid_dir(uint32_t pid) {
       tid_dir->flags = FS_DIRECTORY;
       tid_dir->mask = 0555;
       ramfs_mount_on(tid_dir);
+      tid_dir->flags |= FS_DENTRY_NOCACHE;
 
       // task/<pid>/stat  — same content as /proc/<pid>/stat
       vfs_node_t *tstat_node = kmalloc(sizeof(vfs_node_t));
@@ -830,6 +847,98 @@ static vfs_node_t *make_pid_dir(uint32_t pid) {
   }
 
   return dir;
+}
+
+/* Compatible with ramfs.c's private directory representation. */
+typedef struct procfs_child_node {
+  vfs_node_t *node;
+  struct procfs_child_node *next;
+} procfs_child_node_t;
+
+typedef struct procfs_ramfs_dir {
+  procfs_child_node_t *children;
+} procfs_ramfs_dir_t;
+
+static void procfs_destroy_node_tree(vfs_node_t *node) {
+  if (!node)
+    return;
+
+  if ((node->flags & FS_TYPE_MASK) == FS_DIRECTORY && node->device) {
+    procfs_ramfs_dir_t *dir = (procfs_ramfs_dir_t *)node->device;
+    procfs_child_node_t *child = dir->children;
+    while (child) {
+      procfs_child_node_t *next = child->next;
+      procfs_destroy_node_tree(child->node);
+      kfree(child);
+      child = next;
+    }
+    kfree(dir);
+    node->device = NULL;
+  }
+
+  vfs_cache_clear(node);
+  kfree(node);
+}
+
+static vfs_node_t *procfs_get_pid_dir(uint32_t pid) {
+  spinlock_acquire(&procfs_pid_cache_lock);
+  for (procfs_pid_cache_entry_t *e = procfs_pid_cache; e; e = e->next) {
+    if (e->pid == pid) {
+      vfs_node_t *dir = e->dir;
+      spinlock_release(&procfs_pid_cache_lock);
+      return dir;
+    }
+  }
+  spinlock_release(&procfs_pid_cache_lock);
+
+  vfs_node_t *new_dir = make_pid_dir(pid);
+  if (!new_dir)
+    return NULL;
+  procfs_pid_cache_entry_t *new_entry =
+      kmalloc(sizeof(procfs_pid_cache_entry_t));
+  if (!new_entry) {
+    procfs_destroy_node_tree(new_dir);
+    return NULL;
+  }
+
+  spinlock_acquire(&procfs_pid_cache_lock);
+  /* Another CPU may have populated this PID while allocations were made. */
+  for (procfs_pid_cache_entry_t *e = procfs_pid_cache; e; e = e->next) {
+    if (e->pid == pid) {
+      vfs_node_t *dir = e->dir;
+      spinlock_release(&procfs_pid_cache_lock);
+      procfs_destroy_node_tree(new_dir);
+      kfree(new_entry);
+      return dir;
+    }
+  }
+  new_entry->pid = pid;
+  new_entry->dir = new_dir;
+  new_entry->next = procfs_pid_cache;
+  procfs_pid_cache = new_entry;
+  spinlock_release(&procfs_pid_cache_lock);
+  return new_dir;
+}
+
+void procfs_release_pid_dir(uint32_t pid) {
+  procfs_pid_cache_entry_t *victim = NULL;
+
+  spinlock_acquire(&procfs_pid_cache_lock);
+  procfs_pid_cache_entry_t **link = &procfs_pid_cache;
+  while (*link) {
+    if ((*link)->pid == pid) {
+      victim = *link;
+      *link = victim->next;
+      break;
+    }
+    link = &(*link)->next;
+  }
+  spinlock_release(&procfs_pid_cache_lock);
+
+  if (victim) {
+    procfs_destroy_node_tree(victim->dir);
+    kfree(victim);
+  }
 }
 
 // Number of static entries in the procfs root (excluding . and ..)
@@ -963,8 +1072,9 @@ static vfs_node_t *procfs_root_finddir(vfs_node_t *node, char *name) {
   if (!t)
     return NULL;
 
-  // Synthesise a fresh directory node for this PID
-  return make_pid_dir(pid);
+  // Reuse one generated tree for the lifetime of this task. htop polls these
+  // paths every refresh; rebuilding the tree here leaked kernel heap steadily.
+  return procfs_get_pid_dir(pid);
 }
 
 void procfs_init(void) {

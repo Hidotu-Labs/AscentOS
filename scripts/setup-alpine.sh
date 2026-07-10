@@ -493,6 +493,8 @@ install_apk "zlib" "main"
 install_apk "libtirpc-nokrb" "main"
 install_apk "xwayland" "community" 
 install_apk "weston-xwayland" "community" 
+install_apk "cmatrix" "community" 
+install_apk "btop" "community" 
 
 # 4. Finalize GTK environment
 echo "[*] Compiling GSettings schemas..."

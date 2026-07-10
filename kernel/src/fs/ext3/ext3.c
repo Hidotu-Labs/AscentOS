@@ -16,65 +16,6 @@ static ext4_journal_state_t *ext3_journal_state(ext2_mount_t *mnt) {
   return &legacy_trans;
 }
 
-int ext3_journal_test_commit(ext2_mount_t *mnt, uint32_t block_nr,
-                             const void *data) {
-  ext4_journal_state_t *trans = ext3_journal_state(mnt);
-  if (ext3_journal_start(mnt) != 0)
-    return -1;
-  if (trans->depth != 1 || ext3_journal_block(mnt, block_nr, data) != 0) {
-    trans->active = false;
-    trans->depth = 0;
-    return -1;
-  }
-
-  jbd_block_tag_t *tag = (jbd_block_tag_t *)(trans->desc_block_buf +
-      sizeof(jbd_header_t));
-  tag->t_flags |= __builtin_bswap32(JBD_FLAG_LAST_TAG);
-
-  uint32_t desc_phys = ext2_get_block_num(mnt, &trans->journal_inode,
-                                          trans->start_block);
-  if (!desc_phys || ext2_write_block(mnt, desc_phys, trans->desc_block_buf) != 0)
-    goto fail;
-
-  uint8_t *commit_buf = kmalloc(mnt->block_size);
-  if (!commit_buf)
-    goto fail;
-  memset(commit_buf, 0, mnt->block_size);
-  jbd_header_t *commit = (jbd_header_t *)commit_buf;
-  commit->h_magic = __builtin_bswap32(EXT3_JOURNAL_MAGIC_NUMBER);
-  commit->h_blocktype = __builtin_bswap32(JBD_COMMIT_BLOCK);
-  commit->h_sequence = __builtin_bswap32(trans->sequence);
-  uint32_t commit_phys = ext2_get_block_num(
-      mnt, &trans->journal_inode, trans->start_block + 2);
-  int rc = !commit_phys || ext2_write_block(mnt, commit_phys, commit_buf) != 0;
-  kfree(commit_buf);
-  if (rc)
-    goto fail;
-
-  uint8_t *sb_buf = kmalloc(mnt->block_size);
-  if (!sb_buf)
-    goto fail;
-  uint32_t sb_phys = ext2_get_block_num(mnt, &trans->journal_inode, 0);
-  if (!sb_phys || ext2_read_block(mnt, sb_phys, sb_buf) != 0) {
-    kfree(sb_buf);
-    goto fail;
-  }
-  ((jbd_superblock_t *)sb_buf)->s_start = __builtin_bswap32(trans->start_block);
-  rc = ext2_write_block(mnt, sb_phys, sb_buf);
-  kfree(sb_buf);
-  if (rc)
-    goto fail;
-
-  trans->active = false;
-  trans->depth = 0;
-  return 0;
-
-fail:
-  trans->active = false;
-  trans->depth = 0;
-  return -1;
-}
-
 void ext3_init_journal(ext2_mount_t *mnt) {
   ext4_journal_state_t *trans = ext3_journal_state(mnt);
   if (!(mnt->sb.s_feature_compat & EXT3_FEATURE_COMPAT_HAS_JOURNAL)) {

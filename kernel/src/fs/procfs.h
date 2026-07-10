@@ -6,6 +6,7 @@
 struct vfs_node;
 
 void procfs_init(void);
+void procfs_release_pid_dir(uint32_t pid);
 uint32_t procfs_meminfo_read(struct vfs_node *node, uint32_t offset,
                              uint32_t size, uint8_t *buffer);
 uint32_t procfs_cpuinfo_read(struct vfs_node *node, uint32_t offset,

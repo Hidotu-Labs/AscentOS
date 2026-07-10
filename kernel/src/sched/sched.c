@@ -5,6 +5,7 @@
 #include "../console/klog.h"
 #include "../cpu/idt.h"
 #include "../cpu/msr.h"
+#include "../fs/procfs.h"
 #include "../lib/string.h"
 #include "../lock/spinlock.h"
 #include "../mm/heap.h"
@@ -773,6 +774,39 @@ struct thread *sched_get_current(void) {
   return cpu_get_current()->current_thread;
 }
 
+void sched_terminate_thread_group(struct thread *current) {
+  if (!current)
+    return;
+
+  uint32_t killed = 0;
+  spinlock_acquire(&tid_lock);
+  for (struct thread *t = global_thread_list; t; t = t->global_next) {
+    if (t == current || t->tgid != current->tgid || t->is_idle ||
+        t->state == THREAD_DEAD || t->state == THREAD_ZOMBIE)
+      continue;
+
+    /* exit_group is process-wide. Mark siblings unschedulable before making
+     * them visible to the asynchronous reaper. The reaper waits until a
+     * running sibling is off-CPU before touching any of its resources. */
+    __atomic_store_n(&t->state, THREAD_DEAD, __ATOMIC_RELEASE);
+
+    struct cpu_info *cpu = cpu_get_info(t->cpu_index);
+    if (cpu && cpu->status != CPU_STATUS_OFFLINE &&
+        __atomic_load_n(&cpu->current_thread, __ATOMIC_ACQUIRE) == t)
+      lapic_send_ipi(cpu->apic_id, IPI_VECTOR_RESCHEDULE);
+
+    sched_queue_reap(t);
+    killed++;
+  }
+  spinlock_release(&tid_lock);
+
+  if (killed) {
+    klog_puts("[EXIT_GROUP] queued sibling threads: ");
+    klog_uint64(killed);
+    klog_puts("\n");
+  }
+}
+
 void sched_print_tasks(void) {
   console_puts("TID  CPU  PRIO  STATE       RSP\n");
   for (uint32_t i = 0; i < cpu_get_count(); i++) {
@@ -950,11 +984,6 @@ static void remove_from_runqueue(struct thread *t) {
       if (!found)
         continue;
 
-      // Found it. prev_node is now the predecessor.
-      if (t->state == THREAD_READY || t->state == THREAD_RUNNING) {
-        cpu_local->runnable_count--;
-      }
-
       if (t->next == t) {
         // Only thread in this priority queue
         cpu_local->runqueues[p] = NULL;
@@ -971,6 +1000,29 @@ static void remove_from_runqueue(struct thread *t) {
         if (cpu_local->runqueues[p] == t) {
           cpu_local->runqueues[p] = t->next;
         }
+      }
+
+      /* A remote exit_group changes the victim to DEAD before it gets here,
+       * so its old state no longer tells us whether runnable_count included
+       * it. Rebuild the small per-CPU summary after the rare removal. */
+      cpu_local->runnable_count = 0;
+      cpu_local->runqueue_bitmap = 0;
+      for (int q = 0; q < SCHED_PRIORITY_LEVELS; q++) {
+        struct thread *qhead = cpu_local->runqueues[q];
+        if (!qhead)
+          continue;
+        struct thread *qcur = qhead;
+        do {
+          bool runnable = qcur->state == THREAD_READY ||
+                          qcur->state == THREAD_RUNNING;
+          /* sched_yield accounts the current task until it removes/switches
+           * it, even after that task changes to BLOCKED, ZOMBIE, or DEAD. */
+          if (runnable || cpu_local->current_thread == qcur)
+            cpu_local->runnable_count++;
+          if (runnable)
+            cpu_local->runqueue_bitmap |= (1U << q);
+          qcur = qcur->next;
+        } while (qcur && qcur != qhead);
       }
 
       spinlock_release(&cpu_local->queue_lock);
@@ -1033,9 +1085,12 @@ void sched_reap_thread(struct thread *t) {
     }
   }
 
-  // DEAD and ZOMBIE tasks remove themselves from the owning runqueue under
-  // its queue lock before switching away. Repeating that operation here can
-  // race queue migration and is unnecessary after the off-CPU check above.
+  /* Self-exiting tasks have already removed themselves. Siblings killed by
+   * exit_group may have been blocked and therefore never run the scheduler's
+   * self-removal path. This is safe after the off-CPU check and is a no-op if
+   * the task is already absent. */
+  remove_from_runqueue(t);
+
   klog_puts("[REAP] Step 1: remove from lists\n");
   spinlock_acquire(&tid_lock);
 
@@ -1064,6 +1119,10 @@ void sched_reap_thread(struct thread *t) {
   }
   spinlock_release(&tid_lock);
 
+  /* Monitoring tools poll /proc continuously. Drop the one cached PID tree
+   * now that this task can no longer be opened through procfs. */
+  procfs_release_pid_dir(t->tid);
+
   // Complete CLONE_CHILD_CLEARTID only after the task is off-CPU and has
   // been claimed by the reaper. A futex join then implies reclamation is in
   // progress, rather than merely that userspace cleanup has started.
@@ -1088,6 +1147,10 @@ void sched_reap_thread(struct thread *t) {
   // Normally released by process_do_exit(); retain this as a safety net for
   // kernel-thread and abnormal teardown paths.
   sched_release_files(t);
+  if (t->cwd_node) {
+    vfs_close(t->cwd_node);
+    t->cwd_node = NULL;
+  }
 
   // 4. Free user page tables (CR3) and MM if last thread
   if (t->mm) {

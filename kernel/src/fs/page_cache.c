@@ -8,6 +8,15 @@
 
 #define VFS_CACHE_HASH(offset) (((offset) >> 12) & 0x1F)
 
+/* Number of physical frames retained by the filesystem page cache.  Keep
+ * this separate from PMM free-page accounting so /proc/meminfo can expose
+ * clean, reclaimable cache as available memory like Linux does. */
+static uint64_t vfs_cached_pages;
+
+size_t vfs_cache_page_count(void) {
+    return (size_t)__atomic_load_n(&vfs_cached_pages, __ATOMIC_RELAXED);
+}
+
 vfs_page_t *vfs_cache_lookup(vfs_node_t *node, uint32_t offset) {
     if (!node) return NULL;
     
@@ -45,11 +54,15 @@ vfs_page_t *vfs_cache_insert(vfs_node_t *node, uint32_t offset, uint64_t frame) 
         if (page->offset == offset) {
             spinlock_release(&node->pages_lock);
             kfree(new_page);
+            /* Every caller passes a newly allocated cache frame.  If another
+             * thread won the insertion race, its frame owns the cache slot. */
+            pmm_free_page((void *)frame);
             return page;
         }
     }
     
     list_add_tail(&new_page->list, &node->pages[bucket]);
+    __atomic_add_fetch(&vfs_cached_pages, 1, __ATOMIC_RELAXED);
     spinlock_release(&node->pages_lock);
     
     return new_page;
@@ -78,6 +91,7 @@ void vfs_cache_invalidate(vfs_node_t *node, uint32_t offset) {
     list_for_each_entry_safe(page, n, &node->pages[bucket], list) {
         if (page->offset == offset) {
             list_del(&page->list);
+            __atomic_sub_fetch(&vfs_cached_pages, 1, __ATOMIC_RELAXED);
             pmm_free_page((void*)page->frame_phys);
             kfree(page);
             break;
@@ -101,6 +115,7 @@ void vfs_cache_invalidate_range(vfs_node_t *node, uint32_t offset, uint32_t leng
             vfs_page_t *page, *n;
             list_for_each_entry_safe(page, n, &node->pages[i], list) {
                 list_del(&page->list);
+                __atomic_sub_fetch(&vfs_cached_pages, 1, __ATOMIC_RELAXED);
                 pmm_free_page((void*)page->frame_phys);
                 kfree(page);
             }
@@ -115,6 +130,7 @@ void vfs_cache_invalidate_range(vfs_node_t *node, uint32_t offset, uint32_t leng
             uint32_t p_idx = page->offset >> 12;
             if (p_idx >= start_page && p_idx < end_page) {
                 list_del(&page->list);
+                __atomic_sub_fetch(&vfs_cached_pages, 1, __ATOMIC_RELAXED);
                 pmm_free_page((void*)page->frame_phys);
                 kfree(page);
             }
@@ -132,7 +148,28 @@ void vfs_cache_clear(vfs_node_t *node) {
         vfs_page_t *page, *n;
         list_for_each_entry_safe(page, n, &node->pages[i], list) {
             list_del(&page->list);
+            __atomic_sub_fetch(&vfs_cached_pages, 1, __ATOMIC_RELAXED);
             pmm_free_page((void*)page->frame_phys);
+            kfree(page);
+        }
+    }
+    spinlock_release(&node->pages_lock);
+}
+
+void vfs_cache_clear_unused(vfs_node_t *node) {
+    if (!node) return;
+
+    spinlock_acquire(&node->pages_lock);
+    for (int i = 0; i < 32; i++) {
+        vfs_page_t *page, *n;
+        list_for_each_entry_safe(page, n, &node->pages[i], list) {
+            /* One reference means the cache is the sole owner. Mapped pages
+             * have an additional PMM reference and must remain intact. */
+            if (pmm_get_ref((void *)page->frame_phys) != 1)
+                continue;
+            list_del(&page->list);
+            __atomic_sub_fetch(&vfs_cached_pages, 1, __ATOMIC_RELAXED);
+            pmm_free_page((void *)page->frame_phys);
             kfree(page);
         }
     }

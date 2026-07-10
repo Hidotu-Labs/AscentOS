@@ -245,6 +245,14 @@ static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags,
   if ((flags & O_TRUNC) && node->flags == FS_FILE)
     node->length = 0;
 
+  /* Lookups return persistent metadata. Only a real open gets private DRM
+   * client state. This also covers openat() and paths relative to /dev/dri. */
+  if (drm_is_card_node(node)) {
+    node = drm_create_client_node();
+    if (!node)
+      return (uint64_t)-12;
+  }
+
 open_done:
   fd = alloc_fd(t);
   if (fd < 0)

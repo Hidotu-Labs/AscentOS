@@ -594,6 +594,7 @@ struct drm_framebuffer_full {
 
 void drm_init(void);
 vfs_node_t *drm_create_client_node(void);
+bool drm_is_card_node(vfs_node_t *node);
 void drm_register_vfs(void);
 void drm_stats_snapshot(struct drm_stats *out);
 

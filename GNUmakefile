@@ -161,10 +161,6 @@ run-ata: edk2-ovmf $(IMAGE_NAME).iso disk.img
 fat32_test.img:
 	./scripts/create-fat32-test.sh
 
-.PHONY: test-jbd2
-test-jbd2: $(IMAGE_NAME).iso
-	./scripts/test-jbd2-replay.sh $(IMAGE_NAME).iso
-
 .PHONY: run-fat32
 run-fat32: edk2-ovmf $(IMAGE_NAME).iso fat32_test.img
 	qemu-system-$(ARCH) \
@@ -191,7 +187,7 @@ disk.img: assets/boot.wav assets/test.wav assets/jane.mp3 assets/doom1.wad asset
 	rm -f ./part.img
 	dd if=/dev/zero of=./part.img bs=1M count=2047
 	mkfs.ext4 -F -b 1024 -I 128 \
-		-O extent,filetype,has_journal,^dir_index,^64bit,^metadata_csum,^flex_bg,^huge_file,^dir_nlink,^extra_isize,^metadata_csum_seed,^orphan_file \
+		-O extent,filetype,has_journal,dir_index,^64bit,^metadata_csum,^flex_bg,^huge_file,^dir_nlink,^extra_isize,^metadata_csum_seed,^orphan_file \
 		./part.img
 	@echo "Populating root filesystem..."
 	@{ \

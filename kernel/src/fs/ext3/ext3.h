@@ -58,7 +58,5 @@ void ext3_init_journal(ext2_mount_t *mnt);
 int ext3_journal_start(ext2_mount_t *mnt);
 int ext3_journal_stop(ext2_mount_t *mnt);
 int ext3_journal_block(ext2_mount_t *mnt, uint32_t block_nr, const void *data);
-int ext3_journal_test_commit(ext2_mount_t *mnt, uint32_t block_nr,
-                             const void *data);
 
 #endif

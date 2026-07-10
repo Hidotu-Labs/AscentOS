@@ -176,6 +176,7 @@ sys_exit_group(uint64_t status, uint64_t a1, uint64_t a2, uint64_t a3,
   (void)a3;
   (void)a4;
   (void)a5;
+  sched_terminate_thread_group(sched_get_current());
   process_do_exit(status);
 }
 

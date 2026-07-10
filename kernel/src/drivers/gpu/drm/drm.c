@@ -1603,12 +1603,14 @@ static uint32_t drm_read(struct vfs_node *node, uint32_t offset,
   return event_size;
 }
 
-/* ── Per-client node factory via custom finddir ──────────────────────────── */
+/* ── Per-client node factory and lookup metadata ───────────────────── */
 /*
- * When userland opens /dev/dri/card0, ramfs_finddir returns the template node.
- * We override the dri directory's finddir to return a fresh per-client clone
- * instead, so each open() gets its own vfs_node_t with device→drm_file.
+ * finddir() is also called by getdents64() merely to determine d_type and by
+ * stat-family path resolution. It must therefore not allocate per-open state.
+ * Mesa scans /dev/dri several times before choosing a device; allocating a
+ * drm_file here leaked every scan because no fd existed to release it.
  */
+static vfs_node_t drm_card_metadata_node;
 
 static struct dirent *drm_dri_readdir(vfs_node_t *dir, uint32_t index) {
   static struct dirent entry;
@@ -1634,6 +1636,11 @@ static vfs_node_t *drm_dri_finddir(vfs_node_t *dir, char *name) {
   (void)dir;
   if (strcmp(name, "card0") != 0)
     return NULL;
+
+  return &drm_card_metadata_node;
+}
+
+static vfs_node_t *drm_alloc_client_node(void) {
 
   /* Allocate per-client drm_file */
   struct drm_file *file = drm_file_alloc(&global_drm_dev);
@@ -1664,7 +1671,11 @@ static vfs_node_t *drm_dri_finddir(vfs_node_t *dir, char *name) {
   return clone;
 }
 vfs_node_t *drm_create_client_node(void) {
-  return drm_dri_finddir(NULL, "card0");
+  return drm_alloc_client_node();
+}
+
+bool drm_is_card_node(vfs_node_t *node) {
+  return node == &drm_card_metadata_node;
 }
 
 /* ── Init ────────────────────────────────────────────────────────────────── */
@@ -1716,6 +1727,14 @@ void drm_register_vfs(void) {
   vfs_node_t *dri_dir = vfs_resolve_path("/dev/dri");
   if (!dri_dir)
     return;
+
+  vfs_node_init(&drm_card_metadata_node);
+  strcpy(drm_card_metadata_node.name, "card0");
+  drm_card_metadata_node.flags = FS_CHARDEV | FS_PERSISTENT;
+  drm_card_metadata_node.mask = 0666;
+  drm_card_metadata_node.inode = (226U << 8) | 0U;
+  drm_card_metadata_node.device = &global_drm_dev;
+  drm_card_metadata_node.refcount = 1;
 
   /* Keep enumeration consistent with the dynamic per-open node factory.
    * Mesa scans /dev/dri before opening a preferred KMS/render device. */
