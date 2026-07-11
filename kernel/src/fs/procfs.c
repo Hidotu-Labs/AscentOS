@@ -876,7 +876,8 @@ static void procfs_destroy_node_tree(vfs_node_t *node) {
     node->device = NULL;
   }
 
-  vfs_cache_clear(node);
+  /* Callback-backed proc PID nodes never populate the generic page cache;
+   * avoid taking page-cache locks from scheduler reaper context. */
   kfree(node);
 }
 

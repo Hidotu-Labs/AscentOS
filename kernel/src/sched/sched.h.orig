@@ -152,7 +152,6 @@ struct thread {
   struct thread *global_next;  // Used to link all threads together
   struct thread *next;         // Used for runqueue / blocked queue
   struct thread *reap_next;    // Used for automatic reaping of detached threads
-  bool reap_remove_runqueue;   // Remote exit_group victim still needs unlink
   char cwd_path[256];          // Current working directory
   vfs_node_t *cwd_node;        // Current working directory VFS node
   struct mm_struct *mm;        // Shared memory management state

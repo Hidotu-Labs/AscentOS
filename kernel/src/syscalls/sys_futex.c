@@ -199,8 +199,7 @@ uint64_t futex_wake_phys(uint64_t phys, uint32_t val) {
     struct futex_waiter *w = *pp;
     if (w->phys_addr == phys) {
       if (w->thread && w->thread->state == THREAD_BLOCKED) {
-        w->thread->state = THREAD_READY;
-        w->thread->wakeup_ticks = 0;
+        sched_wakeup(w->thread);
         woken++;
       }
       *pp = w->next;
@@ -262,8 +261,7 @@ static uint64_t futex_requeue(uint32_t *uaddr1, uint32_t val, uint32_t val2,
       if (total_woken < val) {
         // Wake this thread
         if (w->thread && w->thread->state == THREAD_BLOCKED) {
-          w->thread->state = THREAD_READY;
-          w->thread->wakeup_ticks = 0;
+          sched_wakeup(w->thread);
           total_woken++;
         }
         // Remove from bucket1

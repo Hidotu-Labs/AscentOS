@@ -812,7 +812,6 @@ void sched_terminate_thread_group(struct thread *current) {
     /* exit_group is process-wide. Mark siblings unschedulable before making
      * them visible to the asynchronous reaper. The reaper waits until a
      * running sibling is off-CPU before touching any of its resources. */
-    t->reap_remove_runqueue = true;
     __atomic_store_n(&t->state, THREAD_DEAD, __ATOMIC_RELEASE);
 
     struct cpu_info *cpu = cpu_get_info(t->cpu_index);
@@ -1106,8 +1105,7 @@ void sched_reap_thread(struct thread *t) {
    * exit_group may have been blocked and therefore never run the scheduler's
    * self-removal path. This is safe after the off-CPU check and is a no-op if
    * the task is already absent. */
-  if (t->reap_remove_runqueue)
-    remove_from_runqueue(t);
+  remove_from_runqueue(t);
 
   klog_puts("[REAP] Step 1: remove from lists\n");
   spinlock_acquire(&tid_lock);

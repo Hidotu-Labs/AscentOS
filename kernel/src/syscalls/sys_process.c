@@ -97,9 +97,17 @@ extern void fork_return_to_userspace(struct syscall_regs *regs)
 void process_do_exit(uint64_t status) __attribute__((noreturn));
 void process_do_exit(uint64_t status) {
   struct thread *current = sched_get_current();
-  if (current) {
-    sched_reparent_children(current);
+  if (current && current->tid_address) {
+    uint32_t *tidptr = (uint32_t *)current->tid_address;
+    if (vmm_is_user_addr_range_writable((uint64_t)tidptr, sizeof(*tidptr))) {
+      __atomic_store_n(tidptr, 0, __ATOMIC_RELEASE);
+      futex_wake_user(tidptr, 1);
+    }
+    current->tid_address = NULL;
   }
+
+  if (current)
+    sched_reparent_children(current);
 
   if (current && !current->is_main_session) {
     klog_puts("\n[SYSCALL] Process exited with status: ");
@@ -134,9 +142,8 @@ void process_do_exit(uint64_t status) {
     }
 
     if (!(current->clone_flags & CLONE_THREAD) && current->parent &&
-        current->parent->state == THREAD_BLOCKED) {
-      current->parent->state = THREAD_READY;
-    }
+        current->parent->state == THREAD_BLOCKED)
+      sched_wakeup(current->parent);
 
     // Reaping handles the address-space reference after this task is off-CPU.
     if (current->cr3) {
@@ -190,6 +197,8 @@ static uint64_t sys_set_tid_address(uint64_t tidptr, uint64_t a1, uint64_t a2,
   struct thread *current = sched_get_current();
   if (!current)
     return 0;
+  if (tidptr && !vmm_is_user_addr_range_writable(tidptr, sizeof(uint32_t)))
+    return (uint64_t)-14;
 
   // Store the pointer to the user-space TID variable
   // This is used by musl/glibc for thread exit notification
@@ -762,69 +771,80 @@ static uint64_t sys_clone_internal(struct syscall_regs *regs, uint64_t flags,
                                    uint64_t child_stack, uint64_t ptid,
                                    uint64_t ctid, uint64_t newtls) {
   struct thread *parent = sched_get_current();
-  if (!parent)
-    return (uint64_t)-22; // EINVAL
+  if (!parent || !parent->mm)
+    return (uint64_t)-22;
 
-  // 1. Determine address space strategy
+  /* Linux clone flag dependencies. */
+  if ((flags & CLONE_SIGHAND) && !(flags & CLONE_VM))
+    return (uint64_t)-22;
+  if ((flags & CLONE_THREAD) && !(flags & CLONE_SIGHAND))
+    return (uint64_t)-22;
+  if ((flags & CLONE_VM) && !(flags & CLONE_VFORK) && child_stack == 0)
+    return (uint64_t)-22;
+  if ((flags & CLONE_PARENT_SETTID) &&
+      (!ptid || !vmm_is_user_addr_range_writable(ptid, sizeof(uint32_t))))
+    return (uint64_t)-14;
+  if ((flags & (CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID)) &&
+      (!ctid || !vmm_is_user_addr_range_writable(ctid, sizeof(uint32_t))))
+    return (uint64_t)-14;
+
+  struct syscall_regs *child_regs = kmalloc(sizeof(*child_regs));
+  if (!child_regs)
+    return (uint64_t)-12;
+  memcpy(child_regs, regs, sizeof(*child_regs));
+  child_regs->rax = 0;
+  if (child_stack)
+    child_regs->rsp = child_stack;
+
   uint64_t child_cr3 = parent->cr3;
   struct mm_struct *child_mm = parent->mm;
+  bool private_mm = !(flags & CLONE_VM);
 
-  if (!(flags & CLONE_VM)) {
-    // Private (cloned) address space (process fork via clone)
+  if (private_mm) {
     child_cr3 = vmm_clone_user_mappings_vma(
-        (uint64_t *)parent->cr3, parent->mm ? &parent->mm->vmas : NULL);
-    if (child_cr3 == 0) {
-      return (uint64_t)-12; // ENOMEM
+        (uint64_t *)parent->cr3, &parent->mm->vmas);
+    if (!child_cr3) {
+      kfree(child_regs);
+      return (uint64_t)-12;
     }
-    // Deep copy MM state
-    child_mm = kmalloc(sizeof(struct mm_struct));
-    if (child_mm) {
-      vma_list_init(&child_mm->vmas);
-      if (parent->mm) {
-        vma_list_clone(&child_mm->vmas, &parent->mm->vmas);
-        child_mm->brk_base = parent->mm->brk_base;
-        child_mm->brk_current = parent->mm->brk_current;
-        child_mm->mmap_next_addr = parent->mm->mmap_next_addr;
-      }
-      child_mm->ref_count = 1;
-      spinlock_init(&child_mm->lock);
+
+    child_mm = kmalloc(sizeof(*child_mm));
+    if (!child_mm) {
+      vmm_free_user_pages_vma(child_cr3, &parent->mm->vmas);
+      kfree(child_regs);
+      return (uint64_t)-12;
     }
-  } else if (child_mm) {
-    // Shared state: Increment reference count
-    spinlock_acquire(&child_mm->lock);
-    child_mm->ref_count++;
-    spinlock_release(&child_mm->lock);
+    memset(child_mm, 0, sizeof(*child_mm));
+    vma_list_init(&child_mm->vmas);
+    vma_list_clone(&child_mm->vmas, &parent->mm->vmas);
+    child_mm->brk_base = parent->mm->brk_base;
+    child_mm->brk_current = parent->mm->brk_current;
+    child_mm->mmap_next_addr = parent->mm->mmap_next_addr;
+    child_mm->ref_count = 1;
+    spinlock_init(&child_mm->lock);
   }
 
-  // 2. Allocate and populate child registers
-  struct syscall_regs *child_regs = kmalloc(sizeof(struct syscall_regs));
-  if (!child_regs) {
-    return (uint64_t)-12;
-  }
-  memcpy(child_regs, regs, sizeof(struct syscall_regs));
-  child_regs->rax = 0; // Child return value
-
-  // If a new stack is provided, use it
-  if (child_stack) {
-    child_regs->rsp = child_stack;
-  }
-
-  // 3. Create kernel thread
   struct thread *child =
       sched_create_kernel_thread(fork_child_entry, cpu_get_current(), false);
   if (!child) {
+    if (private_mm) {
+      vmm_free_user_pages_vma(child_cr3, &child_mm->vmas);
+      vma_list_destroy(&child_mm->vmas);
+      kfree(child_mm);
+    }
     kfree(child_regs);
     return (uint64_t)-12;
   }
 
-  // Discard the empty MM created for a generic kernel thread before
-  // installing clone's shared or copied address-space state.
+  /* Replace the generic kernel-thread MM only after every clone-owned
+   * allocation has succeeded. From this point initialization cannot fail. */
   if (child->mm) {
     vma_list_destroy(&child->mm->vmas);
     kfree(child->mm);
   }
+  if (!private_mm)
+    __atomic_add_fetch(&child_mm->ref_count, 1, __ATOMIC_ACQ_REL);
 
-  // 4. Configure child
   child->cr3 = child_cr3;
   child->mm = child_mm;
   child->is_forked_child = true;
@@ -832,61 +852,28 @@ static uint64_t sys_clone_internal(struct syscall_regs *regs, uint64_t flags,
   child->parent = parent;
   child->cpu_affinity = parent->cpu_affinity;
   child->clone_flags = flags;
-
-  // CLONE_THREAD: child joins parent's thread group
-  if (flags & CLONE_THREAD) {
-    child->tgid = parent->tgid;
-  } else {
-    child->tgid = child->tid;
-  }
-
-  // Handle TLS
-  if (flags & CLONE_SETTLS) {
-    child->fs_base = newtls;
-  } else {
-    child->fs_base = parent->fs_base;
-  }
+  child->tgid = (flags & CLONE_THREAD) ? parent->tgid : child->tid;
+  child->fs_base = (flags & CLONE_SETTLS) ? newtls : parent->fs_base;
   child->gs_base = parent->gs_base;
+  child->tid_address =
+      (flags & CLONE_CHILD_CLEARTID) ? (uint64_t *)ctid : NULL;
 
-  // Handle TID placement
-  if (flags & CLONE_PARENT_SETTID) {
-    if (ptid && vmm_is_user_addr_range_writable(ptid, sizeof(uint32_t))) {
-      *(uint32_t *)ptid = child->tid;
-    }
-  }
-  if (flags & CLONE_CHILD_SETTID) {
-    if (flags & CLONE_VM) {
-      if (ctid && vmm_is_user_addr_range_writable(ctid, sizeof(uint32_t))) {
-        *(uint32_t *)ctid = child->tid;
-      }
-    }
-  }
-
-  if (flags & CLONE_CHILD_CLEARTID) {
-    child->tid_address = (uint64_t *)ctid;
-  }
-
-  // pthreads pass CLONE_FILES and must observe one descriptor table. A clone
-  // without CLONE_FILES receives a referenced snapshot instead.
   if (flags & CLONE_FILES) {
     sched_share_files(child, parent);
   } else {
     for (int i = 0; i < MAX_FDS; i++) {
-      if (parent->fds[i]) {
-        child->fds[i] = parent->fds[i];
-        child->fd_offsets[i] = parent->fd_offsets[i];
-        child->fd_flags[i] = parent->fd_flags[i];
-        memcpy(child->fd_paths[i], parent->fd_paths[i],
-               sizeof(child->fd_paths[i]));
-        vfs_open(child->fds[i]);
-      }
+      if (!parent->fds[i])
+        continue;
+      child->fds[i] = parent->fds[i];
+      child->fd_offsets[i] = parent->fd_offsets[i];
+      child->fd_flags[i] = parent->fd_flags[i];
+      memcpy(child->fd_paths[i], parent->fd_paths[i],
+             sizeof(child->fd_paths[i]));
+      vfs_open(child->fds[i]);
     }
   }
 
-  // Shared state copies
   memcpy(child->cwd_path, parent->cwd_path, sizeof(child->cwd_path));
-  // sched_create_kernel_thread already inherited and referenced this CWD.
-  child->cwd_node = parent->cwd_node;
   child->uid = parent->uid;
   child->gid = parent->gid;
   child->euid = parent->euid;
@@ -901,35 +888,30 @@ static uint64_t sys_clone_internal(struct syscall_regs *regs, uint64_t flags,
   child->pgid = parent->pgid;
   memcpy(child->signal_handlers, parent->signal_handlers,
          sizeof(child->signal_handlers));
-
-  // Inherit alternate signal stack
   child->ss_sp = parent->ss_sp;
   child->ss_size = parent->ss_size;
   child->ss_flags = parent->ss_flags;
-
-  // Inherit comm name
   memcpy(child->comm, parent->comm, sizeof(child->comm));
 
-  // Determine if we need to block (vfork)
-  bool block_parent = (flags & CLONE_VFORK) != 0;
+  if (flags & CLONE_PARENT_SETTID)
+    __atomic_store_n((uint32_t *)ptid, child->tid, __ATOMIC_RELEASE);
+  if ((flags & CLONE_CHILD_SETTID) && (flags & CLONE_VM))
+    __atomic_store_n((uint32_t *)ctid, child->tid, __ATOMIC_RELEASE);
 
-  if (block_parent) {
+  bool vfork = (flags & CLONE_VFORK) != 0;
+  if (vfork)
     parent->state = THREAD_BLOCKED;
-  }
 
-  // 8. Enqueue child thread
+  /* Publication is the final creation step. */
   sched_enqueue_thread(child, cpu_get_current());
 
-  // 9. If vfork, stay blocked until child releases us
-  if (block_parent) {
-    while (parent->state == THREAD_BLOCKED) {
+  if (vfork) {
+    while (parent->state == THREAD_BLOCKED)
       sched_yield();
-    }
   }
 
   return child->tid;
 }
-
 // sys_clone (syscall 56)
 uint64_t sys_clone(struct syscall_regs *regs) {
   uint64_t flags = regs->rdi;
