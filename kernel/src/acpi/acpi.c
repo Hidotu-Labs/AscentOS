@@ -458,7 +458,7 @@ void acpi_init(struct limine_rsdp_response *response) {
 
         // Add IOAPIC to device tree
         char ioapic_name[16];
-        strcpy(ioapic_name, "ioapic0"); // Simplification for first one
+        snprintf(ioapic_name, sizeof(ioapic_name), "ioapic0"); // Simplification for first one
         struct device *ioapic_dev =
             device_create(device_find_by_path("/sys"), ioapic_name);
         device_add_resource(ioapic_dev, RES_MEM, "regs", ioapic_address,
