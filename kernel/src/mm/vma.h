@@ -11,6 +11,8 @@
 #define MAP_FIXED 0x10
 #define MAP_ANONYMOUS 0x20
 #define MAP_GROWSDOWN 0x0100
+/* Kernel-internal: preserve the identity of individual SysV SHM attaches. */
+#define MAP_SYSV_SHM 0x100000000ULL
 
 // VMA structure - internally represents an AVL Interval Tree Node
 struct vma {

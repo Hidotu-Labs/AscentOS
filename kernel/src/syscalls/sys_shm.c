@@ -263,8 +263,15 @@ int64_t sys_shmat(uint64_t shmid, uint64_t shmaddr, uint64_t shmflg,
     prot |= 0x2; // PROT_WRITE
 
   if (t->mm) {
-    vma_add(&t->mm->vmas, vaddr, vaddr + aligned_size, prot, MAP_SHARED, -1, 0,
-            NULL);
+    if (vma_add(&t->mm->vmas, vaddr, vaddr + aligned_size, prot,
+                MAP_SHARED | MAP_SYSV_SHM, -1, 0, NULL) != 0) {
+      for (uint32_t i = 0; i < seg->num_pages; i++) {
+        vmm_unmap_page(pml4, vaddr + i * PAGE_SIZE);
+        pmm_decref((void *)seg->phys_pages[i]);
+      }
+      spinlock_release(&shm_lock);
+      return -12; // ENOMEM
+    }
   }
 
   seg->nattch++;
@@ -306,7 +313,10 @@ int64_t sys_shmdt(uint64_t shmaddr, uint64_t a1, uint64_t a2, uint64_t a3,
     v = vma_find(&t->mm->vmas, shmaddr);
   }
 
-  if (!v || !(v->flags & MAP_SHARED))
+  /* An attach must be detached at its original address.  Requiring the
+   * internal SHM marker also prevents shmdt from consuming an unrelated
+   * MAP_SHARED mapping. */
+  if (!v || v->start != shmaddr || !(v->flags & MAP_SYSV_SHM))
     return -22; // EINVAL
 
   uint64_t size = v->end - v->start;

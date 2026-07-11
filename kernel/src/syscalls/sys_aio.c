@@ -604,7 +604,7 @@ static uint64_t sys_inotify_init(uint64_t a1, uint64_t a2, uint64_t a3,
 
     t->fds[fd]        = node;
     t->fd_offsets[fd] = 0;
-    strcpy(t->fd_paths[fd], "inotify");
+    fd_path_set(t, fd, "inotify");
 
     klog_puts("[INOTIFY_INIT] Created instance ");
     klog_uint64(instance->instance_id);
@@ -820,7 +820,7 @@ static uint64_t sys_memfd_create(uint64_t name_ptr, uint64_t flags_arg,
 
     t->fds[fd]        = node;
     t->fd_offsets[fd] = 0;
-    strcpy(t->fd_paths[fd], node_name);
+    fd_path_set(t, fd, node_name);
 
     klog_puts("[MEMFD_CREATE] name=\""); klog_puts(node_name);
     klog_puts("\" fd="); klog_uint64(fd); klog_puts("\n");

@@ -772,12 +772,13 @@ bool process_exec_argv(const char **argv) {
     current_thread->fds[0] = console_node;
     current_thread->fds[1] = console_node;
     current_thread->fds[2] = console_node;
+    current_thread->files->next_fd = 3;
     current_thread->fd_offsets[0] = 0;
     current_thread->fd_offsets[1] = 0;
     current_thread->fd_offsets[2] = 0;
-    strcpy(current_thread->fd_paths[0], "/dev/console");
-    strcpy(current_thread->fd_paths[1], "/dev/console");
-    strcpy(current_thread->fd_paths[2], "/dev/console");
+    fd_path_set(current_thread, 0, "/dev/console");
+    fd_path_dup(current_thread, 1, 0);
+    fd_path_dup(current_thread, 2, 0);
 
     for (int i = 3; i < MAX_FDS; i++) {
       current_thread->fds[i] = NULL;

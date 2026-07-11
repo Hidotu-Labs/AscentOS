@@ -44,6 +44,54 @@ static void thread_set_files(struct thread *t, struct fd_table *files) {
   t->fd_paths = files ? files->fd_paths : NULL;
 }
 
+static void fd_path_put(struct fd_path *path) {
+  if (path && __atomic_sub_fetch(&path->ref_count, 1, __ATOMIC_ACQ_REL) == 0)
+    kfree(path);
+}
+
+bool fd_path_set(struct thread *t, int fd, const char *value) {
+  if (!t || !t->files || fd < 0 || fd >= MAX_FDS)
+    return false;
+  struct fd_path *path = NULL;
+  if (value && value[0]) {
+    path = kmalloc(sizeof(*path));
+    if (!path)
+      return false;
+    path->ref_count = 1;
+    strncpy(path->value, value, sizeof(path->value) - 1);
+    path->value[sizeof(path->value) - 1] = '\0';
+  }
+  struct fd_path *old = t->fd_paths[fd];
+  t->fd_paths[fd] = path;
+  fd_path_put(old);
+  return true;
+}
+
+void fd_path_dup(struct thread *t, int dst, int src) {
+  if (!t || dst < 0 || dst >= MAX_FDS || src < 0 || src >= MAX_FDS)
+    return;
+  struct fd_path *path = t->fd_paths[src];
+  if (path)
+    __atomic_add_fetch(&path->ref_count, 1, __ATOMIC_RELAXED);
+  struct fd_path *old = t->fd_paths[dst];
+  t->fd_paths[dst] = path;
+  fd_path_put(old);
+}
+
+void fd_path_clear(struct thread *t, int fd) {
+  if (!t || fd < 0 || fd >= MAX_FDS)
+    return;
+  struct fd_path *old = t->fd_paths[fd];
+  t->fd_paths[fd] = NULL;
+  fd_path_put(old);
+}
+
+const char *fd_path_value(struct thread *t, int fd) {
+  if (!t || fd < 0 || fd >= MAX_FDS || !t->fd_paths[fd])
+    return NULL;
+  return t->fd_paths[fd]->value;
+}
+
 bool sched_ensure_files(struct thread *t) {
   if (!t)
     return false;
@@ -78,6 +126,8 @@ void sched_release_files(struct thread *t) {
     if (files->fds[i] && files->fds[i] != (vfs_node_t *)-1) {
       vfs_node_t *node = files->fds[i];
       files->fds[i] = NULL;
+      fd_path_put(files->fd_paths[i]);
+      files->fd_paths[i] = NULL;
       vfs_close(node);
     }
   }

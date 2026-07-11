@@ -573,7 +573,8 @@ void vma_merge_adjacent(struct vma_list *list) {
                      (prev->flags == cur->flags)   &&
                      (prev->fd    == -1)            &&
                      (cur->fd     == -1)           &&
-                     !((prev->flags | cur->flags) & MAP_GROWSDOWN);
+                     !((prev->flags | cur->flags) &
+                       (MAP_GROWSDOWN | MAP_SYSV_SHM));
 
     if (can_merge) {
       prev->end = cur->end; // extend the current run

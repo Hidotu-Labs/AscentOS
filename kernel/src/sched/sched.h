@@ -27,6 +27,11 @@ struct mm_struct {
 
 #define MAX_FDS 256
 
+struct fd_path {
+  uint32_t ref_count;
+  char value[256];
+};
+
 /*
  * CLONE_FILES makes this object shared by all pthreads in a process. Keep
  * the arrays indirectly referenced from struct thread so existing syscall
@@ -36,7 +41,9 @@ struct fd_table {
   vfs_node_t *fds[MAX_FDS];
   uint64_t fd_offsets[MAX_FDS];
   uint64_t fd_flags[MAX_FDS];
-  char fd_paths[MAX_FDS][256];
+  struct fd_path *fd_paths[MAX_FDS];
+  /* Lowest descriptor which may be free. Protected by lock. */
+  uint32_t next_fd;
   uint32_t ref_count;
   spinlock_t lock;
 };
@@ -135,7 +142,7 @@ struct thread {
   vfs_node_t **fds;
   uint64_t *fd_offsets;  // Track seek offset per file descriptor
   uint64_t *fd_flags;    // Track flags (O_NONBLOCK, etc.) for each FD
-  char (*fd_paths)[256]; // Track full path for each file descriptor
+  struct fd_path **fd_paths; // Shared, reference-counted descriptor paths
   uint64_t cr3;                 // Per-process page table (0 = inherited/kernel)
   bool is_forked_child;         // True for forked children (affects sys_exit)
   bool is_idle;                 // True for idle thread (cannot be terminated)
@@ -204,6 +211,11 @@ struct thread {
   char comm[16];          // Executable name (basename, max 15 chars + NUL)
   uint64_t cpu_affinity;  // Bitmask of allowed CPUs
 };
+
+bool fd_path_set(struct thread *t, int fd, const char *path);
+void fd_path_dup(struct thread *t, int dst, int src);
+void fd_path_clear(struct thread *t, int fd);
+const char *fd_path_value(struct thread *t, int fd);
 
 void sched_init(void);
 void sched_run_phase1_test(void);

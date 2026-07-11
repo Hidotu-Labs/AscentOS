@@ -631,8 +631,8 @@ static int procfs_pid_fd_link_readlink(vfs_node_t *node, char *buf,
   if (!t || fd >= MAX_FDS || !t->fds[fd])
     return -2; // ENOENT
 
-  const char *path = t->fd_paths[fd];
-  if (path[0] == '\0') {
+  const char *path = fd_path_value(t, (int)fd);
+  if (!path || path[0] == '\0') {
     // Fallback if path not tracked (e.g. for some early-boot nodes)
     path = t->fds[fd]->name;
   }

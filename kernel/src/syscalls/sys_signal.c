@@ -710,13 +710,19 @@ static void signalfd_close(vfs_node_t *node) {
 
 // signal_notify_thread must be defined AFTER signalfd_ctx_t and signalfd_read
 void signal_notify_thread(struct thread *t, int sig) {
-  if (!t)
+  if (!t || sig <= 0 || sig > 64)
     return;
 
   // Wake up thread if it's sleeping/blocked
   if (t->state == THREAD_SLEEPING || t->state == THREAD_BLOCKED) {
     sched_wakeup(t);
   }
+
+  /* Exit teardown clears the shared descriptor table before every possible
+   * asynchronous signal source (notably ITIMER_REAL) has observed the dead
+   * state.  There can be no signalfd to notify once the table is detached. */
+  if (!t->fds)
+    return;
 
   // Find all signalfds in this thread and wake them
   for (int i = 0; i < MAX_FDS; i++) {

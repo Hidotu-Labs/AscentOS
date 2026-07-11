@@ -12,6 +12,17 @@ static struct list_head netlink_sockets;
 static spinlock_t netlink_lock;
 static uint64_t uevent_seqnum = 1;
 
+struct nlmsghdr_min {
+  uint32_t nlmsg_len;
+  uint16_t nlmsg_type;
+  uint16_t nlmsg_flags;
+  uint32_t nlmsg_seq;
+  uint32_t nlmsg_pid;
+};
+
+#define NLMSG_DONE 3
+#define NLM_F_MULTI 2
+
 // Append a null-terminated field to uevent buffer, return new position
 static size_t ue_append(char *buf, size_t pos, const char *str) {
   size_t len = strlen(str);
@@ -320,7 +331,6 @@ static ssize_t netlink_recv(socket_t *sock, void *buf, size_t len, int flags) {
 static ssize_t netlink_sendto(socket_t *sock, const void *buf, size_t len,
                               int flags, struct sockaddr *dest_addr,
                               int addrlen) {
-  (void)sock;
   (void)buf;
   (void)flags;
   (void)dest_addr;
@@ -328,6 +338,38 @@ static ssize_t netlink_sendto(socket_t *sock, const void *buf, size_t len,
   klog_puts("[NETLINK] sendto len=");
   klog_uint64(len);
   klog_puts("\n");
+
+  netlink_sock_t *nsk = sock ? (netlink_sock_t *)sock->sk : NULL;
+  if (!nsk)
+    return -22; // EINVAL
+
+  /* Complete route dump requests with an empty multipart result.  This is a
+   * valid netlink transaction and lets getifaddrs(3) return an empty list
+   * until RTM_NEWLINK/RTM_NEWADDR records are implemented. */
+  if (nsk->protocol == NETLINK_ROUTE) {
+    if (!buf || len < sizeof(struct nlmsghdr_min))
+      return -22; // EINVAL
+
+    const struct nlmsghdr_min *request =
+        (const struct nlmsghdr_min *)buf;
+    struct nlmsghdr_min done;
+    memset(&done, 0, sizeof(done));
+    done.nlmsg_len = sizeof(done);
+    done.nlmsg_type = NLMSG_DONE;
+    done.nlmsg_flags = NLM_F_MULTI;
+    done.nlmsg_seq = request->nlmsg_seq;
+
+    sk_buff_t *skb = alloc_skb(sizeof(done));
+    if (!skb)
+      return -12; // ENOMEM
+    memcpy(skb->data, &done, sizeof(done));
+    skb->len = sizeof(done);
+    skb_queue_tail(&nsk->recv_queue, skb);
+    socket_wake(sock);
+    if (sock->node)
+      epoll_notify_event(sock->node, EPOLLIN);
+  }
+
   return (ssize_t)len;
 }
 

@@ -32,9 +32,10 @@ int alloc_fd(struct thread *t) {
   if (!t || !t->files)
     return -1;
   spinlock_acquire(&t->files->lock);
-  for (int i = 0; i < MAX_FDS; i++) {
+  for (int i = (int)t->files->next_fd; i < MAX_FDS; i++) {
     if (t->fds[i] == NULL) {
       t->fds[i] = FD_RESERVED;
+      t->files->next_fd = (uint32_t)i + 1;
       spinlock_release(&t->files->lock);
       return i;
     }
@@ -47,9 +48,13 @@ int alloc_fd_from(struct thread *t, int from) {
   if (!t || !t->files || from < 0 || from >= MAX_FDS)
     return -1;
   spinlock_acquire(&t->files->lock);
-  for (int i = from; i < MAX_FDS; i++) {
+  int start = from;
+  if ((uint32_t)start < t->files->next_fd)
+    start = (int)t->files->next_fd;
+  for (int i = start; i < MAX_FDS; i++) {
     if (t->fds[i] == NULL) {
       t->fds[i] = FD_RESERVED;
+      t->files->next_fd = (uint32_t)i + 1;
       spinlock_release(&t->files->lock);
       return i;
     }
@@ -274,23 +279,24 @@ open_done:
   t->fd_offsets[fd] = 0;
   t->fd_flags[fd] = flags;
 
+  char full_path[256];
   if (path[0] == '/') {
-    strncpy(t->fd_paths[fd], path, sizeof(t->fd_paths[fd]) - 1);
-    t->fd_paths[fd][sizeof(t->fd_paths[fd]) - 1] = '\0';
+    strncpy(full_path, path, sizeof(full_path) - 1);
+    full_path[sizeof(full_path) - 1] = '\0';
   } else {
-    t->fd_paths[fd][0] = '\0';
+    full_path[0] = '\0';
     if (t->cwd_path[0] && strcmp(t->cwd_path, "/") != 0) {
-      strncpy(t->fd_paths[fd], t->cwd_path, sizeof(t->fd_paths[fd]) - 1);
-      strncat(t->fd_paths[fd], "/",
-              sizeof(t->fd_paths[fd]) - strlen(t->fd_paths[fd]) - 1);
-      strncat(t->fd_paths[fd], path,
-              sizeof(t->fd_paths[fd]) - strlen(t->fd_paths[fd]) - 1);
+      strncpy(full_path, t->cwd_path, sizeof(full_path) - 1);
+      full_path[sizeof(full_path) - 1] = '\0';
+      strncat(full_path, "/", sizeof(full_path) - strlen(full_path) - 1);
+      strncat(full_path, path, sizeof(full_path) - strlen(full_path) - 1);
     } else {
-      strcpy(t->fd_paths[fd], "/");
-      strncat(t->fd_paths[fd], path, sizeof(t->fd_paths[fd]) - 2);
+      strcpy(full_path, "/");
+      strncat(full_path, path, sizeof(full_path) - 2);
     }
-    t->fd_paths[fd][sizeof(t->fd_paths[fd]) - 1] = '\0';
+    full_path[sizeof(full_path) - 1] = '\0';
   }
+  fd_path_set(t, fd, full_path);
 
   return fd;
 }
@@ -333,8 +339,14 @@ static uint64_t sys_close(uint64_t fd, uint64_t a1, uint64_t a2, uint64_t a3,
   klog_uint64(t->tid);
   klog_puts("\n");
   }
-  vfs_close(t->fds[fd]);
+  spinlock_acquire(&t->files->lock);
+  vfs_node_t *node = t->fds[fd];
   t->fds[fd] = NULL;
+  fd_path_clear(t, (int)fd);
+  if (fd < t->files->next_fd)
+    t->files->next_fd = (uint32_t)fd;
+  spinlock_release(&t->files->lock);
+  vfs_close(node);
   return 0;
 }
 
@@ -360,10 +372,7 @@ static uint64_t sys_dup(uint64_t oldfd, uint64_t a1, uint64_t a2, uint64_t a3,
   t->fds[newfd] = t->fds[oldfd];
   t->fd_offsets[newfd] = t->fd_offsets[oldfd];
   t->fd_flags[newfd] = t->fd_flags[oldfd];
-  if (t->fd_paths[oldfd][0])
-    strcpy(t->fd_paths[newfd], t->fd_paths[oldfd]);
-  else
-    t->fd_paths[newfd][0] = '\0';
+  fd_path_dup(t, newfd, (int)oldfd);
   vfs_open(t->fds[newfd]);
   return newfd;
 }
@@ -385,10 +394,7 @@ static uint64_t sys_dup2(uint64_t oldfd, uint64_t newfd, uint64_t a2,
   t->fds[newfd] = t->fds[oldfd];
   t->fd_offsets[newfd] = t->fd_offsets[oldfd];
   t->fd_flags[newfd] = t->fd_flags[oldfd];
-  if (t->fd_paths[oldfd][0])
-    strcpy(t->fd_paths[newfd], t->fd_paths[oldfd]);
-  else
-    t->fd_paths[newfd][0] = '\0';
+  fd_path_dup(t, (int)newfd, (int)oldfd);
   vfs_open(t->fds[newfd]);
   return newfd;
 }
@@ -752,10 +758,7 @@ static uint64_t sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,
     t->fds[newfd] = t->fds[fd];
     t->fd_offsets[newfd] = t->fd_offsets[fd];
     t->fd_flags[newfd] = t->fd_flags[fd];
-    if (t->fd_paths[fd][0])
-      strcpy(t->fd_paths[newfd], t->fd_paths[fd]);
-    else
-      t->fd_paths[newfd][0] = '\0';
+    fd_path_dup(t, newfd, (int)fd);
     vfs_open(t->fds[newfd]);
     return (uint64_t)newfd;
   }

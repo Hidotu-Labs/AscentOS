@@ -712,8 +712,11 @@ uint64_t sys_fork(struct syscall_regs *regs) {
         child->fds[i] = parent->fds[i];
         child->fd_offsets[i] = parent->fd_offsets[i];
         child->fd_flags[i] = parent->fd_flags[i];
-        memcpy(child->fd_paths[i], parent->fd_paths[i],
-               sizeof(child->fd_paths[i]));
+        if (parent->fd_paths[i]) {
+          child->fd_paths[i] = parent->fd_paths[i];
+          __atomic_add_fetch(&child->fd_paths[i]->ref_count, 1,
+                             __ATOMIC_RELAXED);
+        }
         // Increment reference count for each inherited FD
         vfs_open(child->fds[i]);
       }
@@ -867,8 +870,11 @@ static uint64_t sys_clone_internal(struct syscall_regs *regs, uint64_t flags,
       child->fds[i] = parent->fds[i];
       child->fd_offsets[i] = parent->fd_offsets[i];
       child->fd_flags[i] = parent->fd_flags[i];
-      memcpy(child->fd_paths[i], parent->fd_paths[i],
-             sizeof(child->fd_paths[i]));
+      if (parent->fd_paths[i]) {
+        child->fd_paths[i] = parent->fd_paths[i];
+        __atomic_add_fetch(&child->fd_paths[i]->ref_count, 1,
+                           __ATOMIC_RELAXED);
+      }
       vfs_open(child->fds[i]);
     }
   }

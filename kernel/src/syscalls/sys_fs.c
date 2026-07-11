@@ -476,31 +476,19 @@ static uint64_t sys_link(uint64_t oldpath_ptr, uint64_t newpath_ptr,
     const char *newpath = (const char *)newpath_ptr;
     if (!oldpath || !newpath) return (uint64_t)-14;
 
-    vfs_node_t *src = vfs_resolve_path(oldpath);
+    struct thread *t = sched_get_current();
+    vfs_node_t *base = (oldpath[0] == '/') ? fs_root
+                       : (t && t->cwd_node ? t->cwd_node : fs_root);
+    vfs_node_t *src = vfs_resolve_path_at(base, oldpath);
     if (!src) return (uint64_t)-2;
     if ((src->flags & FS_TYPE_MASK) != FS_FILE) return (uint64_t)-1;
 
-    char parent_path[128], file_name[128];
+    char file_name[128];
     size_t len = strlen(newpath);
     if (len == 0 || len >= sizeof(file_name)) return (uint64_t)-36;
 
-    const char *slash = 0;
-    for (const char *p = newpath; *p; p++)
-        if (*p == '/') slash = p;
-
-    vfs_node_t *parent = fs_root;
-    if (slash) {
-        size_t parent_len = (size_t)(slash - newpath);
-        if (parent_len > 0) {
-            if (parent_len >= sizeof(parent_path)) return (uint64_t)-36;
-            memcpy(parent_path, newpath, parent_len);
-            parent_path[parent_len] = '\0';
-            parent = vfs_resolve_path(parent_path);
-        }
-        strcpy(file_name, slash + 1);
-    } else {
-        strcpy(file_name, newpath);
-    }
+    vfs_node_t *parent =
+        resolve_parent_and_name(newpath, file_name, sizeof(file_name));
 
     if (!parent || (parent->flags & FS_TYPE_MASK) != FS_DIRECTORY)
         return (uint64_t)-20;
@@ -723,8 +711,9 @@ static uint64_t sys_fchdir(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4,
     if ((t->fds[fd]->flags & FS_TYPE_MASK) != FS_DIRECTORY) return (uint64_t)-20;
     if (!vfs_access(t->fds[fd], 1)) return (uint64_t)-13;
 
-    if (t->fd_paths[fd][0]) {
-        strncpy(t->cwd_path, t->fd_paths[fd], sizeof(t->cwd_path) - 1);
+    const char *fd_path = fd_path_value(t, (int)fd);
+    if (fd_path && fd_path[0]) {
+        strncpy(t->cwd_path, fd_path, sizeof(t->cwd_path) - 1);
         t->cwd_path[sizeof(t->cwd_path) - 1] = '\0';
         if (t->cwd_node) vfs_close(t->cwd_node);
         t->cwd_node = t->fds[fd];

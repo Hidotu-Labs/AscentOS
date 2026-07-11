@@ -51,8 +51,11 @@ typedef struct vfs_mount_entry {
 
 static vfs_mount_entry_t *vfs_mount_list = NULL;
 
-/* Bounded positive dentry cache. Each entry owns one child reference. */
+/* Bounded 4-way dentry cache. Positive entries own a child reference;
+ * positive and negative entries both own a parent reference. */
 #define VFS_DENTRY_CACHE_SIZE 4096
+#define VFS_DENTRY_WAYS 4
+#define VFS_DENTRY_BUCKETS (VFS_DENTRY_CACHE_SIZE / VFS_DENTRY_WAYS)
 
 typedef struct vfs_dentry_cache_entry {
   vfs_node_t *parent;
@@ -61,8 +64,13 @@ typedef struct vfs_dentry_cache_entry {
   bool valid;
 } vfs_dentry_cache_entry_t;
 
-static vfs_dentry_cache_entry_t vfs_dentry_cache[VFS_DENTRY_CACHE_SIZE];
-static spinlock_t vfs_dentry_cache_lock = SPINLOCK_INIT;
+typedef struct vfs_dentry_cache_bucket {
+  vfs_dentry_cache_entry_t entries[VFS_DENTRY_WAYS];
+  uint8_t next_victim;
+  spinlock_t lock;
+} vfs_dentry_cache_bucket_t;
+
+static vfs_dentry_cache_bucket_t vfs_dentry_cache[VFS_DENTRY_BUCKETS];
 
 static uint32_t vfs_dentry_hash(vfs_node_t *parent, const char *name) {
   uint64_t hash = ((uint64_t)(uintptr_t)parent >> 4) ^ 1469598103934665603ULL;
@@ -73,55 +81,73 @@ static uint32_t vfs_dentry_hash(vfs_node_t *parent, const char *name) {
   return (uint32_t)(hash ^ (hash >> 32));
 }
 
-static vfs_node_t *vfs_dentry_lookup(vfs_node_t *parent, const char *name) {
+static vfs_node_t *vfs_dentry_lookup(vfs_node_t *parent, const char *name,
+                                     bool *negative) {
+  *negative = false;
   if (parent->flags & FS_DENTRY_NOCACHE)
     return NULL;
 
-  uint32_t slot = vfs_dentry_hash(parent, name) % VFS_DENTRY_CACHE_SIZE;
+  uint32_t slot = vfs_dentry_hash(parent, name) % VFS_DENTRY_BUCKETS;
+  vfs_dentry_cache_bucket_t *bucket = &vfs_dentry_cache[slot];
 
-  spinlock_acquire(&vfs_dentry_cache_lock);
-  vfs_dentry_cache_entry_t *entry = &vfs_dentry_cache[slot];
-  if (entry->valid && entry->parent == parent &&
-      strcmp(entry->name, name) == 0) {
-    /* Internal lookup reference: do not invoke the file-open callback. */
-    entry->child->refcount++;
-    vfs_node_t *child = entry->child;
-    spinlock_release(&vfs_dentry_cache_lock);
-    return child;
+  spinlock_acquire(&bucket->lock);
+  for (uint32_t i = 0; i < VFS_DENTRY_WAYS; i++) {
+    vfs_dentry_cache_entry_t *entry = &bucket->entries[i];
+    if (entry->valid && entry->parent == parent &&
+        strcmp(entry->name, name) == 0) {
+      vfs_node_t *child = entry->child;
+      if (child)
+        child->refcount++;
+      else
+        *negative = true;
+      spinlock_release(&bucket->lock);
+      return child;
+    }
   }
-  spinlock_release(&vfs_dentry_cache_lock);
+  spinlock_release(&bucket->lock);
   return NULL;
 }
 
 static void vfs_dentry_insert(vfs_node_t *parent, const char *name,
                               vfs_node_t *child) {
-  if (!parent || !name || !child || strlen(name) >= 128 ||
+  if (!parent || !name || strlen(name) >= 128 ||
       (parent->flags & FS_DENTRY_NOCACHE))
     return;
 
-  uint32_t slot = vfs_dentry_hash(parent, name) % VFS_DENTRY_CACHE_SIZE;
+  uint32_t slot = vfs_dentry_hash(parent, name) % VFS_DENTRY_BUCKETS;
+  vfs_dentry_cache_bucket_t *bucket = &vfs_dentry_cache[slot];
   vfs_node_t *evicted = NULL;
   vfs_node_t *evicted_parent = NULL;
 
-  spinlock_acquire(&vfs_dentry_cache_lock);
-  vfs_dentry_cache_entry_t *entry = &vfs_dentry_cache[slot];
-  if (entry->valid && entry->parent == parent &&
-      strcmp(entry->name, name) == 0) {
-    spinlock_release(&vfs_dentry_cache_lock);
-    return;
+  spinlock_acquire(&bucket->lock);
+  vfs_dentry_cache_entry_t *entry = NULL;
+  for (uint32_t i = 0; i < VFS_DENTRY_WAYS; i++) {
+    vfs_dentry_cache_entry_t *candidate = &bucket->entries[i];
+    if (candidate->valid && candidate->parent == parent &&
+        strcmp(candidate->name, name) == 0) {
+      spinlock_release(&bucket->lock);
+      return;
+    }
+    if (!candidate->valid && !entry)
+      entry = candidate;
+  }
+  if (!entry) {
+    entry = &bucket->entries[bucket->next_victim];
+    bucket->next_victim = (bucket->next_victim + 1) % VFS_DENTRY_WAYS;
   }
   if (entry->valid) {
     evicted = entry->child;
     evicted_parent = entry->parent;
   }
   parent->refcount++;
-  child->refcount++;
+  if (child)
+    child->refcount++;
   entry->parent = parent;
   entry->child = child;
   strncpy(entry->name, name, sizeof(entry->name) - 1);
   entry->name[sizeof(entry->name) - 1] = '\0';
   entry->valid = true;
-  spinlock_release(&vfs_dentry_cache_lock);
+  spinlock_release(&bucket->lock);
 
   if (evicted)
     vfs_close(evicted);
@@ -130,30 +156,33 @@ static void vfs_dentry_insert(vfs_node_t *parent, const char *name,
 }
 
 void vfs_dentry_invalidate(vfs_node_t *parent, const char *name) {
-  vfs_node_t *released[VFS_DENTRY_CACHE_SIZE];
-  vfs_node_t *released_parents[VFS_DENTRY_CACHE_SIZE];
-  uint32_t released_count = 0;
+  for (uint32_t b = 0; b < VFS_DENTRY_BUCKETS; b++) {
+    vfs_node_t *released[VFS_DENTRY_WAYS];
+    vfs_node_t *released_parents[VFS_DENTRY_WAYS];
+    uint32_t released_count = 0;
+    vfs_dentry_cache_bucket_t *bucket = &vfs_dentry_cache[b];
 
-  spinlock_acquire(&vfs_dentry_cache_lock);
-  for (uint32_t i = 0; i < VFS_DENTRY_CACHE_SIZE; i++) {
-    vfs_dentry_cache_entry_t *entry = &vfs_dentry_cache[i];
-    if (entry->valid && (!parent || entry->parent == parent) &&
-        (!name || strcmp(entry->name, name) == 0)) {
-      released[released_count] = entry->child;
-      released_parents[released_count] = entry->parent;
-      released_count++;
-      entry->valid = false;
-      entry->parent = NULL;
-      entry->child = NULL;
-      entry->name[0] = '\0';
+    spinlock_acquire(&bucket->lock);
+    for (uint32_t i = 0; i < VFS_DENTRY_WAYS; i++) {
+      vfs_dentry_cache_entry_t *entry = &bucket->entries[i];
+      if (entry->valid && (!parent || entry->parent == parent) &&
+          (!name || strcmp(entry->name, name) == 0)) {
+        released[released_count] = entry->child;
+        released_parents[released_count++] = entry->parent;
+        entry->valid = false;
+        entry->parent = NULL;
+        entry->child = NULL;
+        entry->name[0] = '\0';
+      }
+    }
+    spinlock_release(&bucket->lock);
+
+    for (uint32_t i = 0; i < released_count; i++) {
+      if (released[i])
+        vfs_close(released[i]);
+      vfs_close(released_parents[i]);
     }
   }
-  spinlock_release(&vfs_dentry_cache_lock);
-
-  for (uint32_t i = 0; i < released_count; i++)
-    vfs_close(released[i]);
-  for (uint32_t i = 0; i < released_count; i++)
-    vfs_close(released_parents[i]);
 }
 
 uint32_t vfs_read(vfs_node_t *node, uint32_t offset, uint32_t size,
@@ -227,13 +256,16 @@ struct dirent *vfs_readdir(vfs_node_t *node, uint32_t index) {
 
 vfs_node_t *vfs_finddir(vfs_node_t *node, char *name) {
   if ((node->flags & FS_TYPE_MASK) == FS_DIRECTORY && node->finddir) {
-    vfs_node_t *cached = vfs_dentry_lookup(node, name);
-    if (cached)
+    bool negative;
+    vfs_node_t *cached = vfs_dentry_lookup(node, name, &negative);
+    if (cached || negative)
       return cached;
 
     vfs_node_t *res = node->finddir(node, name);
-    if (!res)
+    if (!res) {
+      vfs_dentry_insert(node, name, NULL);
       return 0;
+    }
 
     vfs_mount_entry_t *curr = vfs_mount_list;
     while (curr) {
@@ -372,9 +404,7 @@ vfs_node_t *vfs_resolve_path_at(vfs_node_t *dir, const char *path) {
   if (!path || !fs_root)
     return 0;
 
-  char *path_buf = kmalloc(512);
-  if (!path_buf)
-    return 0;
+  char path_buf[512];
   strncpy(path_buf, path, 511);
   path_buf[511] = '\0';
 
@@ -428,7 +458,6 @@ vfs_node_t *vfs_resolve_path_at(vfs_node_t *dir, const char *path) {
         vfs_close(parent_stack[j]);
       }
       vfs_close(current);
-      kfree(path_buf);
       return 0;
     }
 
@@ -446,9 +475,7 @@ vfs_node_t *vfs_resolve_path_at(vfs_node_t *dir, const char *path) {
         goto fail;
       link_target[len] = '\0';
 
-      char *next_path = kmalloc(512);
-      if (!next_path)
-        goto fail;
+      char next_path[512];
       strcpy(next_path, link_target);
 
       if (*p) {
@@ -465,7 +492,6 @@ vfs_node_t *vfs_resolve_path_at(vfs_node_t *dir, const char *path) {
       }
       next_path[511] = '\0';
       strcpy(path_buf, next_path);
-      kfree(next_path);
       p = path_buf;
 
       if (path_buf[0] == '/') {
@@ -499,14 +525,12 @@ vfs_node_t *vfs_resolve_path_at(vfs_node_t *dir, const char *path) {
     vfs_close(parent_stack[j]);
   }
 
-  kfree(path_buf);
   return current;
 
 fail:
   for (int j = 0; j <= stack_top; j++)
     vfs_close(parent_stack[j]);
   vfs_close(current);
-  kfree(path_buf);
   return 0;
 }
 
