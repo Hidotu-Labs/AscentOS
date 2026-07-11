@@ -926,7 +926,21 @@ static uint64_t sys_getpeername(uint64_t sockfd, uint64_t addr_ptr,
   // Get socket from FD
   socket_t *sock = socket_from_fd(fd);
   if (!sock) {
-    return (uint64_t)-9; // EBADF
+    struct thread *current = sched_get_current();
+    bool fd_exists = current && fd >= 0 && fd < MAX_FDS && current->fds[fd];
+    klog_puts("[GETPEERNAME] ");
+    klog_puts(fd_exists ? "ENOTSOCK" : "EBADF");
+    klog_puts(" fd=");
+    klog_uint64((uint64_t)(int64_t)fd);
+    klog_puts(" tid=");
+    klog_uint64(current ? current->tid : 0);
+    klog_puts(" comm=");
+    klog_puts(current ? current->comm : "none");
+    klog_puts("\n");
+    // Linux distinguishes a closed/invalid descriptor (EBADF) from a valid
+    // descriptor whose underlying object is not a socket (ENOTSOCK). GLib
+    // deliberately probes stderr with getpeername() and relies on ENOTSOCK.
+    return (uint64_t)(fd_exists ? -88 : -9);
   }
   if (!socket_try_get(sock))
     return (uint64_t)-9;

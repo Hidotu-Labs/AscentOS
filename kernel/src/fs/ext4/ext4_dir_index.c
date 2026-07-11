@@ -3,139 +3,715 @@
 #include "fs/ext2/ext2_internal.h"
 #include "lib/string.h"
 #include "mm/heap.h"
+
 #include <stdint.h>
 
-#define F(x,y,z) ((z)^((x)&((y)^(z))))
-#define G(x,y,z) (((x)&(y))+(((x)^(y))&(z)))
-#define H(x,y,z) ((x)^(y)^(z))
-#define ROL(x,s) (((x)<<(s))|((x)>>(32-(s))))
-#define ROUND(f,a,b,c,d,x,s) (a+=f(b,c,d)+(x),a=ROL(a,s))
-#define K2 013240474631u
-#define K3 015666365641u
+#define MD4_F(x, y, z) ((z) ^ ((x) & ((y) ^ (z))))
+#define MD4_G(x, y, z) (((x) & (y)) + (((x) ^ (y)) & (z)))
+#define MD4_H(x, y, z) ((x) ^ (y) ^ (z))
 
-typedef struct { uint32_t zero; uint8_t version; uint8_t length; uint8_t levels; uint8_t flags; } __attribute__((packed)) dx_info_t;
-typedef struct { uint16_t limit; uint16_t count; } __attribute__((packed)) dx_cl_t;
-typedef struct { uint32_t hash; uint32_t block; } __attribute__((packed)) dx_entry_t;
-typedef struct { uint32_t hash; uint32_t inode; uint16_t size; uint8_t name_len; uint8_t type; char name[256]; } dx_item_t;
+#define ROL32(value, shift) \
+    (((value) << (shift)) | ((value) >> (32 - (shift))))
 
-static void hashbuf(const char *name, int len, uint32_t *out, int words, int uns) {
-  uint32_t pad=(uint32_t)len|((uint32_t)len<<8); pad|=pad<<16;
-  uint32_t value=pad; int left=words;
-  if(len>words*4) len=words*4;
-  for(int i=0;i<len;i++) {
-    int ch=uns?(int)(uint8_t)name[i]:(int)(int8_t)name[i];
-    value=(uint32_t)ch+(value<<8);
-    if((i&3)==3) { *out++=value; value=pad; left--; }
-  }
-  if(--left>=0) *out++=value;
-  while(--left>=0) *out++=pad;
+#define MD4_ROUND(function, a, b, c, d, value, shift) \
+    do {                                                   \
+        (a) += function((b), (c), (d)) + (value);          \
+        (a) = ROL32((a), (shift));                         \
+    } while (0)
+
+#define MD4_K2 013240474631u
+#define MD4_K3 015666365641u
+
+typedef struct {
+    uint32_t zero;
+    uint8_t version;
+    uint8_t length;
+    uint8_t levels;
+    uint8_t flags;
+} __attribute__((packed)) dx_info_t;
+
+typedef struct {
+    uint16_t limit;
+    uint16_t count;
+} __attribute__((packed)) dx_count_limit_t;
+
+typedef struct {
+    uint32_t hash;
+    uint32_t block;
+} __attribute__((packed)) dx_entry_t;
+
+typedef struct {
+    uint32_t hash;
+    uint32_t inode;
+    uint16_t size;
+    uint8_t name_len;
+    uint8_t type;
+    char name[256];
+} dx_item_t;
+
+static uint32_t dirent_min_size(uint32_t name_length)
+{
+    return (8u + name_length + 3u) & ~3u;
 }
 
-static void half_md4(uint32_t s[4],const uint32_t x[8]) {
-  uint32_t a=s[0],b=s[1],c=s[2],d=s[3];
-  ROUND(F,a,b,c,d,x[0],3); ROUND(F,d,a,b,c,x[1],7); ROUND(F,c,d,a,b,x[2],11); ROUND(F,b,c,d,a,x[3],19);
-  ROUND(F,a,b,c,d,x[4],3); ROUND(F,d,a,b,c,x[5],7); ROUND(F,c,d,a,b,x[6],11); ROUND(F,b,c,d,a,x[7],19);
-  ROUND(G,a,b,c,d,x[1]+K2,3); ROUND(G,d,a,b,c,x[3]+K2,5); ROUND(G,c,d,a,b,x[5]+K2,9); ROUND(G,b,c,d,a,x[7]+K2,13);
-  ROUND(G,a,b,c,d,x[0]+K2,3); ROUND(G,d,a,b,c,x[2]+K2,5); ROUND(G,c,d,a,b,x[4]+K2,9); ROUND(G,b,c,d,a,x[6]+K2,13);
-  ROUND(H,a,b,c,d,x[3]+K3,3); ROUND(H,d,a,b,c,x[7]+K3,9); ROUND(H,c,d,a,b,x[2]+K3,11); ROUND(H,b,c,d,a,x[6]+K3,15);
-  ROUND(H,a,b,c,d,x[1]+K3,3); ROUND(H,d,a,b,c,x[5]+K3,9); ROUND(H,c,d,a,b,x[0]+K3,11); ROUND(H,b,c,d,a,x[4]+K3,15);
-  s[0]+=a; s[1]+=b; s[2]+=c; s[3]+=d;
-}
+static void build_hash_buffer(
+    const char *name,
+    int name_length,
+    uint32_t *output,
+    int output_words,
+    int unsigned_chars)
+{
+    uint32_t padding;
+    uint32_t value;
+    int words_left;
 
-static int dirhash(ext2_mount_t *mnt,uint8_t version,const char *name,int len,uint32_t *hash) {
-  if(version!=1&&version!=4) return -1;
-  uint32_t s[4]={0x67452301,0xefcdab89,0x98badcfe,0x10325476};
-  if(mnt->sb.s_hash_seed[0]||mnt->sb.s_hash_seed[1]||mnt->sb.s_hash_seed[2]||mnt->sb.s_hash_seed[3]) memcpy(s,mnt->sb.s_hash_seed,sizeof(s));
-  const char *p=name; int left=len;
-  while(left>0) { uint32_t x[8]; hashbuf(p,left,x,8,version==4); half_md4(s,x); p+=32; left-=32; }
-  *hash=s[1]&0xfffffffeu;
-  if(*hash==0xfffffffeu) *hash=0xfffffffcu;
-  return 0;
-}
+    padding = (uint32_t)name_length |
+              ((uint32_t)name_length << 8);
 
-static int leaf_insert(uint8_t *buf,uint32_t bs,uint32_t inode,const char *name,uint8_t nl,uint8_t type) {
-  uint32_t need=(8u+nl+3u)&0xfffffffcu;
-  for(uint32_t off=0;off<bs;) {
-    ext2_dirent_t *e=(ext2_dirent_t *)(buf+off);
-    if(e->rec_len<8||off+e->rec_len>bs) return -1;
-    if(!e->inode&&e->rec_len>=need) {
-      uint16_t rec=e->rec_len; memset(e,0,rec); e->inode=inode; e->rec_len=rec; e->name_len=nl; e->file_type=type; memcpy(e->name,name,nl); return 0;
+    padding |= padding << 16;
+
+    value = padding;
+    words_left = output_words;
+
+    if (name_length > output_words * 4)
+        name_length = output_words * 4;
+
+    for (int i = 0; i < name_length; i++) {
+        int character;
+
+        if (unsigned_chars)
+            character = (int)(uint8_t)name[i];
+        else
+            character = (int)(int8_t)name[i];
+
+        value = (uint32_t)character + (value << 8);
+
+        if ((i & 3) == 3) {
+            *output++ = value;
+            value = padding;
+            words_left--;
+        }
     }
-    uint32_t used=(8u+e->name_len+3u)&0xfffffffcu;
-    if(e->rec_len>=used+need) {
-      uint16_t rec=e->rec_len; e->rec_len=used; ext2_dirent_t *n=(ext2_dirent_t *)(buf+off+used);
-      memset(n,0,rec-used); n->inode=inode; n->rec_len=rec-used; n->name_len=nl; n->file_type=type; memcpy(n->name,name,nl); return 0;
+
+    if (--words_left >= 0)
+        *output++ = value;
+
+    while (--words_left >= 0)
+        *output++ = padding;
+}
+
+static void half_md4_transform(
+    uint32_t state[4],
+    const uint32_t input[8])
+{
+    uint32_t a = state[0];
+    uint32_t b = state[1];
+    uint32_t c = state[2];
+    uint32_t d = state[3];
+
+    /* Round 1 */
+
+    MD4_ROUND(MD4_F, a, b, c, d, input[0], 3);
+    MD4_ROUND(MD4_F, d, a, b, c, input[1], 7);
+    MD4_ROUND(MD4_F, c, d, a, b, input[2], 11);
+    MD4_ROUND(MD4_F, b, c, d, a, input[3], 19);
+
+    MD4_ROUND(MD4_F, a, b, c, d, input[4], 3);
+    MD4_ROUND(MD4_F, d, a, b, c, input[5], 7);
+    MD4_ROUND(MD4_F, c, d, a, b, input[6], 11);
+    MD4_ROUND(MD4_F, b, c, d, a, input[7], 19);
+
+    /* Round 2 */
+
+    MD4_ROUND(MD4_G, a, b, c, d, input[1] + MD4_K2, 3);
+    MD4_ROUND(MD4_G, d, a, b, c, input[3] + MD4_K2, 5);
+    MD4_ROUND(MD4_G, c, d, a, b, input[5] + MD4_K2, 9);
+    MD4_ROUND(MD4_G, b, c, d, a, input[7] + MD4_K2, 13);
+
+    MD4_ROUND(MD4_G, a, b, c, d, input[0] + MD4_K2, 3);
+    MD4_ROUND(MD4_G, d, a, b, c, input[2] + MD4_K2, 5);
+    MD4_ROUND(MD4_G, c, d, a, b, input[4] + MD4_K2, 9);
+    MD4_ROUND(MD4_G, b, c, d, a, input[6] + MD4_K2, 13);
+
+    /* Round 3 */
+
+    MD4_ROUND(MD4_H, a, b, c, d, input[3] + MD4_K3, 3);
+    MD4_ROUND(MD4_H, d, a, b, c, input[7] + MD4_K3, 9);
+    MD4_ROUND(MD4_H, c, d, a, b, input[2] + MD4_K3, 11);
+    MD4_ROUND(MD4_H, b, c, d, a, input[6] + MD4_K3, 15);
+
+    MD4_ROUND(MD4_H, a, b, c, d, input[1] + MD4_K3, 3);
+    MD4_ROUND(MD4_H, d, a, b, c, input[5] + MD4_K3, 9);
+    MD4_ROUND(MD4_H, c, d, a, b, input[0] + MD4_K3, 11);
+    MD4_ROUND(MD4_H, b, c, d, a, input[4] + MD4_K3, 15);
+
+    state[0] += a;
+    state[1] += b;
+    state[2] += c;
+    state[3] += d;
+}
+
+static int ext4_directory_hash(
+    ext2_mount_t *mount,
+    uint8_t version,
+    const char *name,
+    int name_length,
+    uint32_t *result_hash)
+{
+    uint32_t state[4] = {
+        0x67452301,
+        0xefcdab89,
+        0x98badcfe,
+        0x10325476
+    };
+
+    const char *current;
+    int bytes_left;
+
+    if (version != 1 && version != 4)
+        return -1;
+
+    if (mount->sb.s_hash_seed[0] ||
+        mount->sb.s_hash_seed[1] ||
+        mount->sb.s_hash_seed[2] ||
+        mount->sb.s_hash_seed[3]) {
+        memcpy(
+            state,
+            mount->sb.s_hash_seed,
+            sizeof(state)
+        );
     }
-    off+=e->rec_len;
-  }
-  return 1;
-}
 
-static int collect(ext2_mount_t *mnt,uint8_t version,uint8_t *buf,uint32_t bs,dx_item_t *items,uint32_t cap,uint32_t *count) {
-  for(uint32_t off=0;off<bs;) {
-    ext2_dirent_t *e=(ext2_dirent_t *)(buf+off);
-    if(e->rec_len<8||off+e->rec_len>bs) return -1;
-    if(e->inode) {
-      if(*count>=cap) return -1;
-      dx_item_t *i=&items[(*count)++];
-      if(dirhash(mnt,version,e->name,e->name_len,&i->hash)) return -1;
-      i->inode=e->inode; i->name_len=e->name_len; i->type=e->file_type; i->size=(8u+e->name_len+3u)&0xfffffffcu; memcpy(i->name,e->name,e->name_len);
+    current = name;
+    bytes_left = name_length;
+
+    while (bytes_left > 0) {
+        uint32_t hash_input[8];
+
+        build_hash_buffer(
+            current,
+            bytes_left,
+            hash_input,
+            8,
+            version == 4
+        );
+
+        half_md4_transform(state, hash_input);
+
+        current += 32;
+        bytes_left -= 32;
     }
-    off+=e->rec_len;
-  }
-  return 0;
+
+    *result_hash = state[1] & 0xfffffffeu;
+
+    if (*result_hash == 0xfffffffeu)
+        *result_hash = 0xfffffffcu;
+
+    return 0;
 }
 
-static void sort_items(dx_item_t *items,uint32_t count) {
-  for(uint32_t i=1;i<count;i++) { dx_item_t v=items[i]; uint32_t j=i; while(j&&items[j-1].hash>v.hash) { items[j]=items[j-1]; j--; } items[j]=v; }
+static int insert_into_leaf(
+    uint8_t *block_buffer,
+    uint32_t block_size,
+    uint32_t inode_number,
+    const char *name,
+    uint8_t name_length,
+    uint8_t file_type)
+{
+    uint32_t required_size = dirent_min_size(name_length);
+
+    for (uint32_t offset = 0; offset < block_size;) {
+        ext2_dirent_t *entry;
+        uint32_t used_size;
+
+        entry = (ext2_dirent_t *)(block_buffer + offset);
+
+        if (entry->rec_len < 8 ||
+            offset + entry->rec_len > block_size) {
+            return -1;
+        }
+
+        /*
+         * Reuse an entirely unused directory entry.
+         */
+        if (entry->inode == 0 && entry->rec_len >= required_size) {
+            uint16_t record_length = entry->rec_len;
+
+            memset(entry, 0, record_length);
+
+            entry->inode = inode_number;
+            entry->rec_len = record_length;
+            entry->name_len = name_length;
+            entry->file_type = file_type;
+
+            memcpy(entry->name, name, name_length);
+
+            return 0;
+        }
+
+        /*
+         * Split the unused tail space from an existing entry.
+         */
+        used_size = dirent_min_size(entry->name_len);
+
+        if (entry->rec_len >= used_size + required_size) {
+            uint16_t old_record_length = entry->rec_len;
+            ext2_dirent_t *new_entry;
+
+            entry->rec_len = used_size;
+
+            new_entry = (ext2_dirent_t *)(
+                block_buffer + offset + used_size
+            );
+
+            memset(
+                new_entry,
+                0,
+                old_record_length - used_size
+            );
+
+            new_entry->inode = inode_number;
+            new_entry->rec_len = old_record_length - used_size;
+            new_entry->name_len = name_length;
+            new_entry->file_type = file_type;
+
+            memcpy(new_entry->name, name, name_length);
+
+            return 0;
+        }
+
+        offset += entry->rec_len;
+    }
+
+    /*
+     * The leaf is valid, but has no free space.
+     */
+    return 1;
 }
 
-static int pack(uint8_t *buf,uint32_t bs,dx_item_t *items,uint32_t first,uint32_t end) {
-  if(first==end) return -1;
-  memset(buf,0,bs);
-  uint32_t off=0;
-  for(uint32_t i=first;i<end;i++) {
-    uint32_t rec=i+1==end?bs-off:items[i].size;
-    if(rec<items[i].size||off+rec>bs) return -1;
-    ext2_dirent_t *e=(ext2_dirent_t *)(buf+off); e->inode=items[i].inode; e->rec_len=rec; e->name_len=items[i].name_len; e->file_type=items[i].type; memcpy(e->name,items[i].name,e->name_len); off+=rec;
-  }
-  return 0;
+static int collect_leaf_items(
+    ext2_mount_t *mount,
+    uint8_t hash_version,
+    uint8_t *block_buffer,
+    uint32_t block_size,
+    dx_item_t *items,
+    uint32_t item_capacity,
+    uint32_t *item_count)
+{
+    for (uint32_t offset = 0; offset < block_size;) {
+        ext2_dirent_t *entry;
+
+        entry = (ext2_dirent_t *)(block_buffer + offset);
+
+        if (entry->rec_len < 8 ||
+            offset + entry->rec_len > block_size) {
+            return -1;
+        }
+
+        if (entry->inode != 0) {
+            dx_item_t *item;
+
+            if (*item_count >= item_capacity)
+                return -1;
+
+            item = &items[(*item_count)++];
+
+            if (ext4_directory_hash(
+                    mount,
+                    hash_version,
+                    entry->name,
+                    entry->name_len,
+                    &item->hash) != 0) {
+                return -1;
+            }
+
+            item->inode = entry->inode;
+            item->name_len = entry->name_len;
+            item->type = entry->file_type;
+            item->size = dirent_min_size(entry->name_len);
+
+            memcpy(
+                item->name,
+                entry->name,
+                entry->name_len
+            );
+        }
+
+        offset += entry->rec_len;
+    }
+
+    return 0;
 }
 
-int ext4_dx_add_entry(ext2_mount_t *mnt,uint32_t ino,ext2_inode_t *inode,uint32_t child,const char *name,uint8_t type) {
-  uint32_t nl=strlen(name); if(!nl||nl>255||!(inode->i_flags&EXT2_INDEX_FL)) return -1;
-  uint8_t *root=kmalloc(mnt->block_size),*leaf=kmalloc(mnt->block_size),*right=kmalloc(mnt->block_size);
-  uint32_t cap=mnt->block_size/8+1; dx_item_t *items=kmalloc(cap*sizeof(*items)); int result=-1;
-  if(!root||!leaf||!right||!items) goto out;
-  uint32_t root_phys=ext2_get_block_num(mnt,inode,0); if(!root_phys||ext2_read_block(mnt,root_phys,root)) goto out;
-  dx_info_t *info=(dx_info_t *)(root+24); dx_cl_t *cl=(dx_cl_t *)(root+32); dx_entry_t *entries=(dx_entry_t *)(root+32);
-  if(info->zero||info->length!=8||info->levels||!cl->count||cl->count>cl->limit||32u+(uint32_t)cl->limit*8u>mnt->block_size) goto out;
-  uint32_t hash; if(dirhash(mnt,info->version,name,nl,&hash)) goto out;
-  uint16_t at=0; for(uint16_t i=1;i<cl->count;i++) { if(hash<entries[i].hash) break; at=i; }
-  uint32_t leaf_log=entries[at].block&0x0fffffffu; uint32_t leaf_phys=ext2_get_block_num(mnt,inode,leaf_log);
-  if(!leaf_phys||ext2_read_block(mnt,leaf_phys,leaf)) goto out;
-  int inserted=leaf_insert(leaf,mnt->block_size,child,name,nl,type);
-  if(inserted==0) { result=ext3_journal_block(mnt,leaf_phys,leaf); goto out; }
-  if(inserted<0||cl->count>=cl->limit) goto out;
-  uint32_t count=0; if(collect(mnt,info->version,leaf,mnt->block_size,items,cap,&count)||count>=cap) goto out;
-  dx_item_t *n=&items[count++]; n->hash=hash; n->inode=child; n->name_len=nl; n->type=type; n->size=(8u+nl+3u)&0xfffffffcu; memcpy(n->name,name,nl); sort_items(items,count);
-  uint32_t total=0; for(uint32_t i=0;i<count;i++) total+=items[i].size;
-  uint32_t split=1,bytes=items[0].size; while(split+1<count&&bytes+items[split].size<total/2) { bytes+=items[split].size; split++; }
-  if(pack(leaf,mnt->block_size,items,0,split)||pack(right,mnt->block_size,items,split,count)) goto out;
-  uint32_t new_log=inode->i_size/mnt->block_size; uint64_t new_phys;
-  if(ext4_alloc_extent(mnt,inode,ino,new_log,1,&new_phys)||new_phys>UINT32_MAX) goto out;
-  uint32_t boundary=items[split].hash; if(items[split-1].hash==boundary) boundary|=1;
-  for(uint16_t i=cl->count;i>at+1;i--) entries[i]=entries[i-1];
-  entries[at+1].hash=boundary; entries[at+1].block=new_log; cl->count++;
-  inode->i_size+=mnt->block_size; inode->i_blocks+=mnt->block_size/512;
-  result=ext3_journal_block(mnt,leaf_phys,leaf);
-  if(!result) result=ext3_journal_block(mnt,(uint32_t)new_phys,right);
-  if(!result) result=ext3_journal_block(mnt,root_phys,root);
-  if(!result) result=ext2_write_inode(mnt,ino,inode);
-out:
-  if(root) kfree(root);
-  if(leaf) kfree(leaf);
-  if(right) kfree(right);
-  if(items) kfree(items);
-  return result;
+static void sort_items_by_hash(
+    dx_item_t *items,
+    uint32_t item_count)
+{
+    /*
+     * Insertion sort is sufficient here because a single directory
+     * leaf generally contains a relatively small number of entries.
+     */
+    for (uint32_t i = 1; i < item_count; i++) {
+        dx_item_t current = items[i];
+        uint32_t position = i;
+
+        while (position > 0 &&
+               items[position - 1].hash > current.hash) {
+            items[position] = items[position - 1];
+            position--;
+        }
+
+        items[position] = current;
+    }
+}
+
+static int pack_leaf_items(
+    uint8_t *block_buffer,
+    uint32_t block_size,
+    dx_item_t *items,
+    uint32_t first_item,
+    uint32_t end_item)
+{
+    uint32_t offset = 0;
+
+    if (first_item == end_item)
+        return -1;
+
+    memset(block_buffer, 0, block_size);
+
+    for (uint32_t i = first_item; i < end_item; i++) {
+        ext2_dirent_t *entry;
+        uint32_t record_length;
+
+        if (i + 1 == end_item)
+            record_length = block_size - offset;
+        else
+            record_length = items[i].size;
+
+        if (record_length < items[i].size ||
+            offset + record_length > block_size) {
+            return -1;
+        }
+
+        entry = (ext2_dirent_t *)(block_buffer + offset);
+
+        entry->inode = items[i].inode;
+        entry->rec_len = record_length;
+        entry->name_len = items[i].name_len;
+        entry->file_type = items[i].type;
+
+        memcpy(
+            entry->name,
+            items[i].name,
+            entry->name_len
+        );
+
+        offset += record_length;
+    }
+
+    return 0;
+}
+
+int ext4_dx_add_entry(
+    ext2_mount_t *mount,
+    uint32_t directory_inode_number,
+    ext2_inode_t *directory_inode,
+    uint32_t child_inode_number,
+    const char *name,
+    uint8_t file_type)
+{
+    uint32_t name_length;
+    uint32_t item_capacity;
+
+    uint8_t *root_buffer = NULL;
+    uint8_t *leaf_buffer = NULL;
+    uint8_t *right_buffer = NULL;
+
+    dx_item_t *items = NULL;
+
+    int result = -1;
+
+    name_length = strlen(name);
+
+    if (name_length == 0 ||
+        name_length > 255 ||
+        !(directory_inode->i_flags & EXT2_INDEX_FL)) {
+        return -1;
+    }
+
+    root_buffer = kmalloc(mount->block_size);
+    leaf_buffer = kmalloc(mount->block_size);
+    right_buffer = kmalloc(mount->block_size);
+
+    item_capacity = mount->block_size / 8 + 1;
+    items = kmalloc(item_capacity * sizeof(*items));
+
+    if (!root_buffer ||
+        !leaf_buffer ||
+        !right_buffer ||
+        !items) {
+        goto cleanup;
+    }
+
+    /*
+     * Read and validate the HTree root block.
+     */
+    uint32_t root_physical_block = ext2_get_block_num(
+        mount,
+        directory_inode,
+        0
+    );
+
+    if (root_physical_block == 0 ||
+        ext2_read_block(
+            mount,
+            root_physical_block,
+            root_buffer) != 0) {
+        goto cleanup;
+    }
+
+    dx_info_t *root_info =
+        (dx_info_t *)(root_buffer + 24);
+
+    dx_count_limit_t *count_limit =
+        (dx_count_limit_t *)(root_buffer + 32);
+
+    dx_entry_t *entries =
+        (dx_entry_t *)(root_buffer + 32);
+
+    if (root_info->zero != 0 ||
+        root_info->length != 8 ||
+        root_info->levels != 0 ||
+        count_limit->count == 0 ||
+        count_limit->count > count_limit->limit ||
+        32u + (uint32_t)count_limit->limit * sizeof(dx_entry_t) >
+            mount->block_size) {
+        goto cleanup;
+    }
+
+    /*
+     * Calculate the hash of the new entry and locate its target leaf.
+     */
+    uint32_t name_hash;
+
+    if (ext4_directory_hash(
+            mount,
+            root_info->version,
+            name,
+            name_length,
+            &name_hash) != 0) {
+        goto cleanup;
+    }
+
+    uint16_t target_index = 0;
+
+    for (uint16_t i = 1; i < count_limit->count; i++) {
+        if (name_hash < entries[i].hash)
+            break;
+
+        target_index = i;
+    }
+
+    uint32_t leaf_logical_block =
+        entries[target_index].block & 0x0fffffffu;
+
+    uint32_t leaf_physical_block = ext2_get_block_num(
+        mount,
+        directory_inode,
+        leaf_logical_block
+    );
+
+    if (leaf_physical_block == 0 ||
+        ext2_read_block(
+            mount,
+            leaf_physical_block,
+            leaf_buffer) != 0) {
+        goto cleanup;
+    }
+
+    /*
+     * First try inserting without splitting the leaf.
+     */
+    int insert_result = insert_into_leaf(
+        leaf_buffer,
+        mount->block_size,
+        child_inode_number,
+        name,
+        name_length,
+        file_type
+    );
+
+    if (insert_result == 0) {
+        result = ext3_journal_block(
+            mount,
+            leaf_physical_block,
+            leaf_buffer
+        );
+
+        goto cleanup;
+    }
+
+    /*
+     * A negative result means that the leaf block was malformed.
+     * A full root index cannot accept another leaf pointer.
+     */
+    if (insert_result < 0 ||
+        count_limit->count >= count_limit->limit) {
+        goto cleanup;
+    }
+
+    /*
+     * Collect all existing entries and append the new entry.
+     */
+    uint32_t item_count = 0;
+
+    if (collect_leaf_items(
+            mount,
+            root_info->version,
+            leaf_buffer,
+            mount->block_size,
+            items,
+            item_capacity,
+            &item_count) != 0 ||
+        item_count >= item_capacity) {
+        goto cleanup;
+    }
+
+    dx_item_t *new_item = &items[item_count++];
+
+    new_item->hash = name_hash;
+    new_item->inode = child_inode_number;
+    new_item->name_len = name_length;
+    new_item->type = file_type;
+    new_item->size = dirent_min_size(name_length);
+
+    memcpy(new_item->name, name, name_length);
+
+    sort_items_by_hash(items, item_count);
+
+    /*
+     * Find a split point that keeps the used byte count approximately
+     * balanced between the two leaves.
+     */
+    uint32_t total_bytes = 0;
+
+    for (uint32_t i = 0; i < item_count; i++)
+        total_bytes += items[i].size;
+
+    uint32_t split_index = 1;
+    uint32_t left_bytes = items[0].size;
+
+    while (split_index + 1 < item_count &&
+           left_bytes + items[split_index].size <
+               total_bytes / 2) {
+        left_bytes += items[split_index].size;
+        split_index++;
+    }
+
+    if (pack_leaf_items(
+            leaf_buffer,
+            mount->block_size,
+            items,
+            0,
+            split_index) != 0 ||
+        pack_leaf_items(
+            right_buffer,
+            mount->block_size,
+            items,
+            split_index,
+            item_count) != 0) {
+        goto cleanup;
+    }
+
+    /*
+     * Allocate a new logical block for the right-hand leaf.
+     */
+    uint32_t new_logical_block =
+        directory_inode->i_size / mount->block_size;
+
+    uint64_t new_physical_block;
+
+    if (ext4_alloc_extent(
+            mount,
+            directory_inode,
+            directory_inode_number,
+            new_logical_block,
+            1,
+            &new_physical_block) != 0 ||
+        new_physical_block > UINT32_MAX) {
+        goto cleanup;
+    }
+
+    /*
+     * Add the new split boundary to the root index.
+     *
+     * The low bit marks a continuation when the same hash appears on
+     * both sides of the split.
+     */
+    uint32_t boundary_hash = items[split_index].hash;
+
+    if (items[split_index - 1].hash == boundary_hash)
+        boundary_hash |= 1;
+
+    for (uint16_t i = count_limit->count;
+         i > target_index + 1;
+         i--) {
+        entries[i] = entries[i - 1];
+    }
+
+    entries[target_index + 1].hash = boundary_hash;
+    entries[target_index + 1].block = new_logical_block;
+
+    count_limit->count++;
+
+    directory_inode->i_size += mount->block_size;
+    directory_inode->i_blocks += mount->block_size / 512;
+
+    /*
+     * Journal both leaves, the updated root, and finally the inode.
+     */
+    result = ext3_journal_block(
+        mount,
+        leaf_physical_block,
+        leaf_buffer
+    );
+
+    if (result == 0) {
+        result = ext3_journal_block(
+            mount,
+            (uint32_t)new_physical_block,
+            right_buffer
+        );
+    }
+
+    if (result == 0) {
+        result = ext3_journal_block(
+            mount,
+            root_physical_block,
+            root_buffer
+        );
+    }
+
+    if (result == 0) {
+        result = ext2_write_inode(
+            mount,
+            directory_inode_number,
+            directory_inode
+        );
+    }
+
+cleanup:
+    if (root_buffer)
+        kfree(root_buffer);
+
+    if (leaf_buffer)
+        kfree(leaf_buffer);
+
+    if (right_buffer)
+        kfree(right_buffer);
+
+    if (items)
+        kfree(items);
+
+    return result;
 }

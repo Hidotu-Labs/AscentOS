@@ -258,13 +258,16 @@ open_done:
   if (fd < 0)
     return (uint64_t)-24; // EMFILE
 
-  klog_puts("[SYSCALL] opening: \"");
+  if (strcmp(t->comm, "htop") != 0 && strcmp(t->comm, "btop") != 0) {
+  klog_puts("[SYSCALL] open path=");
   klog_puts(path);
-  klog_puts("\" fd=");
+  klog_puts(" fd=");
   klog_uint64(fd);
   klog_puts(" tid=");
   klog_uint64(t->tid);
   klog_puts("\n");
+  }
+
 
   vfs_open(node);
   t->fds[fd] = node;
@@ -323,11 +326,13 @@ static uint64_t sys_close(uint64_t fd, uint64_t a1, uint64_t a2, uint64_t a3,
   if (!t || fd >= MAX_FDS || !t->fds[fd])
     return (uint64_t)-9;
 
+  if (strcmp(t->comm, "htop") != 0 && strcmp(t->comm, "btop") != 0) {
   klog_puts("[SYSCALL] close: fd=");
   klog_uint64(fd);
   klog_puts(" tid=");
   klog_uint64(t->tid);
   klog_puts("\n");
+  }
   vfs_close(t->fds[fd]);
   t->fds[fd] = NULL;
   return 0;
@@ -392,15 +397,20 @@ static uint64_t sys_dup2(uint64_t oldfd, uint64_t newfd, uint64_t a2,
 // read / write helpers
 // ---------------------------------------------------------------------------
 
-static void trace_weston_debug_write(struct thread *t, int fd, const void *buf,
-                                     size_t count) {
+static void trace_userspace_debug_write(struct thread *t, int fd,
+                                        const void *buf, size_t count) {
   if (!t || fd < 0 || fd >= MAX_FDS || !t->fds[fd] || !buf || count == 0)
     return;
 
-  if (strcmp(t->fds[fd]->name, "weston-debug.log") != 0)
+  const char *prefix = NULL;
+  if (strcmp(t->fds[fd]->name, "weston-debug.log") == 0)
+    prefix = "[WESTON-LOG] ";
+  else if (strcmp(t->fds[fd]->name, "xfwm4.log") == 0)
+    prefix = "[XFWM4-LOG] ";
+  else
     return;
 
-  klog_puts("[WESTON-LOG] ");
+  klog_puts(prefix);
   const char *s = (const char *)buf;
   for (size_t i = 0; i < count; i++) {
     char c = s[i];
@@ -418,7 +428,7 @@ static int64_t fd_write(int fd, const void *buf, size_t count) {
     return -9;
 
   vfs_node_t *node = t->fds[fd];
-  trace_weston_debug_write(t, fd, buf, count);
+  trace_userspace_debug_write(t, fd, buf, count);
   int32_t bytes_written =
       (int32_t)vfs_write(node, t->fd_offsets[fd], count, (uint8_t *)buf);
   if (bytes_written > 0)
@@ -705,6 +715,7 @@ static uint64_t sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,
   (void)a4;
   (void)a5;
   struct thread *t = sched_get_current();
+  if (!t || (strcmp(t->comm, "htop") != 0 && strcmp(t->comm, "btop") != 0)) {
   klog_puts("[FCNTL] tid=");
   if (t)
     klog_uint64(t->tid);
@@ -715,6 +726,7 @@ static uint64_t sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,
   klog_puts(" arg=");
   klog_uint64(arg);
   klog_puts("\n");
+  }
 
   if (!t || fd >= MAX_FDS || !t->fds[fd]) {
     klog_puts("[FCNTL] EBADF: fd=");

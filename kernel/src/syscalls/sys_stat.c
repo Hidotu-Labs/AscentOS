@@ -272,10 +272,13 @@ static uint64_t sys_getdents64(uint64_t fd, uint64_t dirp, uint64_t count,
     vfs_node_t *node = t->fds[fd];
     if ((node->flags & FS_TYPE_MASK) != FS_DIRECTORY) return (uint64_t)-20;
 
+    if (strcmp(t->comm, "htop") != 0 && strcmp(t->comm, "btop") != 0) {
     klog_puts("[SYSCALL] getdents64 tid="); klog_uint64(t->tid);
     klog_puts(" fd="); klog_uint64(fd);
     klog_puts(" path="); klog_puts(node->name);
     klog_puts("\n");
+    }
+
 
     uint8_t *buf = (uint8_t *)dirp;
     if (!buf || !is_user_ptr((uint64_t)buf)) return (uint64_t)-14;
@@ -312,7 +315,9 @@ static uint64_t sys_getdents64(uint64_t fd, uint64_t dirp, uint64_t count,
         }
 
         strcpy(entry->d_name, de->name);
+        if (strcmp(t->comm, "htop") != 0 && strcmp(t->comm, "btop") != 0) {
         klog_puts("[DIRENT] "); klog_puts(de->name); klog_puts("\n");
+        }
         written += entry_size;
         index++;
     }

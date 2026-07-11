@@ -194,6 +194,7 @@ install_apk "dbus-libs" "main"
 install_apk "cairo-gobject" "main"
 install_apk "libepoxy" "main"
 install_apk "adwaita-icon-theme" "community"
+install_apk "hicolor-icon-theme" "main"
 install_apk "iso-codes" "main"
 install_apk "wayland" "main"
 install_apk "wayland-libs-client" "main"
@@ -224,6 +225,7 @@ install_apk "mtdev" "community"
 install_apk "libxml2" "main"
 install_apk "libdisplay-info" "community"
 install_apk "eudev-libs" "main"
+install_apk "libgudev" "community"
 install_apk "pixman" "main"
 install_apk "libjpeg-turbo" "main"
 install_apk "libmount" "main"
@@ -390,10 +392,13 @@ install_apk "xfce4-panel" "community"
 install_apk "xfce4-settings" "community"
 install_apk "xfce4-terminal" "community"
 install_apk "xfconf" "community"
+install_apk "libxklavier" "community"
 install_apk "libxfce4util" "community"
 install_apk "libxfce4ui" "community"
 install_apk "garcon" "community"
 install_apk "exo" "community"
+install_apk "exo-libs" "community"
+install_apk "libxfce4panel" "community"
 install_apk "thunar" "community"
 install_apk "thunar-volman" "community"
 install_apk "tumbler" "community"
@@ -415,6 +420,16 @@ install_apk "notification-daemon" "testing" "edge"
 install_apk "polkit" "community"
 install_apk "polkit-elogind" "community"
 install_apk "upower" "community"
+install_apk "gcr" "community"
+install_apk "gcr4" "community"
+install_apk "gcr4-base" "community"
+install_apk "libsecret" "main"
+install_apk "libgcrypt" "main"
+install_apk "libgpg-error" "main"
+install_apk "p11-kit" "main"
+install_apk "libtasn1" "main"
+install_apk "libxres" "community"
+install_apk "libxpresent" "community"
 
 # xfce4-session hard dependency — libwnck3
 install_apk "libwnck3" "community"
@@ -497,6 +512,17 @@ install_apk "cmatrix" "community"
 install_apk "btop" "community" 
 
 # 4. Finalize GTK environment
+echo "[*] Building fontconfig caches for the target rootfs..."
+TARGET_LOADER="${ROOTFS_DIR}/lib/ld-musl-x86_64.so.1"
+TARGET_FC_CACHE="${ROOTFS_DIR}/usr/bin/fc-cache"
+if [ -x "${TARGET_LOADER}" ] && [ -x "${TARGET_FC_CACHE}" ]; then
+    mkdir -p "${ROOTFS_DIR}/var/cache/fontconfig"
+    "${TARGET_LOADER}" \
+        --library-path "${ROOTFS_DIR}/lib:${ROOTFS_DIR}/usr/lib" \
+        "${TARGET_FC_CACHE}" --sysroot="${ROOTFS_DIR}" --really-force \
+        --system-only
+fi
+
 echo "[*] Compiling GSettings schemas..."
 if [ -d "${ROOTFS_DIR}/usr/share/glib-2.0/schemas" ]; then
     if command -v glib-compile-schemas >/dev/null 2>&1; then
@@ -763,6 +789,7 @@ cat > "${XFCE_SESSION_DIR}/xfce4-panel.xml" << 'EOF'
 <channel name="xfce4-panel" version="1.0">
   <property name="panels" type="array">
     <value type="int" value="1"/>
+    <value type="int" value="2"/>
     <property name="panel-1" type="empty">
       <property name="position" type="string" value="p=6;x=0;y=0"/>
       <property name="length" type="uint" value="100"/>
@@ -774,11 +801,64 @@ cat > "${XFCE_SESSION_DIR}/xfce4-panel.xml" << 'EOF'
         <value type="int" value="3"/>
       </property>
     </property>
+    <property name="panel-2" type="empty">
+      <property name="position" type="string" value="p=10;x=640;y=770"/>
+      <property name="length" type="uint" value="24"/>
+      <property name="length-adjust" type="bool" value="true"/>
+      <property name="position-locked" type="bool" value="true"/>
+      <property name="size" type="uint" value="48"/>
+      <property name="plugin-ids" type="array">
+        <value type="int" value="4"/>
+        <value type="int" value="5"/>
+        <value type="int" value="6"/>
+      </property>
+    </property>
   </property>
   <property name="plugins" type="empty">
     <property name="plugin-1" type="string" value="applicationsmenu"/>
     <property name="plugin-2" type="string" value="tasklist"/>
     <property name="plugin-3" type="string" value="clock"/>
+    <property name="plugin-4" type="string" value="launcher"/>
+    <property name="plugin-5" type="string" value="launcher"/>
+    <property name="plugin-6" type="string" value="launcher"/>
+  </property>
+</channel>
+EOF
+
+XFCE_PANEL_DIR="${ROOTFS_DIR}/etc/xdg/xfce4/panel"
+mkdir -p "${XFCE_PANEL_DIR}/launcher-4" "${XFCE_PANEL_DIR}/launcher-5" \
+         "${XFCE_PANEL_DIR}/launcher-6"
+cp -f "${ROOTFS_DIR}/usr/share/applications/xfce4-terminal.desktop" \
+      "${XFCE_PANEL_DIR}/launcher-4/"
+cp -f "${ROOTFS_DIR}/usr/share/applications/thunar.desktop" \
+      "${XFCE_PANEL_DIR}/launcher-5/"
+cp -f "${ROOTFS_DIR}/usr/share/applications/xfce4-appfinder.desktop" \
+      "${XFCE_PANEL_DIR}/launcher-6/"
+
+cat > "${XFCE_SESSION_DIR}/xfce4-desktop.xml" << EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xfce4-desktop" version="1.0">
+  <property name="backdrop" type="empty">
+    <property name="screen0" type="empty">
+      <property name="monitor0" type="empty">
+        <property name="workspace0" type="empty">
+          <property name="image-style" type="int" value="5"/>
+          <property name="last-image" type="string" value="/usr/share/backgrounds/xfce/xfce-blue.jpg"/>
+        </property>
+      </property>
+      <property name="monitorHDMI-1" type="empty">
+        <property name="workspace0" type="empty">
+          <property name="image-style" type="int" value="5"/>
+          <property name="last-image" type="string" value="/usr/share/backgrounds/xfce/xfce-blue.jpg"/>
+        </property>
+      </property>
+      <property name="monitorHDMI-A-1" type="empty">
+        <property name="workspace0" type="empty">
+          <property name="image-style" type="int" value="5"/>
+          <property name="last-image" type="string" value="/usr/share/backgrounds/xfce/xfce-blue.jpg"/>
+        </property>
+      </property>
+    </property>
   </property>
 </channel>
 EOF

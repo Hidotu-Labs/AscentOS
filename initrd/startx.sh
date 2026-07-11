@@ -50,39 +50,108 @@ fi
 
 # ── XFCE4 session ────────────────────────────────────────────────────────
 if [ "${ASCENT_SESSION:-}" = "xfce4" ]; then
-    echo "[startx] Starting XFCE4 session..."
+    echo "[startx] Starting XFCE4 component session..."
     export XDG_SESSION_TYPE=x11
     export XDG_CURRENT_DESKTOP=XFCE
     export XDG_CONFIG_HOME="${HOME}/.config"
     export XDG_DATA_HOME="${HOME}/.local/share"
     export XDG_CACHE_HOME="${HOME}/.cache"
-    mkdir -p "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME"
+    export GDK_GL=disable
+    export LIBGL_DRI3_DISABLE=1
+    # AscentOS does not run the optional AT-SPI accessibility bus. GTK waits
+    # for its D-Bus reply during startup unless the bridge is disabled.
+    export NO_AT_BRIDGE=1
+    export GTK_A11Y=none
+    # Keep desktop file access local; remote GVfs backends are unnecessary for
+    # the base desktop and otherwise activate more session-bus services.
+    export GIO_USE_VFS=local
+    unset SESSION_MANAGER
     export PATH=/opt/coreutils/bin:/opt/bash/bin:/bin:/usr/local/bin:/usr/bin:/opt/tcc/bin:$PATH
-    export LD_LIBRARY_PATH=/usr/lib:/lib:/usr/local/lib:$LD_LIBRARY_PATH
+    export LD_LIBRARY_PATH=/usr/lib:/lib:/usr/local/lib:${LD_LIBRARY_PATH:-}
+    mkdir -p "$XDG_CONFIG_HOME/xfce4/xfconf/xfce-perchannel-xml" \
+             "$XDG_DATA_HOME" "$XDG_CACHE_HOME"
 
-    # Copy default xfce4 config on first run
-    if [ ! -d "$XDG_CONFIG_HOME/xfce4" ] && [ -d /etc/xdg/xfce4 ]; then
-        cp -r /etc/xdg/xfce4 "$XDG_CONFIG_HOME/xfce4"
+    # Refresh the AscentOS desktop defaults. The home directory is persistent,
+    # so otherwise an older one-panel/no-backdrop configuration wins.
+    for channel in xfwm4 xfce4-panel xfce4-desktop; do
+        src="/etc/xdg/xfce4/xfconf/xfce-perchannel-xml/$channel.xml"
+        if [ -f "$src" ]; then
+            cp -f "$src" \
+                "$XDG_CONFIG_HOME/xfce4/xfconf/xfce-perchannel-xml/$channel.xml"
+        fi
+    done
+    if [ -d /etc/xdg/xfce4/panel ]; then
+        rm -rf "$XDG_CONFIG_HOME/xfce4/panel"
+        cp -r /etc/xdg/xfce4/panel "$XDG_CONFIG_HOME/xfce4/panel"
     fi
 
-    # Load X resources if available
     if command -v xrdb >/dev/null 2>&1; then
         xrdb -merge "$HOME/.Xresources" 2>/dev/null || true
     fi
 
-    # Start D-Bus session daemon then launch xfce4-session directly.
-    # We do NOT call startxfce4 — it tries to spawn a second Xorg.
-    if command -v dbus-run-session >/dev/null 2>&1; then
-        exec dbus-run-session -- xfce4-session
-    elif command -v dbus-launch >/dev/null 2>&1; then
-        eval "$(dbus-launch --sh-syntax --exit-with-session)"
-        exec xfce4-session
-    else
-        exec xfce4-session
+    if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] &&
+       command -v dbus-launch >/dev/null 2>&1; then
+        eval "$(dbus-launch --sh-syntax --exit-with-session)" 2>/dev/null || true
     fi
-    # fallback: keep Xorg alive
-    wait "$XORG_PID"
-    exit $?
+    if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] &&
+       command -v dbus-daemon >/dev/null 2>&1; then
+        DBUS_SESSION_BUS_ADDRESS=$(dbus-daemon --session --fork --print-address=1)
+        export DBUS_SESSION_BUS_ADDRESS
+    fi
+    if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+        echo "[startx] unable to start D-Bus session bus"
+        exit 1
+    fi
+
+    XFCONFD=/usr/lib/xfce4/xfconf/xfconfd
+    if [ -x "$XFCONFD" ]; then
+        "$XFCONFD" &
+        XFCONFD_PID=$!
+        sleep 0.1
+        if ! kill -0 "$XFCONFD_PID" 2>/dev/null; then
+            echo "[startx] xfconfd failed to initialize"
+            exit 1
+        fi
+    fi
+
+    XFWM_LOG=/tmp/xfwm4.log
+    rm -f "$XFWM_LOG"
+    xfwm4 --replace --compositor=off --vblank=off >"$XFWM_LOG" 2>&1 &
+    XFWM_PID=$!
+    sleep 0.2
+    if ! kill -0 "$XFWM_PID" 2>/dev/null; then
+        echo "[startx] xfwm4 failed to initialize"
+        wait "$XFWM_PID"
+        status=$?
+        echo "[startx] --- xfwm4 output ---"
+        cat "$XFWM_LOG" 2>/dev/null || true
+        exit "$status"
+    fi
+
+    xfsettingsd &
+    XFSETTINGS_PID=$!
+    xfdesktop &
+    XFDESKTOP_PID=$!
+    # Apply the wallpaper shortly after xfdesktop claims the root window,
+    # without blocking the rest of the desktop startup.
+    if command -v feh >/dev/null 2>&1; then
+        ( sleep 0.2; feh --no-fehbg --bg-fill \
+            /usr/share/backgrounds/xfce/xfce-blue.jpg \
+            >/tmp/xfce-wallpaper.log 2>&1 ) &
+    fi
+    xfce4-panel &
+    XFPANEL_PID=$!
+
+    wait "$XFWM_PID"
+    status=$?
+    if [ "$status" -ne 0 ]; then
+        echo "[startx] xfwm4 exited with status $status"
+        echo "[startx] --- xfwm4 output ---"
+        cat "$XFWM_LOG" 2>/dev/null || true
+    fi
+    kill "$XFSETTINGS_PID" "$XFDESKTOP_PID" "$XFPANEL_PID" \
+         "${XFCONFD_PID:-}" 2>/dev/null || true
+    exit "$status"
 fi
 
 # ── Default: IceWM session (original behaviour) ───────────────────────────

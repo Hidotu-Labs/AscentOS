@@ -52,7 +52,7 @@ typedef struct vfs_mount_entry {
 static vfs_mount_entry_t *vfs_mount_list = NULL;
 
 /* Bounded positive dentry cache. Each entry owns one child reference. */
-#define VFS_DENTRY_CACHE_SIZE 256
+#define VFS_DENTRY_CACHE_SIZE 4096
 
 typedef struct vfs_dentry_cache_entry {
   vfs_node_t *parent;

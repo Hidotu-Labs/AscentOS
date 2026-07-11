@@ -13,6 +13,9 @@
 #include "../mm/vmm.h"
 #include "../smp/cpu.h"
 
+// Futex waiter records are stack-resident and must be detached before a
+// forced-exit thread stack is released.
+void futex_remove_thread_waiters(struct thread *thread);
 
 static void ipi_reschedule_handler(struct registers *regs) {
   (void)regs;
@@ -1098,6 +1101,8 @@ void sched_reap_thread(struct thread *t) {
   klog_uint64(t->tid);
   klog_puts("\n");
 
+  futex_remove_thread_waiters(t);
+
   /* The reap-queue claimant already verified sched_thread_off_cpu() while
    * holding reap_queue_lock. DEAD threads cannot become runnable again, so
    * repeating that check here can only spin forever on a stale hazard. */
@@ -1124,7 +1129,16 @@ void sched_reap_thread(struct thread *t) {
   }
 
   // 1.75 Remove from parent's children list
+  bool parent_is_live = false;
   if (t->parent) {
+    for (struct thread *it = global_thread_list; it; it = it->global_next) {
+      if (it == t->parent) {
+        parent_is_live = true;
+        break;
+      }
+    }
+  }
+  if (parent_is_live) {
     if (t->parent->children == t) {
       t->parent->children = t->sibling_next;
     } else {
@@ -1135,6 +1149,18 @@ void sched_reap_thread(struct thread *t) {
         p->sibling_next = t->sibling_next;
     }
   }
+
+  // exit_group can reap related clone threads in any order. Clear every
+  // surviving back-pointer before the thread object is freed.
+  for (struct thread *it = global_thread_list; it; it = it->global_next) {
+    if (it->parent == t) {
+      it->parent = NULL;
+      it->sibling_next = NULL;
+    }
+  }
+  t->parent = NULL;
+  t->children = NULL;
+  t->sibling_next = NULL;
   spinlock_release(&tid_lock);
 
   /* Monitoring tools poll /proc continuously. Drop the cached PID tree

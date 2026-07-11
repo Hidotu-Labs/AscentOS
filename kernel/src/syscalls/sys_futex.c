@@ -69,6 +69,29 @@ static inline uint32_t futex_hash_key(uint64_t phys_addr) {
   return (uint32_t)(h & (FUTEX_HASH_SIZE - 1));
 }
 
+// Remove every waiter owned by a thread that is about to be reaped. Futex
+// waiters live in futex_wait() stack frames; forced exit_group teardown does
+// not return through that function, so entries must be detached before the
+// kernel stack is released.
+void futex_remove_thread_waiters(struct thread *thread) {
+  if (!thread || !futex_initialized)
+    return;
+
+  for (uint32_t bucket = 0; bucket < FUTEX_HASH_SIZE; bucket++) {
+    spinlock_acquire(&futex_hash[bucket].lock);
+    struct futex_waiter **pp = &futex_hash[bucket].head;
+    while (*pp) {
+      struct futex_waiter *waiter = *pp;
+      if (waiter->thread == thread) {
+        *pp = waiter->next;
+      } else {
+        pp = &waiter->next;
+      }
+    }
+    spinlock_release(&futex_hash[bucket].lock);
+  }
+}
+
 // Resolve user virtual address to physical address
 static uint64_t futex_get_phys(uint32_t *uaddr) {
   struct thread *t = sched_get_current();

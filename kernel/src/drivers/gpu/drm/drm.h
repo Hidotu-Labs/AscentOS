@@ -137,9 +137,13 @@ struct drm_mode_crtc {
   uint32_t crtc_id;
   uint32_t fb_id;
   uint32_t x, y;
+  uint32_t gamma_size;
   uint32_t mode_valid;
   struct drm_mode_modeinfo mode;
 };
+
+_Static_assert(sizeof(struct drm_mode_crtc) == 104, "drm_mode_crtc ABI size");
+_Static_assert(offsetof(struct drm_mode_crtc, mode) == 36, "drm_mode_crtc ABI mode offset");
 
 struct drm_mode_fb_cmd {
   uint32_t fb_id;
