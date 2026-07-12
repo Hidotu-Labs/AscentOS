@@ -74,17 +74,9 @@ rm -f "$TMPPART"; TMPPART=""
 # Kernel
 cp -v "kernel/bin-${ARCH}/kernel"   "$ISO_ROOT/boot/"
 
-# Limine config — patched version with the module entry added
-# (the source limine.conf stays clean for make run)
-sed '/^\/AscentOS/,/^$/{ /path:.*kernel$/a\    module_path: boot():/disk.img\n    module_string: disk.img
-}' limine.conf > "$ISO_ROOT/boot/limine/limine.conf"
-# Verify the patch worked; fall back to awk if sed variant doesn't support it
-if ! grep -q "module_path" "$ISO_ROOT/boot/limine/limine.conf"; then
-    awk '
-        /path:.*kernel$/ { print; print "    module_path: boot():/disk.img"; print "    module_string: disk.img"; next }
-        { print }
-    ' limine.conf > "$ISO_ROOT/boot/limine/limine.conf"
-fi
+# Limine loads the embedded disk image as a boot module. The kernel's ramdisk
+# driver locates it by the module string/path and exposes its first partition.
+cp -v limine.conf "$ISO_ROOT/boot/limine/"
 
 [ -f assets/boo.png ] && cp -v assets/boo.png "$ISO_ROOT/boot/limine/"
 cp -v limine/limine-bios.sys         "$ISO_ROOT/boot/limine/"
@@ -93,7 +85,7 @@ cp -v limine/limine-uefi-cd.bin      "$ISO_ROOT/boot/limine/"
 cp -v limine/BOOTX64.EFI             "$ISO_ROOT/EFI/BOOT/"
 cp -v limine/BOOTIA32.EFI            "$ISO_ROOT/EFI/BOOT/" 2>/dev/null || true
 
-echo "[INFO] Patched limine.conf for dist ISO:"
+echo "[INFO] Limine config for dist ISO:"
 grep -A5 "^/AscentOS" "$ISO_ROOT/boot/limine/limine.conf"
 
 # ── Generate the ISO ─────────────────────────────────────────────────────────

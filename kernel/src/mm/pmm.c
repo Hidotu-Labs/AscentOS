@@ -650,11 +650,10 @@ void pmm_reclaim_bootloader(uint64_t kernel_phys_base) {
     if (entry->type == LIMINE_MEMMAP_BOOTLOADER_RECLAIMABLE) {
       reclaim = true;
     } else if (entry->type == LIMINE_MEMMAP_EXECUTABLE_AND_MODULES) {
-      // Keep only the kernel image, reclaim other modules/initrd
-      if (kernel_phys_base < entry->base ||
-          kernel_phys_base >= (entry->base + entry->length)) {
-        reclaim = true;
-      }
+      // Keep executable/module pages reserved. Boot modules may directly back
+      // long-lived devices such as ram0, so reclaiming them would corrupt the
+      // device after registration.
+      (void)kernel_phys_base;
     }
 
     if (reclaim) {

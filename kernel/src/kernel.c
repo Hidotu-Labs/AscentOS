@@ -29,6 +29,7 @@
 #include "drivers/storage/ata.h"
 #include "drivers/storage/block.h"
 #include "drivers/storage/nvme.h"
+#include "drivers/storage/ramdisk.h"
 #include "drivers/timer/hpet.h"
 #include "drivers/timer/pit.h"
 #include "drivers/timer/rtc.h"
@@ -120,6 +121,10 @@ __attribute__((
     used,
     section(".limine_requests"))) static volatile struct limine_dtb_request
     dtb_request = {.id = LIMINE_DTB_REQUEST_ID, .revision = 0};
+
+__attribute__((used, section(".limine_requests"))) static volatile struct
+    limine_module_request module_request = {
+        .id = LIMINE_MODULE_REQUEST_ID, .revision = 0};
 
 __attribute__((used, section(".limine_requests_end"))) static volatile uint64_t
     limine_requests_end_marker[2] = LIMINE_REQUESTS_END_MARKER;
@@ -369,6 +374,11 @@ void kmain_high_half(void) {
   if (executable_address_request.response) {
     k_phys = executable_address_request.response->physical_base;
   }
+
+  // Register an embedded disk.img before probing hardware-backed storage.
+  // Its pages remain reserved by PMM for as long as ram0 uses them.
+  ramdisk_init(module_request.response);
+
   pmm_reclaim_bootloader(k_phys);
 
   // Initialize Virtual Filesystem and Ramfs

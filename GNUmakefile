@@ -111,7 +111,7 @@ run-dist: edk2-ovmf ascentos-dist.iso
 		-serial stdio \
 		$(QEMUFLAGS)
 
-ascentos-dist.iso: limine/limine kernel disk.img
+ascentos-dist.iso: limine/limine kernel disk.img limine.conf create_dist_usb.sh
 	./create_dist_usb.sh ascentos-dist.iso
 
 .PHONY: run-x86_64
@@ -133,7 +133,6 @@ run-x86_64: edk2-ovmf $(IMAGE_NAME).iso disk.img nvme.img
 		-device usb-tablet,bus=ehci.0 \
 		-drive file=nvme.img,if=none,id=nvm0 \
 		-device nvme,drive=nvm0,serial=ascentos-nvme-0 \
-		-device usb-kbd,bus=ehci.0 \
 		$(QEMUFLAGS)
 
 .PHONY: run-bios
@@ -576,12 +575,15 @@ setup:
 kernel: setup
 	$(MAKE) -C kernel
 
-$(IMAGE_NAME).iso: limine/limine kernel
+$(IMAGE_NAME).iso: limine/limine kernel limine.conf
 	rm -rf iso_root
 	mkdir -p iso_root/boot
 	cp -v kernel/bin-$(ARCH)/kernel iso_root/boot/
 	mkdir -p iso_root/boot/limine
-	cp -v limine.conf iso_root/boot/limine/
+	# The regular ISO expects disk.img as a separate QEMU drive. Only the
+	# self-contained dist ISO copies the module-enabled configuration verbatim.
+	sed '/^[[:space:]]*module_path: boot():\/disk.img$$/d; /^[[:space:]]*module_string: disk.img$$/d' \
+		limine.conf > iso_root/boot/limine/limine.conf
 	cp -v assets/boo.png iso_root/boot/limine/
 	mkdir -p iso_root/EFI/BOOT
 	cp -v limine/limine-bios.sys limine/limine-bios-cd.bin limine/limine-uefi-cd.bin iso_root/boot/limine/
