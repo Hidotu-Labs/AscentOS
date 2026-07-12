@@ -19,7 +19,17 @@ void futex_remove_thread_waiters(struct thread *thread);
 
 static void ipi_reschedule_handler(struct registers *regs) {
   (void)regs;
-  // EOI is handled by isr_handler
+  /*
+   * sched_yield() may switch away from this interrupt context indefinitely.
+   * Acknowledging the IPI in the common ISR epilogue is therefore too late:
+   * the LAPIC keeps the reschedule vector in-service and can withhold later
+   * timer/IPI delivery from this CPU.  This is especially easy to trigger
+   * when an exiting child wakes its parent on another CPU under KVM.
+   *
+   * The common epilogue will issue a second EOI if this context eventually
+   * resumes; as with the LAPIC timer handler, that redundant EOI is harmless.
+   */
+  lapic_send_eoi();
   sched_yield();
 }
 
@@ -113,7 +123,18 @@ void sched_release_files(struct thread *t) {
 
   struct fd_table *files = t->files;
   bool last = false;
+  if (t->is_forked_child) {
+    klog_puts("[FDDBG] lock table ");
+    klog_hex64((uint64_t)files);
+    klog_puts(" refs=");
+    klog_uint64(files->ref_count);
+    klog_puts(" locked=");
+    klog_uint64(files->lock.locked);
+    klog_puts("\n");
+  }
   spinlock_acquire(&files->lock);
+  if (t->is_forked_child)
+    klog_puts("[FDDBG] table locked\n");
   if (--files->ref_count == 0)
     last = true;
   spinlock_release(&files->lock);
@@ -125,10 +146,21 @@ void sched_release_files(struct thread *t) {
   for (int i = 0; i < MAX_FDS; i++) {
     if (files->fds[i] && files->fds[i] != (vfs_node_t *)-1) {
       vfs_node_t *node = files->fds[i];
+      if (t->is_forked_child) {
+        klog_puts("[FDDBG] closing fd ");
+        klog_uint64(i);
+        klog_puts(" node=");
+        klog_hex64((uint64_t)node);
+        klog_puts(" refs=");
+        klog_uint64(node->refcount);
+        klog_puts("\n");
+      }
       files->fds[i] = NULL;
       fd_path_put(files->fd_paths[i]);
       files->fd_paths[i] = NULL;
       vfs_close(node);
+      if (t->is_forked_child)
+        klog_puts("[FDDBG] close returned\n");
     }
   }
   kfree(files);
@@ -216,8 +248,11 @@ void sched_init(void) {
 
   for (uint32_t i = 0; i < count; i++) {
     struct cpu_info *cpu = cpu_get_info(i);
-    if (!cpu || cpu->status == CPU_STATUS_OFFLINE)
+    // Initialize AP scheduler state before cpu_init_aps() starts its timer.
+    if (!cpu)
       continue;
+
+    spinlock_init(&cpu->queue_lock);
 
     // Initialize all runqueues
     for (int p = 0; p < SCHED_PRIORITY_LEVELS; p++) {
@@ -283,7 +318,6 @@ void sched_init(void) {
       idle_thread->cpu_affinity = ~0ULL;
     spinlock_release(&tid_lock);
 
-    spinlock_release(&cpu->queue_lock);
   }
 }
 
@@ -542,6 +576,10 @@ static void sched_balance(struct cpu_info *cpu) {
       // Find a READY thread (don't steal the currently running one).
       // Ensure the thread is allowed to run on THIS CPU (the stealing CPU).
       if (curr->state == THREAD_READY && !curr->is_idle &&
+          curr != __atomic_load_n(&richest_cpu->current_thread,
+                                  __ATOMIC_ACQUIRE) &&
+          curr != __atomic_load_n(&richest_cpu->switching_from,
+                                  __ATOMIC_ACQUIRE) &&
           (curr->cpu_affinity & (1ULL << cpu->cpu_id))) {
         stolen = curr;
 
@@ -1270,6 +1308,7 @@ struct thread *sched_get_thread_by_tid(uint32_t tid) {
     }
     curr = curr->global_next;
   }
+  spinlock_release(&tid_lock);
   return NULL;
 }
 
@@ -1306,7 +1345,10 @@ void sched_wakeup(struct thread *t) {
        * current thread is still included in runnable_count in that window. */
       bool still_current =
           __atomic_load_n(&target->current_thread, __ATOMIC_ACQUIRE) == t;
-      t->state = THREAD_READY;
+      /* A wake that beats the caller into sched_yield() cancels the
+       * block; the task is still executing and must never be published READY
+       * for another CPU to steal. */
+      t->state = still_current ? THREAD_RUNNING : THREAD_READY;
       t->wakeup_ticks = 0;
       target->runqueue_bitmap |= (1 << t->priority);
       if (!still_current)

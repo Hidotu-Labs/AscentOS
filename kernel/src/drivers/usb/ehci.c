@@ -547,10 +547,10 @@ void ehci_init(void) {
       uintptr_t phys_base = pdev->bar[0] & 0xFFFFFFF0;
       uintptr_t virt_base = phys_base + pmm_get_hhdm_offset();
 
-      vmm_map_page(vmm_get_active_pml4(), virt_base, phys_base,
-                   PAGE_FLAG_RW | PAGE_FLAG_PRESENT);
-      vmm_map_page(vmm_get_active_pml4(), virt_base + 0x1000,
-                   phys_base + 0x1000, PAGE_FLAG_RW | PAGE_FLAG_PRESENT);
+      /* The kernel HHDM already covers physical MMIO addresses. Reinstalling
+       * these mappings is both redundant and unsafe during SMP early boot: it
+       * turns a simple probe into a synchronous global TLB shootdown before
+       * the APs are doing useful work. */
 
       hc->cap_base = virt_base;
       uint8_t cap_len = ehci_read_cap8(hc, EHCI_CAP_CAPLENGTH);
@@ -697,4 +697,3 @@ struct ehci_controller *ehci_get_controller(int index) {
     return NULL;
   return &controllers[index];
 }
-

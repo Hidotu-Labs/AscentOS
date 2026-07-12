@@ -244,6 +244,7 @@ install_apk "libpciaccess" "main"
 install_apk "gcompat" "main"
 install_apk "libucontext" "main"
 install_apk "libucontext-dev" "main"
+install_apk "jansson" "main"
 
 # Keep musl's runtime linker search path explicit inside AscentOS.
 # Some early userspace paths only reliably resolve shared objects from /lib.

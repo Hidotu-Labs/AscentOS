@@ -355,7 +355,11 @@ void kfree(void *ptr) {
   if (magic_check == BIG_MAGIC) {
     struct big_alloc *b = (struct big_alloc *)page_base;
 
-    // Unlink globally
+    // Detach the allocation while holding the metadata lock, but never keep
+    // heap_lock across vmm_unmap_page().  Unmapping a kernel address performs
+    // a synchronous cross-CPU TLB shootdown.  A remote CPU spinning on this
+    // lock has interrupts disabled and therefore cannot acknowledge that IPI,
+    // which deadlocks both CPUs.
     if (b->prev)
       b->prev->next = b->next;
     else
@@ -364,17 +368,19 @@ void kfree(void *ptr) {
       b->next->prev = b->prev;
 
     size_t pages = b->pages;
+    b->magic = 0;
+    spinlock_release(&heap_lock);
+
     uint64_t *pml4 = vmm_get_active_pml4();
-
     uint64_t phys_addr = vmm_virt_to_phys(pml4, page_base);
-
-    for (size_t i = 0; i < pages; i++) {
+    for (size_t i = 0; i < pages; i++)
       vmm_unmap_page(pml4, page_base + i * PAGE_SIZE);
-    }
-
     pmm_free_pages((void *)phys_addr, pages);
-    release_virtual_space(page_base, pages);
 
+    // Publish the now-unused virtual range only after every old mapping has
+    // been removed, so a concurrent kmalloc cannot reuse it prematurely.
+    spinlock_acquire(&heap_lock);
+    release_virtual_space(page_base, pages);
     spinlock_release(&heap_lock);
     return;
   }

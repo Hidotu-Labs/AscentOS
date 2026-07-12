@@ -47,9 +47,10 @@
 #define LAPIC_ICR_NMI (4 << 8)
 #define LAPIC_ICR_INIT (5 << 8)
 #define LAPIC_ICR_STARTUP (6 << 8)
-#define LAPIC_ICR_LEVEL (1 << 14)
-#define LAPIC_ICR_ASSERT (1 << 15)
+#define LAPIC_ICR_ASSERT (1 << 14) // Level field: assert
 #define LAPIC_ICR_DEASSERT (0 << 14)
+#define LAPIC_ICR_LEVEL (1 << 15)  // Trigger mode: level
+#define LAPIC_ICR_EDGE (0 << 15)
 #define LAPIC_ICR_PENDING (1 << 12)
 
 // Timer Modes

@@ -99,13 +99,15 @@ void lapic_init(uint64_t base_phys) {
 void lapic_send_ipi(uint32_t lapic_id, uint8_t vector) {
   if (!lapic_base) return;
   lapic_write(LAPIC_ICR_HIGH, lapic_id << 24);
-  lapic_write(LAPIC_ICR_LOW, LAPIC_ICR_ASSERT | LAPIC_ICR_FIXED | vector);
+  /* Fixed IPIs use edge trigger; level+deassert is not deliverable. */
+  lapic_write(LAPIC_ICR_LOW, LAPIC_ICR_FIXED | LAPIC_ICR_EDGE | vector);
   // Wait for delivery
   while (lapic_read(LAPIC_ICR_LOW) & LAPIC_ICR_PENDING);
 }
 
 void lapic_send_ipi_all_but_self(uint8_t vector) {
   if (!lapic_base) return;
-  lapic_write(LAPIC_ICR_LOW, LAPIC_ICR_ASSERT | LAPIC_ICR_FIXED | LAPIC_ICR_DEST_ALL_BUT_SELF | vector);
+  lapic_write(LAPIC_ICR_LOW, LAPIC_ICR_FIXED | LAPIC_ICR_EDGE |
+                               LAPIC_ICR_DEST_ALL_BUT_SELF | vector);
   while (lapic_read(LAPIC_ICR_LOW) & LAPIC_ICR_PENDING);
 }

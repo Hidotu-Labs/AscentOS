@@ -429,9 +429,9 @@ static int ahci_probe(struct device *dev) {
   uint64_t phys_abar = abar & 0xFFFFFFF0;
   uint64_t virt_abar = phys_abar + pmm_get_hhdm_offset();
   
-  // Map ABAR
-  vmm_map_page(vmm_get_active_pml4(), virt_abar, phys_abar, PAGE_FLAG_RW | PAGE_FLAG_PRESENT);
-  vmm_map_page(vmm_get_active_pml4(), virt_abar + 0x1000, phys_abar + 0x1000, PAGE_FLAG_RW | PAGE_FLAG_PRESENT);
+  // The kernel accesses PCI MMIO through the existing HHDM mapping. Do not
+  // reinstall it here: remapping during SMP early boot requires a global TLB
+  // shootdown and can deadlock idle APs.
 
   hba = (ahci_hba_mem_t *)virt_abar;
   hba->ghc |= (1 << 31); // AHCI Enable

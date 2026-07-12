@@ -101,6 +101,19 @@ all: $(IMAGE_NAME).iso
 .PHONY: run
 run: run-$(ARCH)
 
+.PHONY: run-dist
+run-dist: edk2-ovmf ascentos-dist.iso
+	qemu-system-$(ARCH) \
+		-M q35 \
+		-drive if=pflash,unit=0,format=raw,file=edk2-ovmf/ovmf-code-$(ARCH).fd,readonly=on \
+		-cdrom ascentos-dist.iso \
+		-m 2G \
+		-serial stdio \
+		$(QEMUFLAGS)
+
+ascentos-dist.iso: limine/limine kernel disk.img
+	./create_dist_usb.sh ascentos-dist.iso
+
 .PHONY: run-x86_64
 run-x86_64: edk2-ovmf $(IMAGE_NAME).iso disk.img nvme.img
 	qemu-system-$(ARCH) \
@@ -183,7 +196,7 @@ run-fat32: edk2-ovmf $(IMAGE_NAME).iso fat32_test.img
 disk.img: scripts/configure-accounts.sh userland/ascent-account userland/test_accounts.sh userland/ascent-login.elf
 disk.img:  userland/dns_lookup.elf
 disk.img: userland/test_clone_futex.elf
-disk.img: assets/boot.wav assets/test.wav assets/jane.mp3 assets/doom1.wad assets/mc9.mp3 assets/train.mp3 assets/test.bmp assets/test.tar assets/room.png assets/logo.png assets/linus.gif userland/forkit.elf userland/about.elf userland/hello_glibc.elf userland/booter.elf userland/reboot.elf userland/shutdown.elf userland/apm.elf userland/test_cpp.elf  userland/kilo.elf  userland/ls.elf userland/lspci.elf userland/lsblk.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/asplay.elf userland/kria.elf userland/doom.elf userland/xrootcursor.elf  userland/jwm.elf userland/doom_x11.elf userland/gtk_test.elf userland/tglgears_fb.elf userland/tglgears_drm.elf userland/tglhello_drm.elf userland/test_mem_stress.elf userland/classicube.elf userland/terrain.png userland/texpacks/classicube.zip initrd/startx.sh initrd/startw.sh initrd/weston.ini userland/ascentd.elf $(ASCENTD_CONFIG_FILES)
+disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets/doom1.wad assets/mc9.mp3 assets/train.mp3 assets/test.bmp assets/test.tar assets/room.png assets/logo.png assets/linus.gif userland/forkit.elf userland/about.elf userland/hello_glibc.elf userland/booter.elf userland/reboot.elf userland/shutdown.elf userland/apm.elf userland/test_cpp.elf  userland/kilo.elf  userland/ls.elf userland/lspci.elf userland/lsblk.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/asplay.elf userland/kria.elf userland/doom.elf userland/xrootcursor.elf  userland/jwm.elf userland/doom_x11.elf userland/gtk_test.elf userland/tglgears_fb.elf userland/tglgears_drm.elf userland/tglhello_drm.elf userland/test_mem_stress.elf userland/classicube.elf userland/terrain.png userland/texpacks/classicube.zip initrd/startx.sh initrd/startw.sh initrd/weston.ini userland/ascentd.elf $(ASCENTD_CONFIG_FILES)
 	@echo "Creating root filesystem (ext4)..."
 	rm -f ./part.img
 	dd if=/dev/zero of=./part.img bs=1M count=2047
@@ -288,6 +301,8 @@ disk.img: assets/boot.wav assets/test.wav assets/jane.mp3 assets/doom1.wad asset
 		echo "rm boot.wav"; \
 		echo "write assets/doom1.wad doom1.wad"; \
 		echo "rm doom1.wad"; \
+		echo "write userland/test.c test.c"; \
+		echo "rm test.c"; \
 		echo "write assets/boot.wav boot.wav"; \
 		echo "rm jane.mp3"; \
 		echo "write assets/jane.mp3 jane.mp3"; \

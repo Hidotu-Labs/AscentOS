@@ -70,14 +70,14 @@ static int nvme_probe(struct device *dev) {
   }
   uintptr_t virt_base = phys_base + pmm_get_hhdm_offset();
 
-  // Map first two pages (8KB) - minimum for registers.
-  // Spec usually wants more for doorbells depending on CAP.STRIDE
+  // PCI can place a 64-bit BAR above the physical range covered by Limine's
+  // HHDM (QEMU commonly places NVMe at 0x380000000000). Install explicit
+  // mappings for the register and doorbell pages. These PTEs are fresh, so
+  // vmm_map_page does not require a TLB shootdown.
   vmm_map_page(vmm_get_active_pml4(), virt_base, phys_base,
                PAGE_FLAG_RW | PAGE_FLAG_PRESENT);
   vmm_map_page(vmm_get_active_pml4(), virt_base + 0x1000, phys_base + 0x1000,
                PAGE_FLAG_RW | PAGE_FLAG_PRESENT);
-  // Doorbell registers usually start at 0x1000, so we need at least 2 pages.
-  // However, depending on the number of queues, we might need significantly
 
 
   nvme->regs = (nvme_regs_t *)virt_base;
@@ -545,8 +545,12 @@ static int nvme_setup_msix(struct nvme_controller *nvme,
   }
 
   uintptr_t table_virt = (phys_base + offset) + pmm_get_hhdm_offset();
-  vmm_map_page(vmm_get_active_pml4(), table_virt, phys_base + offset,
-               PAGE_FLAG_RW | PAGE_FLAG_PRESENT);
+  uint64_t table_page = table_virt & ~0xFFFULL;
+  uint64_t table_phys_page = (phys_base + offset) & ~0xFFFULL;
+  uint64_t *active_pml4 = vmm_get_active_pml4();
+  if (vmm_virt_to_phys(active_pml4, table_page) == 0)
+    vmm_map_page(active_pml4, table_page, table_phys_page,
+                 PAGE_FLAG_RW | PAGE_FLAG_PRESENT);
   nvme->msix_table_virt = (void *)table_virt;
 
   nvme->irq_vector = 0x2E; // Using a vector already in the IDT (46)

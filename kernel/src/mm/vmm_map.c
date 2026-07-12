@@ -98,6 +98,24 @@ static bool vmm_map_page_nolock(uint64_t *pml4, uint64_t virtual_addr,
   return true;
 }
 
+// Caller holds vmm_lock. Check leaf presence without allocating page-table
+// levels. Fresh mappings must not wait for a remote TLB acknowledgement.
+static bool vmm_page_present_nolock(uint64_t *pml4, uint64_t virtual_addr) {
+  size_t pml4_index = (virtual_addr >> 39) & 0x1FF;
+  size_t pdpt_index = (virtual_addr >> 30) & 0x1FF;
+  size_t pd_index = (virtual_addr >> 21) & 0x1FF;
+  size_t pt_index = (virtual_addr >> 12) & 0x1FF;
+
+  uint64_t *pml4_virt = (uint64_t *)PHYS_TO_VIRT((uint64_t)pml4);
+  uint64_t *pdpt = get_next_level(pml4_virt, pml4_index, false);
+  if (!pdpt) return false;
+  uint64_t *pd = get_next_level(pdpt, pdpt_index, false);
+  if (!pd) return false;
+  if (pd[pd_index] & PAGE_FLAG_PS) return true;
+  uint64_t *pt = get_next_level(pd, pd_index, false);
+  return pt && (pt[pt_index] & PAGE_FLAG_PRESENT);
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -105,9 +123,12 @@ static bool vmm_map_page_nolock(uint64_t *pml4, uint64_t virtual_addr,
 bool vmm_map_page(uint64_t *pml4, uint64_t virtual_addr, uint64_t physical_addr,
                   uint64_t flags) {
   spinlock_acquire(&vmm_lock);
-  // Always flush: public callers may be replacing an existing mapping
-  // (CoW break, mprotect, remap), so we must evict any stale TLB entry.
-  bool ok = vmm_map_page_nolock(pml4, virtual_addr, physical_addr, flags, true);
+  // A brand-new PTE cannot have a stale TLB translation on another CPU.
+  // Replacing any present mapping (including changing flags on the same
+  // physical page) still requires the normal synchronous shootdown.
+  bool replacing = vmm_page_present_nolock(pml4, virtual_addr);
+  bool ok = vmm_map_page_nolock(pml4, virtual_addr, physical_addr, flags,
+                                replacing);
   spinlock_release(&vmm_lock);
   return ok;
 }

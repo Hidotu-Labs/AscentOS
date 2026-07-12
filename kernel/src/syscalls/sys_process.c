@@ -93,6 +93,8 @@ extern void fork_return_to_userspace(struct syscall_regs *regs)
 #define IA32_KERNEL_GS_BASE 0xC0000102
 #define IA32_FS_BASE 0xC0000100
 
+extern spinlock_t tid_lock;
+
 // exit / exit_group (shared)
 void process_do_exit(uint64_t status) __attribute__((noreturn));
 void process_do_exit(uint64_t status) {
@@ -115,20 +117,26 @@ void process_do_exit(uint64_t status) {
     klog_puts("\n");
   }
 
+  klog_puts("[EXITDBG] begin cleanup\n");
+
   // Common cleanup. CLONE_FILES tables remain alive until the final thread
   // drops its reference; closing every fd on each pthread exit would break
   // descriptors still in use by its siblings.
   if (current) {
     sched_release_files(current);
+    klog_puts("[EXITDBG] files released\n");
 
     if (current->cwd_node) {
       vfs_close(current->cwd_node);
       current->cwd_node = NULL;
     }
+    klog_puts("[EXITDBG] cwd released\n");
   }
 
   if (current && current->is_forked_child) {
     current->exit_status = (int)status;
+
+    struct thread *parent_to_wake = NULL;
 
     // Thread-group members are not waitable children. Keeping them as
     // zombies retains their large struct thread and kernel stack forever.
@@ -138,12 +146,21 @@ void process_do_exit(uint64_t status) {
       current->state = THREAD_DEAD;
       sched_queue_reap(current);
     } else {
+      /* Serialize zombie publication with wait4's transition to BLOCKED. */
+      klog_puts("[EXITDBG] publishing zombie\n");
+      spinlock_acquire(&tid_lock);
       current->state = THREAD_ZOMBIE;
+      if (current->parent && current->parent->state == THREAD_BLOCKED)
+        parent_to_wake = current->parent;
+      spinlock_release(&tid_lock);
+      klog_puts("[EXITDBG] zombie published\n");
     }
 
-    if (!(current->clone_flags & CLONE_THREAD) && current->parent &&
-        current->parent->state == THREAD_BLOCKED)
-      sched_wakeup(current->parent);
+    if (parent_to_wake) {
+      klog_puts("[EXITDBG] waking parent\n");
+      sched_wakeup(parent_to_wake);
+      klog_puts("[EXITDBG] parent wake returned\n");
+    }
 
     // Reaping handles the address-space reference after this task is off-CPU.
     if (current->cr3) {
@@ -152,6 +169,7 @@ void process_do_exit(uint64_t status) {
     }
 
     // Sleep forever; the parent will reap us.
+    klog_puts("[EXITDBG] yielding zombie\n");
     while (1) {
       sched_yield();
     }
@@ -319,6 +337,7 @@ static uint64_t sys_wait4(uint64_t pid, uint64_t wstatus_ptr, uint64_t options,
   while (1) {
     bool has_matching_children = false;
     struct thread *zombie = NULL;
+    bool should_block = false;
 
     spinlock_acquire(&tid_lock);
     struct thread *t = current->children;
@@ -357,6 +376,11 @@ static uint64_t sys_wait4(uint64_t pid, uint64_t wstatus_ptr, uint64_t options,
       }
       t = t->sibling_next;
     }
+    /* Publish BLOCKED while child exit is excluded from publishing ZOMBIE. */
+    if (!zombie && has_matching_children && !(options & WNOHANG)) {
+      current->state = THREAD_BLOCKED;
+      should_block = true;
+    }
     spinlock_release(&tid_lock);
 
     if (zombie) {
@@ -366,8 +390,10 @@ static uint64_t sys_wait4(uint64_t pid, uint64_t wstatus_ptr, uint64_t options,
       }
       uint32_t reaped_pid = zombie->tid;
 
-      // Fully reap the zombie
-      sched_reap_thread(zombie);
+      // Destruction must wait until the exiting child has switched off its
+      // kernel stack.  On SMP the awakened parent can run concurrently with
+      // process_do_exit(), so direct reaping here would free a live stack.
+      sched_queue_reap(zombie);
 
       return (uint64_t)reaped_pid;
     }
@@ -381,9 +407,9 @@ static uint64_t sys_wait4(uint64_t pid, uint64_t wstatus_ptr, uint64_t options,
       return 0;
     }
 
-    // Block and wait for a child to exit
-    current->state = THREAD_BLOCKED;
-    sched_yield();
+    // Block and wait for a child to exit.
+    if (should_block)
+      sched_yield();
   }
 }
 
