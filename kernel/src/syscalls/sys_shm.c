@@ -393,6 +393,12 @@ int64_t sys_shmctl(uint64_t shmid, uint64_t cmd, uint64_t buf, uint64_t a3,
   (void)a4;
   (void)a5;
 
+  klog_puts("[SHM] shmctl shmid=");
+  klog_uint64(shmid);
+  klog_puts(" cmd=");
+  klog_uint64(cmd);
+  klog_puts("\n");
+
   spinlock_acquire(&shm_lock);
 
   struct shm_segment *seg = NULL;

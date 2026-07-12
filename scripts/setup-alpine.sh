@@ -216,6 +216,11 @@ install_apk "vulkan-loader" "main"
 install_apk "mesa-gl" "main"
 install_apk "mesa-gles" "main"
 install_apk "mesa-vulkan-swrast" "main"
+install_apk "mesa-demos" "community"
+install_apk "freeglut" "community"
+# Alpine names the classic GLX demo "gears"; preserve the conventional command.
+rm -f "${ROOTFS_DIR}/usr/bin/glxgears"
+cp "${ROOTFS_DIR}/usr/bin/gears" "${ROOTFS_DIR}/usr/bin/glxgears"
 install_apk "libliftoff" "community"
 install_apk "libinput" "community"
 install_apk "libinput-libs" "community"
@@ -396,6 +401,7 @@ install_apk "xfconf" "community"
 install_apk "libxklavier" "community"
 install_apk "libxfce4util" "community"
 install_apk "libxfce4ui" "community"
+install_apk "libgtop" "community"
 install_apk "garcon" "community"
 install_apk "exo" "community"
 install_apk "exo-libs" "community"
@@ -737,12 +743,18 @@ find_xwayland_display() {
 export DISPLAY="${DISPLAY:-$(find_xwayland_display)}"
 export XDG_SESSION_TYPE=x11
 export XDG_CURRENT_DESKTOP=XFCE
+export XCURSOR_THEME=Adwaita
+export XCURSOR_SIZE=24
 
 # Ensure XDG dirs exist
 export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-${HOME}/.config}"
 export XDG_DATA_HOME="${XDG_DATA_HOME:-${HOME}/.local/share}"
 export XDG_CACHE_HOME="${XDG_CACHE_HOME:-${HOME}/.cache}"
-mkdir -p "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME"
+mkdir -p "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" \
+         "$XDG_CONFIG_HOME/gtk-3.0"
+if [ -f /etc/xdg/gtk-3.0/gtk.css ]; then
+    cp -f /etc/xdg/gtk-3.0/gtk.css "$XDG_CONFIG_HOME/gtk-3.0/gtk.css"
+fi
 
 # Bootstrap D-Bus session if not already present
 if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
@@ -839,6 +851,14 @@ cp -f "${ROOTFS_DIR}/usr/share/applications/xfce4-appfinder.desktop" \
 cat > "${XFCE_SESSION_DIR}/xfce4-desktop.xml" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <channel name="xfce4-desktop" version="1.0">
+  <!-- Keep xfdesktop&apos;s icon view active. Besides showing files from
+       ~/Desktop, this is the widget that implements click-drag rubber-band
+       selection on an otherwise empty desktop. -->
+  <property name="desktop-icons" type="empty">
+    <property name="style" type="int" value="2"/>
+    <property name="icon-size" type="uint" value="48"/>
+    <property name="show-tooltips" type="bool" value="true"/>
+  </property>
   <property name="backdrop" type="empty">
     <property name="screen0" type="empty">
       <property name="monitor0" type="empty">
@@ -864,27 +884,74 @@ cat > "${XFCE_SESSION_DIR}/xfce4-desktop.xml" << EOF
 </channel>
 EOF
 
+# Pin GTK and cursor settings instead of inheriting host or Alpine defaults.
+cat > "${XFCE_SESSION_DIR}/xsettings.xml" << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xsettings" version="1.0">
+  <property name="Net" type="empty">
+    <property name="ThemeName" type="string" value="Adwaita"/>
+    <property name="IconThemeName" type="string" value="Adwaita"/>
+  </property>
+  <property name="Gtk" type="empty">
+    <property name="CursorThemeName" type="string" value="Adwaita"/>
+    <property name="CursorThemeSize" type="int" value="24"/>
+  </property>
+</channel>
+EOF
+
+# Xfdesktop normally uses a translucent rubber band. Keep an opaque fallback
+# for AscentOS&apos;s non-composited X11 path, where alpha fills may disappear.
+mkdir -p "${ROOTFS_DIR}/etc/xdg/gtk-3.0"
+cat > "${ROOTFS_DIR}/etc/xdg/gtk-3.0/gtk.css" << 'EOF'
+XfdesktopIconView .rubberband,
+XfdesktopIconView rubberband {
+    background-color: #3584e4;
+    border: 1px solid #1c71d8;
+    border-radius: 0;
+}
+EOF
+
+# 3c. Alpine compiles its vendor name into xfce4-about rather than reading it
+# from os-release. Replace only that NUL-terminated distributor field; keep
+# Alpine/Xfce copyright and license text intact.
+XFCE_ABOUT="${ROOTFS_DIR}/usr/bin/xfce4-about"
+if [ -f "${XFCE_ABOUT}" ]; then
+    perl -0pi -e "s/Alpine Linux\x00/AscentOS\x00\x00\x00\x00\x00/g" "${XFCE_ABOUT}"
+fi
+
+# 3d. Brand the assembled system while retaining accurate userland attribution.
+echo "[*] Writing AscentOS operating-system identity..."
+mkdir -p "${ROOTFS_DIR}/etc" "${ROOTFS_DIR}/usr/lib" "${ROOTFS_DIR}/usr/share/doc/ascentos"
+rm -f "${ROOTFS_DIR}/etc/os-release" "${ROOTFS_DIR}/usr/lib/os-release"
+cat > "${ROOTFS_DIR}/usr/lib/os-release" <<'EOF'
+NAME="AscentOS"
+ID=ascentos
+VERSION="2.0.0 Beta"
+VERSION_ID="2.0.0-beta"
+PRETTY_NAME="AscentOS 2.0.0 Beta x86_64"
+HOME_URL="https://github.com/AscentOS"
+SUPPORT_URL="https://github.com/AscentOS"
+BUG_REPORT_URL="https://github.com/AscentOS"
+EOF
+ln -s ../usr/lib/os-release "${ROOTFS_DIR}/etc/os-release"
+cat > "${ROOTFS_DIR}/usr/share/doc/ascentos/ALPINE-USERLAND" <<'EOF'
+AscentOS includes a userland assembled from Alpine Linux packages.
+Alpine Linux is an independent project and does not produce or endorse AscentOS.
+The copyright notices and license terms shipped with each package continue to apply.
+See /usr/share/licenses and the corresponding package metadata where available.
+EOF
+
 # 4. Create weston.ini
 echo "[*] Creating /etc/weston.ini..."
 mkdir -p "${ROOTFS_DIR}/etc"
 mkdir -p "${ROOTFS_DIR}/usr/share/icons/default"
-if [ ! -d "${ROOTFS_DIR}/usr/share/icons/Breeze_Light" ] && [ -d "/run/host/usr/share/icons/Breeze_Light" ]; then
-    cp -a "/run/host/usr/share/icons/Breeze_Light" "${ROOTFS_DIR}/usr/share/icons/"
-fi
 cat > "${ROOTFS_DIR}/usr/share/icons/default/index.theme" <<'EOF'
 [Icon Theme]
 Name=Default
 Inherits=Adwaita
 EOF
 rm -rf "${ROOTFS_DIR}/usr/share/icons/default/cursors"
-ln -s ../Breeze_Light/cursors "${ROOTFS_DIR}/usr/share/icons/default/cursors"
-for alias in dnd-copy dnd-none; do
-    target="copy"
-    [ "" = "dnd-none" ] && target="no-drop"
-    if [ -f "${ROOTFS_DIR}/usr/share/icons/Breeze_Light/cursors/$target" ] && [ ! -e "${ROOTFS_DIR}/usr/share/icons/Breeze_Light/cursors/$alias" ]; then
-        ln -s "$target" "${ROOTFS_DIR}/usr/share/icons/Breeze_Light/cursors/$alias"
-    fi
-done
+ln -s ../Adwaita/cursors "${ROOTFS_DIR}/usr/share/icons/default/cursors"
 
 cat > "${ROOTFS_DIR}/etc/weston.ini" <<EOF
 [core]
@@ -897,7 +964,7 @@ panel-position=top
 locking=false
 background-image=/assets/room.png
 background-type=scale
-cursor-theme=Breeze_Light
+cursor-theme=Adwaita
 cursor-size=24
 
 [launcher]

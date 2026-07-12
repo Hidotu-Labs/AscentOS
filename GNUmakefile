@@ -469,12 +469,15 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 		debugfs -w -R "rm etc/ssl/certs/ca-certificates.crt" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "write build/alpine/rootfs/etc/ssl/certs/ca-certificates.crt etc/ssl/certs/ca-certificates.crt" ./part.img >/dev/null 2>&1 || true; \
 		echo "NAME=\"AscentOS\"" > /tmp/os-release; \
-		echo "PRETTY_NAME=\"AscentOS 2.0.0 Beta x86_64\"" >> /tmp/os-release; \
 		echo "ID=ascentos" >> /tmp/os-release; \
-		echo "VERSION_ID=2.0.0 Beta" >> /tmp/os-release; \
+		echo "VERSION=\"2.0.0 Beta\"" >> /tmp/os-release; \
+		echo "VERSION_ID=2.0.0-beta" >> /tmp/os-release; \
+		echo "PRETTY_NAME=\"AscentOS 2.0.0 Beta x86_64\"" >> /tmp/os-release; \
 		echo "HOME_URL=\"https://github.com/AscentOS\"" >> /tmp/os-release; \
 		debugfs -w -R "rm etc/os-release" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "write /tmp/os-release etc/os-release" ./part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "rm usr/lib/os-release" ./part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write /tmp/os-release usr/lib/os-release" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "rm .bashrc" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "write /tmp/bashrc .bashrc" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "mkdir .config" ./part.img >/dev/null 2>&1 || true; \

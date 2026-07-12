@@ -616,6 +616,7 @@ enum drm_gem_cache_mode {
 
 // GEM internals
 struct drm_gem_object {
+  struct drm_device *dev;
   uint32_t handle;
   size_t size;
   uint64_t phys_addr;

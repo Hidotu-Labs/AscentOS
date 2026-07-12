@@ -38,6 +38,10 @@ struct partition_wrapper {
 static int partition_read(struct block_device *dev, uint64_t lba,
                           uint32_t count, void *buf) {
   struct partition_wrapper *wrap = (struct partition_wrapper *)dev->driver_data;
+  if (!wrap || !wrap->parent || !buf || count == 0 ||
+      lba >= dev->total_sectors ||
+      (uint64_t)count > dev->total_sectors - lba)
+    return -1;
   return wrap->parent->read_sectors(wrap->parent, lba + wrap->start_lba, count,
                                     buf);
 }
@@ -45,7 +49,9 @@ static int partition_read(struct block_device *dev, uint64_t lba,
 static int partition_write(struct block_device *dev, uint64_t lba,
                            uint32_t count, const void *buf) {
   struct partition_wrapper *wrap = (struct partition_wrapper *)dev->driver_data;
-  if (!wrap->parent->write_sectors)
+  if (!wrap || !wrap->parent || !wrap->parent->write_sectors || !buf ||
+      count == 0 || lba >= dev->total_sectors ||
+      (uint64_t)count > dev->total_sectors - lba)
     return -1;
   return wrap->parent->write_sectors(wrap->parent, lba + wrap->start_lba, count,
                                      buf);
@@ -89,6 +95,11 @@ void block_scan_partitions(struct block_device *dev) {
   for (int i = 0; i < 4; i++) {
     struct mbr_partition *p = &mbr->partitions[i];
     if (p->type == 0 || p->total_sectors == 0)
+      continue;
+
+    if ((uint64_t)p->start_lba >= dev->total_sectors ||
+        (uint64_t)p->total_sectors >
+            dev->total_sectors - (uint64_t)p->start_lba)
       continue;
 
     struct partition_wrapper *wrap = kmalloc(sizeof(struct partition_wrapper));

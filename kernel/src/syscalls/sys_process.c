@@ -12,6 +12,7 @@
 #include "../mm/vmm.h"
 #include "../sched/sched.h"
 #include "../smp/cpu.h"
+#include "sys_io_shared.h"
 #include "syscall.h"
 #include <stdint.h>
 
@@ -413,6 +414,32 @@ static uint64_t sys_wait4(uint64_t pid, uint64_t wstatus_ptr, uint64_t options,
   }
 }
 
+// Close descriptors marked FD_CLOEXEC only after the replacement image has
+// loaded successfully. Failed execve() must leave the descriptor table intact.
+static void exec_close_cloexec(struct thread *t) {
+  if (!t || !t->files)
+    return;
+
+  for (int fd = 0; fd < MAX_FDS; fd++) {
+    spinlock_acquire(&t->files->lock);
+    vfs_node_t *node = t->fds[fd];
+    if (!node || node == (vfs_node_t *)-1 ||
+        !(t->fd_flags[fd] & FD_FLAGS_CLOEXEC_BIT)) {
+      spinlock_release(&t->files->lock);
+      continue;
+    }
+
+    t->fds[fd] = NULL;
+    t->fd_offsets[fd] = 0;
+    t->fd_flags[fd] = 0;
+    fd_path_clear(t, fd);
+    if ((uint32_t)fd < t->files->next_fd)
+      t->files->next_fd = (uint32_t)fd;
+    spinlock_release(&t->files->lock);
+    vfs_close(node);
+  }
+}
+
 // sys_execve
 static uint64_t sys_execve(struct syscall_regs *regs) {
   const char **user_argv = (const char **)regs->rsi;
@@ -560,6 +587,8 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
     // vmm_destroy_pml4 or similar, but for now we focus on the reported leak.
     return (uint64_t)-8; // ENOEXEC
   }
+
+  exec_close_cloexec(current);
 
   if (exec_mode & 04000)
     current->euid = current->suid = current->fsuid = exec_uid;

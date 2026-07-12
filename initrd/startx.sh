@@ -53,6 +53,8 @@ if [ "${ASCENT_SESSION:-}" = "xfce4" ]; then
     echo "[startx] Starting XFCE4 component session..."
     export XDG_SESSION_TYPE=x11
     export XDG_CURRENT_DESKTOP=XFCE
+    export XCURSOR_THEME=Adwaita
+    export XCURSOR_SIZE=24
     export XDG_CONFIG_HOME="${HOME}/.config"
     export XDG_DATA_HOME="${HOME}/.local/share"
     export XDG_CACHE_HOME="${HOME}/.cache"
@@ -69,11 +71,16 @@ if [ "${ASCENT_SESSION:-}" = "xfce4" ]; then
     export PATH=/opt/coreutils/bin:/opt/bash/bin:/bin:/usr/local/bin:/usr/bin:/opt/tcc/bin:$PATH
     export LD_LIBRARY_PATH=/usr/lib:/lib:/usr/local/lib:${LD_LIBRARY_PATH:-}
     mkdir -p "$XDG_CONFIG_HOME/xfce4/xfconf/xfce-perchannel-xml" \
-             "$XDG_DATA_HOME" "$XDG_CACHE_HOME"
+             "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$HOME/Desktop" \
+             "$XDG_CONFIG_HOME/gtk-3.0"
+    if [ -f /etc/xdg/gtk-3.0/gtk.css ]; then
+        cp -f /etc/xdg/gtk-3.0/gtk.css \
+            "$XDG_CONFIG_HOME/gtk-3.0/gtk.css"
+    fi
 
     # Refresh the AscentOS desktop defaults. The home directory is persistent,
     # so otherwise an older one-panel/no-backdrop configuration wins.
-    for channel in xfwm4 xfce4-panel xfce4-desktop; do
+    for channel in xfwm4 xfce4-panel xfce4-desktop xsettings; do
         src="/etc/xdg/xfce4/xfconf/xfce-perchannel-xml/$channel.xml"
         if [ -f "$src" ]; then
             cp -f "$src" \

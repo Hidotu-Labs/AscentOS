@@ -4,6 +4,7 @@
 #include "../../../fs/ramfs.h"
 #include "../../../lib/string.h"
 #include "../../../mm/heap.h"
+#include "../../../mm/vmm.h"
 #include "../../../sched/sched.h"
 #include "drm.h"
 
@@ -122,15 +123,38 @@ void drm_file_free(struct drm_file *file) {
 uint32_t drm_file_gem_register(struct drm_file *file,
                                struct drm_gem_object *obj) {
   spinlock_acquire(&file->lock);
-  if (file->next_handle >= DRM_MAX_HANDLES_PER_FILE) {
-    spinlock_release(&file->lock);
-    return 0;
+
+  /* Linux GEM namespaces return the existing handle when the same dma-buf
+   * is imported repeatedly into one DRM file. */
+  for (uint32_t h = 1; h < DRM_MAX_HANDLES_PER_FILE; h++) {
+    if (file->handles[h] == obj) {
+      spinlock_release(&file->lock);
+      return h;
+    }
   }
-  uint32_t h = file->next_handle++;
-  file->handles[h] = obj;
-  obj->refcount++;
+
+  /* Reuse released slots instead of permanently exhausting the namespace. */
+  uint32_t start = file->next_handle;
+  if (start == 0 || start >= DRM_MAX_HANDLES_PER_FILE)
+    start = 1;
+  uint32_t h = start;
+  do {
+    if (!file->handles[h]) {
+      file->handles[h] = obj;
+      obj->refcount++;
+      file->next_handle = h + 1;
+      if (file->next_handle >= DRM_MAX_HANDLES_PER_FILE)
+        file->next_handle = 1;
+      spinlock_release(&file->lock);
+      return h;
+    }
+    h++;
+    if (h >= DRM_MAX_HANDLES_PER_FILE)
+      h = 1;
+  } while (h != start);
+
   spinlock_release(&file->lock);
-  return h;
+  return 0;
 }
 
 /*
@@ -230,12 +254,41 @@ static uint32_t prime_read(struct vfs_node *node, uint32_t offset,
   return length;
 }
 
+static uint64_t prime_mmap(struct vfs_node *node, uint64_t addr,
+                           uint64_t length, uint64_t prot, uint64_t flags,
+                           uint64_t offset) {
+  (void)prot;
+  (void)flags;
+  struct drm_gem_object *obj = (struct drm_gem_object *)node->device;
+  if (!obj || !addr || !length || (addr & 4095) || (offset & 4095) ||
+      offset > obj->size || length > obj->size - offset)
+    return (uint64_t)-1;
+
+  uint64_t page_flags = PAGE_FLAG_PRESENT | PAGE_FLAG_USER | PAGE_FLAG_RW;
+  if (obj->cache_mode == DRM_GEM_CACHE_WC)
+    page_flags |= PAGE_FLAG_PWT | PAGE_FLAG_PCD | PAGE_FLAG_PAT;
+
+  uint64_t *pml4 = vmm_get_active_pml4();
+  uint32_t pages = (uint32_t)((length + 4095) / 4096);
+  for (uint32_t i = 0; i < pages; i++) {
+    uint64_t object_offset = offset + (uint64_t)i * 4096;
+    uint64_t phys = obj->get_page_phys
+        ? obj->get_page_phys(obj, (uint32_t)(object_offset / 4096))
+        : obj->phys_addr + object_offset;
+    if (!phys || !vmm_map_page(pml4, addr + (uint64_t)i * 4096, phys,
+                               page_flags))
+      return (uint64_t)-1;
+  }
+  return addr;
+}
+
 static void prime_close(struct vfs_node *node) {
   /* When the prime fd is closed, drop the gem refcount */
   struct drm_gem_object *obj = (struct drm_gem_object *)node->device;
   if (obj) {
     obj->refcount--;
-    /* Note: we don't free here — the owning drm_file still holds a ref */
+    if (obj->refcount <= 0 && obj->dev)
+      drm_gem_object_free(obj->dev, obj);
   }
   klog_puts("[DRM] PRIME fd closed\n");
 }
@@ -261,8 +314,11 @@ int drm_prime_export(struct drm_gem_object *obj) {
   strcpy(prime_node->name, "prime_buf");
   prime_node->flags = FS_CHARDEV; /* non-persistent: freed on last close */
   prime_node->mask = 0600;
+  prime_node->length =
+      obj->size > UINT32_MAX ? UINT32_MAX : (uint32_t)obj->size;
   prime_node->device = obj;
   prime_node->read = prime_read;
+  prime_node->mmap = prime_mmap;
   prime_node->close = prime_close;
   prime_node->refcount = 1;
 

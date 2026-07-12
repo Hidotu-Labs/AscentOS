@@ -133,6 +133,8 @@ static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags,
       node->mmap = ptmx_mmap;
       node->device = pty;
       node->wait_queue = pty->master_waitq;
+      // The descriptor installed below owns the initial reference.
+      node->refcount = 0;
       goto open_done;
     }
 
@@ -168,6 +170,8 @@ static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags,
       node->mmap = pty_slave_mmap;
       node->device = pty;
       node->wait_queue = pty->slave_waitq;
+      // The descriptor installed below owns the initial reference.
+      node->refcount = 0;
       goto open_done;
     }
 
@@ -175,7 +179,6 @@ static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags,
       struct thread *ct = sched_get_current();
       if (ct && ct->ctty) {
         node = ct->ctty;
-        vfs_open(node);
         goto open_done;
       }
     }
@@ -277,7 +280,9 @@ open_done:
   vfs_open(node);
   t->fds[fd] = node;
   t->fd_offsets[fd] = 0;
-  t->fd_flags[fd] = flags;
+  t->fd_flags[fd] = flags & ~(uint64_t)O_CLOEXEC;
+  if (flags & O_CLOEXEC)
+    t->fd_flags[fd] |= FD_FLAGS_CLOEXEC_BIT;
 
   char full_path[256];
   if (path[0] == '/') {
@@ -371,7 +376,7 @@ static uint64_t sys_dup(uint64_t oldfd, uint64_t a1, uint64_t a2, uint64_t a3,
 
   t->fds[newfd] = t->fds[oldfd];
   t->fd_offsets[newfd] = t->fd_offsets[oldfd];
-  t->fd_flags[newfd] = t->fd_flags[oldfd];
+  t->fd_flags[newfd] = t->fd_flags[oldfd] & ~(uint64_t)FD_FLAGS_CLOEXEC_BIT;
   fd_path_dup(t, newfd, (int)oldfd);
   vfs_open(t->fds[newfd]);
   return newfd;
@@ -393,7 +398,7 @@ static uint64_t sys_dup2(uint64_t oldfd, uint64_t newfd, uint64_t a2,
 
   t->fds[newfd] = t->fds[oldfd];
   t->fd_offsets[newfd] = t->fd_offsets[oldfd];
-  t->fd_flags[newfd] = t->fd_flags[oldfd];
+  t->fd_flags[newfd] = t->fd_flags[oldfd] & ~(uint64_t)FD_FLAGS_CLOEXEC_BIT;
   fd_path_dup(t, (int)newfd, (int)oldfd);
   vfs_open(t->fds[newfd]);
   return newfd;
@@ -757,7 +762,9 @@ static uint64_t sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,
       return (uint64_t)-24;
     t->fds[newfd] = t->fds[fd];
     t->fd_offsets[newfd] = t->fd_offsets[fd];
-    t->fd_flags[newfd] = t->fd_flags[fd];
+    t->fd_flags[newfd] = t->fd_flags[fd] & ~(uint64_t)FD_FLAGS_CLOEXEC_BIT;
+    if (cmd == F_DUPFD_CLOEXEC)
+      t->fd_flags[newfd] |= FD_FLAGS_CLOEXEC_BIT;
     fd_path_dup(t, newfd, (int)fd);
     vfs_open(t->fds[newfd]);
     return (uint64_t)newfd;

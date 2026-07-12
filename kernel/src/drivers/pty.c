@@ -990,6 +990,11 @@ void pty_slave_open(struct vfs_node *node) {
     return;
 
   spinlock_acquire(&pty->lock);
+  // vfs_open() is also used for dup() and inherited descriptors, while the
+  // VFS close hook runs only when this node's final reference is released.
+  // Remember how many slave references this particular node contributed so
+  // the final close can remove all of them from the pair-wide count.
+  node->impl++;
   pty->slave_open_count++;
   spinlock_release(&pty->lock);
 
@@ -1009,9 +1014,11 @@ void pty_slave_close(struct vfs_node *node) {
     return;
 
   spinlock_acquire(&pty->lock);
-  if (pty->slave_open_count > 0) {
-    pty->slave_open_count--;
-  }
+  int open_refs = (int)node->impl;
+  if (open_refs > pty->slave_open_count)
+    open_refs = pty->slave_open_count;
+  pty->slave_open_count -= open_refs;
+  node->impl = 0;
 
   // Wake up anything waiting on the master side to notify them of hangup
   if (pty->master_waitq) {

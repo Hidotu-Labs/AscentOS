@@ -8,6 +8,7 @@ struct drm_gem_object *drm_gem_object_create(struct drm_device *dev, size_t size
     if (!obj) return NULL;
 
     memset(obj, 0, sizeof(struct drm_gem_object));
+    obj->dev = dev;
     
     // Round size up to page boundary
     size = (size + 0xFFF) & ~0xFFFULL;

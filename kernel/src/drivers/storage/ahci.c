@@ -24,9 +24,15 @@ struct ahci_drive {
   bool present;
   uint64_t total_sectors;
   char model[41];
+  bool failed; /* Fail-stop after an uncertain command; never risk a later write. */
   struct block_device blkdev;
   spinlock_t lock; // Protect access to this port's command slots
 };
+
+#define AHCI_TFD_BSY (1u << 7)
+#define AHCI_TFD_DRQ (1u << 3)
+#define AHCI_PXIS_TFES (1u << 30)
+#define AHCI_MAX_SECTORS_PER_CMD 8192u /* one PRDT entry: at most 4 MiB */
 
 static ahci_hba_mem_t *hba;
 static struct ahci_drive ahci_drives[32];
@@ -90,6 +96,25 @@ static void start_cmd(ahci_port_t *port) {
   port->cmd |= AHCI_CMD_ST;
 }
 
+/* Stop DMA before releasing memory named by a failed command table. */
+static bool quiesce_port(ahci_port_t *port) {
+  port->cmd &= ~AHCI_CMD_ST;
+  uint64_t deadline = lapic_timer_get_ms() + 1000;
+  while (port->cmd & AHCI_CMD_CR) {
+    if (lapic_timer_get_ms() >= deadline)
+      return false;
+    __asm__ volatile("pause");
+  }
+  port->cmd &= ~AHCI_CMD_FRE;
+  deadline = lapic_timer_get_ms() + 1000;
+  while (port->cmd & AHCI_CMD_FR) {
+    if (lapic_timer_get_ms() >= deadline)
+      return false;
+    __asm__ volatile("pause");
+  }
+  return true;
+}
+
 static void port_rebase(ahci_port_t *port) {
   stop_cmd(port);
 
@@ -139,6 +164,15 @@ static int ahci_io(ahci_port_t *port, uint64_t lba, uint32_t count, void *buf,
   if (drive)
     spinlock_acquire(&drive->lock);
 
+  if (!drive || drive->failed || !buf || count == 0 ||
+      count > AHCI_MAX_SECTORS_PER_CMD || lba >= drive->total_sectors ||
+      (uint64_t)count > drive->total_sectors - lba ||
+      lba > 0x0000FFFFFFFFFFFFULL) {
+    if (drive)
+      spinlock_release(&drive->lock);
+    return -1;
+  }
+
   // Clear pending interrupts
   port->is = port->is;
 
@@ -176,6 +210,7 @@ static int ahci_io(ahci_port_t *port, uint64_t lba, uint32_t count, void *buf,
   void *bounce_phys = pmm_alloc_blocks(pages);
   if (!bounce_phys) {
     console_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " AHCI OOM: bounce buffer alloc failed\n");
+    spinlock_release(&drive->lock);
     return -1;
   }
   void *bounce_virt = (void *)((uint64_t)bounce_phys + pmm_get_hhdm_offset());
@@ -211,10 +246,11 @@ static int ahci_io(ahci_port_t *port, uint64_t lba, uint32_t count, void *buf,
 
   // Issue command, but never let a wedged controller freeze the kernel.
   uint64_t deadline = lapic_timer_get_ms() + 5000;
-  while (port->tfd & (0x80 | 0x08)) {
+  while (port->tfd & (AHCI_TFD_BSY | AHCI_TFD_DRQ)) {
     if (lapic_timer_get_ms() >= deadline) {
       console_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET
                    " AHCI timeout waiting for BSY/DRQ to clear\n");
+      drive->failed = true;
       pmm_free_blocks(bounce_phys, pages);
       if (drive) spinlock_release(&drive->lock);
       return -1;
@@ -230,12 +266,9 @@ static int ahci_io(ahci_port_t *port, uint64_t lba, uint32_t count, void *buf,
     // If the command issue bit clears, it's done
     if ((port->ci & (1 << slot)) == 0)
       break;
-    if (port->is & (1 << 30)) { // Error (TFES - Task File Error Status)
+    if (port->is & AHCI_PXIS_TFES) {
       console_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " AHCI Disk Error during wait: IS=");
-      // Note: we'd ideally dump more regs here
-      pmm_free_blocks(bounce_phys, pages);
-      if (drive) spinlock_release(&drive->lock);
-      return -1;
+      break;
     }
     if (lapic_timer_get_ms() >= deadline) {
       console_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET
@@ -246,11 +279,22 @@ static int ahci_io(ahci_port_t *port, uint64_t lba, uint32_t count, void *buf,
       console_puts(" IS=");
       print_uint64(port->is);
       console_puts("\n");
-      pmm_free_blocks(bounce_phys, pages);
-      if (drive) spinlock_release(&drive->lock);
-      return -1;
+      break;
     }
     __asm__ volatile("pause");
+  }
+
+  /* CI may clear in the same MMIO update that reports TFES. */
+  if ((port->ci & (1u << slot)) != 0 ||
+      (port->is & AHCI_PXIS_TFES) != 0 || (port->tfd & 0x01) != 0) {
+    drive->failed = true;
+    console_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET
+                 " AHCI port disabled after an uncertain command\n");
+    /* Never reuse memory while the HBA may still own it. */
+    if (quiesce_port(port))
+      pmm_free_blocks(bounce_phys, pages);
+    spinlock_release(&drive->lock);
+    return -1;
   }
 
   if (!is_write) {

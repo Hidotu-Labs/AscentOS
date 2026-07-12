@@ -1705,6 +1705,7 @@ void drm_init(void) {
     struct drm_gem_object *fb_obj = kmalloc(sizeof(struct drm_gem_object));
     if (fb_obj) {
       memset(fb_obj, 0, sizeof(struct drm_gem_object));
+      fb_obj->dev = &global_drm_dev;
       fb_obj->size = fb_size;
       fb_obj->phys_addr = fb_phys;
       fb_obj->virt_addr = fb_base;
