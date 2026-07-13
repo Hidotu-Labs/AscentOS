@@ -112,24 +112,9 @@ static void pci_check_function(uint8_t bus, uint8_t slot, uint8_t func) {
   dev->header_type = (reg3 >> 16) & 0xFF;
   dev->irq_line = reg_irq & 0xFF;
 
-  // Read BARs (only for standard header type 0x00)
-  char dev_path[32];
-  // Format: 00:02.0
-  // Note: we are hardcoding seg0 for now
-  strcpy(dev_path, "00:00.0"); // TODO: use actual bus/slot/func
-  // We'll just use a simple name for now
-  char dev_name[16];
-  // Format: 00:02.0
-  // Int to string is not available easily without snprintf
-  // Let's just name them by index or something simple
-  static int dev_idx = 0;
-  char buf[4];
-  buf[0] = '0' + (dev_idx / 10);
-  buf[1] = '0' + (dev_idx % 10);
-  buf[2] = '\0';
-  strcpy(dev_name, "pci_dev");
-  strcat(dev_name, buf);
-  dev_idx++;
+  // Name the device by its PCI bus:slot.function address (BDF).
+  char dev_name[9];
+  snprintf(dev_name, sizeof(dev_name), "%02x:%02x.%x", bus, slot, func);
 
   struct device *seg_dev = device_find_by_path("/sys/pci/seg0");
   if (!seg_dev)

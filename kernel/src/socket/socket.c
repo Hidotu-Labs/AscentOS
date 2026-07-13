@@ -7,6 +7,7 @@
 #include "../fs/vfs.h"
 #include "../lib/string.h"
 #include "../mm/heap.h"
+#include "../mm/vmm.h"
 #include "../sched/sched.h"
 #include "../sched/wait.h"
 #include "af_unix.h"
@@ -703,6 +704,28 @@ int socket_vfs_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
   if (sock->closing) {
     socket_put(sock);
     return -9;
+  }
+
+  /* FIONBIO is a generic socket ioctl. Rust std/rustix uses it to put TCP
+   * sockets into nonblocking mode before connect(2), so handling it only in
+   * AF_UNIX makes AF_INET and AF_INET6 fail with ENOTTY. */
+  if (request == 0x5421) { /* FIONBIO */
+    if (!arg || !vmm_is_user_addr_range_valid(arg, sizeof(int))) {
+      socket_put(sock);
+      return -14; /* EFAULT */
+    }
+
+    int nonblocking;
+    memcpy(&nonblocking, (const void *)arg, sizeof(nonblocking));
+    spinlock_acquire(&sock->lock);
+    if (nonblocking)
+      sock->flags |= SOCK_NONBLOCK;
+    else
+      sock->flags &= ~SOCK_NONBLOCK;
+    spinlock_release(&sock->lock);
+
+    socket_put(sock);
+    return 0;
   }
 
   if (sock->ops && sock->ops->ioctl) {
