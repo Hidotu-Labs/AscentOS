@@ -1156,25 +1156,40 @@ void sched_reparent_children(struct thread *parent) {
     return;
 
   spinlock_acquire(&tid_lock);
+
+  // Linux process children belong to the thread group for wait purposes.
+  // Keep them with a live group member when a pthread exits.
+  struct thread *adopter = NULL;
+  if (parent->tgid != parent->tid) {
+    for (struct thread *candidate = global_thread_list; candidate;
+         candidate = candidate->global_next) {
+      if (candidate != parent && candidate->tgid == parent->tgid &&
+          candidate->state != THREAD_DEAD &&
+          candidate->state != THREAD_ZOMBIE) {
+        adopter = candidate;
+        if (candidate->tid == parent->tgid)
+          break;
+      }
+    }
+  }
+
+  // Orphans from a terminating process go to the BSP idle task as init.
+  if (!adopter) {
+    adopter = global_thread_list;
+    while (adopter && adopter->tid != 1)
+      adopter = adopter->global_next;
+  }
+
   struct thread *child = parent->children;
   while (child) {
     struct thread *next_sibling = child->sibling_next;
-
-    // Reparent to BSP idle thread (TID 1) as a fallback for init
-    // In a mature kernel, this would be the actual 'init' process.
-    struct thread *init = global_thread_list;
-    while (init && init->tid != 1) {
-      init = init->global_next;
-    }
-
-    child->parent = init;
-    if (init) {
-      child->sibling_next = init->children;
-      init->children = child;
+    child->parent = adopter;
+    if (adopter) {
+      child->sibling_next = adopter->children;
+      adopter->children = child;
     } else {
       child->sibling_next = NULL;
     }
-
     child = next_sibling;
   }
   parent->children = NULL;

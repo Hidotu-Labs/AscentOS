@@ -483,6 +483,71 @@ install_apk "sdl2_mixer-dev" "community"
 install_apk "sdl2_net" "community"
 install_apk "sdl2_net-dev" "community"
 
+# WebKitGTK (GTK 3 / libsoup 3 ABI)
+#
+# Packages are extracted manually by install_apk(), so apk cannot resolve the
+# shared-library providers for us. Keep WebKitGTK on the same v3.21 branch as
+# GTK and install its non-core runtime providers explicitly before the engine.
+echo "[*] Installing WebKitGTK and dependencies..."
+install_apk "bubblewrap" "main"
+install_apk "xdg-dbus-proxy" "community"
+install_apk "gnome-keyring" "community"
+install_apk "libavif" "main"
+install_apk "libatomic" "main"
+install_apk "aom-libs" "main"
+install_apk "enchant2-libs" "community"
+install_apk "flite" "main"
+install_apk "gstreamer" "main"
+install_apk "gst-plugins-base" "main"
+install_apk "orc" "main"
+install_apk "gst-plugins-bad" "community"
+install_apk "harfbuzz-icu" "main"
+install_apk "hyphen" "community"
+install_apk "icu-data-en" "main"
+install_apk "icu-libs" "main"
+install_apk "libjxl" "community"
+install_apk "libhwy" "community"
+install_apk "libmanette" "community"
+install_apk "libseccomp" "main"
+install_apk "libsoup3" "community"
+# libsoup3 uses GIO's dynamically loaded TLS implementation. Since packages
+# are unpacked without apk dependency resolution, install the complete
+# glib-networking/GnuTLS chain explicitly; otherwise HTTPS fails with
+# "TLS support is not available" even though plain HTTP works.
+install_apk "gmp" "main"
+install_apk "gnutls" "main"
+install_apk "duktape" "community"
+install_apk "libproxy" "community"
+install_apk "ca-certificates" "main"
+install_apk "glib-networking" "community"
+install_apk "sqlite-libs" "main"
+install_apk "libwoff2common" "community"
+install_apk "libwoff2dec" "community"
+install_apk "libwoff2enc" "community"
+install_apk "libwebpmux" "main"
+install_apk "libwebpdemux" "main"
+install_apk "webkit2gtk-4.1" "community"
+install_apk "badwolf" "community"
+
+# AscentOS does not yet provide the namespaces, seccomp, or pidfd syscalls used
+# by WebKitGTK's bubblewrap sandbox. Its DRM stack also lacks the DRI2/DRI3
+# authentication needed by WebKit accelerated compositing. Keep the packaged
+# binary intact and install a compatibility launcher at the conventional path.
+if [ -x "${ROOTFS_DIR}/usr/bin/badwolf" ] &&
+   [ ! -e "${ROOTFS_DIR}/usr/libexec/badwolf.bin" ]; then
+    mkdir -p "${ROOTFS_DIR}/usr/libexec"
+    mv "${ROOTFS_DIR}/usr/bin/badwolf" "${ROOTFS_DIR}/usr/libexec/badwolf.bin"
+fi
+cat > "${ROOTFS_DIR}/usr/bin/badwolf" <<'EOF'
+#!/bin/sh
+export WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1
+export WEBKIT_DISABLE_COMPOSITING_MODE=1
+export WEBKIT_DISABLE_DMABUF_RENDERER=1
+export LIBGL_ALWAYS_SOFTWARE=1
+exec /usr/libexec/badwolf.bin "$@"
+EOF
+chmod +x "${ROOTFS_DIR}/usr/bin/badwolf"
+
 # NetSurf Web Browser
 echo "[*] Installing NetSurf and dependencies..."
 install_apk "netsurf" "community" "edge"

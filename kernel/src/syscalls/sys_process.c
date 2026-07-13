@@ -95,6 +95,7 @@ extern void fork_return_to_userspace(struct syscall_regs *regs)
 #define IA32_FS_BASE 0xC0000100
 
 extern spinlock_t tid_lock;
+extern struct thread *global_thread_list;
 
 // exit / exit_group (shared)
 void process_do_exit(uint64_t status) __attribute__((noreturn));
@@ -151,8 +152,17 @@ void process_do_exit(uint64_t status) {
       klog_puts("[EXITDBG] publishing zombie\n");
       spinlock_acquire(&tid_lock);
       current->state = THREAD_ZOMBIE;
-      if (current->parent && current->parent->state == THREAD_BLOCKED)
-        parent_to_wake = current->parent;
+      if (current->parent) {
+        uint32_t parent_tgid = current->parent->tgid;
+        for (struct thread *waiter = global_thread_list; waiter;
+             waiter = waiter->global_next) {
+          if (waiter->tgid == parent_tgid && waiter->waiting_for_child &&
+              waiter->state == THREAD_BLOCKED) {
+            parent_to_wake = waiter;
+            break;
+          }
+        }
+      }
       spinlock_release(&tid_lock);
       klog_puts("[EXITDBG] zombie published\n");
     }
@@ -251,7 +261,7 @@ static uint64_t sys_getpid(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
 
   struct thread *current = sched_get_current();
   if (current) {
-    return current->tid;
+    return current->tgid;
   }
   return 0;
 }
@@ -323,6 +333,7 @@ static uint64_t sys_chdir(uint64_t path_ptr, uint64_t a1, uint64_t a2,
 extern spinlock_t tid_lock;
 
 #define WNOHANG 1
+#define __WNOTHREAD 0x20000000
 
 static uint64_t sys_wait4(uint64_t pid, uint64_t wstatus_ptr, uint64_t options,
                           uint64_t rusage, uint64_t a4, uint64_t a5) {
@@ -338,47 +349,62 @@ static uint64_t sys_wait4(uint64_t pid, uint64_t wstatus_ptr, uint64_t options,
   while (1) {
     bool has_matching_children = false;
     struct thread *zombie = NULL;
+    struct thread *zombie_owner = NULL;
     bool should_block = false;
 
     spinlock_acquire(&tid_lock);
-    struct thread *t = current->children;
-    while (t) {
-      bool matches = false;
-      if (target_pid == -1) {
-        matches = true;
-      } else if (target_pid > 0) {
-        if (t->tid == (uint32_t)target_pid)
-          matches = true;
-      } else if (target_pid == 0) {
-        if (t->pgid == current->pgid)
-          matches = true;
-      } else { // target_pid < -1
-        if (t->pgid == (uint32_t)(-target_pid))
-          matches = true;
+    struct thread *owner = (options & __WNOTHREAD) ? current : global_thread_list;
+    while (owner) {
+      if (owner->tgid != current->tgid) {
+        owner = owner->global_next;
+        continue;
       }
 
-      if (matches) {
-        has_matching_children = true;
-        if (t->state == THREAD_ZOMBIE) {
-          zombie = t;
-
-          // Unlink from parent's children list while holding lock
-          if (current->children == zombie) {
-            current->children = zombie->sibling_next;
-          } else {
-            struct thread *p = current->children;
-            while (p && p->sibling_next != zombie)
-              p = p->sibling_next;
-            if (p)
-              p->sibling_next = zombie->sibling_next;
-          }
-          break;
+      struct thread *t = owner->children;
+      while (t) {
+        bool matches = false;
+        if (target_pid == -1) {
+          matches = true;
+        } else if (target_pid > 0) {
+          if (t->tid == (uint32_t)target_pid)
+            matches = true;
+        } else if (target_pid == 0) {
+          if (t->pgid == current->pgid)
+            matches = true;
+        } else { // target_pid < -1
+          if (t->pgid == (uint32_t)(-target_pid))
+            matches = true;
         }
+
+        if (matches) {
+          has_matching_children = true;
+          if (t->state == THREAD_ZOMBIE) {
+            zombie = t;
+            zombie_owner = owner;
+
+            // Unlink from its owning thread list while holding the lock.
+            if (zombie_owner->children == zombie) {
+              zombie_owner->children = zombie->sibling_next;
+            } else {
+              struct thread *p = zombie_owner->children;
+              while (p && p->sibling_next != zombie)
+                p = p->sibling_next;
+              if (p)
+                p->sibling_next = zombie->sibling_next;
+            }
+            break;
+          }
+        }
+        t = t->sibling_next;
       }
-      t = t->sibling_next;
+
+      if (zombie || (options & __WNOTHREAD))
+        break;
+      owner = owner->global_next;
     }
     /* Publish BLOCKED while child exit is excluded from publishing ZOMBIE. */
     if (!zombie && has_matching_children && !(options & WNOHANG)) {
+      current->waiting_for_child = true;
       current->state = THREAD_BLOCKED;
       should_block = true;
     }
@@ -409,8 +435,10 @@ static uint64_t sys_wait4(uint64_t pid, uint64_t wstatus_ptr, uint64_t options,
     }
 
     // Block and wait for a child to exit.
-    if (should_block)
+    if (should_block) {
       sched_yield();
+      current->waiting_for_child = false;
+    }
   }
 }
 
@@ -1372,7 +1400,7 @@ static uint64_t sys_getppid(struct syscall_regs *regs) {
   if (!t)
     return 0;
   if (t->parent)
-    return t->parent->tid;
+    return t->parent->tgid;
   return 0;
 }
 

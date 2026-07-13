@@ -87,9 +87,21 @@ ensure_dir_cmds "$DST_DIR"
   done
 )
 
+# Flatpak/container development shells may expose debugfs only through the
+# host filesystem. Prefer that binary when available so a successful setup
+# cannot silently leave the disk image unchanged.
+DEBUGFS_BIN=debugfs
+if [ -x /run/host/usr/bin/debugfs ]; then
+  DEBUGFS_BIN=/run/host/usr/bin/debugfs
+fi
+
 # Execute commands in a single debugfs call.
-# Use -w for write access. Redirect stdout to null but keep stderr.
-# We ignore errors from mkdir (if dir already exists).
-debugfs -w -f "$CMDS_FILE" "$IMG_PATH" > /dev/null 2>&1 || true
+# Existing-directory diagnostics are expected during incremental population,
+# so suppress batch output while still treating a debugfs process failure as fatal.
+if ! "$DEBUGFS_BIN" -w -f "$CMDS_FILE" "$IMG_PATH" > /dev/null 2>&1; then
+  echo "Failed to populate ext2 image with $DEBUGFS_BIN" >&2
+  rm -f "$CMDS_FILE"
+  exit 1
+fi
 
 rm -f "$CMDS_FILE"

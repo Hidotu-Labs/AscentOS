@@ -137,6 +137,7 @@ struct thread {
   uint64_t stack_base;
   uint64_t stack_size;
   thread_state_t state;
+  bool waiting_for_child;       // Blocked specifically inside wait4().
   uint64_t wakeup_ticks;
   struct fd_table *files;
   vfs_node_t **fds;

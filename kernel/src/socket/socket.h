@@ -296,6 +296,7 @@ net_family_t *sock_lookup_family(int family);
 
 // Ancillary Data Support
 #define SCM_RIGHTS 0x01
+#define SCM_CREDENTIALS 0x02
 
 struct cmsghdr {
   size_t cmsg_len;   // Data byte count, including header

@@ -378,9 +378,6 @@ static ssize_t netlink_send(socket_t *sock, const void *buf, size_t len,
   return netlink_sendto(sock, buf, len, flags, NULL, 0);
 }
 
-// SCM_CREDENTIALS type used by SO_PASSCRED
-#define SCM_CREDENTIALS 0x02
-
 struct ucred_nl {
   int pid;
   int uid;

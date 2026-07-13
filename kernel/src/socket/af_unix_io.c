@@ -14,6 +14,26 @@ static bool unix_user_range_valid(uint64_t addr, size_t len) {
   return vmm_is_user_addr_range_valid(addr, len);
 }
 
+struct unix_ucred {
+  int pid;
+  int uid;
+  int gid;
+};
+
+// Called with peer->recv_lock held. Linux attaches the credentials of the
+// sending process to data received on an SO_PASSCRED socket, including data
+// sent through write(2)/send(2), not only explicit sendmsg(2) control data.
+static void unix_record_sender_credentials(unix_sock_t *peer,
+                                           struct thread *sender) {
+  if (!peer->passcred || !sender)
+    return;
+
+  peer->scm_cred_pid = (int)sender->tgid;
+  peer->scm_cred_uid = (int)sender->uid;
+  peer->scm_cred_gid = (int)sender->gid;
+  peer->scm_cred_pending = true;
+}
+
 static socket_t *unix_get_live_peer(socket_t *sock, unix_sock_t **peer_out) {
   if (peer_out)
     *peer_out = NULL;
@@ -147,6 +167,8 @@ ssize_t unix_send_impl(socket_t *sock, const void *buf, size_t len, int flags) {
     peer->recv_buf_tail = tail;
     sent += to_copy;
 
+    unix_record_sender_credentials(peer, sched_get_current());
+
     spinlock_release(&peer->recv_lock);
 
     wait_queue_wake_all(peer->wait);
@@ -242,8 +264,10 @@ ssize_t unix_recv_impl(socket_t *sock, void *buf, size_t len, int flags) {
     for (size_t i = 0; i < to_copy; i++)
       dest[received + i] = usk->recv_buf[(head + i) % size];
 
-    if (!(flags & 0x02)) // MSG_PEEK
+    if (!(flags & 0x02)) { // MSG_PEEK
       usk->recv_buf_head = (head + to_copy) % size;
+      usk->scm_cred_pending = false;
+    }
 
     spinlock_release(&usk->recv_lock);
     received += to_copy;
@@ -403,6 +427,9 @@ ssize_t unix_sendmsg_impl(socket_t *sock, struct msghdr *msg, int flags) {
     total_sent += (ssize_t)sent;
   }
 
+  if (total_sent > 0)
+    unix_record_sender_credentials(peer, current);
+
   spinlock_release(&peer->recv_lock);
 
   // Wake receiver
@@ -469,22 +496,52 @@ ssize_t unix_recvmsg_impl(socket_t *sock, struct msghdr *msg, int flags) {
   // Lock order: recv_lock → parent->lock  (same as sendmsg)
   spinlock_acquire(&sock->lock);
 
-  if (usk->scm_count > 0 && msg->msg_control &&
-      msg->msg_controllen >= CMSG_SPACE(sizeof(int))) {
-    if (!unix_user_range_valid((uint64_t)(uintptr_t)msg->msg_control,
-                               msg->msg_controllen)) {
-      spinlock_release(&sock->lock);
-      spinlock_release(&usk->recv_lock);
-      return -14; // EFAULT
-    }
+  size_t control_capacity = msg->msg_controllen;
+  size_t control_used = 0;
+  bool have_control = msg->msg_control && control_capacity > 0;
 
-    struct cmsghdr *cmsg = (struct cmsghdr *)msg->msg_control;
+  if (have_control &&
+      !unix_user_range_valid((uint64_t)(uintptr_t)msg->msg_control,
+                             control_capacity)) {
+    spinlock_release(&sock->lock);
+    spinlock_release(&usk->recv_lock);
+    return -14; // EFAULT
+  }
+
+  if (usk->scm_cred_pending) {
+    size_t needed = CMSG_SPACE(sizeof(struct unix_ucred));
+    if (have_control && control_capacity - control_used >= needed) {
+      struct cmsghdr *cmsg = (struct cmsghdr *)
+          ((uint8_t *)msg->msg_control + control_used);
+      cmsg->cmsg_len = CMSG_LEN(sizeof(struct unix_ucred));
+      cmsg->cmsg_level = SOL_SOCKET;
+      cmsg->cmsg_type = SCM_CREDENTIALS;
+
+      struct unix_ucred *cred = (struct unix_ucred *)CMSG_DATA(cmsg);
+      cred->pid = usk->scm_cred_pid;
+      cred->uid = usk->scm_cred_uid;
+      cred->gid = usk->scm_cred_gid;
+      control_used += needed;
+
+      if (!(flags & 0x02)) // MSG_PEEK
+        usk->scm_cred_pending = false;
+    } else {
+      msg->msg_flags |= MSG_CTRUNC;
+      if (!(flags & 0x02)) // MSG_PEEK
+        usk->scm_cred_pending = false;
+    }
+  }
+
+  if (usk->scm_count > 0 && have_control &&
+      control_capacity - control_used >= CMSG_SPACE(sizeof(int))) {
+    struct cmsghdr *cmsg = (struct cmsghdr *)
+        ((uint8_t *)msg->msg_control + control_used);
     cmsg->cmsg_level = SOL_SOCKET;
     cmsg->cmsg_type  = SCM_RIGHTS;
 
-    int *fds      = (int *)CMSG_DATA(cmsg);
-    int max_fds   = (int)((msg->msg_controllen -
-                           CMSG_ALIGN(sizeof(struct cmsghdr))) / sizeof(int));
+    int *fds = (int *)CMSG_DATA(cmsg);
+    int max_fds = (int)((control_capacity - control_used -
+                         CMSG_ALIGN(sizeof(struct cmsghdr))) / sizeof(int));
     if (max_fds > usk->scm_count)
       max_fds = usk->scm_count;
 
@@ -494,7 +551,7 @@ ssize_t unix_recvmsg_impl(socket_t *sock, struct msghdr *msg, int flags) {
       int new_fd = alloc_fd(current);
       if (new_fd >= 0) {
         current->fds[new_fd] = node;
-        fds[actual_count++]  = new_fd;
+        fds[actual_count++] = new_fd;
       } else {
         vfs_close(node);
       }
@@ -507,17 +564,16 @@ ssize_t unix_recvmsg_impl(socket_t *sock, struct msghdr *msg, int flags) {
       usk->scm_nodes[i] = usk->scm_nodes[max_fds + i];
     usk->scm_count = remaining;
 
-    cmsg->cmsg_len        = CMSG_LEN(actual_count * sizeof(int));
-    msg->msg_controllen   = CMSG_SPACE(actual_count * sizeof(int));
+    cmsg->cmsg_len = CMSG_LEN(actual_count * sizeof(int));
+    control_used += CMSG_SPACE(actual_count * sizeof(int));
 
     if (remaining > 0)
       msg->msg_flags |= MSG_CTRUNC;
   } else if (usk->scm_count > 0) {
-    msg->msg_flags    |= MSG_CTRUNC;
-    msg->msg_controllen = 0;
-  } else {
-    msg->msg_controllen = 0;
+    msg->msg_flags |= MSG_CTRUNC;
   }
+
+  msg->msg_controllen = control_used;
 
   spinlock_release(&sock->lock);
 

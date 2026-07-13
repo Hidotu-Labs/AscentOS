@@ -70,6 +70,10 @@ typedef struct unix_sock {
 
   struct vfs_node *scm_nodes[16];   // Pending FDs to be received
   int scm_count;                    // Number of pending nodes
+  bool scm_cred_pending;            // Sender credentials for SO_PASSCRED
+  int scm_cred_pid;
+  int scm_cred_uid;
+  int scm_cred_gid;
 } unix_sock_t;
 
 // Socket Buffer (sk_buff-like structure)
