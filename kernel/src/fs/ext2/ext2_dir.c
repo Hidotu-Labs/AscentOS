@@ -7,30 +7,48 @@ struct dirent *ext2_readdir_impl(vfs_node_t *node, uint32_t index) {
   if (!mnt)
     return NULL;
 
+  spinlock_acquire(&node->readdir_cursor_lock);
+
   ext2_inode_t inode;
-  if (ext2_read_inode(mnt, node->inode, &inode))
+  if (ext2_read_inode(mnt, node->inode, &inode)) {
+    spinlock_release(&node->readdir_cursor_lock);
     return NULL;
+  }
 
   static struct dirent d;
   memset(&d, 0, sizeof(d));
 
   uint8_t *block_buf = kmalloc(mnt->block_size);
-  if (!block_buf)
+  if (!block_buf) {
+    spinlock_release(&node->readdir_cursor_lock);
     return NULL;
+  }
 
   uint32_t dir_size   = inode.i_size;
   uint32_t byte_pos   = 0;
   uint32_t entry_idx  = 0;
+  uint32_t loaded_logical_block = UINT32_MAX;
+
+  /*
+   * getdents asks for monotonically increasing indices. Resume at the byte
+   * following the previous result instead of rescanning the directory from
+   * byte zero. Interleaved or random access safely falls back to a full scan.
+   */
+  if (index != 0 && index == node->readdir_cursor_index) {
+    byte_pos = node->readdir_cursor_offset;
+    entry_idx = index;
+  }
 
   while (byte_pos < dir_size) {
     uint32_t logical_block   = byte_pos / mnt->block_size;
     uint32_t offset_in_block = byte_pos % mnt->block_size;
 
-    if (offset_in_block == 0) {
+    if (logical_block != loaded_logical_block) {
       uint32_t disk_block = ext2_get_block_num(mnt, &inode, logical_block);
       if (disk_block == 0)
         break;
       ext2_read_block(mnt, disk_block, block_buf);
+      loaded_logical_block = logical_block;
     }
 
     ext2_dirent_t *entry = (ext2_dirent_t *)(block_buf + offset_in_block);
@@ -43,7 +61,10 @@ struct dirent *ext2_readdir_impl(vfs_node_t *node, uint32_t index) {
         memcpy(d.name, entry->name, name_len);
         d.name[name_len] = '\0';
         d.ino = entry->inode;
+        node->readdir_cursor_index = index + 1;
+        node->readdir_cursor_offset = byte_pos + entry->rec_len;
         kfree(block_buf);
+        spinlock_release(&node->readdir_cursor_lock);
         return &d;
       }
       entry_idx++;
@@ -55,6 +76,9 @@ struct dirent *ext2_readdir_impl(vfs_node_t *node, uint32_t index) {
   }
 
   kfree(block_buf);
+  node->readdir_cursor_index = 0;
+  node->readdir_cursor_offset = 0;
+  spinlock_release(&node->readdir_cursor_lock);
   return NULL;
 }
 
@@ -186,14 +210,26 @@ int ext2_add_dir_entry(ext2_mount_t *mnt, uint32_t dir_inode_num,
     byte_pos += entry->rec_len;
   }
 
-  uint32_t new_block = ext2_alloc_block(mnt);
-  if (!new_block) {
-    kfree(block_buf);
-    return -1;
-  }
-
   uint32_t logical_block = dir_size / mnt->block_size;
-  ext2_set_block_num(mnt, &dir_inode, logical_block, new_block);
+  uint32_t new_block = 0;
+  if (dir_inode.i_flags & EXT4_EXTENTS_FL) {
+    uint64_t allocated = 0;
+    if (ext4_alloc_extent(mnt, &dir_inode, dir_inode_num, logical_block, 1,
+                          &allocated) != 0 || allocated > UINT32_MAX) {
+      kfree(block_buf);
+      return -1;
+    }
+    new_block = (uint32_t)allocated;
+  } else {
+    new_block = ext2_alloc_block(mnt);
+    if (!new_block ||
+        ext2_set_block_num(mnt, &dir_inode, logical_block, new_block) != 0) {
+      if (new_block)
+        ext2_free_block(mnt, new_block);
+      kfree(block_buf);
+      return -1;
+    }
+  }
   dir_inode.i_size   += mnt->block_size;
   dir_inode.i_blocks += mnt->block_size / 512;
 

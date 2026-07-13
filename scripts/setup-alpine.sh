@@ -500,6 +500,18 @@ install_apk "flite" "main"
 install_apk "gstreamer" "main"
 install_apk "gst-plugins-base" "main"
 install_apk "orc" "main"
+# gst-plugins-bad is unpacked without apk dependency resolution. Install the
+# codec/scanner libraries used by its voaacenc, voamrwbenc, webrtc and zbar
+# plugins explicitly so gst-plugin-scanner can load them.
+install_apk "vo-aacenc" "community"
+install_apk "vo-amrwbenc" "community"
+install_apk "libnice" "community"
+install_apk "libzbar" "community"
+install_apk "libxv" "main"
+install_apk "libusb" "main"
+install_apk "libsrtp" "main"
+install_apk "tiff" "main"
+install_apk "spandsp" "main"
 install_apk "gst-plugins-bad" "community"
 install_apk "harfbuzz-icu" "main"
 install_apk "hyphen" "community"
@@ -584,17 +596,6 @@ install_apk "cmatrix" "community"
 install_apk "btop" "community" 
 
 # 4. Finalize GTK environment
-echo "[*] Building fontconfig caches for the target rootfs..."
-TARGET_LOADER="${ROOTFS_DIR}/lib/ld-musl-x86_64.so.1"
-TARGET_FC_CACHE="${ROOTFS_DIR}/usr/bin/fc-cache"
-if [ -x "${TARGET_LOADER}" ] && [ -x "${TARGET_FC_CACHE}" ]; then
-    mkdir -p "${ROOTFS_DIR}/var/cache/fontconfig"
-    "${TARGET_LOADER}" \
-        --library-path "${ROOTFS_DIR}/lib:${ROOTFS_DIR}/usr/lib" \
-        "${TARGET_FC_CACHE}" --sysroot="${ROOTFS_DIR}" --really-force \
-        --system-only
-fi
-
 echo "[*] Compiling GSettings schemas..."
 if [ -d "${ROOTFS_DIR}/usr/share/glib-2.0/schemas" ]; then
     if command -v glib-compile-schemas >/dev/null 2>&1; then
@@ -1072,6 +1073,19 @@ fi
 if [ -f "${ROOT_DIR}/userland/gtk3_test.elf" ]; then
     cp "${ROOT_DIR}/userland/gtk3_test.elf" "${ROOTFS_DIR}/bin/gtk3_test"
     chmod +x "${ROOTFS_DIR}/bin/gtk3_test"
+fi
+
+# Generate caches last: no subsequent rootfs customization may make their
+# configuration or source-directory metadata stale before image population.
+echo "[*] Building final Fontconfig caches for the target rootfs..."
+TARGET_LOADER="${ROOTFS_DIR}/lib/ld-musl-x86_64.so.1"
+TARGET_FC_CACHE="${ROOTFS_DIR}/usr/bin/fc-cache"
+if [ -x "${TARGET_LOADER}" ] && [ -x "${TARGET_FC_CACHE}" ]; then
+    mkdir -p "${ROOTFS_DIR}/var/cache/fontconfig"
+    "${TARGET_LOADER}" \
+        --library-path "${ROOTFS_DIR}/lib:${ROOTFS_DIR}/usr/lib" \
+        "${TARGET_FC_CACHE}" --sysroot="${ROOTFS_DIR}" --really-force \
+        --system-only
 fi
 
 # 5. Inject into disk.img

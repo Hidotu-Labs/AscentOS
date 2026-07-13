@@ -17,6 +17,7 @@ ext2_mount_t *ext2_init_mount(struct block_device *dev) {
   if (!mnt)
     return NULL;
   memset(mnt, 0, sizeof(ext2_mount_t));
+  spinlock_init(&mnt->cache_lock);
 
   mnt->dev             = dev;
   memcpy(&mnt->sb, sb, sizeof(ext2_superblock_t));

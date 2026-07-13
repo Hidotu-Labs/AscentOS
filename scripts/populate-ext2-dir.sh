@@ -83,7 +83,19 @@ ensure_dir_cmds "$DST_DIR"
       echo "write $SRC_DIR/$rel_path $DST_DIR/$rel_path" >> "$CMDS_FILE"
       mode=$(stat -c %a "$file_path")
       echo "set_inode_field $DST_DIR/$rel_path mode 0100$mode" >> "$CMDS_FILE"
+      mtime=$(stat -c %Y "$file_path")
+      echo "set_inode_field $DST_DIR/$rel_path mtime @$mtime" >> "$CMDS_FILE"
     fi
+  done
+
+  # Creating children changes directory mtimes. Restore them only after the
+  # complete tree has been populated so metadata-based caches (notably
+  # Fontconfig) remain valid in the image.
+  find . -depth -type d | while IFS= read -r dir_path; do
+    rel_path=${dir_path#./}
+    [ "$rel_path" = "." ] && continue
+    mtime=$(stat -c %Y "$dir_path")
+    echo "set_inode_field $DST_DIR/$rel_path mtime @$mtime" >> "$CMDS_FILE"
   done
 )
 

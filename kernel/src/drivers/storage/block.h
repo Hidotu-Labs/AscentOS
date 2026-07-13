@@ -12,6 +12,7 @@ struct block_device {
     uint64_t total_sectors;     // Total number of sectors on the device
     int (*read_sectors)(struct block_device *dev, uint64_t lba, uint32_t count, void *buf);
     int (*write_sectors)(struct block_device *dev, uint64_t lba, uint32_t count, const void *buf);
+    int (*flush)(struct block_device *dev);
     void *driver_data;          // Opaque pointer for the specific driver
 };
 
@@ -23,6 +24,7 @@ struct block_device *block_get(int index);
 
 // Get the number of registered block devices.
 int block_count(void);
+int block_flush(struct block_device *dev);
 
 // Scan for partitions on a block device (MBR).
 void block_scan_partitions(struct block_device *dev);

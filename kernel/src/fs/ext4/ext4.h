@@ -2,7 +2,6 @@
 #define FS_EXT4_H
 
 #include "fs/ext2/ext2.h"
-#include <stdbool.h>
 #include <stdint.h>
 
 #define EXT4_FEATURE_INCOMPAT_EXTENTS 0x0040
@@ -10,18 +9,7 @@
 #define EXT4_EXTENTS_FL               0x00080000
 
 typedef struct {
-    bool active;
-    uint32_t depth;
-    uint32_t sequence;
-    uint32_t start_block;
-    ext2_inode_t journal_inode;
-    uint8_t *desc_block_buf;
-    uint32_t blocks_in_trans;
-} ext4_journal_state_t;
-
-typedef struct {
     ext2_mount_t base;
-    ext4_journal_state_t journal;
 } ext4_mount_t;
 
 int ext4_mount(struct block_device *dev, vfs_node_t *mountpoint);

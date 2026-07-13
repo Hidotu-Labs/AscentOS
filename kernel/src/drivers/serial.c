@@ -32,11 +32,13 @@ static void serial_enqueue(char c) {
 
 // Drain as many queued bytes as the UART FIFO can accept right now (non-blocking)
 void serial_flush(void) {
-  // Try to drain up to 16 bytes (UART FIFO depth) per call
+  // THRE means the transmit FIFO is empty, so one status check is enough
+  // before filling up to the 16550 FIFO's 16-byte capacity.
+  if (!is_transmit_empty())
+    return;
+
   int max_drain = 16;
   while (serial_tail != serial_head && max_drain-- > 0) {
-    if (!is_transmit_empty())
-      break;
     outb(COM1, serial_buf[serial_tail]);
     serial_tail = (serial_tail + 1) % SERIAL_BUF_SIZE;
   }
@@ -47,6 +49,20 @@ void serial_putchar(char c) {
     serial_enqueue('\r');
   serial_enqueue(c);
   // Opportunistic drain — send what we can without blocking
+  serial_flush();
+}
+
+void serial_write(const char *data, size_t length) {
+  if (!data)
+    return;
+
+  for (size_t i = 0; i < length; i++) {
+    if (data[i] == '\n')
+      serial_enqueue('\r');
+    serial_enqueue(data[i]);
+  }
+
+  // Check/drain the UART once for the whole write instead of once per byte.
   serial_flush();
 }
 

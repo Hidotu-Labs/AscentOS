@@ -16,6 +16,7 @@
 #define ATA_CMD_READ_DMA_EX 0x25
 #define ATA_CMD_WRITE_DMA_EX 0x35
 #define ATA_CMD_IDENTIFY 0xEC
+#define ATA_CMD_FLUSH_CACHE_EXT 0xEA
 
 // Private structures
 
@@ -320,6 +321,63 @@ static int ahci_write(struct block_device *dev, uint64_t lba, uint32_t count,
   return ahci_io(drive->port, lba, count, (void *)buf, 1);
 }
 
+static int ahci_flush(struct block_device *dev) {
+  struct ahci_drive *drive = (struct ahci_drive *)dev->driver_data;
+  if (!drive || drive->failed)
+    return -1;
+
+  spinlock_acquire(&drive->lock);
+  ahci_port_t *port = drive->port;
+  port->is = port->is;
+  int slot = find_cmdslot(port);
+  if (slot < 0) {
+    spinlock_release(&drive->lock);
+    return -1;
+  }
+
+  uint64_t clb_addr = ((uint64_t)port->clbu << 32) | port->clb;
+  ahci_command_header_t *header =
+      (ahci_command_header_t *)(clb_addr + pmm_get_hhdm_offset());
+  header[slot].cfl = sizeof(fis_reg_h2d_t) / sizeof(uint32_t);
+  header[slot].w = 0;
+  header[slot].prdtl = 0;
+
+  uint64_t ctba = ((uint64_t)header[slot].ctbau << 32) | header[slot].ctba;
+  ahci_command_table_t *table =
+      (ahci_command_table_t *)(ctba + pmm_get_hhdm_offset());
+  memset(table, 0, sizeof(*table));
+  fis_reg_h2d_t *fis = (fis_reg_h2d_t *)&table->cfis;
+  fis->fis_type = FIS_TYPE_REG_H2D;
+  fis->c = 1;
+  fis->command = ATA_CMD_FLUSH_CACHE_EXT;
+
+  uint64_t deadline = lapic_timer_get_ms() + 5000;
+  while (port->tfd & (AHCI_TFD_BSY | AHCI_TFD_DRQ)) {
+    if (lapic_timer_get_ms() >= deadline) {
+      spinlock_release(&drive->lock);
+      return -1;
+    }
+    __asm__ volatile("pause");
+  }
+
+  port->ci = 1u << slot;
+  while (port->ci & (1u << slot)) {
+    if ((port->is & AHCI_PXIS_TFES) ||
+        lapic_timer_get_ms() >= deadline) {
+      drive->failed = true;
+      spinlock_release(&drive->lock);
+      return -1;
+    }
+    __asm__ volatile("pause");
+  }
+
+  int result = ((port->is & AHCI_PXIS_TFES) || (port->tfd & 0x01)) ? -1 : 0;
+  if (result)
+    drive->failed = true;
+  spinlock_release(&drive->lock);
+  return result;
+}
+
 // Identify & Setup
 
 static bool ahci_identify(ahci_port_t *port, struct ahci_drive *drive) {
@@ -450,6 +508,7 @@ static void probe_port(ahci_port_t *port, int portno) {
       blk->total_sectors = drive->total_sectors;
       blk->read_sectors = ahci_read;
       blk->write_sectors = ahci_write;
+      blk->flush = ahci_flush;
       blk->driver_data = drive;
 
       block_register(blk);

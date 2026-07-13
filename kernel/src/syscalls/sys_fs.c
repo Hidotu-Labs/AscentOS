@@ -447,12 +447,6 @@ static uint64_t sys_readlink(uint64_t pathname_ptr, uint64_t buf_ptr,
     int ret = vfs_readlink(node, buf, (uint32_t)bufsiz);
     if (ret < 0) return (uint64_t)-22;
 
-    klog_puts("[READLINK] "); klog_puts(path); klog_puts(" -> ");
-    char log_tmp[256];
-    size_t log_len = (size_t)ret < 255 ? (size_t)ret : 255;
-    memcpy(log_tmp, buf, log_len);
-    log_tmp[log_len] = '\0';
-    klog_puts(log_tmp); klog_puts("\n");
     return (uint64_t)ret;
 }
 

@@ -127,11 +127,12 @@ void klog_putchar(char c) {
 
 void klog_puts(const char *s) {
   spinlock_acquire(&klog_lock);
-  while (*s) {
-    char c = *s++;
-    serial_putchar(c);
-    klog_putchar_screen(c);
-  }
+  const char *p = s;
+  while (*p)
+    p++;
+  serial_write(s, (size_t)(p - s));
+  while (*s)
+    klog_putchar_screen(*s++);
   spinlock_release(&klog_lock);
 }
 

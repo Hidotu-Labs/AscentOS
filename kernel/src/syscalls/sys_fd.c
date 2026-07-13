@@ -266,17 +266,6 @@ open_done:
   if (fd < 0)
     return (uint64_t)-24; // EMFILE
 
-  if (strcmp(t->comm, "htop") != 0 && strcmp(t->comm, "btop") != 0) {
-  klog_puts("[SYSCALL] open path=");
-  klog_puts(path);
-  klog_puts(" fd=");
-  klog_uint64(fd);
-  klog_puts(" tid=");
-  klog_uint64(t->tid);
-  klog_puts("\n");
-  }
-
-
   vfs_open(node);
   t->fds[fd] = node;
   t->fd_offsets[fd] = 0;
@@ -337,13 +326,6 @@ static uint64_t sys_close(uint64_t fd, uint64_t a1, uint64_t a2, uint64_t a3,
   if (!t || fd >= MAX_FDS || !t->fds[fd])
     return (uint64_t)-9;
 
-  if (strcmp(t->comm, "htop") != 0 && strcmp(t->comm, "btop") != 0) {
-  klog_puts("[SYSCALL] close: fd=");
-  klog_uint64(fd);
-  klog_puts(" tid=");
-  klog_uint64(t->tid);
-  klog_puts("\n");
-  }
   spinlock_acquire(&t->files->lock);
   vfs_node_t *node = t->fds[fd];
   t->fds[fd] = NULL;
@@ -726,19 +708,6 @@ static uint64_t sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,
   (void)a4;
   (void)a5;
   struct thread *t = sched_get_current();
-  if (!t || (strcmp(t->comm, "htop") != 0 && strcmp(t->comm, "btop") != 0)) {
-  klog_puts("[FCNTL] tid=");
-  if (t)
-    klog_uint64(t->tid);
-  klog_puts(" fd=");
-  klog_uint64(fd);
-  klog_puts(" cmd=");
-  klog_uint64(cmd);
-  klog_puts(" arg=");
-  klog_uint64(arg);
-  klog_puts("\n");
-  }
-
   if (!t || fd >= MAX_FDS || !t->fds[fd]) {
     klog_puts("[FCNTL] EBADF: fd=");
     klog_uint64(fd);

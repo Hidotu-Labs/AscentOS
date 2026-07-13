@@ -12,12 +12,15 @@ int ext2_read_block(ext2_mount_t *mnt, uint32_t block_num, void *buffer) {
     return 0;
   }
 
+  spinlock_acquire(&mnt->cache_lock);
   for (int i = 0; i < 32; i++) {
     if (mnt->cache[i].data && mnt->cache[i].num == block_num) {
       memcpy(buffer, mnt->cache[i].data, mnt->block_size);
+      spinlock_release(&mnt->cache_lock);
       return 0;
     }
   }
+  spinlock_release(&mnt->cache_lock);
 
   uint64_t byte_offset = (uint64_t)block_num * mnt->block_size;
   uint64_t lba         = byte_offset / 512;
@@ -26,13 +29,21 @@ int ext2_read_block(ext2_mount_t *mnt, uint32_t block_num, void *buffer) {
   if (err)
     return err;
 
+  spinlock_acquire(&mnt->cache_lock);
   int idx = block_num % 32;
-  if (!mnt->cache[idx].data)
-    mnt->cache[idx].data = kmalloc(mnt->block_size);
-  if (mnt->cache[idx].data) {
-    mnt->cache[idx].num = block_num;
-    memcpy(mnt->cache[idx].data, buffer, mnt->block_size);
+  if (mnt->cache[idx].data && mnt->cache[idx].num == block_num) {
+    /* A writer populated this block while the device read was in flight.
+     * Keep and return the newer cached version instead of restoring stale data. */
+    memcpy(buffer, mnt->cache[idx].data, mnt->block_size);
+  } else {
+    if (!mnt->cache[idx].data)
+      mnt->cache[idx].data = kmalloc(mnt->block_size);
+    if (mnt->cache[idx].data) {
+      mnt->cache[idx].num = block_num;
+      memcpy(mnt->cache[idx].data, buffer, mnt->block_size);
+    }
   }
+  spinlock_release(&mnt->cache_lock);
 
   return 0;
 }
@@ -42,12 +53,14 @@ int ext2_write_block(ext2_mount_t *mnt, uint32_t block_num,
   if (block_num == 0)
     return -1;
 
+  spinlock_acquire(&mnt->cache_lock);
   for (int i = 0; i < 32; i++) {
     if (mnt->cache[i].data && mnt->cache[i].num == block_num) {
       memcpy(mnt->cache[i].data, buffer, mnt->block_size);
       break;
     }
   }
+  spinlock_release(&mnt->cache_lock);
 
   uint64_t byte_offset = (uint64_t)block_num * mnt->block_size;
   uint64_t lba         = byte_offset / 512;

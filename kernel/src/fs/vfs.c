@@ -548,6 +548,7 @@ void vfs_node_init(vfs_node_t *node) {
     INIT_LIST_HEAD(&node->pages[i]);
   }
   spinlock_init(&node->pages_lock);
+  spinlock_init(&node->readdir_cursor_lock);
   node->refcount = 1;
 }
 

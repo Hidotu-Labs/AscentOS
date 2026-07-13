@@ -57,6 +57,13 @@ static int partition_write(struct block_device *dev, uint64_t lba,
                                      buf);
 }
 
+static int partition_flush(struct block_device *dev) {
+  struct partition_wrapper *wrap = (struct partition_wrapper *)dev->driver_data;
+  if (!wrap || !wrap->parent)
+    return -1;
+  return block_flush(wrap->parent);
+}
+
 // MBR Structures
 
 struct mbr_partition {
@@ -128,6 +135,8 @@ void block_scan_partitions(struct block_device *dev) {
     pdev->read_sectors = partition_read;
     if (dev->write_sectors)
       pdev->write_sectors = partition_write;
+    if (dev->flush)
+      pdev->flush = partition_flush;
     pdev->driver_data = wrap;
 
     block_register(pdev);
@@ -173,6 +182,12 @@ struct block_device *block_get(int index) {
 }
 
 int block_count(void) { return num_devices; }
+
+int block_flush(struct block_device *dev) {
+  if (!dev)
+    return -1;
+  return dev->flush ? dev->flush(dev) : 0;
+}
 
 void block_repopulate_devices(void) {
   if (!fs_root)

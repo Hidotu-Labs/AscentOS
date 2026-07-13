@@ -1,23 +1,23 @@
 #include "ext3.h"
-#include "fs/ext4/ext4.h"
 #include "console/klog.h"
 #include "lib/string.h"
+#include "sched/sched.h"
 #include "mm/heap.h"
 #include <stdbool.h>
 
 static int ext3_recover_journal(ext2_mount_t *mnt, jbd_superblock_t *jsb,
                                 ext2_inode_t *j_inode);
 
-static ext4_journal_state_t legacy_trans = {0};
-
-static ext4_journal_state_t *ext3_journal_state(ext2_mount_t *mnt) {
-  if (mnt->sb.s_feature_incompat & EXT4_FEATURE_INCOMPAT_EXTENTS)
-    return &((ext4_mount_t *)mnt)->journal;
-  return &legacy_trans;
+static ext3_journal_state_t *ext3_journal_state(ext2_mount_t *mnt) {
+  return &mnt->journal;
 }
 
 void ext3_init_journal(ext2_mount_t *mnt) {
-  ext4_journal_state_t *trans = ext3_journal_state(mnt);
+  ext3_journal_state_t *trans = ext3_journal_state(mnt);
+  spinlock_init(&trans->lock);
+  trans->active = false;
+  trans->owner_tid = 0;
+  trans->depth = 0;
   if (!(mnt->sb.s_feature_compat & EXT3_FEATURE_COMPAT_HAS_JOURNAL)) {
     return;
   }
@@ -93,15 +93,24 @@ void ext3_init_journal(ext2_mount_t *mnt) {
 }
 
 int ext3_journal_start(ext2_mount_t *mnt) {
-  ext4_journal_state_t *trans = ext3_journal_state(mnt);
+  ext3_journal_state_t *trans = ext3_journal_state(mnt);
   if (!(mnt->sb.s_feature_compat & EXT3_FEATURE_COMPAT_HAS_JOURNAL))
     return 0;
-  if (trans->active) {
+
+  struct thread *current = sched_get_current();
+  uint32_t tid = current ? current->tid : 0;
+  if (trans->active && trans->owner_tid == tid) {
     trans->depth++;
     return 0;
   }
 
+  /*
+   * Only the owning thread may nest a transaction. Other writers wait until
+   * the complete journal commit/checkpoint sequence has finished.
+   */
+  spinlock_acquire(&trans->lock);
   trans->active = true;
+  trans->owner_tid = tid;
   trans->depth = 1;
   trans->blocks_in_trans = 0;
 
@@ -120,7 +129,7 @@ int ext3_journal_start(ext2_mount_t *mnt) {
 }
 
 int ext3_journal_block(ext2_mount_t *mnt, uint32_t block_nr, const void *data) {
-  ext4_journal_state_t *trans = ext3_journal_state(mnt);
+  ext3_journal_state_t *trans = ext3_journal_state(mnt);
   if (!trans->active)
     return ext2_write_block(mnt, block_nr, data);
 
@@ -148,19 +157,21 @@ int ext3_journal_block(ext2_mount_t *mnt, uint32_t block_nr, const void *data) {
   ext2_write_block(mnt, phys_pos, safe_data);
 
   int cache_idx = block_nr % 32;
+  spinlock_acquire(&mnt->cache_lock);
   if (!mnt->cache[cache_idx].data)
     mnt->cache[cache_idx].data = kmalloc(mnt->block_size);
   if (mnt->cache[cache_idx].data) {
     mnt->cache[cache_idx].num = block_nr;
     memcpy(mnt->cache[cache_idx].data, data, mnt->block_size);
   }
+  spinlock_release(&mnt->cache_lock);
 
   trans->blocks_in_trans++;
   return 0;
 }
 
 int ext3_journal_stop(ext2_mount_t *mnt) {
-  ext4_journal_state_t *trans = ext3_journal_state(mnt);
+  ext3_journal_state_t *trans = ext3_journal_state(mnt);
   if (!trans->active)
     return 0;
   if (trans->depth > 1) {
@@ -201,7 +212,6 @@ int ext3_journal_stop(ext2_mount_t *mnt) {
   jbd_superblock_t *jsb = (jbd_superblock_t *)sb_buf;
   jsb->s_start = __builtin_bswap32(trans->start_block);
   ext2_write_block(mnt, sb_phys, sb_buf);
-
   for (uint32_t i = 0; i < trans->blocks_in_trans; i++) {
     uint32_t tag_off = sizeof(jbd_header_t) + (i * sizeof(jbd_block_tag_t));
     jbd_block_tag_t *tag =
@@ -220,12 +230,14 @@ int ext3_journal_stop(ext2_mount_t *mnt) {
 
   trans->sequence++;
   trans->active = false;
+  trans->owner_tid = 0;
   trans->depth = 0;
 
   jsb->s_sequence = __builtin_bswap32(trans->sequence);
   jsb->s_start = 0;
   ext2_write_block(mnt, sb_phys, sb_buf);
   kfree(sb_buf);
+  spinlock_release(&trans->lock);
 
   return 0;
 }
@@ -243,6 +255,36 @@ static int ext3_recover_journal(ext2_mount_t *mnt, jbd_superblock_t *jsb,
   uint8_t *data_buf = kmalloc(block_size);
   if (!desc_buf || !data_buf)
     return -1;
+
+  /* Never replay an incomplete transaction. This implementation writes one
+   * descriptor followed by its data blocks and a commit block. */
+  uint32_t desc_phys = ext2_get_block_num(mnt, j_inode, start_block);
+  if (ext2_read_block(mnt, desc_phys, desc_buf) != 0)
+    goto incomplete;
+  jbd_header_t *desc_header = (jbd_header_t *)desc_buf;
+  if (__builtin_bswap32(desc_header->h_magic) != EXT3_JOURNAL_MAGIC_NUMBER ||
+      __builtin_bswap32(desc_header->h_blocktype) != JBD_DESCRIPTOR_BLOCK ||
+      __builtin_bswap32(desc_header->h_sequence) != sequence)
+    goto incomplete;
+  uint32_t tag_count = 0;
+  for (uint32_t off = sizeof(jbd_header_t);
+       off + sizeof(jbd_block_tag_t) <= block_size;
+       off += sizeof(jbd_block_tag_t)) {
+    jbd_block_tag_t *tag = (jbd_block_tag_t *)(desc_buf + off);
+    tag_count++;
+    if (__builtin_bswap32(tag->t_flags) & JBD_FLAG_LAST_TAG)
+      break;
+  }
+  uint32_t commit_pos =
+      ((start_block + 1 + tag_count - 1) % (journal_blocks - 1)) + 1;
+  uint32_t commit_phys = ext2_get_block_num(mnt, j_inode, commit_pos);
+  if (ext2_read_block(mnt, commit_phys, data_buf) != 0)
+    goto incomplete;
+  jbd_header_t *commit = (jbd_header_t *)data_buf;
+  if (__builtin_bswap32(commit->h_magic) != EXT3_JOURNAL_MAGIC_NUMBER ||
+      __builtin_bswap32(commit->h_blocktype) != JBD_COMMIT_BLOCK ||
+      __builtin_bswap32(commit->h_sequence) != sequence)
+    goto incomplete;
 
   uint32_t curr_journal_block = start_block;
   while (1) {
@@ -298,4 +340,10 @@ static int ext3_recover_journal(ext2_mount_t *mnt, jbd_superblock_t *jsb,
   kfree(desc_buf);
   kfree(data_buf);
   return 0;
+
+incomplete:
+  klog_puts("[EXT3] Ignoring incomplete journal transaction.\n");
+  kfree(desc_buf);
+  kfree(data_buf);
+  return -1;
 }

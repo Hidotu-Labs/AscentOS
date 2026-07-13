@@ -77,7 +77,6 @@ static uint64_t sys_stat(uint64_t path_ptr, uint64_t statbuf_ptr, uint64_t a2,
         node = vfs_resolve_path_at(cwd, path);
     }
     if (!node) {
-        klog_puts("[SYSCALL] sys_stat: not found: "); klog_puts(path); klog_puts("\n");
         return (uint64_t)-2;
     }
     fill_kstat(ks, node);
@@ -272,14 +271,6 @@ static uint64_t sys_getdents64(uint64_t fd, uint64_t dirp, uint64_t count,
     vfs_node_t *node = t->fds[fd];
     if ((node->flags & FS_TYPE_MASK) != FS_DIRECTORY) return (uint64_t)-20;
 
-    if (strcmp(t->comm, "htop") != 0 && strcmp(t->comm, "btop") != 0) {
-    klog_puts("[SYSCALL] getdents64 tid="); klog_uint64(t->tid);
-    klog_puts(" fd="); klog_uint64(fd);
-    klog_puts(" path="); klog_puts(node->name);
-    klog_puts("\n");
-    }
-
-
     uint8_t *buf = (uint8_t *)dirp;
     if (!buf || !is_user_ptr((uint64_t)buf)) return (uint64_t)-14;
 
@@ -313,11 +304,10 @@ static uint64_t sys_getdents64(uint64_t fd, uint64_t dirp, uint64_t count,
         } else {
             entry->d_type = DT_UNKNOWN;
         }
+        if (child)
+            vfs_close(child);
 
         strcpy(entry->d_name, de->name);
-        if (strcmp(t->comm, "htop") != 0 && strcmp(t->comm, "btop") != 0) {
-        klog_puts("[DIRENT] "); klog_puts(de->name); klog_puts("\n");
-        }
         written += entry_size;
         index++;
     }

@@ -3,6 +3,7 @@
 
 #include "drivers/storage/block.h"
 #include "fs/vfs.h"
+#include "lock/spinlock.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -123,6 +124,18 @@ typedef struct {
 } __attribute__((packed)) ext2_dirent_t;
 
 typedef struct {
+  bool active;
+  uint32_t owner_tid;
+  uint32_t depth;
+  uint32_t sequence;
+  uint32_t start_block;
+  ext2_inode_t journal_inode;
+  uint8_t *desc_block_buf;
+  uint32_t blocks_in_trans;
+  spinlock_t lock;
+} ext3_journal_state_t;
+
+typedef struct {
   struct block_device *dev;
   ext2_superblock_t sb;
   ext2_bgd_t *bgdt;
@@ -135,6 +148,8 @@ typedef struct {
     uint32_t num;
     uint8_t *data;
   } cache[32];
+  spinlock_t cache_lock;
+  ext3_journal_state_t journal;
 } ext2_mount_t;
 
 int ext2_mount(struct block_device *dev, vfs_node_t *mountpoint);

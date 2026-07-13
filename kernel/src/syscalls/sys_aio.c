@@ -488,7 +488,9 @@ static int pipe_poll(vfs_node_t *node, int events) {
     if (node->refcount <= 1)            revents |= (POLLHUP | POLLERR);
     else                                revents |= POLLOUT;
     spinlock_release(&ctx->lock);
-    return revents & events;
+    /* poll(2) reports POLLERR and POLLHUP regardless of the requested mask.
+     * A POLLIN-only reader must wake when the final pipe writer closes. */
+    return revents & (events | POLLERR | POLLHUP | POLLNVAL);
 }
 
 static void pipe_close(vfs_node_t *node) {

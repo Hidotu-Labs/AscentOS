@@ -137,6 +137,11 @@ typedef struct vfs_node {
 
   struct list_head pages[32]; // Hash table of cached pages (vfs_page_t)
   spinlock_t pages_lock;      // Lock for the page cache hash table
+
+  /* Optional sequential readdir cursor used by filesystems with indexed API. */
+  uint32_t readdir_cursor_index;
+  uint32_t readdir_cursor_offset;
+  spinlock_t readdir_cursor_lock;
 } vfs_node_t;
 
 extern vfs_node_t *fs_root;

@@ -139,6 +139,7 @@ static ext4_mount_t *ext4_init_mount(struct block_device *dev) {
     memset(mnt, 0, sizeof(ext4_mount_t));
 
     ext2_mount_t *base = &mnt->base;
+    spinlock_init(&base->cache_lock);
 
     base->dev = dev;
     memcpy(&base->sb, sb, sizeof(ext2_superblock_t));
