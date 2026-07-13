@@ -212,6 +212,59 @@ static bool sched_thread_off_cpu(struct thread *t) {
   return true;
 }
 
+/* Timed waits are rare compared with scheduler entries. Keep insertion O(n)
+ * and make the yield/timer hot path O(1) by maintaining the earliest deadline
+ * at the head. All helpers require cpu->queue_lock. */
+static void sched_deadline_remove_locked(struct cpu_info *cpu,
+                                         struct thread *t) {
+  if (!t->deadline_queued)
+    return;
+
+  struct thread **link = &cpu->deadline_head;
+  while (*link && *link != t)
+    link = &(*link)->deadline_next;
+  if (*link == t)
+    *link = t->deadline_next;
+
+  t->deadline_next = NULL;
+  t->deadline_queued = false;
+}
+
+static void sched_deadline_insert_locked(struct cpu_info *cpu,
+                                         struct thread *t) {
+  if (!t->wakeup_ticks)
+    return;
+  if (t->deadline_queued)
+    sched_deadline_remove_locked(cpu, t);
+
+  struct thread **link = &cpu->deadline_head;
+  while (*link && (*link)->wakeup_ticks <= t->wakeup_ticks)
+    link = &(*link)->deadline_next;
+  t->deadline_next = *link;
+  *link = t;
+  t->deadline_queued = true;
+}
+
+static void sched_deadline_expire_locked(struct cpu_info *cpu, uint64_t now) {
+  while (cpu->deadline_head && cpu->deadline_head->wakeup_ticks <= now) {
+    struct thread *t = cpu->deadline_head;
+    cpu->deadline_head = t->deadline_next;
+    t->deadline_next = NULL;
+    t->deadline_queued = false;
+
+    if (t->state == THREAD_SLEEPING || t->state == THREAD_BLOCKED) {
+      bool still_current = cpu->current_thread == t;
+      t->state = still_current ? THREAD_RUNNING : THREAD_READY;
+      t->wakeup_ticks = 0;
+      cpu->runqueue_bitmap |= (1U << t->priority);
+      if (!still_current)
+        cpu->runnable_count++;
+    } else {
+      t->wakeup_ticks = 0;
+    }
+  }
+}
+
 static void sched_arm_next_deadline(struct cpu_info *cpu,
                                     struct thread *next_t) {
   uint64_t now = lapic_timer_get_ms();
@@ -222,17 +275,9 @@ static void sched_arm_next_deadline(struct cpu_info *cpu,
   } else {
     cpu->quantum_deadline_ms = 0;
   }
-  for (int p = 0; p < SCHED_PRIORITY_LEVELS; p++) {
-    struct thread *head = cpu->runqueues[p];
-    if (!head) continue;
-    struct thread *t = head;
-    do {
-      if ((t->state == THREAD_SLEEPING || t->state == THREAD_BLOCKED) &&
-          t->wakeup_ticks && (!deadline || t->wakeup_ticks < deadline))
-        deadline = t->wakeup_ticks;
-      t = t->next;
-    } while (t && t != head);
-  }
+  if (cpu->deadline_head &&
+      (!deadline || cpu->deadline_head->wakeup_ticks < deadline))
+    deadline = cpu->deadline_head->wakeup_ticks;
   if (deadline) lapic_timer_rearm_if_earlier(deadline);
 }
 
@@ -259,6 +304,7 @@ void sched_init(void) {
       cpu->runqueues[p] = NULL;
     }
     cpu->runqueue_bitmap = 0;
+    cpu->deadline_head = NULL;
 
     // Register reschedule IPI handler once on BSP
     if (i == 0) {
@@ -679,37 +725,25 @@ void sched_yield(void) {
 
   spinlock_acquire(&cpu->queue_lock);
 
-  // Wake ALL expired sleeping threads FIRST.
-  // This ensures that if a high-priority task wakes up, we can switch to it
-  // immediately.
-  {
-    uint64_t now = lapic_timer_get_ticks();
-    // Only scan current CPU's queues to avoid cross-core pointer corruption or
-    // complex locking. Threads in AscentOS are currently sticky to their CPU.
-    for (int p = 0; p < SCHED_PRIORITY_LEVELS; p++) {
-      struct thread *head = cpu->runqueues[p];
-      if (!head)
-        continue;
-      struct thread *curr = head;
-      do {
-        if (!curr)
-          break; // Defensive
-        if ((curr->state == THREAD_SLEEPING || curr->state == THREAD_BLOCKED) &&
-            curr->wakeup_ticks != 0 && now >= curr->wakeup_ticks) {
-          curr->state = THREAD_READY;
-          curr->wakeup_ticks = 0;
-          cpu->runqueue_bitmap |= (1 << p);
-          cpu->runnable_count++;
-        }
-        curr = curr->next;
-      } while (curr != head && curr != NULL);
+  /* Publish a newly requested timeout once, then wake only deadlines that are
+   * actually due. This replaces two full runqueue scans on every yield. */
+  uint64_t now = lapic_timer_get_ticks();
+  if ((prev->state == THREAD_SLEEPING || prev->state == THREAD_BLOCKED) &&
+      prev->wakeup_ticks) {
+    if (prev->wakeup_ticks <= now) {
+      prev->state = THREAD_RUNNING;
+      prev->wakeup_ticks = 0;
+    } else {
+      sched_deadline_insert_locked(cpu, prev);
     }
   }
+  sched_deadline_expire_locked(cpu, now);
 
   // 1. If prev is ZOMBIE or DEAD, remove it from the runqueue entirely.
   //    BLOCKED/SLEEPING threads stay in the queue so sched_wakeup can
   //    find them in O(1) via cpu_index without re-enqueueing.
   if (prev->state == THREAD_ZOMBIE || prev->state == THREAD_DEAD) {
+    sched_deadline_remove_locked(cpu, prev);
     uint8_t p = prev->priority;
     if (cpu->runqueues[p]) {
       if (prev->next == prev) {
@@ -826,11 +860,12 @@ void sched_yield(void) {
       __asm__ volatile("mov %0, %%cr3" ::"r"(target_cr3) : "memory");
     }
 
-    // Save/Restore TLS MSRs
-    prev->fs_base = rdmsr(0xC0000100);
-    prev->gs_base = rdmsr(0xC0000102);
-    wrmsr(0xC0000100, next_t->fs_base);
-    wrmsr(0xC0000102, next_t->gs_base);
+    /* arch_prctl and clone keep these cached fields authoritative. Reading
+     * both MSRs on every switch is redundant and especially costly in TCG. */
+    if (prev->fs_base != next_t->fs_base)
+      wrmsr(0xC0000100, next_t->fs_base);
+    if (prev->gs_base != next_t->gs_base)
+      wrmsr(0xC0000102, next_t->gs_base);
 
     spinlock_release(&cpu->queue_lock);
     switch_context(prev, next_t);
@@ -1076,6 +1111,9 @@ static void remove_from_runqueue(struct thread *t) {
 
     __asm__ volatile("cli");
     spinlock_acquire(&cpu_local->queue_lock);
+
+    if (t->cpu_index == cpu_local->cpu_id)
+      sched_deadline_remove_locked(cpu_local, t);
 
     // Check all priority levels
     for (int p = 0; p < SCHED_PRIORITY_LEVELS; p++) {
@@ -1363,6 +1401,7 @@ void sched_wakeup(struct thread *t) {
       /* A wake that beats the caller into sched_yield() cancels the
        * block; the task is still executing and must never be published READY
        * for another CPU to steal. */
+      sched_deadline_remove_locked(target, t);
       t->state = still_current ? THREAD_RUNNING : THREAD_READY;
       t->wakeup_ticks = 0;
       target->runqueue_bitmap |= (1 << t->priority);

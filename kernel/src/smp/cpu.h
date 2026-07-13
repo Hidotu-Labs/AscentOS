@@ -47,6 +47,8 @@ struct cpu_info {
   // stack handoff so interrupts observe the arriving task.
   struct thread *switching_from;
   uint64_t sigreturn_frame;
+  // Timed sleepers ordered by wakeup_ticks. Protected by queue_lock.
+  struct thread *deadline_head;
 } __attribute__((aligned(64)));
 
 _Static_assert(offsetof(struct cpu_info, scratch_rsp) == 368,

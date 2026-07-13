@@ -147,6 +147,44 @@ static void drm_close(struct vfs_node *node) {
 }
 
 /* ── Display Commit (Software Blit) ─────────────────────────────────────── */
+static bool drm_cursor_damage_rect(const struct drm_plane *cursor,
+                                   struct drm_clip_rect *clip) {
+  if (!cursor || !cursor->fb || !clip)
+    return false;
+
+  int64_t x1 = (int64_t)cursor->crtc_x - cursor->hotspot_x;
+  int64_t y1 = (int64_t)cursor->crtc_y - cursor->hotspot_y;
+  uint32_t width = cursor->crtc_w ? cursor->crtc_w : cursor->fb->width;
+  uint32_t height = cursor->crtc_h ? cursor->crtc_h : cursor->fb->height;
+  int64_t x2 = x1 + width;
+  int64_t y2 = y1 + height;
+
+  if (x2 <= 0 || y2 <= 0 || x1 >= UINT16_MAX || y1 >= UINT16_MAX)
+    return false;
+  if (x1 < 0)
+    x1 = 0;
+  if (y1 < 0)
+    y1 = 0;
+  if (x2 > UINT16_MAX)
+    x2 = UINT16_MAX;
+  if (y2 > UINT16_MAX)
+    y2 = UINT16_MAX;
+  if (x2 <= x1 || y2 <= y1)
+    return false;
+
+  clip->x1 = (uint16_t)x1;
+  clip->y1 = (uint16_t)y1;
+  clip->x2 = (uint16_t)x2;
+  clip->y2 = (uint16_t)y2;
+  return true;
+}
+
+static bool drm_damage_intersects(const struct drm_clip_rect *a,
+                                  const struct drm_clip_rect *b) {
+  return a->x1 <= b->x2 && b->x1 <= a->x2 &&
+         a->y1 <= b->y2 && b->y1 <= a->y2;
+}
+
 static void drm_commit_damage(struct drm_device *dev,
                               const struct drm_clip_rect *clips,
                               uint32_t num_clips, uint32_t target_fb_id) {
@@ -180,6 +218,10 @@ static void drm_commit_damage(struct drm_device *dev,
           uint32_t width = fb_get_width();
           uint32_t height = fb_get_height();
           uint32_t hw_pitch = fb_get_pitch();
+          if (width > crtc->fb->width)
+            width = crtc->fb->width;
+          if (height > crtc->fb->height)
+            height = crtc->fb->height;
           uint32_t sw_pitch = crtc->fb->pitch;
 
           bool direct_scanout = crtc->fb->gem_obj->virt_addr == hw_fb &&
@@ -188,31 +230,88 @@ static void drm_commit_damage(struct drm_device *dev,
             saw_direct_scanout = true;
 
           if (!direct_scanout && clips && num_clips) {
+            struct drm_damage_span { uint32_t x1, x2; };
+            struct drm_damage_span spans[64];
             uint32_t cpp = crtc->fb->bpp / 8;
             if (!cpp) cpp = 4;
+            uint32_t damage_y1 = height, damage_y2 = 0;
             for (uint32_t i = 0; i < num_clips; i++) {
-              uint32_t x1 = clips[i].x1, y1 = clips[i].y1;
-              uint32_t x2 = clips[i].x2, y2 = clips[i].y2;
-              if (x1 > width) x1 = width;
-              if (x2 > width) x2 = width;
+              uint32_t y1 = clips[i].y1;
+              uint32_t y2 = clips[i].y2;
               if (y1 > height) y1 = height;
               if (y2 > height) y2 = height;
-              if (x2 <= x1 || y2 <= y1) continue;
-              size_t xoff = (size_t)x1 * cpp;
-              if (xoff >= hw_pitch || xoff >= sw_pitch) continue;
-              size_t line_bytes = (size_t)(x2 - x1) * cpp;
-              if (line_bytes > hw_pitch - xoff)
-                line_bytes = hw_pitch - xoff;
-              if (line_bytes > sw_pitch - xoff)
-                line_bytes = sw_pitch - xoff;
-              for (uint32_t y = y1; y < y2; y++)
-                memcpy_to_wc((uint8_t *)hw_fb +
-                                 (size_t)y * hw_pitch + xoff,
+              if (y2 <= y1) continue;
+              if (y1 < damage_y1) damage_y1 = y1;
+              if (y2 > damage_y2) damage_y2 = y2;
+            }
+
+            /* Build a union of the damage on each scanline.  Xorg can send
+             * overlapping clips; copying each rectangle independently writes
+             * those pixels to the WC scanout more than once. */
+            for (uint32_t y = damage_y1; y < damage_y2; y++) {
+              uint32_t span_count = 0;
+              for (uint32_t i = 0; i < num_clips; i++) {
+                if (y < clips[i].y1 || y >= clips[i].y2)
+                  continue;
+                uint32_t x1 = clips[i].x1;
+                uint32_t x2 = clips[i].x2;
+                if (x1 > width) x1 = width;
+                if (x2 > width) x2 = width;
+                if (x2 <= x1) continue;
+
+                uint32_t pos = 0;
+                while (pos < span_count && spans[pos].x2 < x1)
+                  pos++;
+                uint32_t end = pos;
+                while (end < span_count && spans[end].x1 <= x2) {
+                  if (spans[end].x1 < x1) x1 = spans[end].x1;
+                  if (spans[end].x2 > x2) x2 = spans[end].x2;
+                  end++;
+                }
+
+                if (end > pos) {
+                  spans[pos].x1 = x1;
+                  spans[pos].x2 = x2;
+                  uint32_t remove = end - pos - 1;
+                  for (uint32_t j = end; j < span_count; j++)
+                    spans[j - remove] = spans[j];
+                  span_count -= remove;
+                } else if (span_count < 64) {
+                  for (uint32_t j = span_count; j > pos; j--)
+                    spans[j] = spans[j - 1];
+                  spans[pos].x1 = x1;
+                  spans[pos].x2 = x2;
+                  span_count++;
+                } else {
+                  /* Pathological fragmentation: one bounding span still
+                   * avoids a full-height framebuffer copy. */
+                  uint32_t bx1 = x1, bx2 = x2;
+                  for (uint32_t j = 0; j < span_count; j++) {
+                    if (spans[j].x1 < bx1) bx1 = spans[j].x1;
+                    if (spans[j].x2 > bx2) bx2 = spans[j].x2;
+                  }
+                  spans[0].x1 = bx1;
+                  spans[0].x2 = bx2;
+                  span_count = 1;
+                }
+              }
+
+              for (uint32_t i = 0; i < span_count; i++) {
+                size_t xoff = (size_t)spans[i].x1 * cpp;
+                if (xoff >= hw_pitch || xoff >= sw_pitch) continue;
+                size_t line_bytes = (size_t)(spans[i].x2 - spans[i].x1) * cpp;
+                if (line_bytes > hw_pitch - xoff)
+                  line_bytes = hw_pitch - xoff;
+                if (line_bytes > sw_pitch - xoff)
+                  line_bytes = sw_pitch - xoff;
+                if (!line_bytes) continue;
+                memcpy_to_wc((uint8_t *)hw_fb + (size_t)y * hw_pitch + xoff,
                              (uint8_t *)crtc->fb->gem_obj->virt_addr +
                                  (size_t)y * sw_pitch + xoff,
                              line_bytes);
-              copied_bytes += (uint64_t)line_bytes * (y2 - y1);
-              wrote_wc = true;
+                copied_bytes += line_bytes;
+                wrote_wc = true;
+              }
             }
           } else if (!direct_scanout && hw_pitch == sw_pitch) {
 #if DRM_DEBUG_LOGGING
@@ -377,6 +476,31 @@ static void drm_commit_damage(struct drm_device *dev,
     drm_perf_stats.direct_scanout_commits++;
 
   spinlock_release(&dev->lock);
+}
+
+static void drm_commit_cursor_damage(struct drm_device *dev,
+                                     const struct drm_clip_rect *old_damage,
+                                     bool have_old_damage,
+                                     const struct drm_clip_rect *new_damage,
+                                     bool have_new_damage) {
+  struct drm_clip_rect clips[2];
+  uint32_t count = 0;
+
+  if (have_old_damage)
+    clips[count++] = *old_damage;
+  if (have_new_damage) {
+    if (count && drm_damage_intersects(&clips[0], new_damage)) {
+      if (new_damage->x1 < clips[0].x1) clips[0].x1 = new_damage->x1;
+      if (new_damage->y1 < clips[0].y1) clips[0].y1 = new_damage->y1;
+      if (new_damage->x2 > clips[0].x2) clips[0].x2 = new_damage->x2;
+      if (new_damage->y2 > clips[0].y2) clips[0].y2 = new_damage->y2;
+    } else {
+      clips[count++] = *new_damage;
+    }
+  }
+
+  if (count)
+    drm_commit_damage(dev, clips, count, 0);
 }
 
 static void drm_commit(struct drm_device *dev) {
@@ -1308,6 +1432,8 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     klog_puts("\n");
 #endif
 
+    struct drm_clip_rect old_damage = {0}, new_damage = {0};
+    bool have_old_damage = false, have_new_damage = false;
     spinlock_acquire(&dev->lock);
 
     struct drm_mode_object *obj;
@@ -1321,6 +1447,7 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
       if (!cursor)
         continue;
 
+      have_old_damage = drm_cursor_damage_rect(cursor, &old_damage);
       uint32_t flags =
           cur->flags ? cur->flags : (DRM_MODE_CURSOR_BO | DRM_MODE_CURSOR_MOVE);
 
@@ -1364,6 +1491,7 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
 
         cursor->fb = &legacy_cursor_fb;
       }
+      have_new_damage = drm_cursor_damage_rect(cursor, &new_damage);
       break;
     }
 
@@ -1380,7 +1508,8 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
       if (found_crtc_id)
         g_drm_cursor_fn(found_crtc_id, cur->handle, cur->x, cur->y, 0, 0);
     }
-    drm_commit(dev);
+    drm_commit_cursor_damage(dev, &old_damage, have_old_damage,
+                             &new_damage, have_new_damage);
     return 0;
   }
 
@@ -1407,6 +1536,8 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     klog_puts("\n");
 #endif
 
+    struct drm_clip_rect old_damage = {0}, new_damage = {0};
+    bool have_old_damage = false, have_new_damage = false;
     spinlock_acquire(&dev->lock);
 
     struct drm_mode_object *obj;
@@ -1420,6 +1551,7 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
       if (!cursor)
         continue;
 
+      have_old_damage = drm_cursor_damage_rect(cursor, &old_damage);
       uint32_t flags =
           cur->flags ? cur->flags : (DRM_MODE_CURSOR_BO | DRM_MODE_CURSOR_MOVE);
 
@@ -1463,11 +1595,13 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
 
         cursor->fb = &legacy_cursor2_fb;
       }
+      have_new_damage = drm_cursor_damage_rect(cursor, &new_damage);
       break;
     }
 
     spinlock_release(&dev->lock);
-    drm_commit(dev);
+    drm_commit_cursor_damage(dev, &old_damage, have_old_damage,
+                             &new_damage, have_new_damage);
     return 0;
   }
 

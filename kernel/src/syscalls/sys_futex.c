@@ -1,7 +1,6 @@
 // Futex Syscall (202)
-// Implements FUTEX_WAIT and FUTEX_WAKE using a hash table keyed on the
-// physical address of the futex word.  This ensures correctness across
-// processes sharing memory (e.g. after fork + shared mappings).
+// Implements FUTEX_WAIT and FUTEX_WAKE using a hash table. Shared futexes use
+// physical addresses; private futexes use (mm, virtual address) identities.
 //
 // Linux futex(2) signature:
 //   long futex(uint32_t *uaddr, int futex_op, uint32_t val,
@@ -13,6 +12,7 @@
 #include "../mm/vmm.h"
 #include "../sched/sched.h"
 #include "syscall.h"
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -39,8 +39,15 @@
 #define FUTEX_HASH_BITS 6
 #define FUTEX_HASH_SIZE (1 << FUTEX_HASH_BITS) // 64 buckets
 
+struct futex_key {
+  // Zero selects a shared, physical-address key. Private futexes use the
+  // process mm pointer and never need a guest page-table walk.
+  uint64_t space;
+  uint64_t address;
+};
+
 struct futex_waiter {
-  uint64_t phys_addr;    // Physical address of the futex word
+  struct futex_key key;
   struct thread *thread; // Blocked thread
   struct futex_waiter *next;
 };
@@ -62,11 +69,17 @@ static void futex_init_once(void) {
   futex_initialized = 1;
 }
 
-static inline uint32_t futex_hash_key(uint64_t phys_addr) {
-  // Mix the address bits a little for better distribution
-  uint64_t h = phys_addr >> 2; // Remove lowest 2 bits (4-byte aligned)
-  h ^= (h >> 16);
+static inline uint32_t futex_hash_key(struct futex_key key) {
+  uint64_t h = key.address >> 2;
+  h ^= key.space + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+  h ^= h >> 33;
+  h *= 0xff51afd7ed558ccdULL;
+  h ^= h >> 33;
   return (uint32_t)(h & (FUTEX_HASH_SIZE - 1));
+}
+
+static inline bool futex_key_equal(struct futex_key a, struct futex_key b) {
+  return a.space == b.space && a.address == b.address;
 }
 
 // Remove every waiter owned by a thread that is about to be reaped. Futex
@@ -92,20 +105,37 @@ void futex_remove_thread_waiters(struct thread *thread) {
   }
 }
 
-// Resolve user virtual address to physical address
-static uint64_t futex_get_phys(uint32_t *uaddr) {
+/* Build a futex identity. Process-private futexes are only meaningful within
+ * one mm, so (mm, uaddr) is sufficient and avoids vmm_virt_to_phys() on every
+ * Mesa/LLVM worker wait and wake. Shared futexes retain physical identities. */
+static int futex_get_key(uint32_t *uaddr, bool private,
+                         struct futex_key *key) {
   struct thread *t = sched_get_current();
-  if (!t || !t->cr3)
-    return 0;
+  if (!t || !key)
+    return -EFAULT;
 
   uint64_t vaddr = (uint64_t)uaddr;
-
-  // Basic user-space address sanity check
+  if ((vaddr & (sizeof(uint32_t) - 1)) != 0)
+    return -EINVAL;
   if (!vmm_is_user_addr_range_valid(vaddr, sizeof(uint32_t)))
-    return 0;
+    return -EFAULT;
 
+  if (private) {
+    if (!t->mm)
+      return -EFAULT;
+    key->space = (uint64_t)t->mm;
+    key->address = vaddr;
+    return 0;
+  }
+
+  if (!t->cr3)
+    return -EFAULT;
   uint64_t phys = vmm_virt_to_phys((uint64_t *)t->cr3, vaddr);
-  return phys;
+  if (!phys)
+    return -EFAULT;
+  key->space = 0;
+  key->address = phys;
+  return 0;
 }
 
 // FUTEX_WAIT
@@ -115,19 +145,18 @@ static uint64_t futex_get_phys(uint32_t *uaddr) {
 // Returns -EAGAIN if *uaddr != val at time of check.
 // Returns -ETIMEDOUT if timeout expired.
 static uint64_t futex_wait(uint32_t *uaddr, uint32_t val,
-                           const uint64_t *timeout_ts) {
-  futex_init_once();
+                           const uint64_t *timeout_ts, bool private) {
+  struct futex_key key;
+  int error = futex_get_key(uaddr, private, &key);
+  if (error)
+    return (uint64_t)(int64_t)error;
 
-  uint64_t phys = futex_get_phys(uaddr);
-  if (phys == 0)
-    return (uint64_t)(-(int64_t)EFAULT);
-
-  uint32_t bucket = futex_hash_key(phys);
+  uint32_t bucket = futex_hash_key(key);
 
   // Allocate waiter on the kernel stack — it's safe because we block in this
   // function and only return after being woken (the stack frame stays valid).
   struct futex_waiter waiter;
-  waiter.phys_addr = phys;
+  waiter.key = key;
   waiter.thread = sched_get_current();
   waiter.next = NULL;
 
@@ -174,7 +203,7 @@ static uint64_t futex_wait(uint32_t *uaddr, uint32_t val,
 
   // We're back!  Remove ourselves from the hash bucket
   // The waiter might have been requeued to a different bucket.
-  uint32_t final_bucket = futex_hash_key(waiter.phys_addr);
+  uint32_t final_bucket = futex_hash_key(waiter.key);
   spinlock_acquire(&futex_hash[final_bucket].lock);
 
   // Remove waiter from the list (may already have been removed by wake)
@@ -211,16 +240,14 @@ static uint64_t futex_wait(uint32_t *uaddr, uint32_t val,
   return 0;
 }
 
-uint64_t futex_wake_phys(uint64_t phys, uint32_t val) {
-  futex_init_once();
-  if (phys == 0) return (uint64_t)(-(int64_t)EFAULT);
-  uint32_t bucket = futex_hash_key(phys);
+static uint64_t futex_wake_key(struct futex_key key, uint32_t val) {
+  uint32_t bucket = futex_hash_key(key);
   uint32_t woken = 0;
   spinlock_acquire(&futex_hash[bucket].lock);
   struct futex_waiter **pp = &futex_hash[bucket].head;
   while (*pp && woken < val) {
     struct futex_waiter *w = *pp;
-    if (w->phys_addr == phys) {
+    if (futex_key_equal(w->key, key)) {
       if (w->thread && w->thread->state == THREAD_BLOCKED) {
         sched_wakeup(w->thread);
         woken++;
@@ -237,39 +264,41 @@ uint64_t futex_wake_phys(uint64_t phys, uint32_t val) {
 // FUTEX_WAKE
 // Wake at most `val` threads waiting on the futex at *uaddr.
 // Returns the number of threads woken.
-static uint64_t futex_wake(uint32_t *uaddr, uint32_t val) {
-  futex_init_once();
+static uint64_t futex_wake(uint32_t *uaddr, uint32_t val, bool private) {
+  struct futex_key key;
+  int error = futex_get_key(uaddr, private, &key);
+  if (error)
+    return (uint64_t)(int64_t)error;
 
-  uint64_t phys = futex_get_phys(uaddr);
-  if (phys == 0)
-    return (uint64_t)(-(int64_t)EFAULT);
-
-  return futex_wake_phys(phys, val);
+  return futex_wake_key(key, val);
 }
 
 // FUTEX_REQUEUE
 // Wake at most `val` threads waiting on uaddr1, and move at most `val2`
 // remaining threads to wait on uaddr2 instead.
 static uint64_t futex_requeue(uint32_t *uaddr1, uint32_t val, uint32_t val2,
-                              uint32_t *uaddr2) {
-  futex_init_once();
+                              uint32_t *uaddr2, bool private) {
+  struct futex_key key1, key2;
+  int error = futex_get_key(uaddr1, private, &key1);
+  if (error)
+    return (uint64_t)(int64_t)error;
+  error = futex_get_key(uaddr2, private, &key2);
+  if (error)
+    return (uint64_t)(int64_t)error;
 
-  uint64_t phys1 = futex_get_phys(uaddr1);
-  uint64_t phys2 = futex_get_phys(uaddr2);
-  if (phys1 == 0 || phys2 == 0)
-    return (uint64_t)(-(int64_t)EFAULT);
+  if (futex_key_equal(key1, key2))
+    return futex_wake_key(key1, val);
 
-  if (phys1 == phys2)
-    return futex_wake(uaddr1, val);
-
-  uint32_t bucket1 = futex_hash_key(phys1);
-  uint32_t bucket2 = futex_hash_key(phys2);
+  uint32_t bucket1 = futex_hash_key(key1);
+  uint32_t bucket2 = futex_hash_key(key2);
 
   uint32_t total_woken = 0;
   uint32_t total_requeued = 0;
 
   // Always acquire locks in bucket order to avoid deadlocks
-  if (bucket1 < bucket2) {
+  if (bucket1 == bucket2) {
+    spinlock_acquire(&futex_hash[bucket1].lock);
+  } else if (bucket1 < bucket2) {
     spinlock_acquire(&futex_hash[bucket1].lock);
     spinlock_acquire(&futex_hash[bucket2].lock);
   } else {
@@ -280,7 +309,7 @@ static uint64_t futex_requeue(uint32_t *uaddr1, uint32_t val, uint32_t val2,
   struct futex_waiter **pp = &futex_hash[bucket1].head;
   while (*pp) {
     struct futex_waiter *w = *pp;
-    if (w->phys_addr == phys1) {
+    if (futex_key_equal(w->key, key1)) {
       if (total_woken < val) {
         // Wake this thread
         if (w->thread && w->thread->state == THREAD_BLOCKED) {
@@ -292,7 +321,7 @@ static uint64_t futex_requeue(uint32_t *uaddr1, uint32_t val, uint32_t val2,
       } else if (total_requeued < val2) {
         // Requeue: move to bucket2
         *pp = w->next; // Remove from bucket1
-        w->phys_addr = phys2;
+        w->key = key2;
         w->next = futex_hash[bucket2].head;
         futex_hash[bucket2].head = w;
         total_requeued++;
@@ -306,7 +335,8 @@ static uint64_t futex_requeue(uint32_t *uaddr1, uint32_t val, uint32_t val2,
   }
 
   spinlock_release(&futex_hash[bucket1].lock);
-  spinlock_release(&futex_hash[bucket2].lock);
+  if (bucket2 != bucket1)
+    spinlock_release(&futex_hash[bucket2].lock);
 
   return (uint64_t)total_woken;
 }
@@ -318,22 +348,23 @@ static uint64_t sys_futex(uint64_t uaddr_val, uint64_t op_val, uint64_t val_arg,
   (void)val3;
 
   uint32_t *uaddr = (uint32_t *)uaddr_val;
-  int op = (int)(op_val & FUTEX_CMD_MASK); // Strip FUTEX_PRIVATE_FLAG
+  bool private = (op_val & FUTEX_PRIVATE_FLAG) != 0;
+  int op = (int)(op_val & FUTEX_CMD_MASK);
   uint32_t val = (uint32_t)val_arg;
 
   switch (op) {
   case FUTEX_WAIT: {
     const uint64_t *timeout =
         timeout_ptr ? (const uint64_t *)timeout_ptr : NULL;
-    return futex_wait(uaddr, val, timeout);
+    return futex_wait(uaddr, val, timeout, private);
   }
 
   case FUTEX_WAKE:
-    return futex_wake(uaddr, val);
+    return futex_wake(uaddr, val, private);
 
   case FUTEX_REQUEUE:
     return futex_requeue(uaddr, val, (uint32_t)timeout_ptr,
-                         (uint32_t *)uaddr2_val);
+                         (uint32_t *)uaddr2_val, private);
 
   default:
     klog_puts("[FUTEX] Unsupported op: ");
@@ -345,7 +376,13 @@ static uint64_t sys_futex(uint64_t uaddr_val, uint64_t op_val, uint64_t val_arg,
 
 // Registration
 uint64_t futex_wake_user(uint32_t *uaddr, uint32_t count) {
-  return futex_wake(uaddr, count);
+  // CLONE_CHILD_CLEARTID is paired with pthread-private futex waits.
+  return futex_wake(uaddr, count, true);
 }
 
-void syscall_register_futex(void) { syscall_register(SYS_FUTEX, sys_futex); }
+void syscall_register_futex(void) {
+  // Registration runs before userspace and makes lazy initialization and its
+  // race/branch unnecessary in every futex operation.
+  futex_init_once();
+  syscall_register(SYS_FUTEX, sys_futex);
+}

@@ -72,8 +72,10 @@ void syscall_dispatcher(struct syscall_regs *regs) {
     klog_puts("\n");
   }
 
-  // Delivery signals before returning to usermode
-  signal_deliver_syscall(regs);
+  /* Signal frame conversion copies the complete register set. Keep it off the
+   * syscall hot path unless this thread can actually deliver a signal. */
+  if (t && (t->pending_signals & ~t->signal_mask))
+    signal_deliver_syscall(regs);
 }
 
 // Core initialization

@@ -139,6 +139,8 @@ struct thread {
   thread_state_t state;
   bool waiting_for_child;       // Blocked specifically inside wait4().
   uint64_t wakeup_ticks;
+  struct thread *deadline_next; // Per-CPU ordered timeout queue link
+  bool deadline_queued;
   struct fd_table *files;
   vfs_node_t **fds;
   uint64_t *fd_offsets;  // Track seek offset per file descriptor

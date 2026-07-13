@@ -136,39 +136,75 @@ void *memcpy(void *dest, const void *src, size_t n) {
   return dest;
 }
 
+static int memcpy_wc_use_rep(void) {
+  /* Give QEMU TCG one REP string operation instead of a guest loop with one
+   * MOVNTI per machine word. Cache the vendor check because damage blits call
+   * memcpy_to_wc once per affected span. */
+  static uint8_t mode;
+  uint8_t cached = __atomic_load_n(&mode, __ATOMIC_RELAXED);
+  if (cached)
+    return cached == 2;
+
+  uint32_t eax = 1, ebx, ecx, edx;
+  __asm__ volatile("cpuid"
+                   : "+a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx));
+  int tcg = 0;
+  if (ecx & (1U << 31)) {
+    eax = 0x40000000;
+    __asm__ volatile("cpuid"
+                     : "+a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx));
+    /* "TCGTCGTCGTCG" consists of the same little-endian dword repeated. */
+    tcg = ebx == 0x54474354U && ecx == 0x54474354U &&
+          edx == 0x54474354U;
+  }
+  __atomic_store_n(&mode, tcg ? 2 : 1, __ATOMIC_RELAXED);
+  return tcg;
+}
+
 void *memcpy_to_wc(void *dest, const void *src, size_t n) {
   uint8_t *d = dest;
   const uint8_t *s = src;
 
-  /* MOVNTI requires a naturally aligned destination. Unaligned source
-   * loads are valid on x86-64 and occur for narrow damage rectangles. */
+  /* Both MOVNTI and REP MOVSQ benefit from an aligned WC destination. */
   while (n && ((uintptr_t)d & 7)) {
     *d++ = *s++;
     n--;
   }
 
+  if (memcpy_wc_use_rep()) {
+    size_t qwords = n >> 3;
+    __asm__ volatile("rep movsq"
+                     : "+D"(d), "+S"(s), "+c"(qwords)
+                     :
+                     : "memory");
+    n &= 7;
+    while (n--)
+      *d++ = *s++;
+    return dest;
+  }
+
   while (n >= 64) {
     __asm__ volatile(
-        "prefetchnta 256(%[src])\n\t"
         "movq 0(%[src]), %%rax\n\t"
+        "movq 8(%[src]), %%rcx\n\t"
+        "movq 16(%[src]), %%rdx\n\t"
+        "movq 24(%[src]), %%r8\n\t"
+        "movq 32(%[src]), %%r9\n\t"
+        "movq 40(%[src]), %%r10\n\t"
+        "movq 48(%[src]), %%r11\n\t"
+        "movq 56(%[src]), %%r12\n\t"
         "movnti %%rax, 0(%[dst])\n\t"
-        "movq 8(%[src]), %%rax\n\t"
-        "movnti %%rax, 8(%[dst])\n\t"
-        "movq 16(%[src]), %%rax\n\t"
-        "movnti %%rax, 16(%[dst])\n\t"
-        "movq 24(%[src]), %%rax\n\t"
-        "movnti %%rax, 24(%[dst])\n\t"
-        "movq 32(%[src]), %%rax\n\t"
-        "movnti %%rax, 32(%[dst])\n\t"
-        "movq 40(%[src]), %%rax\n\t"
-        "movnti %%rax, 40(%[dst])\n\t"
-        "movq 48(%[src]), %%rax\n\t"
-        "movnti %%rax, 48(%[dst])\n\t"
-        "movq 56(%[src]), %%rax\n\t"
-        "movnti %%rax, 56(%[dst])"
+        "movnti %%rcx, 8(%[dst])\n\t"
+        "movnti %%rdx, 16(%[dst])\n\t"
+        "movnti %%r8, 24(%[dst])\n\t"
+        "movnti %%r9, 32(%[dst])\n\t"
+        "movnti %%r10, 40(%[dst])\n\t"
+        "movnti %%r11, 48(%[dst])\n\t"
+        "movnti %%r12, 56(%[dst])"
         :
         : [dst] "r"(d), [src] "r"(s)
-        : "rax", "memory");
+        : "rax", "rcx", "rdx", "r8", "r9", "r10", "r11", "r12",
+          "memory");
     d += 64;
     s += 64;
     n -= 64;

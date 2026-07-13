@@ -167,6 +167,15 @@ void process_do_exit(uint64_t status) {
       klog_puts("[EXITDBG] zombie published\n");
     }
 
+    /* A vfork parent is blocked inside sys_clone_internal(), before it can
+     * enter wait4().  Publish the zombie before releasing it so an immediate
+     * waitpid() can observe and reap this child. */
+    if (current->clone_flags & CLONE_VFORK) {
+      if (current->parent && current->parent->state == THREAD_BLOCKED)
+        sched_wakeup(current->parent);
+      current->clone_flags &= ~CLONE_VFORK;
+    }
+
     if (parent_to_wake) {
       klog_puts("[EXITDBG] waking parent\n");
       sched_wakeup(parent_to_wake);
@@ -639,7 +648,7 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
   // child needs the shared address space intact to handle ENOEXEC fallbacks.
   if (current->clone_flags & CLONE_VFORK) {
     if (current->parent && current->parent->state == THREAD_BLOCKED)
-      current->parent->state = THREAD_READY;
+      sched_wakeup(current->parent);
     current->clone_flags &= ~CLONE_VFORK;
   }
 
