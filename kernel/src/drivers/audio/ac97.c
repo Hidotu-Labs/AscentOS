@@ -1,4 +1,5 @@
 #include "ac97.h"
+#include "hal/hal.h"
 #include "../../apic/ioapic.h"
 #include "../../apic/lapic.h"
 #include "../../console/console.h"
@@ -263,7 +264,7 @@ static uint32_t ac97_vfs_write(struct vfs_node *node, uint32_t offset,
 
   uint32_t written = 0;
   while (written < size) {
-    asm volatile("cli");
+    hal_irq_disable();
     uint32_t space = AC97_RING_SIZE - ring_count;
 
     // Calculate how many input bytes we can process based on available space in
@@ -273,14 +274,14 @@ static uint32_t ac97_vfs_write(struct vfs_node *node, uint32_t offset,
     uint32_t output_bytes_per_frame = 4; // 16-bit stereo
 
     if (space < output_bytes_per_frame) {
-      asm volatile("sti");
+      hal_irq_enable();
       break; // Buffer full
     }
 
     // Process one frame at a time for simplicity and to handle format
     // conversion
     if (written + input_bytes_per_frame > size) {
-      asm volatile("sti");
+      hal_irq_enable();
       break; // Partial frame at end of user buffer, skip for now
     }
 
@@ -324,7 +325,7 @@ static uint32_t ac97_vfs_write(struct vfs_node *node, uint32_t offset,
       ac97_pump_audio();
       ac97_nabm_write8(AC97_PO_CR, AC97_CR_RPBM | AC97_CR_IOCE | AC97_CR_LVBIE);
     }
-    asm volatile("sti");
+    hal_irq_enable();
   }
   return written;
 }
@@ -337,11 +338,11 @@ int ac97_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
   switch (request) {
   case 0x5000: // SNDCTL_DSP_RESET
   {
-    asm volatile("cli");
+    hal_irq_disable();
     ring_head = ring_tail = ring_count = 0;
     ac97_is_playing = false;
     ac97_nabm_write8(AC97_PO_CR, 0);
-    asm volatile("sti");
+    hal_irq_enable();
     return 0;
   }
   case 0xC004500A: // SNDCTL_DSP_SETFRAGMENT

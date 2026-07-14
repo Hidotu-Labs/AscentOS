@@ -1,4 +1,5 @@
 #include "sb16.h"
+#include "hal/hal.h"
 #include "../../acpi/acpi.h"
 #include "../../apic/ioapic.h"
 #include "../../apic/lapic.h"
@@ -308,12 +309,12 @@ int sb16_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
   switch (request) {
   case 0x5000: // SNDCTL_DSP_RESET
   {
-    asm volatile("cli");
+    hal_irq_disable();
     ring_head = ring_tail = ring_count = 0;
     sb16_is_playing = false;
     dsp_write(0xD0);
     dsp_write(0xD5);
-    asm volatile("sti");
+    hal_irq_enable();
     return 0;
   }
   case 0xC004500A: // SNDCTL_DSP_SETFRAGMENT
@@ -413,11 +414,11 @@ static uint32_t dsp_vfs_write(struct vfs_node *node, uint32_t offset,
   uint32_t to_write = size;
   uint32_t written = 0;
   while (to_write > 0) {
-    asm volatile("cli");
+    hal_irq_disable();
     uint32_t space = SB16_RING_SIZE - ring_count;
 
     if (space == 0) {
-      asm volatile("sti");
+      hal_irq_enable();
       // Ring buffer full. Do not block, just return.
       break;
     }
@@ -439,7 +440,7 @@ static uint32_t dsp_vfs_write(struct vfs_node *node, uint32_t offset,
     if (!sb16_is_playing) {
       sb16_pump_audio();
     }
-    asm volatile("sti");
+    hal_irq_enable();
 
     written += chunk;
     to_write -= chunk;

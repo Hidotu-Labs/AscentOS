@@ -1,4 +1,5 @@
 #include "hda.h"
+#include "hal/hal.h"
 #include "../../console/klog.h"
 #include "../../cpu/irq.h"
 #include "../../cpu/isr.h"
@@ -860,7 +861,7 @@ static uint32_t hda_vfs_write(struct vfs_node *node, uint32_t offset,
        hda_bits != active_bits);
 
   if (hda_is_playing && format_changed) {
-    __asm__ volatile("cli");
+    hal_irq_disable();
     uint16_t gcap = hda_read16(HDA_GCAP);
     int iss = (gcap >> 8) & 0xF;
     uint32_t sd_off = HDA_SD_BASE + (iss * 0x20);
@@ -870,20 +871,20 @@ static uint32_t hda_vfs_write(struct vfs_node *node, uint32_t offset,
     ring_head = 0;
     ring_tail = 0;
     ring_count = 0;
-    __asm__ volatile("sti");
+    hal_irq_enable();
   }
 
   uint32_t written = 0;
   while (written < size) {
     // Calculate available space with interrupts briefly disabled
-    __asm__ volatile("cli");
+    hal_irq_disable();
     uint32_t cur_count = ring_count;
-    __asm__ volatile("sti");
+    hal_irq_enable();
 
     uint32_t space = HDA_RING_SIZE - cur_count;
     if (space == 0) {
       // Ring is full, yield and retry - do NOT drop data
-      __asm__ volatile("pause");
+      hal_cpu_relax();
       continue;
     }
 
@@ -895,7 +896,7 @@ static uint32_t hda_vfs_write(struct vfs_node *node, uint32_t offset,
       if (chunk * 2 > space)
         chunk = space / 2;
       if (chunk == 0) {
-        __asm__ volatile("pause");
+        hal_cpu_relax();
         continue;
       }
     }
@@ -911,9 +912,9 @@ static uint32_t hda_vfs_write(struct vfs_node *node, uint32_t offset,
         ring_head = (ring_head + 1) % HDA_RING_SIZE;
       }
       // Atomically update count
-      __asm__ volatile("cli");
+      hal_irq_disable();
       ring_count += (chunk * 2);
-      __asm__ volatile("sti");
+      hal_irq_enable();
     } else {
       uint32_t head_snap = ring_head;
       uint32_t end1 = HDA_RING_SIZE - head_snap;
@@ -926,16 +927,16 @@ static uint32_t hda_vfs_write(struct vfs_node *node, uint32_t offset,
         memcpy(hda_ring, buffer + written + end1, rem);
         ring_head = rem;
       }
-      __asm__ volatile("cli");
+      hal_irq_disable();
       ring_count += chunk;
-      __asm__ volatile("sti");
+      hal_irq_enable();
     }
 
     written += chunk;
 
     // Start stream if we have enough buffered data
     if (!hda_is_playing && ring_count >= HDA_VFS_BUF_SIZE * HDA_VFS_NUM_BDL) {
-      __asm__ volatile("cli");
+      hal_irq_disable();
       active_rate = hda_sample_rate;
       active_channels = hda_channels;
       active_bits = hda_bits;
@@ -995,7 +996,7 @@ static uint32_t hda_vfs_write(struct vfs_node *node, uint32_t offset,
       // Start stream with Stream ID 1 and IOCE
       hda_write32(sd_off + HDA_SD_CTL,
                   (1 << 20) | HDA_SD_CTL_IOCE | HDA_SD_CTL_RUN);
-      __asm__ volatile("sti");
+      hal_irq_enable();
     }
   }
   return written;
@@ -1009,7 +1010,7 @@ static int hda_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
   switch (request) {
   case 0x5000: // SNDCTL_DSP_RESET
   {
-    __asm__ volatile("cli");
+    hal_irq_disable();
     if (hda_is_playing) {
       uint16_t gcap = hda_read16(HDA_GCAP);
       int iss = (gcap >> 8) & 0xF;
@@ -1019,7 +1020,7 @@ static int hda_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
       hda_is_playing = false;
     }
     ring_head = ring_tail = ring_count = 0;
-    __asm__ volatile("sti");
+    hal_irq_enable();
     return 0;
   }
   case 0xC004500A: // SNDCTL_DSP_SETFRAGMENT

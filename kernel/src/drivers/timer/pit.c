@@ -1,4 +1,5 @@
 #include "drivers/timer/pit.h"
+#include "hal/hal.h"
 #include "console/console.h"
 #include "console/klog.h"
 #include "cpu/irq.h"
@@ -48,6 +49,6 @@ void pit_sleep(uint32_t ms) {
 
   uint64_t end = pit_ticks + ticks_to_wait;
   while (pit_ticks < end) {
-    __asm__ volatile("hlt");
+    hal_cpu_halt();
   }
 }

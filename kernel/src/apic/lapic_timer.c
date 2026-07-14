@@ -1,4 +1,5 @@
 #include "lapic_timer.h"
+#include "hal/hal.h"
 #include "lapic.h"
 #include "../cpu/isr.h"
 #include "../console/console.h"
@@ -178,6 +179,6 @@ void lapic_timer_sleep(uint32_t ms) {
     uint64_t target = monotonic_ms() + ms;
     while (monotonic_ms() < target) {
         lapic_timer_rearm_if_earlier(target);
-        __asm__ volatile("hlt");
+        hal_cpu_halt();
     }
 }

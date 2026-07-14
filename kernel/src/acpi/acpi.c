@@ -1,4 +1,5 @@
 #include "acpi/acpi.h"
+#include "hal/hal.h"
 #include "console/console.h"
 #include "drivers/manager/device.h"
 #include "lib/string.h"
@@ -317,9 +318,9 @@ void acpi_poweroff(void) {
 
 hang:
   // Should not reach here; halt all CPUs
-  __asm__ volatile("cli");
+  hal_irq_disable();
   for (;;)
-    __asm__ volatile("hlt");
+    hal_cpu_halt();
 }
 
 void acpi_reboot(void) {
@@ -364,7 +365,7 @@ void acpi_reboot(void) {
   __asm__ volatile("cli; lidt %0; ud2" :: "m"(idtr));
 
   for (;;)
-    __asm__ volatile("hlt");
+    hal_cpu_halt();
 }
 
 // Initialization

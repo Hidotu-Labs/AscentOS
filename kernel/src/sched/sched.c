@@ -1,4 +1,5 @@
 #include "sched.h"
+#include "hal/hal.h"
 #include "../apic/lapic.h"
 #include "../apic/lapic_timer.h"
 #include "../console/console.h"
@@ -369,7 +370,7 @@ void sched_init(void) {
 
 static void thread_exit(void) {
   // Current thread finished execution. Mark dead and yield.
-  __asm__ volatile("cli");
+  hal_irq_disable();
   struct cpu_info *cpu = cpu_get_current();
   if (cpu->current_thread) {
     cpu->current_thread->state = THREAD_DEAD;
@@ -411,7 +412,7 @@ void sched_enqueue_thread(struct thread *t, struct cpu_info *explicit_cpu) {
     target_cpu = cpu_get_bsp();
   }
 
-  __asm__ volatile("cli");
+  hal_irq_disable();
   spinlock_acquire(&target_cpu->queue_lock);
 
   uint8_t p = t->priority;
@@ -452,7 +453,7 @@ void sched_enqueue_thread(struct thread *t, struct cpu_info *explicit_cpu) {
       lapic_send_ipi(target_cpu->apic_id, IPI_VECTOR_RESCHEDULE);
   }
 
-  __asm__ volatile("sti");
+  hal_irq_enable();
 }
 
 struct thread *sched_create_kernel_thread(void (*entry)(void),
@@ -687,10 +688,10 @@ static void sched_balance(struct cpu_info *cpu) {
 }
 
 void sched_yield(void) {
-  __asm__ volatile("cli");
+  hal_irq_disable();
   struct cpu_info *cpu = cpu_get_current();
   if (!cpu->current_thread) {
-    __asm__ volatile("sti");
+    hal_irq_enable();
     return;
   }
 
@@ -874,7 +875,7 @@ void sched_yield(void) {
   }
 
   // Only enable here if we are returning normally
-  __asm__ volatile("sti");
+  hal_irq_enable();
 }
 
 void sched_queue_reap(struct thread *t) {
@@ -885,6 +886,35 @@ void sched_queue_reap(struct thread *t) {
   t->reap_next = reap_queue;
   reap_queue = t;
   spinlock_release(&reap_queue_lock);
+}
+
+void sched_queue_reap_and_wait(struct thread *t) {
+  if (!t || t->is_idle)
+    return;
+
+  sched_queue_reap(t);
+
+  for (;;) {
+    /* Give the exiting child a chance to switch off its kernel stack. */
+    sched_yield();
+
+    /* Holding the worker lock also waits for a concurrent reaper that may
+     * already have removed and begun destroying this victim. */
+    spinlock_acquire(&reap_worker_lock);
+    spinlock_acquire(&reap_queue_lock);
+    bool pending = false;
+    for (struct thread *it = reap_queue; it; it = it->reap_next) {
+      if (it == t) {
+        pending = true;
+        break;
+      }
+    }
+    spinlock_release(&reap_queue_lock);
+    spinlock_release(&reap_worker_lock);
+
+    if (!pending)
+      return;
+  }
 }
 
 void sched_tick(struct registers *regs) {
@@ -965,7 +995,7 @@ void sched_print_tasks(void) {
     if (!cpu || cpu->status == CPU_STATUS_OFFLINE)
       continue;
 
-    __asm__ volatile("cli");
+    hal_irq_disable();
     spinlock_acquire(&cpu->queue_lock);
 
     for (int p = 0; p < SCHED_PRIORITY_LEVELS; p++) {
@@ -1043,7 +1073,7 @@ void sched_print_tasks(void) {
       }
     }
     spinlock_release(&cpu->queue_lock);
-    __asm__ volatile("sti");
+    hal_irq_enable();
   }
 }
 
@@ -1056,7 +1086,7 @@ bool sched_terminate_thread(uint32_t tid) {
     if (!cpu || cpu->status == CPU_STATUS_OFFLINE)
       continue;
 
-    __asm__ volatile("cli");
+    hal_irq_disable();
     spinlock_acquire(&cpu->queue_lock);
     for (int p = 0; p < SCHED_PRIORITY_LEVELS; p++) {
       struct thread *first = cpu->runqueues[p];
@@ -1066,7 +1096,7 @@ bool sched_terminate_thread(uint32_t tid) {
           if (curr->tid == tid && !curr->is_idle) {
             curr->state = THREAD_DEAD;
             spinlock_release(&cpu->queue_lock);
-            __asm__ volatile("sti");
+            hal_irq_enable();
             return true;
           }
           curr = curr->next;
@@ -1074,7 +1104,7 @@ bool sched_terminate_thread(uint32_t tid) {
       }
     }
     spinlock_release(&cpu->queue_lock);
-    __asm__ volatile("sti");
+    hal_irq_enable();
   }
   return false;
 }
@@ -1109,7 +1139,6 @@ static void remove_from_runqueue(struct thread *t) {
     if (!cpu_local || cpu_local->status == CPU_STATUS_OFFLINE)
       continue;
 
-    __asm__ volatile("cli");
     spinlock_acquire(&cpu_local->queue_lock);
 
     if (t->cpu_index == cpu_local->cpu_id)
@@ -1180,12 +1209,10 @@ static void remove_from_runqueue(struct thread *t) {
       }
 
       spinlock_release(&cpu_local->queue_lock);
-      __asm__ volatile("sti");
       return;
     }
 
     spinlock_release(&cpu_local->queue_lock);
-    __asm__ volatile("sti");
   }
 }
 
@@ -1385,8 +1412,7 @@ void sched_wakeup(struct thread *t) {
   if (t->state == THREAD_READY || t->state == THREAD_RUNNING)
     return; // Already runnable, nothing to do
 
-  uint64_t rflags;
-  __asm__ volatile("pushfq; pop %0; cli" : "=r"(rflags) : : "memory");
+  hal_irq_state_t rflags = hal_irq_save();
 
   // O(1) wakeup: blocked threads stay in their CPU's runqueue,
   // so we just use the stored cpu_index to flip state + bitmap.
@@ -1422,5 +1448,5 @@ void sched_wakeup(struct thread *t) {
     sched_enqueue_thread(t, cpu_get_current());
   }
 
-  __asm__ volatile("push %0; popfq" : : "r"(rflags) : "memory");
+  hal_irq_restore(rflags);
 }

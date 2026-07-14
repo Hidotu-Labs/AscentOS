@@ -365,12 +365,19 @@ int ext2_create_impl(vfs_node_t *node, char *name, uint16_t permission) {
   if (!mnt)
     return -1;
 
-  if (ext2_finddir_impl(node, name) != NULL)
+  /* Keep allocation, inode initialization, and directory insertion atomic. */
+  ext3_journal_start(mnt);
+
+  if (ext2_finddir_impl(node, name) != NULL) {
+    ext3_journal_stop(mnt);
     return -1;
+  }
 
   uint32_t new_ino = ext2_alloc_inode(mnt);
-  if (!new_ino)
+  if (!new_ino) {
+    ext3_journal_stop(mnt);
     return -1;
+  }
 
   ext2_inode_t new_inode;
   memset(&new_inode, 0, sizeof(ext2_inode_t));
@@ -387,12 +394,17 @@ int ext2_create_impl(vfs_node_t *node, char *name, uint16_t permission) {
   if (mnt->sb.s_feature_incompat & EXT4_FEATURE_INCOMPAT_EXTENTS)
     ext4_extent_init_inode(&new_inode);
 
-  if (ext2_write_inode(mnt, new_ino, &new_inode))
+  if (ext2_write_inode(mnt, new_ino, &new_inode)) {
+    ext3_journal_stop(mnt);
     return -1;
+  }
 
-  if (ext2_add_dir_entry(mnt, node->inode, new_ino, name, EXT2_FT_REG_FILE))
+  if (ext2_add_dir_entry(mnt, node->inode, new_ino, name, EXT2_FT_REG_FILE)) {
+    ext3_journal_stop(mnt);
     return -1;
+  }
 
+  ext3_journal_stop(mnt);
   return 0;
 }
 
@@ -401,16 +413,25 @@ int ext2_mkdir_impl(vfs_node_t *node, char *name, uint16_t permission) {
   if (!mnt)
     return -1;
 
-  if (ext2_finddir_impl(node, name) != NULL)
+  /* Serialize shared inode-table and directory-block read/modify/writes. */
+  ext3_journal_start(mnt);
+
+  if (ext2_finddir_impl(node, name) != NULL) {
+    ext3_journal_stop(mnt);
     return -1;
+  }
 
   uint32_t new_ino = ext2_alloc_inode(mnt);
-  if (!new_ino)
+  if (!new_ino) {
+    ext3_journal_stop(mnt);
     return -1;
+  }
 
   uint32_t data_block = ext2_alloc_block(mnt);
-  if (!data_block)
+  if (!data_block) {
+    ext3_journal_stop(mnt);
     return -1;
+  }
 
   ext2_inode_t new_inode;
   memset(&new_inode, 0, sizeof(ext2_inode_t));
@@ -427,13 +448,17 @@ int ext2_mkdir_impl(vfs_node_t *node, char *name, uint16_t permission) {
 
   if (mnt->sb.s_feature_incompat & EXT4_FEATURE_INCOMPAT_EXTENTS) {
     ext4_extent_init_inode(&new_inode);
-    if (ext4_extent_insert(mnt, &new_inode, new_ino, 0, data_block, 1) != 0)
+    if (ext4_extent_insert(mnt, &new_inode, new_ino, 0, data_block, 1) != 0) {
+      ext3_journal_stop(mnt);
       return -1;
+    }
   }
 
   uint8_t *block_buf = kcalloc(1, mnt->block_size);
-  if (!block_buf)
+  if (!block_buf) {
+    ext3_journal_stop(mnt);
     return -1;
+  }
 
   ext2_dirent_t *dot = (ext2_dirent_t *)block_buf;
   dot->inode     = new_ino;
@@ -453,11 +478,15 @@ int ext2_mkdir_impl(vfs_node_t *node, char *name, uint16_t permission) {
   ext3_journal_block(mnt, data_block, block_buf);
   kfree(block_buf);
 
-  if (ext2_write_inode(mnt, new_ino, &new_inode))
+  if (ext2_write_inode(mnt, new_ino, &new_inode)) {
+    ext3_journal_stop(mnt);
     return -1;
+  }
 
-  if (ext2_add_dir_entry(mnt, node->inode, new_ino, name, EXT2_FT_DIR))
+  if (ext2_add_dir_entry(mnt, node->inode, new_ino, name, EXT2_FT_DIR)) {
+    ext3_journal_stop(mnt);
     return -1;
+  }
 
   ext2_inode_t parent_inode;
   if (ext2_read_inode(mnt, node->inode, &parent_inode) == 0) {
@@ -469,5 +498,6 @@ int ext2_mkdir_impl(vfs_node_t *node, char *name, uint16_t permission) {
   mnt->bgdt[group].bg_used_dirs_count++;
   ext2_write_bgdt(mnt);
 
+  ext3_journal_stop(mnt);
   return 0;
 }

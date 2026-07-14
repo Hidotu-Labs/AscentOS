@@ -891,6 +891,11 @@ static uint64_t sys_fsync(uint64_t fd, uint64_t a1, uint64_t a2, uint64_t a3,
   return 0;
 }
 
+static uint64_t sys_fdatasync(uint64_t fd, uint64_t a1, uint64_t a2,
+                              uint64_t a3, uint64_t a4, uint64_t a5) {
+  return sys_fsync(fd, a1, a2, a3, a4, a5);
+}
+
 static uint64_t sys_fadvise64(uint64_t fd, uint64_t offset, uint64_t len,
                               uint64_t advice, uint64_t a4, uint64_t a5) {
   (void)fd;
@@ -965,6 +970,7 @@ void syscall_register_fd(void) {
   syscall_register(SYS_FALLOCATE, sys_fallocate);
   syscall_register(SYS_FLOCK, sys_flock);
   syscall_register(SYS_FSYNC, sys_fsync);
+  syscall_register(SYS_FDATASYNC, sys_fdatasync);
   syscall_register(SYS_MOUNT, sys_mount);
   syscall_register(SYS_SENDFILE, sys_sendfile);
   syscall_register(SYS_FADVISE64, sys_fadvise64);

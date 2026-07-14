@@ -1,6 +1,7 @@
 // sys_random.c — getrandom syscall
 #include "../apic/lapic_timer.h"
 #include "../console/klog.h"
+#include "hal/hal.h"
 #include "../sched/sched.h"
 #include "sys_io_shared.h"
 #include "syscall.h"
@@ -11,8 +12,7 @@ static uint64_t prng_state = 0;
 static void prng_seed(void) {
   if (prng_state != 0)
     return;
-  uint64_t tsc;
-  __asm__ volatile("rdtsc" : "=A"(tsc));
+  uint64_t tsc = hal_cpu_cycle_count();
   uint64_t ticks = lapic_timer_get_ticks();
   prng_state = tsc ^ (ticks << 32) ^ 0xDEADBEEFCAFEBABEULL;
   if (prng_state == 0)

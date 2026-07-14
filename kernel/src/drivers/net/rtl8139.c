@@ -1,4 +1,5 @@
 #include "drivers/net/rtl8139.h"
+#include "hal/hal.h"
 #include "console/klog.h"
 #include "drivers/pci/pci.h"
 #include "io/io.h"
@@ -121,7 +122,7 @@ bool rtl8139_phase1_init(void) {
   outb(rtl.io + RTL_CR, CR_RESET);
   uint32_t timeout = 1000000;
   while ((inb(rtl.io + RTL_CR) & CR_RESET) && --timeout)
-    __asm__ volatile("pause");
+    hal_cpu_relax();
   if (!timeout) {
     klog_puts("[RTL8139 TEST] Phase 1 FAIL: reset timeout\n");
     pci_config_write16(rtl.pci->bus, rtl.pci->slot, rtl.pci->func, 0x04,

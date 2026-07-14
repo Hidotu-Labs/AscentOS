@@ -1,4 +1,5 @@
 #include "tlb_shootdown.h"
+#include "hal/hal.h"
 #include "../apic/lapic.h"
 #include "../console/klog.h"
 #include "../cpu/isr.h"
@@ -111,7 +112,7 @@ static void do_shootdown(uint64_t addr) {
 
     // Wait for all targets to acknowledge.
     while (__atomic_load_n(&ack_pending, __ATOMIC_ACQUIRE) != 0)
-        __asm__ volatile("pause" ::: "memory");
+        hal_cpu_relax();
 
     // Now flush locally.
     if (addr == TLB_SHOOTDOWN_ALL) {

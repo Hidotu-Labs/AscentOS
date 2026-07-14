@@ -1,4 +1,5 @@
 #include "drivers/input/keyboard.h"
+#include "hal/hal.h"
 #include "../../console/console.h"
 #include "../../console/klog.h"
 #include "../../cpu/irq.h"
@@ -87,11 +88,11 @@ void keyboard_push_scancode(uint8_t scancode, bool extended, bool release) {
 }
 
 void keyboard_push_bytes(const char *bytes, uint32_t len) {
-  __asm__ volatile("cli");
+  hal_irq_disable();
   for (uint32_t i = 0; i < len; i++) {
     ring_buffer_push(bytes[i]);
   }
-  __asm__ volatile("sti");
+  hal_irq_enable();
 }
 
 bool keyboard_has_char(void) { return kbd_head != kbd_tail; }
@@ -121,7 +122,7 @@ bool keyboard_get_scancode(scancode_event_t *event) {
 }
 
 void keyboard_set_scancode_mode(bool enabled) {
-  __asm__ volatile("cli");
+  hal_irq_disable();
   scancode_mode_enabled = enabled;
   extended_scancode = false; // Reset state to avoid corrupting next key
 
@@ -133,7 +134,7 @@ void keyboard_set_scancode_mode(bool enabled) {
   scancode_head = 0;
   scancode_tail = 0;
 
-  __asm__ volatile("sti");
+  hal_irq_enable();
 }
 
 bool keyboard_is_scancode_mode(void) { return scancode_mode_enabled; }

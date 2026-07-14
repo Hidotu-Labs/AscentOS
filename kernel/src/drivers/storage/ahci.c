@@ -1,4 +1,5 @@
 #include "drivers/storage/ahci.h"
+#include "hal/hal.h"
 #include "apic/lapic_timer.h"
 #include "console/console.h"
 #include "console/klog.h"
@@ -104,14 +105,14 @@ static bool quiesce_port(ahci_port_t *port) {
   while (port->cmd & AHCI_CMD_CR) {
     if (lapic_timer_get_ms() >= deadline)
       return false;
-    __asm__ volatile("pause");
+    hal_cpu_relax();
   }
   port->cmd &= ~AHCI_CMD_FRE;
   deadline = lapic_timer_get_ms() + 1000;
   while (port->cmd & AHCI_CMD_FR) {
     if (lapic_timer_get_ms() >= deadline)
       return false;
-    __asm__ volatile("pause");
+    hal_cpu_relax();
   }
   return true;
 }
@@ -256,7 +257,7 @@ static int ahci_io(ahci_port_t *port, uint64_t lba, uint32_t count, void *buf,
       if (drive) spinlock_release(&drive->lock);
       return -1;
     }
-    __asm__ volatile("pause");
+    hal_cpu_relax();
   }
 
   port->ci = 1 << slot;
@@ -282,7 +283,7 @@ static int ahci_io(ahci_port_t *port, uint64_t lba, uint32_t count, void *buf,
       console_puts("\n");
       break;
     }
-    __asm__ volatile("pause");
+    hal_cpu_relax();
   }
 
   /* CI may clear in the same MMIO update that reports TFES. */
@@ -357,7 +358,7 @@ static int ahci_flush(struct block_device *dev) {
       spinlock_release(&drive->lock);
       return -1;
     }
-    __asm__ volatile("pause");
+    hal_cpu_relax();
   }
 
   port->ci = 1u << slot;
@@ -368,7 +369,7 @@ static int ahci_flush(struct block_device *dev) {
       spinlock_release(&drive->lock);
       return -1;
     }
-    __asm__ volatile("pause");
+    hal_cpu_relax();
   }
 
   int result = ((port->is & AHCI_PXIS_TFES) || (port->tfd & 0x01)) ? -1 : 0;

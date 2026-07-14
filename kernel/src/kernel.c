@@ -48,6 +48,7 @@
 #include "fs/ramfs.h"
 #include "fs/random.h"
 #include "fs/vfs.h"
+#include "hal/hal.h"
 #include "io/io.h"
 #include "mm/dma_alloc.h"
 #include "mm/heap.h"
@@ -131,7 +132,7 @@ __attribute__((used, section(".limine_requests_end"))) static volatile uint64_t
 
 static void halt(void) {
   for (;;) {
-    __asm__ volatile("hlt");
+    hal_cpu_halt();
   }
 }
 
@@ -145,7 +146,7 @@ void restart_main_session(void) {
                    "mov %%ax, %%ds\n"
                    "mov %%ax, %%es\n" ::
                        : "eax");
-  __asm__ volatile("sti");
+  hal_irq_enable();
 
   struct thread *current = sched_get_current();
   uint64_t stack_top = current->stack_base + current->stack_size;
@@ -204,6 +205,9 @@ static void init_thread_entry(void) {
 }
 
 void kmain(void) {
+  if (!hal_init())
+    halt();
+
   if (!LIMINE_BASE_REVISION_SUPPORTED(limine_base_revision)) {
     halt();
   }
@@ -223,6 +227,9 @@ void kmain(void) {
 
   klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET
                            " AscentOS Kernel Booting...\n");
+  klog_puts("     HAL architecture: ");
+  klog_puts(hal_arch_name());
+  klog_puts("\n");
 
   if (paging_mode_request.response != NULL) {
     if (paging_mode_request.response->mode == LIMINE_PAGING_MODE_X86_64_4LVL) {
@@ -282,7 +289,7 @@ void kmain(void) {
 
   keyboard_init();
   mouse_init();
-  __asm__ volatile("sti"); 
+  hal_irq_enable();
 
   klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET
                            " Initializing Virtual Memory Manager (VMM)...\n");
@@ -295,7 +302,7 @@ void kmain(void) {
   vma_cache = kmem_cache_create("vma", sizeof(struct vma), 8, NULL, NULL);
 
   dma_alloc_init();
-  sb16_reserve_dma(); 
+  sb16_reserve_dma();
   console_init(fb);
   klog_set_screen_logging(false);
   dm_init();
@@ -335,7 +342,7 @@ void kmain_high_half(void) {
     klog_puts("\n" KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET
               " Switching to APIC interrupt mode...\n");
 
-    __asm__ volatile("cli");
+    hal_irq_disable();
 
     pic_disable();
     klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET
@@ -349,7 +356,7 @@ void kmain_high_half(void) {
 
     isr_set_apic_mode(true);
 
-    __asm__ volatile("sti");
+    hal_irq_enable();
 
     klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET
                              " APIC interrupt mode ACTIVE.\n\n");
@@ -397,7 +404,7 @@ void kmain_high_half(void) {
   usb_init();
 
   ehci_init();
-  ehci_hand_to_companion(); 
+  ehci_hand_to_companion();
   uhci_init();
   uhci_self_test();
   ohci_init();
@@ -464,7 +471,7 @@ mount_success:
   fb_register_vfs();
   drm_init();
   drm_register_vfs();
-  fb_detect_drm_backend(); 
+  fb_detect_drm_backend();
   mouse_register_vfs();
   random_register_vfs();
   procfs_init();
@@ -493,6 +500,6 @@ mount_fail:
   klog_puts("[KERNEL] init thread queued\n");
 
   for (;;) {
-    __asm__ volatile("hlt");
+    hal_cpu_halt();
   }
 }

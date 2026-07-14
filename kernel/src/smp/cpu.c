@@ -1,4 +1,5 @@
 #include "smp/cpu.h"
+#include "hal/hal.h"
 #include "acpi/acpi.h"
 #include "apic/lapic.h"
 #include "apic/lapic_timer.h"
@@ -145,7 +146,7 @@ void ap_main(void) {
   lapic_timer_init_ap();
 
   // 5. Enable interrupts locally on this core
-  __asm__ volatile("sti");
+  hal_irq_enable();
 
   // Mark as online to unblock the BSP's boot loop
   current->status = CPU_STATUS_ONLINE;
@@ -158,7 +159,7 @@ void ap_main(void) {
 
   // Endless loop, waiting for IPIs or scheduler interrupts
   while (1) {
-    __asm__ volatile("hlt");
+    hal_cpu_halt();
   }
 }
 
@@ -331,7 +332,7 @@ void cpu_init_aps(void) {
 
       // Wait for AP to finish booting and signal ONLINE
       while (cpus[i].status != CPU_STATUS_ONLINE) {
-        __asm__ volatile("pause" ::: "memory");
+        hal_cpu_relax();
       }
     }
   }

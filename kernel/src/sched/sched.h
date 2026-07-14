@@ -247,6 +247,7 @@ struct thread *sched_get_thread_by_tid(uint32_t tid);
 // Reap a zombie thread (remove from runqueue, free resources)
 void sched_reap_thread(struct thread *t);
 void sched_queue_reap(struct thread *t);
+void sched_queue_reap_and_wait(struct thread *t);
 void sched_terminate_thread_group(struct thread *current);
 void sched_share_files(struct thread *child, struct thread *parent);
 void sched_release_files(struct thread *t);

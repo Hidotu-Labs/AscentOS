@@ -1,4 +1,5 @@
 #include "tsc.h"
+#include "hal/hal.h"
 #include "../io/io.h"
 #include "../console/klog.h"
 
@@ -9,11 +10,7 @@
 
 static uint64_t tsc_freq_khz = 0;
 
-uint64_t rdtsc(void) {
-    uint32_t lo, hi;
-    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
-    return ((uint64_t)hi << 32) | lo;
-}
+uint64_t rdtsc(void) { return hal_cpu_cycle_count(); }
 
 static void pit_calibration_sleep_ms(uint32_t ms) {
     uint32_t divisor = (PIT_BASE_FREQ * ms) / 1000;

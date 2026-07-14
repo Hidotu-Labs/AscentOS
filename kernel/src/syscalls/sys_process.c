@@ -429,7 +429,7 @@ static uint64_t sys_wait4(uint64_t pid, uint64_t wstatus_ptr, uint64_t options,
       // Destruction must wait until the exiting child has switched off its
       // kernel stack.  On SMP the awakened parent can run concurrently with
       // process_do_exit(), so direct reaping here would free a live stack.
-      sched_queue_reap(zombie);
+      sched_queue_reap_and_wait(zombie);
 
       return (uint64_t)reaped_pid;
     }
@@ -1989,8 +1989,8 @@ static uint64_t sys_reboot(uint64_t magic1, uint64_t magic2, uint64_t cmd,
 
   case LINUX_REBOOT_CMD_HALT:
     klog_puts("[REBOOT] System halt requested via syscall.\n");
-    __asm__ volatile("cli");
-    for (;;) __asm__ volatile("hlt");
+    hal_irq_disable();
+    for (;;) hal_cpu_halt();
     break;
 
   case LINUX_REBOOT_CMD_CAD_ON:

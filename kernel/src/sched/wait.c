@@ -1,4 +1,5 @@
 #include "wait.h"
+#include "hal/hal.h"
 #include "../mm/heap.h"
 #include "sched.h"
 #include <stddef.h>
@@ -43,8 +44,7 @@ void wait_queue_wake_all(wait_queue_t *wq) {
   if (!wq)
     return;
 
-  uint64_t rflags;
-  __asm__ volatile("pushfq; pop %0; cli" : "=r"(rflags) : : "memory");
+  hal_irq_state_t rflags = hal_irq_save();
   spinlock_acquire(&wq->lock);
 
   wait_queue_entry_t *curr = wq->head;
@@ -57,15 +57,14 @@ void wait_queue_wake_all(wait_queue_t *wq) {
   }
 
   spinlock_release(&wq->lock);
-  __asm__ volatile("push %0; popfq" : : "r"(rflags) : "memory");
+  hal_irq_restore(rflags);
 }
 
 void wait_queue_wake_one(wait_queue_t *wq) {
   if (!wq)
     return;
 
-  uint64_t rflags;
-  __asm__ volatile("pushfq; pop %0; cli" : "=r"(rflags) : : "memory");
+  hal_irq_state_t rflags = hal_irq_save();
   spinlock_acquire(&wq->lock);
 
   wait_queue_entry_t *curr = wq->head;
@@ -74,12 +73,12 @@ void wait_queue_wake_one(wait_queue_t *wq) {
       sched_wakeup(curr->thread);
       curr->thread->wakeup_ticks = 0;
       spinlock_release(&wq->lock);
-      __asm__ volatile("push %0; popfq" : : "r"(rflags) : "memory");
+      hal_irq_restore(rflags);
       return; // Only wake one thread
     }
     curr = curr->next;
   }
 
   spinlock_release(&wq->lock);
-  __asm__ volatile("push %0; popfq" : : "r"(rflags) : "memory");
+  hal_irq_restore(rflags);
 }

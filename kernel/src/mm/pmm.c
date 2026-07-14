@@ -1,4 +1,5 @@
 #include "mm/pmm.h"
+#include "hal/hal.h"
 #include "console/klog.h"
 #include "lib/list.h"
 #include "lib/string.h"
@@ -254,7 +255,7 @@ void pmm_init(struct limine_memmap_response *memmap, uint64_t hhdm_offset) {
     klog_puts("      Max usable region seen: ");
     // Optional: add a log for the largest region seen to help debugging
     while (1)
-      __asm__ volatile("hlt");
+      hal_cpu_halt();
   }
 
   for (int i = 0; i < MAX_ORDER; i++) {
@@ -696,8 +697,7 @@ void pmm_reclaim_bootloader(uint64_t kernel_phys_base) {
   klog_puts("[PMM] Reclaiming unprotected bootloader pages...\n");
 
   // Disable interrupts during final stage to avoid scheduler/allocation races
-  uint64_t flags;
-  __asm__ volatile("pushfq; pop %0; cli" : "=r"(flags));
+  hal_irq_state_t flags = hal_irq_save();
   spinlock_acquire(&b_zone.lock);
 
   for (size_t b = 0; b < bitmap_size; b++) {
@@ -746,7 +746,7 @@ void pmm_reclaim_bootloader(uint64_t kernel_phys_base) {
 
   internal_memmap = NULL;
   spinlock_release(&b_zone.lock);
-  __asm__ volatile("push %0; popfq" ::"r"(flags));
+  hal_irq_restore(flags);
 
   klog_puts("[PMM] Bootloader memory reclaimed. Usable RAM now: ");
   klog_uint64(usable_memory / 1024 / 1024);

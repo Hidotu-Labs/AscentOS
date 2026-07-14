@@ -1,13 +1,12 @@
 #include "random.h"
+#include "hal/hal.h"
 #include "../fb/framebuffer.h"
 #include "../lib/string.h"
 #include "../mm/heap.h"
 #include "vfs.h"
 
 static inline uint64_t __random_rdtsc(void) {
-  uint32_t lo, hi;
-  __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
-  return ((uint64_t)hi << 32) | lo;
+  return hal_cpu_cycle_count();
 }
 
 static uint32_t random_read(struct vfs_node *node, uint32_t offset,

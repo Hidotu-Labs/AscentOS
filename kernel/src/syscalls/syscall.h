@@ -74,6 +74,7 @@
 #define SYS_FCNTL 72
 #define SYS_FLOCK 73
 #define SYS_FSYNC 74
+#define SYS_FDATASYNC 75
 #define SYS_FTRUNCATE 77
 #define SYS_GETCWD 79
 #define SYS_CHDIR 80

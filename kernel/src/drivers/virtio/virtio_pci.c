@@ -1,4 +1,5 @@
 #include "drivers/virtio/virtio_pci.h"
+#include "hal/hal.h"
 #include "drivers/virtio/virtio.h"
 #include "drivers/pci/pci.h"
 #include "mm/pmm.h"
@@ -289,7 +290,7 @@ void virtio_pci_reset(struct virtio_pci_device *vdev) {
   __asm__ volatile("" ::: "memory");
   // Wait for reset to complete (status reads back as 0)
   while (vdev->common->device_status != 0)
-    __asm__ volatile("pause");
+    hal_cpu_relax();
 }
 
 bool virtio_pci_setup_queue(struct virtio_pci_device *vdev,

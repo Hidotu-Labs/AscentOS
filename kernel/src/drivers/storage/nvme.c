@@ -1,4 +1,5 @@
 #include "nvme.h"
+#include "hal/hal.h"
 #include "../../console/klog.h"
 #include "../../cpu/irq.h"
 #include "../../cpu/isr.h"
@@ -150,7 +151,7 @@ static bool nvme_wait_ready(struct nvme_controller *nvme, bool ready) {
     if (rdy == ready)
       return true;
     for (int i = 0; i < 1000; i++)
-      __asm__ volatile("pause");
+      hal_cpu_relax();
   }
   return false;
 }
@@ -251,7 +252,7 @@ static int nvme_submit_admin_cmd(struct nvme_controller *nvme, nvme_cmd_t *cmd,
       return 0;
     }
     for (int i = 0; i < 100; i++)
-      __asm__ volatile("pause");
+      hal_cpu_relax();
   }
 
   return -1;
@@ -395,7 +396,7 @@ static int nvme_submit_io_cmd(struct nvme_controller *nvme, nvme_cmd_t *cmd,
       return 0;
     }
     for (int i = 0; i < 10; i++)
-      __asm__ volatile("pause");
+      hal_cpu_relax();
   }
   return -1;
 }

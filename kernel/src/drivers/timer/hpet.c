@@ -1,4 +1,5 @@
 #include "drivers/timer/hpet.h"
+#include "hal/hal.h"
 #include "acpi/acpi.h"
 #include "console/console.h"
 #include "console/klog.h"
@@ -315,7 +316,7 @@ void hpet_sleep(uint32_t ms) {
     uint64_t end = start + ticks;
     
     while (hpet_read_counter() < end) {
-        __asm__ volatile("pause");
+        hal_cpu_relax();
     }
 }
 
