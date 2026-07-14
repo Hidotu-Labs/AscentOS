@@ -26,6 +26,7 @@
 #define TIOCSPTLCK 0x40045431 // Lock/unlock PTY
 #define TIOCGPTLCK 0x80045432 // Get PTY lock state
 #define TIOCSIG 0x40045436    // Send signal to slave
+#define TIOCPKT 0x5420        // Enable/disable PTY packet mode
 
 // Forward declaration
 struct vfs_node;
@@ -35,6 +36,8 @@ typedef struct pty_pair {
   bool allocated;       // Is this pair in use?
   bool locked;          // Is slave locked (cannot be opened)?
   bool master_open;     // Is the master side open?
+  bool packet_mode;     // Prefix master reads with a TIOCPKT control byte
+  struct vfs_node *master_node; // Dynamic node watched by poll/epoll
   int slave_open_count; // Number of open slave handles
 
   // Master → Slave buffer (data written by master, read by slave)

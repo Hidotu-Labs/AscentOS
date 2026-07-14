@@ -222,11 +222,11 @@ static vfs_node_t *ramfs_finddir(vfs_node_t *node, char *name) {
     return 0;
 
   // Log searches in /sys
-  klog_puts("[RAMFS] finddir: parent=");
-  klog_puts(node->name);
-  klog_puts(" looking for=");
-  klog_puts(name);
-  klog_puts("\n");
+  klog_debug_puts("[RAMFS] finddir: parent=");
+  klog_debug_puts(node->name);
+  klog_debug_puts(" looking for=");
+  klog_debug_puts(name);
+  klog_debug_puts("\n");
 
   ramfs_dir_t *dir = (ramfs_dir_t *)node->device;
 

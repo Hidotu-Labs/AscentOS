@@ -114,25 +114,25 @@ void process_do_exit(uint64_t status) {
     sched_reparent_children(current);
 
   if (current && !current->is_main_session) {
-    klog_puts("\n[SYSCALL] Process exited with status: ");
-    klog_uint64(status);
-    klog_puts("\n");
+    klog_debug_puts("\n[SYSCALL] Process exited with status: ");
+    klog_debug_uint64(status);
+    klog_debug_puts("\n");
   }
 
-  klog_puts("[EXITDBG] begin cleanup\n");
+  klog_debug_puts("[EXITDBG] begin cleanup\n");
 
   // Common cleanup. CLONE_FILES tables remain alive until the final thread
   // drops its reference; closing every fd on each pthread exit would break
   // descriptors still in use by its siblings.
   if (current) {
     sched_release_files(current);
-    klog_puts("[EXITDBG] files released\n");
+    klog_debug_puts("[EXITDBG] files released\n");
 
     if (current->cwd_node) {
       vfs_close(current->cwd_node);
       current->cwd_node = NULL;
     }
-    klog_puts("[EXITDBG] cwd released\n");
+    klog_debug_puts("[EXITDBG] cwd released\n");
   }
 
   if (current && current->is_forked_child) {
@@ -149,7 +149,7 @@ void process_do_exit(uint64_t status) {
       sched_queue_reap(current);
     } else {
       /* Serialize zombie publication with wait4's transition to BLOCKED. */
-      klog_puts("[EXITDBG] publishing zombie\n");
+      klog_debug_puts("[EXITDBG] publishing zombie\n");
       spinlock_acquire(&tid_lock);
       current->state = THREAD_ZOMBIE;
       if (current->parent) {
@@ -164,7 +164,7 @@ void process_do_exit(uint64_t status) {
         }
       }
       spinlock_release(&tid_lock);
-      klog_puts("[EXITDBG] zombie published\n");
+      klog_debug_puts("[EXITDBG] zombie published\n");
     }
 
     /* A vfork parent is blocked inside sys_clone_internal(), before it can
@@ -177,9 +177,9 @@ void process_do_exit(uint64_t status) {
     }
 
     if (parent_to_wake) {
-      klog_puts("[EXITDBG] waking parent\n");
+      klog_debug_puts("[EXITDBG] waking parent\n");
       sched_wakeup(parent_to_wake);
-      klog_puts("[EXITDBG] parent wake returned\n");
+      klog_debug_puts("[EXITDBG] parent wake returned\n");
     }
 
     // Reaping handles the address-space reference after this task is off-CPU.
@@ -189,7 +189,7 @@ void process_do_exit(uint64_t status) {
     }
 
     // Sleep forever; the parent will reap us.
-    klog_puts("[EXITDBG] yielding zombie\n");
+    klog_debug_puts("[EXITDBG] yielding zombie\n");
     while (1) {
       sched_yield();
     }

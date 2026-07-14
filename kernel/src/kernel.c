@@ -51,6 +51,7 @@
 #include "fs/vfs.h"
 #include "hal/hal.h"
 #include "io/io.h"
+#include "lib/radix_tree.h"
 #include "mm/dma_alloc.h"
 #include "mm/heap.h"
 #include "mm/pmm.h"
@@ -297,6 +298,7 @@ void kmain(void) {
   vmm_init();
   klog_puts("     Active CR3 Page Map hooked.\n");
   heap_init();
+
   slab_cache_init();
 
   extern kmem_cache_t *vma_cache;
@@ -411,7 +413,6 @@ void kmain_high_half(void) {
   ehci_init();
   ehci_hand_to_companion();
   uhci_init();
-  uhci_self_test();
   ohci_init();
 
   // VirtIO subsystem
@@ -519,6 +520,11 @@ mount_fail:
     halt();
   }
   klog_puts("[KERNEL] init thread queued\n");
+
+  /* Perform the boot-to-init handoff synchronously.  Relying on the first
+   * one-shot LAPIC deadline here can leave the BSP halted forever on KVM if
+   * that initial edge is lost while interrupt routing is settling. */
+  sched_yield();
 
   for (;;) {
     hal_cpu_halt();

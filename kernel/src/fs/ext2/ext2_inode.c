@@ -56,7 +56,7 @@ vfs_node_t *ext2_make_vfs_node(ext2_mount_t *mnt, uint32_t inode_num,
     node->chown   = ext2_chown_impl;
     node->mknod   = ext2_mknod_impl;
   } else if (type == EXT2_S_IFREG) {
-    node->flags    = FS_FILE;
+    node->flags    = FS_FILE | FS_PAGE_CACHE;
     if (mnt->sb.s_feature_incompat & EXT4_FEATURE_INCOMPAT_EXTENTS) {
       node->read  = ext4_read_impl;
       node->write = ext4_write_impl;

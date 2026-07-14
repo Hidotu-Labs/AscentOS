@@ -563,16 +563,16 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     return -9; /* EBADF */
 
 #if DRM_DEBUG_LOGGING
-  klog_puts("[DRM] ioctl request=0x");
-  klog_hex32(request);
-  klog_puts("\n");
+  klog_debug_puts("[DRM] ioctl request=0x");
+  klog_debug_hex32(request);
+  klog_debug_puts("\n");
 #endif
 
   switch (request) {
 
   /* ── Version / caps ──────────────────────────────────────────────── */
   case DRM_IOCTL_VERSION: {
-    klog_puts("[DRM] VERSION ioctl\n");
+    klog_debug_puts("[DRM] VERSION ioctl\n");
     struct drm_version *v = (struct drm_version *)arg;
     static const char ascent_name[] = "ascentdrm";
     const char *name = ascent_name;
@@ -611,7 +611,7 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     return 0;
   }
   case DRM_IOCTL_GET_UNIQUE: {
-    klog_puts("[DRM] GET_UNIQUE ioctl\n");
+    klog_debug_puts("[DRM] GET_UNIQUE ioctl\n");
     struct drm_unique *u = (struct drm_unique *)arg;
     static const char busid[] = "platform:ascentdrm:0";
     size_t unique_len = u->unique_len;
@@ -628,7 +628,7 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     return 0;
   }
   case DRM_IOCTL_SET_VERSION: {
-    klog_puts("[DRM] SET_VERSION ioctl\n");
+    klog_debug_puts("[DRM] SET_VERSION ioctl\n");
     struct drm_set_version *sv = (struct drm_set_version *)arg;
     sv->drm_di_major = 1;
     sv->drm_di_minor = 4;
@@ -638,9 +638,9 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
   }
   case DRM_IOCTL_GET_CAP: {
     struct drm_get_cap *cap = (struct drm_get_cap *)arg;
-    klog_puts("[DRM] GET_CAP capability=0x");
-    klog_hex64(cap->capability);
-    klog_puts("\n");
+    klog_debug_puts("[DRM] GET_CAP capability=0x");
+    klog_debug_hex64(cap->capability);
+    klog_debug_puts("\n");
     switch (cap->capability) {
     case DRM_CAP_DUMB_BUFFER:
       cap->value = 1;
@@ -692,18 +692,18 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
       cap->value = 0;
       break;
     }
-    klog_puts("[DRM] GET_CAP value=0x");
-    klog_hex64(cap->value);
-    klog_puts("\n");
+    klog_debug_puts("[DRM] GET_CAP value=0x");
+    klog_debug_hex64(cap->value);
+    klog_debug_puts("\n");
     return 0;
   }
   case 0x4010640D: /* DRM_IOCTL_SET_CLIENT_CAP */ {
     struct drm_set_client_cap *cap = (struct drm_set_client_cap *)arg;
-    klog_puts("[DRM] SET_CLIENT_CAP cap=");
-    klog_uint64(cap->capability);
-    klog_puts(" val=");
-    klog_uint64(cap->value);
-    klog_puts("\n");
+    klog_debug_puts("[DRM] SET_CLIENT_CAP cap=");
+    klog_debug_uint64(cap->capability);
+    klog_debug_puts(" val=");
+    klog_debug_uint64(cap->value);
+    klog_debug_puts("\n");
     uint32_t bit = 0;
     switch (cap->capability) {
     case DRM_CLIENT_CAP_STEREO_3D:
@@ -729,7 +729,7 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
       bit = DRM_FILE_CAP_CURSOR_PLANE_HOTSPOT;
       break;
     default:
-      klog_puts("[DRM] SET_CLIENT_CAP unsupported\n");
+      klog_debug_puts("[DRM] SET_CLIENT_CAP unsupported\n");
       return -95; /* EOPNOTSUPP */
     }
 
@@ -753,10 +753,10 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     return 0;
   }
   case 0x80086406: /* DRM_IOCTL_GET_STATS */
-    klog_puts("[DRM] GET_STATS -> ENOTTY\n");
+    klog_debug_puts("[DRM] GET_STATS -> ENOTTY\n");
     return -25; /* ENOTTY */
   case DRM_IOCTL_MODE_CREATE_LEASE:
-    klog_puts("[DRM] MODE_CREATE_LEASE -> EINVAL\n");
+    klog_debug_puts("[DRM] MODE_CREATE_LEASE -> EINVAL\n");
     return -22; /* EINVAL: Leasing not supported on this driver version */
 
   /* ── Per-client GEM ──────────────────────────────────────────────── */
@@ -773,13 +773,13 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     }
     obj->refcount--; /* transfer creator ownership to the handle */
     c->handle = local_h;
-    klog_puts("[DRM] GEM_CREATE size=");
-    klog_uint64(c->size);
-    klog_puts(" handle=");
-    klog_uint64(c->handle);
-    klog_puts(" phys=0x");
-    klog_hex64(obj->phys_addr);
-    klog_puts("\n");
+    klog_debug_puts("[DRM] GEM_CREATE size=");
+    klog_debug_uint64(c->size);
+    klog_debug_puts(" handle=");
+    klog_debug_uint64(c->handle);
+    klog_debug_puts(" phys=0x");
+    klog_debug_hex64(obj->phys_addr);
+    klog_debug_puts("\n");
     return 0;
   }
   case DRM_IOCTL_GEM_CLOSE: {
@@ -796,15 +796,15 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
   /* ── Dumb buffers (use per-client handle table) ───────────────────── */
   case DRM_IOCTL_MODE_CREATE_DUMB: {
     struct drm_mode_create_dumb *c = (struct drm_mode_create_dumb *)arg;
-    klog_puts("[DRM] CREATE_DUMB in width=");
-    klog_uint64(c->width);
-    klog_puts(" height=");
-    klog_uint64(c->height);
-    klog_puts(" bpp=");
-    klog_uint64(c->bpp);
-    klog_puts(" flags=0x");
-    klog_hex32(c->flags);
-    klog_puts("\n");
+    klog_debug_puts("[DRM] CREATE_DUMB in width=");
+    klog_debug_uint64(c->width);
+    klog_debug_puts(" height=");
+    klog_debug_uint64(c->height);
+    klog_debug_puts(" bpp=");
+    klog_debug_uint64(c->bpp);
+    klog_debug_puts(" flags=0x");
+    klog_debug_hex32(c->flags);
+    klog_debug_puts("\n");
 
     if (g_drm_create_dumb_fn) {
       struct drm_gem_object *obj = NULL;
@@ -832,17 +832,17 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     }
     obj->refcount--; /* transfer creator ownership to the handle */
     c->handle = local_h;
-    klog_puts("[DRM] CREATE_DUMB out handle=");
-    klog_uint64(c->handle);
-    klog_puts(" pitch=");
-    klog_uint64(c->pitch);
-    klog_puts(" size=");
-    klog_uint64(c->size);
-    klog_puts(" gem_phys=0x");
-    klog_hex64(obj->phys_addr);
-    klog_puts(" gem_virt=0x");
-    klog_hex64((uint64_t)obj->virt_addr);
-    klog_puts("\n");
+    klog_debug_puts("[DRM] CREATE_DUMB out handle=");
+    klog_debug_uint64(c->handle);
+    klog_debug_puts(" pitch=");
+    klog_debug_uint64(c->pitch);
+    klog_debug_puts(" size=");
+    klog_debug_uint64(c->size);
+    klog_debug_puts(" gem_phys=0x");
+    klog_debug_hex64(obj->phys_addr);
+    klog_debug_puts(" gem_virt=0x");
+    klog_debug_hex64((uint64_t)obj->virt_addr);
+    klog_debug_puts("\n");
     return 0;
   }
   case DRM_IOCTL_MODE_MAP_DUMB: {
@@ -873,11 +873,11 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
       } else if (mobj->type == DRM_MODE_OBJECT_CONNECTOR) {
         if (res->connector_id_ptr && connectors < res->count_connectors) {
           ((uint32_t *)res->connector_id_ptr)[connectors] = mobj->id;
-          klog_puts("[DRM] GETRESOURCES: filling connector id=");
-          klog_uint64(mobj->id);
-          klog_puts(" at ptr=");
-          klog_hex64(res->connector_id_ptr + connectors * 4);
-          klog_puts("\n");
+          klog_debug_puts("[DRM] GETRESOURCES: filling connector id=");
+          klog_debug_uint64(mobj->id);
+          klog_debug_puts(" at ptr=");
+          klog_debug_hex64(res->connector_id_ptr + connectors * 4);
+          klog_debug_puts("\n");
         }
         connectors++;
       } else if (mobj->type == DRM_MODE_OBJECT_ENCODER) {
@@ -891,15 +891,15 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
       }
     }
     spinlock_release(&dev->lock);
-    klog_puts("[DRM] GETRESOURCES: fbs=");
-    klog_uint64(fbs);
-    klog_puts(" crtcs=");
-    klog_uint64(crtcs);
-    klog_puts(" connectors=");
-    klog_uint64(connectors);
-    klog_puts(" encoders=");
-    klog_uint64(encoders);
-    klog_puts("\n");
+    klog_debug_puts("[DRM] GETRESOURCES: fbs=");
+    klog_debug_uint64(fbs);
+    klog_debug_puts(" crtcs=");
+    klog_debug_uint64(crtcs);
+    klog_debug_puts(" connectors=");
+    klog_debug_uint64(connectors);
+    klog_debug_puts(" encoders=");
+    klog_debug_uint64(encoders);
+    klog_debug_puts("\n");
 
     res->count_fbs = fbs;
     res->count_crtcs = crtcs;
@@ -920,11 +920,11 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     uint32_t planes = 0;
     struct drm_mode_object *mobj;
 
-    klog_puts("[DRM] GETPLANERESOURCES in count=");
-    klog_uint64(res->count_planes);
-    klog_puts(" ptr=0x");
-    klog_hex64(res->plane_id_ptr);
-    klog_puts("\n");
+    klog_debug_puts("[DRM] GETPLANERESOURCES in count=");
+    klog_debug_uint64(res->count_planes);
+    klog_debug_puts(" ptr=0x");
+    klog_debug_hex64(res->plane_id_ptr);
+    klog_debug_puts("\n");
 
     spinlock_acquire(&dev->lock);
 
@@ -948,22 +948,22 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
         if ((uint32_t)type_val == DRM_PLANE_TYPE_CURSOR && !g_drm_cursor_fn)
           continue;
 
-        klog_puts("[DRM] GETPLANERESOURCES found plane index=");
-        klog_uint64(planes);
-        klog_puts(" id=");
-        klog_uint64(mobj->id);
-        klog_puts(" type=");
-        klog_uint64(type_val);
-        klog_puts("\n");
+        klog_debug_puts("[DRM] GETPLANERESOURCES found plane index=");
+        klog_debug_uint64(planes);
+        klog_debug_puts(" id=");
+        klog_debug_uint64(mobj->id);
+        klog_debug_puts(" type=");
+        klog_debug_uint64(type_val);
+        klog_debug_puts("\n");
 
         if (res->plane_id_ptr && planes < res->count_planes) {
           ((uint32_t *)res->plane_id_ptr)[planes] = mobj->id;
 
-          klog_puts("[DRM] GETPLANERESOURCES wrote index=");
-          klog_uint64(planes);
-          klog_puts(" id=");
-          klog_uint64(mobj->id);
-          klog_puts("\n");
+          klog_debug_puts("[DRM] GETPLANERESOURCES wrote index=");
+          klog_debug_uint64(planes);
+          klog_debug_puts(" id=");
+          klog_debug_uint64(mobj->id);
+          klog_debug_puts("\n");
         }
 
         planes++;
@@ -974,9 +974,9 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
 
     res->count_planes = planes;
 
-    klog_puts("[DRM] GETPLANERESOURCES out count=");
-    klog_uint64(planes);
-    klog_puts("\n");
+    klog_debug_puts("[DRM] GETPLANERESOURCES out count=");
+    klog_debug_uint64(planes);
+    klog_debug_puts("\n");
 
     return 0;
   }
@@ -991,20 +991,20 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
       uint64_t format_type_ptr;
     } *p = (void *)arg;
 
-    klog_puts("[DRM] GETPLANE in id=");
-    klog_uint64(p->plane_id);
-    klog_puts(" format_ptr=0x");
-    klog_hex64(p->format_type_ptr);
-    klog_puts(" count_in=");
-    klog_uint64(p->count_formats);
-    klog_puts("\n");
+    klog_debug_puts("[DRM] GETPLANE in id=");
+    klog_debug_uint64(p->plane_id);
+    klog_debug_puts(" format_ptr=0x");
+    klog_debug_hex64(p->format_type_ptr);
+    klog_debug_puts(" count_in=");
+    klog_debug_uint64(p->count_formats);
+    klog_debug_puts("\n");
 
     spinlock_acquire(&dev->lock);
 
     struct drm_mode_object *mobj = drm_mode_object_find(dev, p->plane_id);
     if (!mobj || mobj->type != DRM_MODE_OBJECT_PLANE) {
       spinlock_release(&dev->lock);
-      klog_puts("[DRM] GETPLANE failed: bad plane id\n");
+      klog_debug_puts("[DRM] GETPLANE failed: bad plane id\n");
       return -2; /* ENOENT */
     }
 
@@ -1041,15 +1041,15 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
       ((uint32_t *)p->format_type_ptr)[1] = formats[1];
     }
 
-    klog_puts("[DRM] GETPLANE out id=");
-    klog_uint64(p->plane_id);
-    klog_puts(" type=");
-    klog_uint64(type_val);
-    klog_puts(" possible_crtcs=0x");
-    klog_hex32(p->possible_crtcs);
-    klog_puts(" formats=");
-    klog_uint64(p->count_formats);
-    klog_puts("\n");
+    klog_debug_puts("[DRM] GETPLANE out id=");
+    klog_debug_uint64(p->plane_id);
+    klog_debug_puts(" type=");
+    klog_debug_uint64(type_val);
+    klog_debug_puts(" possible_crtcs=0x");
+    klog_debug_hex32(p->possible_crtcs);
+    klog_debug_puts(" formats=");
+    klog_debug_uint64(p->count_formats);
+    klog_debug_puts("\n");
 
     spinlock_release(&dev->lock);
     return 0;
@@ -1107,17 +1107,17 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
   }
   case DRM_IOCTL_MODE_GETCONNECTOR: {
     struct drm_mode_get_connector *c = (struct drm_mode_get_connector *)arg;
-    klog_puts("[DRM] GETCONNECTOR: arg=");
-    klog_hex64((uint64_t)arg);
-    klog_puts(" id_in_struct=");
-    klog_uint64(c->connector_id);
-    klog_puts("\n");
+    klog_debug_puts("[DRM] GETCONNECTOR: arg=");
+    klog_debug_hex64((uint64_t)arg);
+    klog_debug_puts(" id_in_struct=");
+    klog_debug_uint64(c->connector_id);
+    klog_debug_puts("\n");
     spinlock_acquire(&dev->lock);
     struct drm_mode_object *mobj = drm_mode_object_find(dev, c->connector_id);
     if (!mobj || mobj->type != DRM_MODE_OBJECT_CONNECTOR) {
-      klog_puts("[DRM] GETCONNECTOR: object not found or wrong type: id=");
-      klog_uint64(c->connector_id);
-      klog_puts("\n");
+      klog_debug_puts("[DRM] GETCONNECTOR: object not found or wrong type: id=");
+      klog_debug_uint64(c->connector_id);
+      klog_debug_puts("\n");
       spinlock_release(&dev->lock);
       return -2; /* ENOENT */
     }
@@ -1173,23 +1173,23 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
       if (c->encoders_ptr)
         ((uint32_t *)c->encoders_ptr)[0] = conn->encoder->base.id;
     }
-    klog_puts("[DRM] GETCONNECTOR out id=");
-    klog_uint64(c->connector_id);
-    klog_puts(" conn=");
-    klog_uint64(c->connection);
-    klog_puts(" enc=");
-    klog_uint64(c->encoder_id);
-    klog_puts(" modes=");
-    klog_uint64(c->count_modes);
-    klog_puts(" props=");
-    klog_uint64(c->count_props);
-    klog_puts(" encoders=");
-    klog_uint64(c->count_encoders);
-    klog_puts(" modes_ptr=0x");
-    klog_hex64(c->modes_ptr);
-    klog_puts(" props_ptr=0x");
-    klog_hex64(c->props_ptr);
-    klog_puts("\n");
+    klog_debug_puts("[DRM] GETCONNECTOR out id=");
+    klog_debug_uint64(c->connector_id);
+    klog_debug_puts(" conn=");
+    klog_debug_uint64(c->connection);
+    klog_debug_puts(" enc=");
+    klog_debug_uint64(c->encoder_id);
+    klog_debug_puts(" modes=");
+    klog_debug_uint64(c->count_modes);
+    klog_debug_puts(" props=");
+    klog_debug_uint64(c->count_props);
+    klog_debug_puts(" encoders=");
+    klog_debug_uint64(c->count_encoders);
+    klog_debug_puts(" modes_ptr=0x");
+    klog_debug_hex64(c->modes_ptr);
+    klog_debug_puts(" props_ptr=0x");
+    klog_debug_hex64(c->props_ptr);
+    klog_debug_puts("\n");
     spinlock_release(&dev->lock);
     return 0;
   }
@@ -1197,25 +1197,25 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
   /* ── Framebuffer management ──────────────────────────────────────── */
   case DRM_IOCTL_MODE_ADDFB: {
     struct drm_mode_fb_cmd *cmd = (struct drm_mode_fb_cmd *)arg;
-    klog_puts("[DRM] ADDFB in handle=");
-    klog_uint64(cmd->handle);
-    klog_puts(" width=");
-    klog_uint64(cmd->width);
-    klog_puts(" height=");
-    klog_uint64(cmd->height);
-    klog_puts(" pitch=");
-    klog_uint64(cmd->pitch);
-    klog_puts(" bpp=");
-    klog_uint64(cmd->bpp);
-    klog_puts(" depth=");
-    klog_uint64(cmd->depth);
-    klog_puts("\n");
+    klog_debug_puts("[DRM] ADDFB in handle=");
+    klog_debug_uint64(cmd->handle);
+    klog_debug_puts(" width=");
+    klog_debug_uint64(cmd->width);
+    klog_debug_puts(" height=");
+    klog_debug_uint64(cmd->height);
+    klog_debug_puts(" pitch=");
+    klog_debug_uint64(cmd->pitch);
+    klog_debug_puts(" bpp=");
+    klog_debug_uint64(cmd->bpp);
+    klog_debug_puts(" depth=");
+    klog_debug_uint64(cmd->depth);
+    klog_debug_puts("\n");
     /* Resolve local handle → global gem object */
     struct drm_gem_object *gem = drm_file_gem_lookup(file, cmd->handle);
     if (!gem) {
-      klog_puts("[DRM] ADDFB missing GEM handle=");
-      klog_uint64(cmd->handle);
-      klog_puts("\n");
+      klog_debug_puts("[DRM] ADDFB missing GEM handle=");
+      klog_debug_uint64(cmd->handle);
+      klog_debug_puts("\n");
       return -2; /* ENOENT */
     }
     /* Temporarily patch handle to global for drm_framebuffer_create */
@@ -1224,15 +1224,15 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     struct drm_framebuffer *fb = drm_framebuffer_create(dev, cmd);
     cmd->handle = saved;
     if (!fb) {
-      klog_puts("[DRM] ADDFB framebuffer create failed\n");
+      klog_debug_puts("[DRM] ADDFB framebuffer create failed\n");
       return -1;
     }
     cmd->fb_id = fb->base.id;
-    klog_puts("[DRM] ADDFB out fb_id=");
-    klog_uint64(cmd->fb_id);
-    klog_puts(" gem_phys=0x");
-    klog_hex64(gem->phys_addr);
-    klog_puts("\n");
+    klog_debug_puts("[DRM] ADDFB out fb_id=");
+    klog_debug_uint64(cmd->fb_id);
+    klog_debug_puts(" gem_phys=0x");
+    klog_debug_hex64(gem->phys_addr);
+    klog_debug_puts("\n");
     return 0;
   }
   case DRM_IOCTL_MODE_RMFB: {
@@ -1254,30 +1254,30 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
   /* ── Legacy modesetting ──────────────────────────────────────────── */
   case DRM_IOCTL_MODE_SETCRTC: {
     struct drm_mode_crtc *crtc_cmd = (struct drm_mode_crtc *)arg;
-    klog_puts("[DRM] SETCRTC crtc=");
-    klog_uint64(crtc_cmd->crtc_id);
-    klog_puts(" fb=");
-    klog_uint64(crtc_cmd->fb_id);
-    klog_puts(" connectors=");
-    klog_uint64(crtc_cmd->count_connectors);
-    klog_puts(" mode_valid=");
-    klog_uint64(crtc_cmd->mode_valid);
-    klog_puts(" mode=");
-    klog_uint64(crtc_cmd->mode.hdisplay);
-    klog_puts("x");
-    klog_uint64(crtc_cmd->mode.vdisplay);
-    klog_puts("\n");
+    klog_debug_puts("[DRM] SETCRTC crtc=");
+    klog_debug_uint64(crtc_cmd->crtc_id);
+    klog_debug_puts(" fb=");
+    klog_debug_uint64(crtc_cmd->fb_id);
+    klog_debug_puts(" connectors=");
+    klog_debug_uint64(crtc_cmd->count_connectors);
+    klog_debug_puts(" mode_valid=");
+    klog_debug_uint64(crtc_cmd->mode_valid);
+    klog_debug_puts(" mode=");
+    klog_debug_uint64(crtc_cmd->mode.hdisplay);
+    klog_debug_puts("x");
+    klog_debug_uint64(crtc_cmd->mode.vdisplay);
+    klog_debug_puts("\n");
     spinlock_acquire(&dev->lock);
     struct drm_mode_object *crtc_obj =
         drm_mode_object_find(dev, crtc_cmd->crtc_id);
     struct drm_mode_object *fb_obj = drm_mode_object_find(dev, crtc_cmd->fb_id);
     if (!crtc_obj || crtc_obj->type != DRM_MODE_OBJECT_CRTC) {
-      klog_puts("[DRM] SETCRTC bad crtc id\n");
+      klog_debug_puts("[DRM] SETCRTC bad crtc id\n");
       spinlock_release(&dev->lock);
       return -1;
     }
     if (crtc_cmd->fb_id && (!fb_obj || fb_obj->type != DRM_MODE_OBJECT_FB))
-      klog_puts("[DRM] SETCRTC warning: fb id not found\n");
+      klog_debug_puts("[DRM] SETCRTC warning: fb id not found\n");
     struct drm_crtc *crtc = (struct drm_crtc *)crtc_obj;
     if (fb_obj && fb_obj->type == DRM_MODE_OBJECT_FB) {
       crtc->fb = (struct drm_framebuffer *)fb_obj;
@@ -1292,22 +1292,22 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     struct drm_mode_crtc_page_flip *flip =
         (struct drm_mode_crtc_page_flip *)arg;
 #if DRM_DEBUG_LOGGING
-    klog_puts("[DRM] PAGE_FLIP crtc=");
-    klog_uint64(flip->crtc_id);
-    klog_puts(" fb=");
-    klog_uint64(flip->fb_id);
-    klog_puts(" flags=0x");
-    klog_hex32(flip->flags);
-    klog_puts(" user_data=0x");
-    klog_hex64(flip->user_data);
-    klog_puts("\n");
+    klog_debug_puts("[DRM] PAGE_FLIP crtc=");
+    klog_debug_uint64(flip->crtc_id);
+    klog_debug_puts(" fb=");
+    klog_debug_uint64(flip->fb_id);
+    klog_debug_puts(" flags=0x");
+    klog_debug_hex32(flip->flags);
+    klog_debug_puts(" user_data=0x");
+    klog_debug_hex64(flip->user_data);
+    klog_debug_puts("\n");
 #endif
     spinlock_acquire(&dev->lock);
     struct drm_mode_object *crtc_obj = drm_mode_object_find(dev, flip->crtc_id);
     struct drm_mode_object *fb_obj = drm_mode_object_find(dev, flip->fb_id);
     if (!crtc_obj || crtc_obj->type != DRM_MODE_OBJECT_CRTC || !fb_obj ||
         fb_obj->type != DRM_MODE_OBJECT_FB) {
-      klog_puts("[DRM] PAGE_FLIP rejected: bad crtc or fb\n");
+      klog_debug_puts("[DRM] PAGE_FLIP rejected: bad crtc or fb\n");
       spinlock_release(&dev->lock);
       return -1;
     }
@@ -1343,7 +1343,7 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     if (ret == 0 &&
         !(((struct drm_mode_atomic *)arg)->flags & DRM_MODE_ATOMIC_TEST_ONLY)) {
 #if DRM_DEBUG_LOGGING
-      klog_puts("[DRM] ATOMIC commit triggering drm_commit\n");
+      klog_debug_puts("[DRM] ATOMIC commit triggering drm_commit\n");
 #endif
       drm_sync_cursor_backend(dev, 0);
       drm_commit_atomic(dev);
@@ -1417,11 +1417,11 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     uint64_t ms = lapic_timer_get_ms();
     uint32_t seq = drm_event_sequence++;
 #if DRM_DEBUG_LOGGING
-    klog_puts("[DRM] WAIT_VBLANK type=0x");
-    klog_hex32(type);
-    klog_puts(" seq_in=");
-    klog_uint64(vbl->request.sequence);
-    klog_puts("\n");
+    klog_debug_puts("[DRM] WAIT_VBLANK type=0x");
+    klog_debug_hex32(type);
+    klog_debug_puts(" seq_in=");
+    klog_debug_uint64(vbl->request.sequence);
+    klog_debug_puts("\n");
 #endif
     vbl->reply.type = type;
     vbl->reply.sequence = seq;
@@ -1445,19 +1445,19 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     struct drm_mode_cursor *cur = (struct drm_mode_cursor *)arg;
 
 #if DRM_DEBUG_LOGGING
-    klog_puts("[DRM] MODE_CURSOR flags=0x");
-    klog_hex32(cur->flags);
-    klog_puts(" handle=");
-    klog_uint64(cur->handle);
-    klog_puts(" x=");
-    klog_uint64((uint32_t)cur->x);
-    klog_puts(" y=");
-    klog_uint64((uint32_t)cur->y);
-    klog_puts(" w=");
-    klog_uint64(cur->width);
-    klog_puts(" h=");
-    klog_uint64(cur->height);
-    klog_puts("\n");
+    klog_debug_puts("[DRM] MODE_CURSOR flags=0x");
+    klog_debug_hex32(cur->flags);
+    klog_debug_puts(" handle=");
+    klog_debug_uint64(cur->handle);
+    klog_debug_puts(" x=");
+    klog_debug_uint64((uint32_t)cur->x);
+    klog_debug_puts(" y=");
+    klog_debug_uint64((uint32_t)cur->y);
+    klog_debug_puts(" w=");
+    klog_debug_uint64(cur->width);
+    klog_debug_puts(" h=");
+    klog_debug_uint64(cur->height);
+    klog_debug_puts("\n");
 #endif
 
     struct drm_clip_rect old_damage = {0}, new_damage = {0};
@@ -1504,7 +1504,7 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
         struct drm_gem_object *gem = drm_file_gem_lookup(file, cur->handle);
         if (!gem) {
           spinlock_release(&dev->lock);
-          klog_puts("[DRM] MODE_CURSOR invalid GEM handle\n");
+          klog_debug_puts("[DRM] MODE_CURSOR invalid GEM handle\n");
           return -2; /* ENOENT */
         }
 
@@ -1535,23 +1535,23 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     struct drm_mode_cursor2 *cur = (struct drm_mode_cursor2 *)arg;
 
 #if DRM_DEBUG_LOGGING
-    klog_puts("[DRM] MODE_CURSOR2 flags=0x");
-    klog_hex32(cur->flags);
-    klog_puts(" handle=");
-    klog_uint64(cur->handle);
-    klog_puts(" x=");
-    klog_uint64((uint32_t)cur->x);
-    klog_puts(" y=");
-    klog_uint64((uint32_t)cur->y);
-    klog_puts(" w=");
-    klog_uint64(cur->width);
-    klog_puts(" h=");
-    klog_uint64(cur->height);
-    klog_puts(" hot=");
-    klog_uint64((uint32_t)cur->hot_x);
-    klog_puts(",");
-    klog_uint64((uint32_t)cur->hot_y);
-    klog_puts("\n");
+    klog_debug_puts("[DRM] MODE_CURSOR2 flags=0x");
+    klog_debug_hex32(cur->flags);
+    klog_debug_puts(" handle=");
+    klog_debug_uint64(cur->handle);
+    klog_debug_puts(" x=");
+    klog_debug_uint64((uint32_t)cur->x);
+    klog_debug_puts(" y=");
+    klog_debug_uint64((uint32_t)cur->y);
+    klog_debug_puts(" w=");
+    klog_debug_uint64(cur->width);
+    klog_debug_puts(" h=");
+    klog_debug_uint64(cur->height);
+    klog_debug_puts(" hot=");
+    klog_debug_uint64((uint32_t)cur->hot_x);
+    klog_debug_puts(",");
+    klog_debug_uint64((uint32_t)cur->hot_y);
+    klog_debug_puts("\n");
 #endif
 
     struct drm_clip_rect old_damage = {0}, new_damage = {0};
@@ -1598,7 +1598,7 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
         struct drm_gem_object *gem = drm_file_gem_lookup(file, cur->handle);
         if (!gem) {
           spinlock_release(&dev->lock);
-          klog_puts("[DRM] MODE_CURSOR2 invalid GEM handle\n");
+          klog_debug_puts("[DRM] MODE_CURSOR2 invalid GEM handle\n");
           return -2; /* ENOENT */
         }
 
@@ -1629,9 +1629,9 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
   case DRM_IOCTL_MODE_SETGAMMA:
     return 0; /* stub */
   default: {
-    klog_puts("[DRM] unknown ioctl request=0x");
-    klog_hex32(request);
-    klog_puts("\n");
+    klog_debug_puts("[DRM] unknown ioctl request=0x");
+    klog_debug_hex32(request);
+    klog_debug_puts("\n");
     return -25; /* ENOTTY */
   }
   }

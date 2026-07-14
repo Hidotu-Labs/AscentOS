@@ -251,6 +251,7 @@ extern struct termios console_termios;
 // ---------------------------------------------------------------------------
 int alloc_fd(struct thread *t);
 int alloc_fd_from(struct thread *t, int from);
+uint64_t sys_open_path(int dirfd, const char *path, uint64_t flags, uint64_t mode);
 
 // stat helper (defined in sys_stat.c, used in sys_fs.c)
 void fill_kstat(struct kstat *ks, vfs_node_t *node);

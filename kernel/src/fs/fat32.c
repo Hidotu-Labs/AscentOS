@@ -833,7 +833,7 @@ static vfs_node_t *fat32_make_vfs_node(fat32_mount_t *mnt,
     node->unlink = fat32_unlink_impl;
     node->rmdir = fat32_rmdir_impl;
   } else {
-    node->flags = FS_FILE;
+    node->flags = FS_FILE | FS_PAGE_CACHE;
     node->read = fat32_read_impl;
     node->write = fat32_write_impl;
     node->unlink = fat32_unlink_impl;

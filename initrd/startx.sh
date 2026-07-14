@@ -171,6 +171,7 @@ mkdir -p "$HOME/.icewm"
 if [ -d /etc/icewm ]; then
     cp -f /etc/icewm/icewmrc "$HOME/.icewm/icewmrc" 2>/dev/null || true
     cp -f /etc/icewm/winoptions "$HOME/.icewm/winoptions" 2>/dev/null || true
+    cp -f /etc/icewm/menu "$HOME/.icewm/menu" 2>/dev/null || true
 fi
 export ICEWM_PRIVCFG="$HOME/.icewm"
 

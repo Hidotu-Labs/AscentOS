@@ -132,7 +132,7 @@ run-x86_64: edk2-ovmf $(IMAGE_NAME).iso disk.img nvme.img
 		-drive if=pflash,unit=0,format=raw,file=edk2-ovmf/ovmf-code-$(ARCH).fd,readonly=on \
 		-cdrom $(IMAGE_NAME).iso \
 		-drive file=disk.img,format=raw,if=ide \
-		-smp 4 \
+		-cpu host -enable-kvm \
 		-serial stdio \
 		-audiodev pa,id=snd0 \
 		-device rtl8139,netdev=net0 \
@@ -203,6 +203,7 @@ run-fat32: edk2-ovmf $(IMAGE_NAME).iso fat32_test.img
 		$(QEMUFLAGS)
 
 # Create a 64MB ext2 disk image with sample files for testing
+disk.img: userland/icewmrc userland/winoptions userland/icewm-menu
 disk.img: scripts/configure-accounts.sh userland/ascent-account userland/test_accounts.sh userland/ascent-login.elf
 disk.img:  userland/dns_lookup.elf
 disk.img: userland/test_clone_futex.elf
@@ -514,37 +515,20 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 		debugfs -w -R "write assets/ascii-art.txt fastfetch/logo.txt" ./part.img >/dev/null 2>&1 || true; \
 		rm -f /tmp/bashrc /tmp/resolv.conf /tmp/hosts /tmp/ff_config.jsonc /tmp/os-release; \
 	fi
-	@if [ -f userland/icewmrc ] && [ -f userland/winoptions ]; then \
+	@if [ -f userland/icewmrc ] && [ -f userland/winoptions ] && [ -f userland/icewm-menu ]; then \
 		echo "Installing IceWM configuration into disk image..."; \
 		debugfs -w -R "mkdir etc/icewm" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "rm etc/icewm/icewmrc" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "write userland/icewmrc etc/icewm/icewmrc" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "rm etc/icewm/winoptions" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "write userland/winoptions etc/icewm/winoptions" ./part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "rm etc/icewm/menu" ./part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write userland/icewm-menu etc/icewm/menu" ./part.img >/dev/null 2>&1 || true; \
 	fi
 	@if [ -f toolchain/musl-sysroot/bin/tar ]; then \
 		echo "Installing tar into disk image..."; \
 		debugfs -w -R "rm bin/tar" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "write toolchain/musl-sysroot/bin/tar bin/tar" ./part.img >/dev/null 2>&1 || true; \
-	fi
-	@if [ -f userland/xeyes.elf ]; then \
-		echo "Installing xeyes into disk image..."; \
-		debugfs -w -R "rm xeyes" ./part.img >/dev/null 2>&1 || true; \
-		debugfs -w -R "write userland/xeyes.elf xeyes" ./part.img >/dev/null 2>&1 || true; \
-	fi
-	@if [ -f userland/twm.elf ]; then \
-		echo "Installing twm into disk image..."; \
-		debugfs -w -R "rm twm" ./part.img >/dev/null 2>&1 || true; \
-		debugfs -w -R "write userland/twm.elf twm" ./part.img >/dev/null 2>&1 || true; \
-	fi
-	@if [ -f userland/jwm.elf ]; then \
-		echo "Installing jwm into disk image..."; \
-		debugfs -w -R "rm bin/jwm" ./part.img >/dev/null 2>&1 || true; \
-		debugfs -w -R "write userland/jwm.elf bin/jwm" ./part.img >/dev/null 2>&1 || true; \
-		debugfs -w -R "rm .jwmrc" ./part.img >/dev/null 2>&1 || true; \
-		debugfs -w -R "write userland/jwmrc .jwmrc" ./part.img >/dev/null 2>&1 || true; \
-		debugfs -w -R "rm bg.png" ./part.img >/dev/null 2>&1 || true; \
-		debugfs -w -R "write assets/room.png bg.png" ./part.img >/dev/null 2>&1 || true; \
 	fi
 	@if [ -f userland/doom_x11.elf ]; then \
 		echo "Installing doom_x11 into disk image..."; \
@@ -552,10 +536,6 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 		debugfs -w -R "write userland/doom_x11.elf bin/doom_x11" ./part.img >/dev/null 2>&1 || true; \
 	fi
 
-	@if [ -f userland/xeyes.elf ] || [ -f userland/twm.elf ]; then \
-		debugfs -w -R "rm .Xauthority" ./part.img >/dev/null 2>&1 || true; \
-		debugfs -w -R "write initrd/.Xauthority .Xauthority" ./part.img >/dev/null 2>&1 || true; \
-	fi
 	@echo "Fixing executable modes for directly injected launchers..."
 	@{ \
 		echo "rm bin/ls"; \

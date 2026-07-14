@@ -65,12 +65,13 @@ void syscall_dispatcher(struct syscall_regs *regs) {
 
   if ((int64_t)regs->rax < 0 && (int64_t)regs->rax != -11 &&
       (int64_t)regs->rax != -2 &&
+      (int64_t)regs->rax != -17 && /* EEXIST is routine for mkdir */
       (int64_t)regs->rax != -25) {
-    klog_puts("[SYSCALL ERR] syscall ");
-    klog_uint64(syscall_num);
-    klog_puts(" returned error: ");
-    klog_uint64((uint64_t)(-(int64_t)regs->rax)); 
-    klog_puts("\n");
+    klog_debug_puts("[SYSCALL ERR] syscall ");
+    klog_debug_uint64(syscall_num);
+    klog_debug_puts(" returned error: ");
+    klog_debug_uint64((uint64_t)(-(int64_t)regs->rax));
+    klog_debug_puts("\n");
   }
 
   /* Signal frame conversion copies the complete register set. Keep it off the

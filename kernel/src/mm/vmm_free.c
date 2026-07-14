@@ -141,8 +141,18 @@ void vmm_free_user_pages_vma(uint64_t cr3, struct vma_list *vmas) {
           uint64_t va = ((uint64_t)i << 39) | ((uint64_t)j << 30) |
                         ((uint64_t)k << 21) | ((uint64_t)l << 12);
           struct vma *v = vma_find(vmas, va);
-          if (v && (v->flags & MAP_SHARED))
-            continue; // shared mapping — do NOT free the physical frame
+          if (v && (v->flags & MAP_SHARED)) {
+            vfs_node_t *file = (vfs_node_t *)v->file_node;
+            if (file && (file->flags & FS_PAGE_CACHE) &&
+                (pt_virt[l] & PAGE_FLAG_D)) {
+              uint32_t file_offset = (uint32_t)(v->offset + va - v->start);
+              vfs_cache_mark_dirty(file, file_offset);
+            }
+            /* Shared mappings in AscentOS do not take a per-PTE PMM
+             * reference. Their backing object owns the frame, so dropping a
+             * reference here frees live memfd/GEM/framebuffer storage. */
+            continue;
+          }
 
           pmm_free_page((void *)(pt_virt[l] & PAGE_MASK));
         }

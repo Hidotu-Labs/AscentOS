@@ -12,6 +12,7 @@
 #include "../mm/vmm.h"
 #include "../sched/sched.h"
 #include "../sched/wait.h"
+#include "../socket/epoll.h"
 #include "../syscalls/syscall.h"
 
 // PTY pair pool
@@ -90,6 +91,8 @@ void pty_init(void) {
     pty_pool[i].allocated = false;
     pty_pool[i].locked = false;
     pty_pool[i].master_open = false;
+    pty_pool[i].packet_mode = false;
+    pty_pool[i].master_node = NULL;
     pty_pool[i].slave_open_count = 0;
     pty_pool[i].m2s_head = 0;
     pty_pool[i].m2s_tail = 0;
@@ -140,6 +143,8 @@ int pty_alloc_pair(void) {
       pty_pool[idx].allocated = true;
       pty_pool[idx].locked = false;
       pty_pool[idx].master_open = true;
+      pty_pool[idx].packet_mode = false;
+      pty_pool[idx].master_node = NULL;
       pty_pool[idx].slave_open_count = 0;
       pty_pool[idx].m2s_head = 0;
       pty_pool[idx].m2s_tail = 0;
@@ -218,6 +223,18 @@ uint32_t ptmx_read(struct vfs_node *node, uint32_t offset, uint32_t size,
       return 0; // EOF: No slaves left
     }
 
+    /* VTE drains the master until EAGAIN.  Sleeping on its second read would
+     * stall the UI loop before it renders bytes returned by the first read. */
+    struct thread *current = sched_get_current();
+    if (current) {
+      for (int fd = 0; fd < MAX_FDS; fd++) {
+        if (current->fds[fd] == node && (current->fd_flags[fd] & 0x800)) {
+          spinlock_release(&pty->lock);
+          return (uint32_t)-11; /* EAGAIN */
+        }
+      }
+    }
+
     // Wait for data from slave
     wait_queue_entry_t entry = {0};
     entry.thread = sched_get_current();
@@ -239,8 +256,15 @@ uint32_t ptmx_read(struct vfs_node *node, uint32_t offset, uint32_t size,
     entry.thread->state = THREAD_RUNNING;
   }
 
-  uint32_t read = ring_read(pty->slave_to_master, pty->s2m_head, &pty->s2m_tail,
-                            buffer, size);
+  uint32_t read;
+  if (pty->packet_mode && size > 0) {
+    buffer[0] = 0; /* TIOCPKT_DATA */
+    read = 1 + ring_read(pty->slave_to_master, pty->s2m_head,
+                         &pty->s2m_tail, buffer + 1, size - 1);
+  } else {
+    read = ring_read(pty->slave_to_master, pty->s2m_head, &pty->s2m_tail,
+                     buffer, size);
+  }
 
   // Wake up any writers waiting for buffer space
   if (read > 0 && pty->slave_write_waitq &&
@@ -428,6 +452,51 @@ int ptmx_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
   spinlock_acquire(&pty->lock);
 
   switch (request) {
+  case TCGETS: {
+    struct kernel_termios *kt = (struct kernel_termios *)arg;
+    if (!kt || !vmm_is_user_addr_range_valid(arg, sizeof(*kt))) {
+      ret = -14;
+    } else {
+      kt->c_iflag = pty->termios.c_iflag;
+      kt->c_oflag = pty->termios.c_oflag;
+      kt->c_cflag = pty->termios.c_cflag;
+      kt->c_lflag = pty->termios.c_lflag;
+      kt->c_line = pty->termios.c_line;
+      memcpy(kt->c_cc, pty->termios.c_cc, KERNEL_NCCS);
+      ret = 0;
+    }
+    break;
+  }
+
+  case TCSETS:
+  case TCSETSW:
+  case TCSETSF: {
+    const struct kernel_termios *kt = (const struct kernel_termios *)arg;
+    if (!kt || !vmm_is_user_addr_range_valid(arg, sizeof(*kt))) {
+      ret = -14;
+    } else {
+      pty->termios.c_iflag = kt->c_iflag;
+      pty->termios.c_oflag = kt->c_oflag;
+      pty->termios.c_cflag = kt->c_cflag;
+      pty->termios.c_lflag = kt->c_lflag;
+      pty->termios.c_line = kt->c_line;
+      memcpy(pty->termios.c_cc, kt->c_cc, KERNEL_NCCS);
+      ret = 0;
+    }
+    break;
+  }
+
+  case TIOCPKT: {
+    const int *enabled = (const int *)arg;
+    if (!enabled || !vmm_is_user_addr_range_valid(arg, sizeof(*enabled))) {
+      ret = -14;
+    } else {
+      pty->packet_mode = (*enabled != 0);
+      ret = 0;
+    }
+    break;
+  }
+
   case TIOCGPTN: {
     // Get PTY number
     int *ptn = (int *)arg;
@@ -555,6 +624,7 @@ void ptmx_close(struct vfs_node *node) {
     return;
 
   spinlock_acquire(&pty->lock);
+  pty->master_node = NULL;
 
   // Only mark master as closed if no slaves are open
   // This prevents breaking the slave when the terminal emulator
@@ -793,7 +863,9 @@ uint32_t pty_slave_write(struct vfs_node *node, uint32_t offset, uint32_t size,
 
     spinlock_release(&pty->lock);
 
-    // Wake up master if we wrote something
+    // Wake ordinary readers and epoll watchers if we wrote something.
+    if (total_written > 0 && pty->master_node)
+      epoll_notify_event(pty->master_node, EPOLLIN);
     if (pty->master_waitq &&
         ((wait_queue_t *)pty->master_waitq)->head != NULL) {
       wait_queue_wake_all(pty->master_waitq);

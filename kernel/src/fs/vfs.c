@@ -190,6 +190,10 @@ uint32_t vfs_read(vfs_node_t *node, uint32_t offset, uint32_t size,
   if (!node)
     return 0;
 
+  if ((node->flags & (FS_TYPE_MASK | FS_PAGE_CACHE)) ==
+      (FS_FILE | FS_PAGE_CACHE))
+    return vfs_cache_read(node, offset, size, buffer);
+
   if (node->read) {
     return node->read(node, offset, size, buffer);
   }
@@ -206,7 +210,10 @@ uint32_t vfs_write(vfs_node_t *node, uint32_t offset, uint32_t size,
     vfs_chmod(node, (uint16_t)(node->mask & ~06000));
 
   if (node->write) {
-    return node->write(node, offset, size, buffer);
+    uint32_t written = node->write(node, offset, size, buffer);
+    if (written && (node->flags & FS_PAGE_CACHE))
+      vfs_cache_invalidate_range(node, offset, written);
+    return written;
   }
   return 0;
 }
@@ -231,6 +238,7 @@ void vfs_close(vfs_node_t *node) {
     if (node->close) {
       node->close(node);
     }
+    vfs_cache_sync(node);
     vfs_cache_clear(node);
     if (!(node->flags & FS_PERSISTENT)) {
       kfree(node);
@@ -375,7 +383,10 @@ int vfs_mknod(vfs_node_t *node, char *name, uint16_t permission, uint32_t flags,
 
 int vfs_truncate(vfs_node_t *node, uint32_t size) {
   if (node && node->truncate) {
-    return node->truncate(node, size);
+    int result = node->truncate(node, size);
+    if (!result && (node->flags & FS_PAGE_CACHE))
+      vfs_cache_clear(node);
+    return result;
   }
   return -1;
 }
@@ -544,9 +555,7 @@ void vfs_node_init(vfs_node_t *node) {
   memset(node, 0, sizeof(vfs_node_t));
   INIT_LIST_HEAD(&node->ep_watchers);
   spinlock_init(&node->ep_lock);
-  for (int i = 0; i < 32; i++) {
-    INIT_LIST_HEAD(&node->pages[i]);
-  }
+  radix_tree_init(&node->pages);
   spinlock_init(&node->pages_lock);
   spinlock_init(&node->readdir_cursor_lock);
   node->refcount = 1;

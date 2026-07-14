@@ -14,6 +14,7 @@
 #include "../sched/sched.h"
 #include "../sched/wait.h"
 #include "syscall.h"
+#include "../socket/epoll.h"
 #include <stdint.h>
 
 // ---------------------------------------------------------------------------
@@ -421,26 +422,45 @@ typedef struct {
     ramfs_file_t ramfs;
     wait_queue_t wq;
     spinlock_t   lock;
+    uint32_t length;
+    uint32_t read_offset;
+    bool reader_open;
+    bool writer_open;
+    vfs_node_t *read_node;
 } pipe_ctx_t;
+
+typedef struct {
+    pipe_ctx_t *ctx;
+    bool writer;
+} pipe_end_t;
 
 static uint32_t pipe_read(vfs_node_t *node, uint32_t offset, uint32_t size,
                            uint8_t *buffer) {
     (void)offset;
-    pipe_ctx_t *ctx = (pipe_ctx_t *)node->device;
+    pipe_end_t *end = (pipe_end_t *)node->device;
+    pipe_ctx_t *ctx = end ? end->ctx : NULL;
     if (!ctx) return 0;
 
     spinlock_acquire(&ctx->lock);
-    while (node->impl >= node->length) {
+    while (ctx->read_offset >= ctx->length) {
         struct thread *t = sched_get_current();
         int fd = -1;
         for (int i = 0; i < MAX_FDS; i++) {
             if (t->fds[i] == node) { fd = i; break; }
         }
+        /* EOF takes precedence over O_NONBLOCK/EAGAIN. */
+        if (!ctx->writer_open) { spinlock_release(&ctx->lock); return 0; }
         if (fd != -1 && (t->fd_flags[fd] & 0x800)) {
+            klog_puts("[PIPE] EAGAIN ctx=");
+            klog_hex64((uint64_t)ctx);
+            klog_puts(" fd=");
+            klog_uint64((uint64_t)fd);
+            klog_puts(" writer_open=1 read_node_refs=");
+            klog_uint64(node->refcount);
+            klog_puts("\n");
             spinlock_release(&ctx->lock);
             return (uint32_t)-11;
         }
-        if (node->refcount <= 1) { spinlock_release(&ctx->lock); return 0; }
         wait_queue_entry_t entry = {.thread = t, .next = NULL};
         wait_queue_add(&ctx->wq, &entry);
         t->state = THREAD_BLOCKED;
@@ -451,10 +471,16 @@ static uint32_t pipe_read(vfs_node_t *node, uint32_t offset, uint32_t size,
         spinlock_acquire(&ctx->lock);
     }
 
-    uint32_t ret = ramfs_read(node, node->impl, size, buffer);
+    vfs_node_t storage = {0};
+    storage.device = &ctx->ramfs;
+    storage.length = ctx->length;
+    uint32_t ret = ramfs_read(&storage, ctx->read_offset, size, buffer);
     if (ret > 0) {
-        node->impl += ret;
-        if (node->impl >= node->length) { node->impl = 0; node->length = 0; }
+        ctx->read_offset += ret;
+        if (ctx->read_offset >= ctx->length) {
+            ctx->read_offset = 0;
+            ctx->length = 0;
+        }
     }
     spinlock_release(&ctx->lock);
     return ret;
@@ -463,30 +489,36 @@ static uint32_t pipe_read(vfs_node_t *node, uint32_t offset, uint32_t size,
 static uint32_t pipe_write(vfs_node_t *node, uint32_t offset, uint32_t size,
                             uint8_t *buffer) {
     (void)offset;
-    pipe_ctx_t *ctx = (pipe_ctx_t *)node->device;
+    pipe_end_t *end = (pipe_end_t *)node->device;
+    pipe_ctx_t *ctx = end ? end->ctx : NULL;
     if (!ctx) return 0;
 
     spinlock_acquire(&ctx->lock);
-    if (node->refcount <= 1) { spinlock_release(&ctx->lock); return (uint32_t)-32; }
-    uint32_t ret = ramfs_write(node, node->length, size, buffer);
+    if (!ctx->reader_open) { spinlock_release(&ctx->lock); return (uint32_t)-32; }
+    vfs_node_t storage = {0};
+    storage.device = &ctx->ramfs;
+    storage.length = ctx->length;
+    uint32_t ret = ramfs_write(&storage, ctx->length, size, buffer);
+    ctx->length = storage.length;
     spinlock_release(&ctx->lock);
 
     if (ret > 0) {
         wait_queue_wake_all(&ctx->wq);
-        extern void epoll_notify_event(struct vfs_node *node, uint32_t events);
-        epoll_notify_event(node, 0x0001);
+        epoll_notify_event(ctx->read_node, 0x0001);
     }
     return ret;
 }
 
 static int pipe_poll(vfs_node_t *node, int events) {
-    pipe_ctx_t *ctx = (pipe_ctx_t *)node->device;
+    pipe_end_t *end = (pipe_end_t *)node->device;
+    pipe_ctx_t *ctx = end ? end->ctx : NULL;
     if (!ctx) return 0;
     int revents = 0;
     spinlock_acquire(&ctx->lock);
-    if (node->length > node->impl)      revents |= POLLIN;
-    if (node->refcount <= 1)            revents |= (POLLHUP | POLLERR);
-    else                                revents |= POLLOUT;
+    if (!end->writer && ctx->length > ctx->read_offset) revents |= POLLIN;
+    if (!end->writer && !ctx->writer_open)              revents |= POLLHUP;
+    if (end->writer && !ctx->reader_open)               revents |= POLLERR;
+    if (end->writer && ctx->reader_open)                revents |= POLLOUT;
     spinlock_release(&ctx->lock);
     /* poll(2) reports POLLERR and POLLHUP regardless of the requested mask.
      * A POLLIN-only reader must wake when the final pipe writer closes. */
@@ -495,13 +527,25 @@ static int pipe_poll(vfs_node_t *node, int events) {
 
 static void pipe_close(vfs_node_t *node) {
     if (!node || !node->device) return;
-    pipe_ctx_t *ctx = (pipe_ctx_t *)node->device;
+    pipe_end_t *end = (pipe_end_t *)node->device;
+    pipe_ctx_t *ctx = end->ctx;
     spinlock_acquire(&ctx->lock);
+    if (end->writer) ctx->writer_open = false;
+    else             ctx->reader_open = false;
+    klog_puts("[PIPE] final endpoint close ctx=");
+    klog_hex64((uint64_t)ctx);
+    klog_puts(end->writer ? " writer\n" : " reader\n");
     wait_queue_wake_all(&ctx->wq);
+    if (end->writer && ctx->read_node)
+        epoll_notify_event(ctx->read_node, POLLHUP);
+    bool free_ctx = !ctx->reader_open && !ctx->writer_open;
     spinlock_release(&ctx->lock);
-    ramfs_free_file_data(&ctx->ramfs);
-    kfree(ctx);
+    kfree(end);
     node->device = NULL;
+    if (free_ctx) {
+        ramfs_free_file_data(&ctx->ramfs);
+        kfree(ctx);
+    }
 }
 
 static uint64_t sys_pipe2(uint64_t pipefd_ptr, uint64_t flags, uint64_t a2,
@@ -528,30 +572,52 @@ static uint64_t sys_pipe2(uint64_t pipefd_ptr, uint64_t flags, uint64_t a2,
     memset(ctx, 0, sizeof(pipe_ctx_t));
     spinlock_init(&ctx->lock);
     wait_queue_init(&ctx->wq);
+    ctx->reader_open = true;
+    ctx->writer_open = true;
 
-    vfs_node_t *pipe_node = kmalloc(sizeof(vfs_node_t));
-    if (!pipe_node) {
+    pipe_end_t *read_end = kmalloc(sizeof(pipe_end_t));
+    pipe_end_t *write_end = kmalloc(sizeof(pipe_end_t));
+    vfs_node_t *read_node = kmalloc(sizeof(vfs_node_t));
+    vfs_node_t *write_node = kmalloc(sizeof(vfs_node_t));
+    if (!read_end || !write_end || !read_node || !write_node) {
+        if (read_end) kfree(read_end);
+        if (write_end) kfree(write_end);
+        if (read_node) kfree(read_node);
+        if (write_node) kfree(write_node);
         kfree(ctx);
         t->fds[fd_read] = t->fds[fd_write] = NULL;
         return (uint64_t)-12;
     }
-    vfs_node_init(pipe_node);
-    pipe_node->flags      = FS_PIPE;
-    pipe_node->device     = ctx;
-    pipe_node->length     = 0;
-    pipe_node->impl       = 0;
-    pipe_node->read       = pipe_read;
-    pipe_node->write      = pipe_write;
-    pipe_node->poll       = pipe_poll;
-    pipe_node->close      = pipe_close;
-    pipe_node->wait_queue = &ctx->wq;
+    read_end->ctx = write_end->ctx = ctx;
+    read_end->writer = false;
+    write_end->writer = true;
+    vfs_node_init(read_node);
+    vfs_node_init(write_node);
+    read_node->flags = write_node->flags = FS_PIPE;
+    read_node->device = read_end;
+    write_node->device = write_end;
+    read_node->read = pipe_read;
+    write_node->write = pipe_write;
+    read_node->poll = write_node->poll = pipe_poll;
+    read_node->close = write_node->close = pipe_close;
+    read_node->wait_queue = write_node->wait_queue = &ctx->wq;
+    ctx->read_node = read_node;
 
-    vfs_open(pipe_node);
-    t->fds[fd_read]   = t->fds[fd_write]   = pipe_node;
+    t->fds[fd_read] = read_node;
+    t->fds[fd_write] = write_node;
     t->fd_offsets[fd_read]  = t->fd_offsets[fd_write]  = 0;
     t->fd_flags[fd_read]    = t->fd_flags[fd_write]    = flags;
     pipefd[0] = fd_read;
     pipefd[1] = fd_write;
+    klog_puts("[PIPE] create ctx=");
+    klog_hex64((uint64_t)ctx);
+    klog_puts(" read_fd=");
+    klog_uint64((uint64_t)fd_read);
+    klog_puts(" write_fd=");
+    klog_uint64((uint64_t)fd_write);
+    klog_puts(" flags=");
+    klog_hex64(flags);
+    klog_puts("\n");
     return 0;
 }
 
@@ -608,9 +674,9 @@ static uint64_t sys_inotify_init(uint64_t a1, uint64_t a2, uint64_t a3,
     t->fd_offsets[fd] = 0;
     fd_path_set(t, fd, "inotify");
 
-    klog_puts("[INOTIFY_INIT] Created instance ");
-    klog_uint64(instance->instance_id);
-    klog_puts(" with fd="); klog_uint64(fd); klog_puts("\n");
+    klog_debug_puts("[INOTIFY_INIT] Created instance ");
+    klog_debug_uint64(instance->instance_id);
+    klog_debug_puts(" with fd="); klog_debug_uint64(fd); klog_debug_puts("\n");
     return fd;
 }
 
@@ -646,8 +712,8 @@ static uint64_t sys_inotify_add_watch(uint64_t fd, uint64_t pathname,
     for (uint32_t i = 0; i < instance->num_watches; i++) {
         if (strcmp(instance->watches[i].path, path) == 0) {
             instance->watches[i].mask = (uint32_t)mask;
-            klog_puts("[INOTIFY_ADD_WATCH] Updated watch for path: ");
-            klog_puts(path); klog_puts("\n");
+            klog_debug_puts("[INOTIFY_ADD_WATCH] Updated watch for path: ");
+            klog_debug_puts(path); klog_debug_puts("\n");
             return instance->watches[i].wd;
         }
     }
@@ -660,9 +726,9 @@ static uint64_t sys_inotify_add_watch(uint64_t fd, uint64_t pathname,
     watch->path[sizeof(watch->path) - 1] = '\0';
     instance->num_watches++;
 
-    klog_puts("[INOTIFY_ADD_WATCH] Added watch wd="); klog_uint64(watch->wd);
-    klog_puts(" for path: "); klog_puts(path);
-    klog_puts(" in instance "); klog_uint64(instance_id); klog_puts("\n");
+    klog_debug_puts("[INOTIFY_ADD_WATCH] Added watch wd="); klog_debug_uint64(watch->wd);
+    klog_debug_puts(" for path: "); klog_debug_puts(path);
+    klog_debug_puts(" in instance "); klog_debug_uint64(instance_id); klog_debug_puts("\n");
     return watch->wd;
 }
 

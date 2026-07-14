@@ -1,4 +1,5 @@
 #include "ehci.h"
+#include "../../apic/lapic_timer.h"
 #include "../../console/klog.h"
 #include "../../cpu/irq.h"
 #include "../../io/io.h"
@@ -21,6 +22,15 @@ static int int_pipe_count = 0;
 
 // Helpers
 static void ehci_enumerate_ports(struct ehci_controller *hc);
+
+/* io_wait() writes to legacy port 0x80 and therefore causes a VM exit for
+ * every iteration under KVM.  EHCI waits are measured in real milliseconds;
+ * use the already calibrated monotonic clock and PAUSE while polling. */
+static void ehci_delay_ms(uint32_t ms) {
+  uint64_t deadline = lapic_timer_get_ms() + ms;
+  while (lapic_timer_get_ms() < deadline)
+    hal_cpu_relax();
+}
 
 static inline uint32_t ehci_read_cap32(struct ehci_controller *hc,
                                        uint32_t reg) {
@@ -60,15 +70,13 @@ static void ehci_bios_handover(struct ehci_controller *hc) {
 
   if (legsup & EHCI_LEGACY_BIOS_OWNED) {
     klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " EHCI: BIOS owns controller. Waiting for handover...\n");
-    int timeout = 1000;
-    while (timeout > 0) {
+    uint64_t deadline = lapic_timer_get_ms() + 1000;
+    while (lapic_timer_get_ms() < deadline) {
       legsup = pci_config_read32(hc->pci_bus, hc->pci_slot, hc->pci_func,
                                  eecp_offset);
       if (!(legsup & EHCI_LEGACY_BIOS_OWNED))
         break;
-      for (int i = 0; i < 1000; i++)
-        io_wait();
-      timeout--;
+      hal_cpu_relax();
     }
   }
 
@@ -86,21 +94,22 @@ static void ehci_controller_reset(struct ehci_controller *hc) {
   ehci_write_op(hc, EHCI_REG_USBCMD, cmd);
 
   // Wait for it to stop
-  while (!(ehci_read_op(hc, EHCI_REG_USBSTS) & EHCI_STS_HALTED))
-    ;
+  uint64_t stop_deadline = lapic_timer_get_ms() + 100;
+  while (!(ehci_read_op(hc, EHCI_REG_USBSTS) & EHCI_STS_HALTED) &&
+         lapic_timer_get_ms() < stop_deadline)
+    hal_cpu_relax();
 
   // 2. Issue Reset
   ehci_write_op(hc, EHCI_REG_USBCMD, EHCI_CMD_HCRESET);
 
   // 3. Wait for reset to complete
-  int timeout = 1000;
+  uint64_t reset_deadline = lapic_timer_get_ms() + 1000;
   while (ehci_read_op(hc, EHCI_REG_USBCMD) & EHCI_CMD_HCRESET) {
-    for (int i = 0; i < 1000; i++)
-      io_wait();
-    if (--timeout == 0) {
+    if (lapic_timer_get_ms() >= reset_deadline) {
       klog_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " EHCI: Reset timed out!\n");
       return;
     }
+    hal_cpu_relax();
   }
 }
 
@@ -171,8 +180,7 @@ static void ehci_reset_port(struct ehci_controller *hc, uint8_t port) {
   ehci_write_op(hc, reg, status);
 
   // 2. Hold reset for 50ms (USB 2.0 spec requires at least 50ms for root ports)
-  for (int i = 0; i < 100000; i++)
-    io_wait();
+  ehci_delay_ms(50);
 
   // 3. Clear reset
   status = ehci_read_op(hc, reg);
@@ -180,16 +188,16 @@ static void ehci_reset_port(struct ehci_controller *hc, uint8_t port) {
   ehci_write_op(hc, reg, status);
 
   // 4. Wait for reset bit to actually clear (HC may take a few uframes)
-  for (int i = 0; i < 100000; i++) {
+  uint64_t clear_deadline = lapic_timer_get_ms() + 10;
+  while (lapic_timer_get_ms() < clear_deadline) {
     status = ehci_read_op(hc, reg);
     if (!(status & EHCI_PORT_RESET))
       break;
-    io_wait();
+    hal_cpu_relax();
   }
 
   // 5. Post-reset recovery delay (USB 2.0 spec TRSTRCY = 10ms minimum)
-  for (int i = 0; i < 30000; i++)
-    io_wait();
+  ehci_delay_ms(10);
 
   // 6. Re-read status after recovery
   status = ehci_read_op(hc, reg);
@@ -276,16 +284,15 @@ int ehci_control_transfer(struct ehci_controller *hc, uint8_t addr,
   asm volatile("mfence" ::: "memory");
 
   bool success = false;
-  int timeout = 1000000;
-  while (timeout--) {
+  uint64_t transfer_deadline = lapic_timer_get_ms() + 500;
+  while (lapic_timer_get_ms() < transfer_deadline) {
     asm volatile("" ::: "memory");
     if (!(status_qtd->token & QTD_TOKEN_ACTIVE)) {
       if (!(status_qtd->token & 0x7C))
         success = true;
       break;
     }
-    for (int j = 0; j < 10; j++)
-      io_wait();
+    hal_cpu_relax();
   }
 
   hc->async_qh->link = qh->link;
@@ -583,10 +590,11 @@ void ehci_init(void) {
       ehci_write_op(hc, EHCI_REG_USBCMD, cmd);
 
       // Wait for controller to start running
-      for (int w = 0; w < 100000; w++) {
+      uint64_t run_deadline = lapic_timer_get_ms() + 100;
+      while (lapic_timer_get_ms() < run_deadline) {
         if (!(ehci_read_op(hc, EHCI_REG_USBSTS) & EHCI_STS_HALTED))
           break;
-        io_wait();
+        hal_cpu_relax();
       }
 
       // Route all ports to EHCI first, then hand low-speed to companion UHCI
@@ -596,8 +604,7 @@ void ehci_init(void) {
       // Wait 200ms for ports to detect connections after CONFIGFLAG is set.
       // The USB 2.0 spec requires time for port routing and device detection.
       // Without this delay, port enumeration may find no connected devices.
-      for (int w = 0; w < 200000; w++)
-        io_wait();
+      ehci_delay_ms(200);
 
       hc->hcd.priv = hc;
       hc->hcd.control_transfer = ehci_hcd_control_transfer;
@@ -658,17 +665,16 @@ static void ehci_enumerate_ports(struct ehci_controller *hc) {
   for (uint8_t p = 0; p < hc->num_ports; p++) {
     uint32_t portsc = ehci_read_op(hc, EHCI_REG_PORTSC + (p * 4));
 
+    /* Empty root ports are the normal case.  Avoid six misleading failure
+     * lines (and slow serial output) on every boot. */
+    if (!(portsc & EHCI_PORT_CONNECT))
+      continue;
+
     klog_puts("       Port ");
     klog_uint64(p);
-    klog_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " EHCI Xfer fail. SETUP=0x");
+    klog_puts(" connected (PORTSC=");
     klog_hex32(portsc);
-
-    if (!(portsc & EHCI_PORT_CONNECT)) {
-      klog_puts(" [EMPTY]\n");
-      continue;
-    }
-
-    klog_puts(" [CONNECTED] Resetting...\n");
+    klog_puts("); resetting...\n");
     ehci_reset_port(hc, p);
 
     // After reset, if it's still EHCI-enabled, enumerate it

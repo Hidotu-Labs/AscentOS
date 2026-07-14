@@ -142,17 +142,17 @@ int drm_ioctl_obj_getprops(struct drm_device *dev, uint64_t arg) {
   struct drm_mode_obj_get_properties *req =
       (struct drm_mode_obj_get_properties *)arg;
 
-  klog_puts("[DRM] OBJ_GETPROPS obj=");
-  klog_uint64(req->obj_id);
-  klog_puts(" type_in=0x");
-  klog_hex32(req->obj_type);
-  klog_puts(" count_in=");
-  klog_uint64(req->count_props);
-  klog_puts(" props_ptr=0x");
-  klog_hex64(req->props_ptr);
-  klog_puts(" vals_ptr=0x");
-  klog_hex64(req->prop_values_ptr);
-  klog_puts("\n");
+  klog_debug_puts("[DRM] OBJ_GETPROPS obj=");
+  klog_debug_uint64(req->obj_id);
+  klog_debug_puts(" type_in=0x");
+  klog_debug_hex32(req->obj_type);
+  klog_debug_puts(" count_in=");
+  klog_debug_uint64(req->count_props);
+  klog_debug_puts(" props_ptr=0x");
+  klog_debug_hex64(req->props_ptr);
+  klog_debug_puts(" vals_ptr=0x");
+  klog_debug_hex64(req->prop_values_ptr);
+  klog_debug_puts("\n");
 
   spinlock_acquire(&dev->lock);
   struct drm_mode_object *mobj = NULL;
@@ -164,9 +164,9 @@ int drm_ioctl_obj_getprops(struct drm_device *dev, uint64_t arg) {
     }
   }
   if (!mobj) {
-    klog_puts("[DRM] OBJ_GETPROPS missing obj=");
-    klog_uint64(req->obj_id);
-    klog_puts("\n");
+    klog_debug_puts("[DRM] OBJ_GETPROPS missing obj=");
+    klog_debug_uint64(req->obj_id);
+    klog_debug_puts("\n");
     spinlock_release(&dev->lock);
     return -2;
   } /* ENOENT */
@@ -181,13 +181,13 @@ int drm_ioctl_obj_getprops(struct drm_device *dev, uint64_t arg) {
     }
   }
   req->count_props = count;
-  klog_puts("[DRM] OBJ_GETPROPS out obj=");
-  klog_uint64(req->obj_id);
-  klog_puts(" type=0x");
-  klog_hex32(mobj->type);
-  klog_puts(" count=");
-  klog_uint64(count);
-  klog_puts("\n");
+  klog_debug_puts("[DRM] OBJ_GETPROPS out obj=");
+  klog_debug_uint64(req->obj_id);
+  klog_debug_puts(" type=0x");
+  klog_debug_hex32(mobj->type);
+  klog_debug_puts(" count=");
+  klog_debug_uint64(count);
+  klog_debug_puts("\n");
   spinlock_release(&dev->lock);
   return 0;
 }
@@ -206,17 +206,17 @@ int drm_ioctl_getproperty(struct drm_device *dev, uint64_t arg) {
     uint32_t count_enum_blobs;
   } *p = (void *)arg;
 
-  klog_puts("[DRM] GETPROPERTY id=");
-  klog_uint64(p->prop_id);
-  klog_puts(" values_ptr=0x");
-  klog_hex64(p->values_ptr);
-  klog_puts(" enum_ptr=0x");
-  klog_hex64(p->enum_blob_ptr);
-  klog_puts(" count_values_in=");
-  klog_uint64(p->count_values);
-  klog_puts(" count_enum_in=");
-  klog_uint64(p->count_enum_blobs);
-  klog_puts("\n");
+  klog_debug_puts("[DRM] GETPROPERTY id=");
+  klog_debug_uint64(p->prop_id);
+  klog_debug_puts(" values_ptr=0x");
+  klog_debug_hex64(p->values_ptr);
+  klog_debug_puts(" enum_ptr=0x");
+  klog_debug_hex64(p->enum_blob_ptr);
+  klog_debug_puts(" count_values_in=");
+  klog_debug_uint64(p->count_values);
+  klog_debug_puts(" count_enum_in=");
+  klog_debug_uint64(p->count_enum_blobs);
+  klog_debug_puts("\n");
 
   const struct drm_property_def *def = drm_prop_find_def(p->prop_id);
   if (!def) {
@@ -225,9 +225,9 @@ int drm_ioctl_getproperty(struct drm_device *dev, uint64_t arg) {
     p->count_values = 0;
     p->count_enum_blobs = 0;
     strncpy(p->name, "Unknown", 32);
-    klog_puts("[DRM] GETPROPERTY unknown id=");
-    klog_uint64(p->prop_id);
-    klog_puts("\n");
+    klog_debug_puts("[DRM] GETPROPERTY unknown id=");
+    klog_debug_uint64(p->prop_id);
+    klog_debug_puts("\n");
     return 0;
   }
 
@@ -279,17 +279,17 @@ int drm_ioctl_getproperty(struct drm_device *dev, uint64_t arg) {
   } else {
     p->count_values = 0;
   }
-  klog_puts("[DRM] GETPROPERTY out id=");
-  klog_uint64(p->prop_id);
-  klog_puts(" name=");
-  klog_puts(p->name);
-  klog_puts(" flags=0x");
-  klog_hex32(p->flags);
-  klog_puts(" values=");
-  klog_uint64(p->count_values);
-  klog_puts(" enums=");
-  klog_uint64(p->count_enum_blobs);
-  klog_puts("\n");
+  klog_debug_puts("[DRM] GETPROPERTY out id=");
+  klog_debug_uint64(p->prop_id);
+  klog_debug_puts(" name=");
+  klog_debug_puts(p->name);
+  klog_debug_puts(" flags=0x");
+  klog_debug_hex32(p->flags);
+  klog_debug_puts(" values=");
+  klog_debug_uint64(p->count_values);
+  klog_debug_puts(" enums=");
+  klog_debug_uint64(p->count_enum_blobs);
+  klog_debug_puts("\n");
   return 0;
 }
 
@@ -387,7 +387,7 @@ int atomic_apply_prop(struct drm_device *dev,
 
       if (plane_type == DRM_PLANE_TYPE_CURSOR &&
           drm_cursor_fb_validate(new_fb) != 0) {
-        klog_puts("[DRM] atomic cursor: rejected invalid cursor FB\n");
+        klog_debug_puts("[DRM] atomic cursor: rejected invalid cursor FB\n");
         return -22;
       }
 
@@ -410,15 +410,15 @@ int atomic_apply_prop(struct drm_device *dev,
 
       if (plane_type == DRM_PLANE_TYPE_CURSOR) {
 #if DRM_DEBUG_LOGGING
-        klog_puts("[DRM] atomic cursor: FB_ID=");
-        klog_uint64((uint32_t)value);
-        klog_puts(" size=");
-        klog_uint64(new_fb ? new_fb->width : 0);
-        klog_puts("x");
-        klog_uint64(new_fb ? new_fb->height : 0);
-        klog_puts(" fmt=0x");
-        klog_hex32(new_fb ? new_fb->pixel_format : 0);
-        klog_puts("\n");
+        klog_debug_puts("[DRM] atomic cursor: FB_ID=");
+        klog_debug_uint64((uint32_t)value);
+        klog_debug_puts(" size=");
+        klog_debug_uint64(new_fb ? new_fb->width : 0);
+        klog_debug_puts("x");
+        klog_debug_uint64(new_fb ? new_fb->height : 0);
+        klog_debug_puts(" fmt=0x");
+        klog_debug_hex32(new_fb ? new_fb->pixel_format : 0);
+        klog_debug_puts("\n");
 #endif
       }
       break;
@@ -444,9 +444,9 @@ int atomic_apply_prop(struct drm_device *dev,
       }
       if (plane_type == DRM_PLANE_TYPE_CURSOR) {
 #if DRM_DEBUG_LOGGING
-        klog_puts("[DRM] atomic cursor: CRTC_ID=");
-        klog_uint64((uint32_t)value);
-        klog_puts("\n");
+        klog_debug_puts("[DRM] atomic cursor: CRTC_ID=");
+        klog_debug_uint64((uint32_t)value);
+        klog_debug_puts("\n");
 #endif
       }
       break;
@@ -557,15 +557,15 @@ int drm_ioctl_obj_setproperty(struct drm_device *dev, uint64_t arg) {
   } *req = (void *)arg;
 
 #if DRM_DEBUG_LOGGING
-  klog_puts("[DRM] OBJ_SETPROPERTY obj=");
-  klog_uint64(req->obj_id);
-  klog_puts(" type=0x");
-  klog_hex32(req->obj_type);
-  klog_puts(" prop=");
-  klog_uint64(req->prop_id);
-  klog_puts(" val=");
-  klog_uint64(req->value);
-  klog_puts("\n");
+  klog_debug_puts("[DRM] OBJ_SETPROPERTY obj=");
+  klog_debug_uint64(req->obj_id);
+  klog_debug_puts(" type=0x");
+  klog_debug_hex32(req->obj_type);
+  klog_debug_puts(" prop=");
+  klog_debug_uint64(req->prop_id);
+  klog_debug_puts(" val=");
+  klog_debug_uint64(req->value);
+  klog_debug_puts("\n");
 #endif
 
   spinlock_acquire(&dev->lock);
@@ -629,9 +629,9 @@ int drm_ioctl_atomic(struct vfs_node *node, struct drm_file *file,
     }
     if (!mobj) {
       spinlock_release(&dev->lock);
-      klog_puts("[DRM] atomic: unknown object id=");
-      klog_uint64(obj_id);
-      klog_puts("\n");
+      klog_debug_puts("[DRM] atomic: unknown object id=");
+      klog_debug_uint64(obj_id);
+      klog_debug_puts("\n");
       return -1;
     }
 
@@ -640,13 +640,13 @@ int drm_ioctl_atomic(struct vfs_node *node, struct drm_file *file,
       uint64_t val = prop_vals[prop_offset + j];
 
 #if DRM_DEBUG_LOGGING
-      klog_puts("[DRM] atomic: obj=");
-      klog_uint64(obj_id);
-      klog_puts(" prop=");
-      klog_uint64(pid);
-      klog_puts(" val=");
-      klog_uint64(val);
-      klog_puts("\n");
+      klog_debug_puts("[DRM] atomic: obj=");
+      klog_debug_uint64(obj_id);
+      klog_debug_puts(" prop=");
+      klog_debug_uint64(pid);
+      klog_debug_puts(" val=");
+      klog_debug_uint64(val);
+      klog_debug_puts("\n");
 #endif
 
       if (mobj->type == DRM_MODE_OBJECT_CRTC)
@@ -693,11 +693,11 @@ int drm_ioctl_atomic(struct vfs_node *node, struct drm_file *file,
           }
         }
         if (atomic_apply_prop(dev, mobj, pid, val) != 0) {
-          klog_puts("[DRM] atomic: unknown prop_id=");
-          klog_uint64(pid);
-          klog_puts(" on obj=");
-          klog_uint64(obj_id);
-          klog_puts(" (ignored)\n");
+          klog_debug_puts("[DRM] atomic: unknown prop_id=");
+          klog_debug_uint64(pid);
+          klog_debug_puts(" on obj=");
+          klog_debug_uint64(obj_id);
+          klog_debug_puts(" (ignored)\n");
           /* Non-fatal: skip unknown props for forward compat */
         }
       }
@@ -725,11 +725,11 @@ int drm_ioctl_atomic(struct vfs_node *node, struct drm_file *file,
   spinlock_release(&dev->lock);
 done:
 #if DRM_DEBUG_LOGGING
-  klog_puts("[DRM] atomic commit: ");
-  klog_uint64(req->count_objs);
-  klog_puts(" objects, flags=0x");
-  klog_hex32(req->flags);
-  klog_puts(test_only ? " (TEST_ONLY)\n" : "\n");
+  klog_debug_puts("[DRM] atomic commit: ");
+  klog_debug_uint64(req->count_objs);
+  klog_debug_puts(" objects, flags=0x");
+  klog_debug_hex32(req->flags);
+  klog_debug_puts(test_only ? " (TEST_ONLY)\n" : "\n");
 #endif
 
   return 0;

@@ -67,7 +67,7 @@ int alloc_fd_from(struct thread *t, int from) {
 // open / openat
 // ---------------------------------------------------------------------------
 
-static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags,
+uint64_t sys_open_path(int dirfd, const char *path, uint64_t flags,
                             uint64_t mode) {
   (void)dirfd;
   if (!path)
@@ -133,6 +133,9 @@ static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags,
       node->mmap = ptmx_mmap;
       node->device = pty;
       node->wait_queue = pty->master_waitq;
+      pty->master_node = node;
+      klog_puts("[PTYMASTER] pair=");
+      klog_uint64((uint64_t)pty->index);
       // The descriptor installed below owns the initial reference.
       node->refcount = 0;
       goto open_done;
@@ -272,6 +275,13 @@ open_done:
   t->fd_flags[fd] = flags & ~(uint64_t)O_CLOEXEC;
   if (flags & O_CLOEXEC)
     t->fd_flags[fd] |= FD_FLAGS_CLOEXEC_BIT;
+  if (strcmp(node->name, "ptmx") == 0) {
+    klog_puts(" fd=");
+    klog_uint64((uint64_t)fd);
+    klog_puts(" tid=");
+    klog_uint64(t->tid);
+    klog_puts("\n");
+  }
 
   char full_path[256];
   if (path[0] == '/') {
@@ -299,7 +309,7 @@ static uint64_t sys_openat(uint64_t dirfd, uint64_t path_ptr, uint64_t flags,
                            uint64_t mode, uint64_t a4, uint64_t a5) {
   (void)a4;
   (void)a5;
-  return (uint64_t)(int)do_sys_open((int)dirfd, (const char *)path_ptr, flags,
+  return (uint64_t)(int)sys_open_path((int)dirfd, (const char *)path_ptr, flags,
                                     mode);
 }
 
@@ -334,6 +344,65 @@ static uint64_t sys_close(uint64_t fd, uint64_t a1, uint64_t a2, uint64_t a3,
     t->files->next_fd = (uint32_t)fd;
   spinlock_release(&t->files->lock);
   vfs_close(node);
+  return 0;
+}
+
+/* Linux close_range(2).  VTE uses this while preparing its shell child. */
+#define CLOSE_RANGE_UNSHARE (1U << 1)
+#define CLOSE_RANGE_CLOEXEC (1U << 2)
+static uint64_t sys_close_range(uint64_t first, uint64_t last, uint64_t flags,
+                                uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  if (first > last || (flags & ~(CLOSE_RANGE_UNSHARE | CLOSE_RANGE_CLOEXEC)))
+    return (uint64_t)-22;
+
+  struct thread *t = sched_get_current();
+  if (!t || !t->files)
+    return (uint64_t)-9;
+  klog_puts("[CLOSE_RANGE] tid=");
+  klog_uint64(t->tid);
+  klog_puts(" first=");
+  klog_uint64(first);
+  klog_puts(" last=");
+  klog_uint64(last);
+  klog_puts(" flags=");
+  klog_hex64(flags);
+  klog_puts("\n");
+  if (first >= MAX_FDS)
+    return 0;
+  if (last >= MAX_FDS)
+    last = MAX_FDS - 1;
+
+  /* File tables are already private for forked children.  CLONE_UNSHARE is
+   * accepted here; callers using it only need the range operation itself. */
+  if (flags & CLOSE_RANGE_CLOEXEC) {
+    spinlock_acquire(&t->files->lock);
+    for (uint64_t fd = first; fd <= last; fd++) {
+      if (t->fds[fd] && t->fds[fd] != FD_RESERVED)
+        t->fd_flags[fd] |= FD_FLAGS_CLOEXEC_BIT;
+    }
+    spinlock_release(&t->files->lock);
+    return 0;
+  }
+
+  for (uint64_t fd = first; fd <= last; fd++) {
+    spinlock_acquire(&t->files->lock);
+    vfs_node_t *node = t->fds[fd];
+    if (!node || node == FD_RESERVED) {
+      spinlock_release(&t->files->lock);
+      continue;
+    }
+    t->fds[fd] = NULL;
+    t->fd_offsets[fd] = 0;
+    t->fd_flags[fd] = 0;
+    fd_path_clear(t, (int)fd);
+    if (fd < t->files->next_fd)
+      t->files->next_fd = (uint32_t)fd;
+    spinlock_release(&t->files->lock);
+    vfs_close(node);
+  }
   return 0;
 }
 
@@ -885,9 +954,7 @@ static uint64_t sys_fsync(uint64_t fd, uint64_t a1, uint64_t a2, uint64_t a3,
   struct thread *t = sched_get_current();
   if (!t || fd >= MAX_FDS || !t->fds[fd])
     return (uint64_t)-9;
-  klog_puts("[SYSCALL] fsync: fd=");
-  klog_uint64(fd);
-  klog_puts(" (no-op, synchronous writes)\n");
+  vfs_cache_sync(t->fds[fd]);
   return 0;
 }
 
@@ -962,6 +1029,7 @@ void syscall_register_fd(void) {
   syscall_register(SYS_OPEN, sys_open);
   syscall_register(SYS_OPENAT, sys_openat);
   syscall_register(SYS_CLOSE, sys_close);
+  syscall_register(SYS_CLOSE_RANGE, sys_close_range);
   syscall_register(SYS_DUP, sys_dup);
   syscall_register(SYS_DUP2, sys_dup2);
   syscall_register(SYS_LSEEK, sys_lseek);

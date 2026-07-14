@@ -1,3 +1,4 @@
+
 #include "../console/klog.h"
 #include "../fs/vfs.h"
 #include "../lib/string.h"
@@ -313,6 +314,7 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
 
   void *frame = NULL;
   bool frame_from_cache = false;
+  vfs_page_t *cached_hold = NULL;
 
   vfs_node_t *node = (vfs_node_t *)vma_file_node;
   if (node && (node->flags & FS_TYPE_MASK) == FS_FILE) {
@@ -321,10 +323,11 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
     uint32_t file_offset = (uint32_t)(vma_offset + page_offset);
 
     // 1. Try page cache first.
-    vfs_page_t *cached = vfs_cache_lookup(node, file_offset);
+    vfs_page_t *cached = vfs_cache_get_or_create(node, file_offset);
     if (cached) {
       frame = (void *)cached->frame_phys;
       frame_from_cache = true;
+      cached_hold = cached;
     } else {
       // 2. Cache miss: read a 64 KB cluster to maximise disk throughput.
       uint32_t cluster_base = file_offset & ~0xFFFFU; // 64 KB aligned
@@ -335,33 +338,17 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
 
       for (uint32_t off = 0; off < cluster_size; off += 4096) {
         uint32_t cur_off = cluster_base + off;
-        if (vfs_cache_lookup(node, cur_off))
-          continue;
-
-        void *nf = pmm_alloc_page();
-        if (!nf)
+        vfs_page_t *read_ahead = vfs_cache_get_or_create(node, cur_off);
+        if (!read_ahead)
           break;
-
-        uint32_t to_read =
-            (node->length - cur_off >= 4096) ? 4096 : (node->length - cur_off);
-        if (to_read > 0) {
-          vfs_read(node, cur_off, to_read,
-                   (uint8_t *)PHYS_TO_VIRT((uint64_t)nf));
-          if (to_read < 4096)
-            memset((uint8_t *)PHYS_TO_VIRT((uint64_t)nf) + to_read, 0,
-                   4096 - to_read);
-        } else {
-          memset(PHYS_TO_VIRT((uint64_t)nf), 0, 4096);
-        }
-
-        if (!vfs_cache_insert(node, cur_off, (uint64_t)nf))
-          pmm_free_page(nf);
+        vfs_cache_put(node, read_ahead);
       }
 
-      cached = vfs_cache_lookup(node, file_offset);
+      cached = vfs_cache_get_or_create(node, file_offset);
       if (cached) {
         frame = (void *)cached->frame_phys;
         frame_from_cache = true;
+        cached_hold = cached;
       }
     }
 
@@ -399,6 +386,7 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
                           pt_flags)) {
           pmm_decref((void *)p->frame_phys);
         }
+        vfs_cache_put(node, p);
       }
     }
 
@@ -426,6 +414,7 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
 
   if (frame_from_cache) {
     pmm_incref(frame);
+    vfs_cache_put(node, cached_hold);
   }
 
   if (!vmm_map_page((uint64_t *)target_cr3, cr2 & ~0xFFFULL, (uint64_t)frame,

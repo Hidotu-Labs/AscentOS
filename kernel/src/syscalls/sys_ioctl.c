@@ -1,6 +1,7 @@
 // sys_ioctl.c — ioctl syscall
 #include "../console/klog.h"
 #include "../fb/framebuffer.h"
+#include "../drivers/pty.h"
 #include "../font/font.h"
 #include "../fs/vfs.h"
 #include "../lib/string.h"
@@ -70,6 +71,22 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
     klog_uint64(node->ioctl ? 1 : 0);
     klog_puts("\n");
 #endif
+
+    /* Linux TIOCGPTPEER opens the slave associated with a PTY master.
+     * VTE uses this race-free interface and treats ENOTTY as PTY failure. */
+    if ((uint32_t)request == 0x5441 && strcmp(node->name, "ptmx") == 0) {
+      pty_pair_t *pty = (pty_pair_t *)node->device;
+      if (!pty)
+        return (uint64_t)-9;
+      char peer_path[16] = "/dev/pts/";
+      int index = pty->index;
+      size_t pos = 9;
+      if (index >= 10)
+        peer_path[pos++] = (char)(48 + (index / 10));
+      peer_path[pos++] = (char)(48 + (index % 10));
+      peer_path[pos] = 0;
+      return sys_open_path(-100, peer_path, arg, 0);
+    }
 
     if (node->ioctl) {
       if (request & 0xC0000000) {

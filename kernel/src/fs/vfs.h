@@ -2,6 +2,7 @@
 #define FS_VFS_H
 
 #include "../lib/list.h"
+#include "../lib/radix_tree.h"
 #include "../lock/spinlock.h"
 #include <stdbool.h>
 #include <stddef.h>
@@ -19,6 +20,7 @@
 #define FS_PERSISTENT 0x10
 #define FS_NONBLOCK 0x20
 #define FS_DENTRY_NOCACHE 0x40
+#define FS_PAGE_CACHE 0x80
 #define FS_TYPE_MASK 0x0F
 
 // Poll Events
@@ -33,7 +35,13 @@ typedef struct vfs_page {
   uint32_t offset;       // Byte offset within the file (page aligned)
   uint64_t frame_phys;   // Physical address of the frame
   bool dirty;            // True if data has been modified but not written back
-  struct list_head list; // List linkage for vfs_node_t
+  bool evicted;          // Removed from the tree; free after final transient ref
+  bool loading;          // One owner is filling this page from the filesystem
+  bool uptodate;         // Frame contains a complete, valid file page
+  bool writeback;        // Filesystem write is currently using this frame
+  uint32_t refs;         // Transient users; the tree owns a separate cache ref
+  uint64_t last_used;    // Monotonic access stamp used for cache reclaim
+  uint64_t dirty_seq;    // Detects modifications racing with writeback
 } vfs_page_t;
 
 struct dirent {
@@ -135,8 +143,8 @@ typedef struct vfs_node {
   struct vfs_node *ptr; // Used by mountpoints and symlinks
   uint32_t refcount;    // Reference count for memory management
 
-  struct list_head pages[32]; // Hash table of cached pages (vfs_page_t)
-  spinlock_t pages_lock;      // Lock for the page cache hash table
+  struct radix_tree pages; // Cached pages keyed by file page index
+  spinlock_t pages_lock;   // Serializes compound cache/value-lifetime changes
 
   /* Optional sequential readdir cursor used by filesystems with indexed API. */
   uint32_t readdir_cursor_index;
@@ -200,6 +208,14 @@ void vfs_cache_invalidate_range(vfs_node_t *node, uint32_t offset,
 void vfs_cache_clear(vfs_node_t *node);
 void vfs_cache_clear_unused(vfs_node_t *node);
 void vfs_cache_sync(vfs_node_t *node);
+void vfs_cache_mark_dirty(vfs_node_t *node, uint32_t offset);
+size_t vfs_cache_reclaim(vfs_node_t *node, size_t target);
 vfs_page_t *vfs_cache_get_or_create(vfs_node_t *node, uint32_t offset);
+void vfs_cache_put(vfs_node_t *node, vfs_page_t *page);
+bool vfs_cache_phase3_stress_test(void);
+uint32_t vfs_cache_read(vfs_node_t *node, uint32_t offset, uint32_t size,
+                        uint8_t *buffer);
+bool vfs_cache_phase4_stress_test(void);
+bool vfs_cache_phase5_stress_test(void);
 
 #endif

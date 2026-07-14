@@ -1008,7 +1008,10 @@ static void virtio_gpu_worker(void) {
     wait_queue_entry_t entry = {.thread = self, .next = NULL};
     for (;;) {
         uint32_t pending = __atomic_exchange_n(&gpu_pending_work, 0, __ATOMIC_ACQ_REL);
-        if (!pending)
+        /* Poll periodically only when interrupts are unavailable.  In IRQ mode,
+         * waking this worker every millisecond wastes a substantial share of a
+         * QEMU vCPU and competes directly with Xorg and the renderer. */
+        if (!pending && !gpu_irq_installed)
             gpu.stats.watchdog_polls++;
         if (pending & GPU_WORK_CONFIG)
             gpu_handle_config_event();
@@ -1018,7 +1021,7 @@ static void virtio_gpu_worker(void) {
         if (gpu.controlq.last_used_idx == gpu.controlq.used->idx &&
             gpu.cursorq.last_used_idx == gpu.cursorq.used->idx && !gpu_pending_work) {
             self->state = THREAD_BLOCKED;
-            self->wakeup_ticks = lapic_timer_get_ticks() + 1;
+            self->wakeup_ticks = gpu_irq_installed ? 0 : lapic_timer_get_ticks() + 1;
         } else
             wait_queue_wake_one(&gpu_worker_wait);
         sched_yield();

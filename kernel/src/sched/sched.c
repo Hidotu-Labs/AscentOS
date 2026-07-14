@@ -125,17 +125,17 @@ void sched_release_files(struct thread *t) {
   struct fd_table *files = t->files;
   bool last = false;
   if (t->is_forked_child) {
-    klog_puts("[FDDBG] lock table ");
-    klog_hex64((uint64_t)files);
-    klog_puts(" refs=");
-    klog_uint64(files->ref_count);
-    klog_puts(" locked=");
-    klog_uint64(files->lock.locked);
-    klog_puts("\n");
+    klog_debug_puts("[FDDBG] lock table ");
+    klog_debug_hex64((uint64_t)files);
+    klog_debug_puts(" refs=");
+    klog_debug_uint64(files->ref_count);
+    klog_debug_puts(" locked=");
+    klog_debug_uint64(files->lock.locked);
+    klog_debug_puts("\n");
   }
   spinlock_acquire(&files->lock);
   if (t->is_forked_child)
-    klog_puts("[FDDBG] table locked\n");
+    klog_debug_puts("[FDDBG] table locked\n");
   if (--files->ref_count == 0)
     last = true;
   spinlock_release(&files->lock);
@@ -148,20 +148,20 @@ void sched_release_files(struct thread *t) {
     if (files->fds[i] && files->fds[i] != (vfs_node_t *)-1) {
       vfs_node_t *node = files->fds[i];
       if (t->is_forked_child) {
-        klog_puts("[FDDBG] closing fd ");
-        klog_uint64(i);
-        klog_puts(" node=");
-        klog_hex64((uint64_t)node);
-        klog_puts(" refs=");
-        klog_uint64(node->refcount);
-        klog_puts("\n");
+        klog_debug_puts("[FDDBG] closing fd ");
+        klog_debug_uint64(i);
+        klog_debug_puts(" node=");
+        klog_debug_hex64((uint64_t)node);
+        klog_debug_puts(" refs=");
+        klog_debug_uint64(node->refcount);
+        klog_debug_puts("\n");
       }
       files->fds[i] = NULL;
       fd_path_put(files->fd_paths[i]);
       files->fd_paths[i] = NULL;
       vfs_close(node);
       if (t->is_forked_child)
-        klog_puts("[FDDBG] close returned\n");
+        klog_debug_puts("[FDDBG] close returned\n");
     }
   }
   kfree(files);
@@ -422,7 +422,6 @@ void sched_enqueue_thread(struct thread *t, struct cpu_info *explicit_cpu) {
   if (!target_cpu->runqueues[p]) {
     target_cpu->runqueues[p] = t;
     t->next = t;
-    target_cpu->runqueue_bitmap |= (1 << p);
   } else {
     // Insert at tail of circular list
     struct thread *head = target_cpu->runqueues[p];
@@ -434,18 +433,26 @@ void sched_enqueue_thread(struct thread *t, struct cpu_info *explicit_cpu) {
     t->next = head;
   }
 
+  /* A priority bit may have been cleared when its existing threads were all
+   * blocked.  Appending a newly runnable thread to that non-empty list must
+   * make the priority visible to the selector again. */
+  target_cpu->runqueue_bitmap |= (1U << p);
+
   if (t->state == THREAD_READY || t->state == THREAD_RUNNING) {
     target_cpu->runnable_count++;
   }
 
   t->cpu_index = target_cpu->cpu_id;
 
-  bool kick_idle_cpu = target_cpu->current_thread == target_cpu->idle_thread;
+  struct thread *running = target_cpu->current_thread;
+  bool kick_cpu = running == target_cpu->idle_thread ||
+                  (running && t->priority <= running->priority);
   spinlock_release(&target_cpu->queue_lock);
 
-  // A periodic tick used to notice newly runnable work. In one-shot mode an
-  // idle CPU may have no timer armed, so explicitly force a scheduling event.
-  if (kick_idle_cpu && lapic_is_ready()) {
+  /* One-shot mode has no periodic tick to notice newly runnable work. Ask
+   * the target CPU to reschedule promptly instead of making an interactive
+   * task wait for the running task's entire quantum. */
+  if (kick_cpu && lapic_is_ready()) {
     struct cpu_info *self = cpu_get_current();
     if (target_cpu == self)
       lapic_timer_rearm_if_earlier(lapic_timer_get_ms() + 1);
@@ -982,9 +989,9 @@ void sched_terminate_thread_group(struct thread *current) {
   spinlock_release(&tid_lock);
 
   if (killed) {
-    klog_puts("[EXIT_GROUP] queued sibling threads: ");
-    klog_uint64(killed);
-    klog_puts("\n");
+    klog_debug_puts("[EXIT_GROUP] queued sibling threads: ");
+    klog_debug_uint64(killed);
+    klog_debug_puts("\n");
   }
 }
 
@@ -1265,9 +1272,9 @@ void sched_reap_thread(struct thread *t) {
   if (!t || t->is_idle)
     return;
 
-  klog_puts("[REAP] Reaping thread ");
-  klog_uint64(t->tid);
-  klog_puts("\n");
+  klog_debug_puts("[REAP] Reaping thread ");
+  klog_debug_uint64(t->tid);
+  klog_debug_puts("\n");
 
   futex_remove_thread_waiters(t);
 
@@ -1282,7 +1289,7 @@ void sched_reap_thread(struct thread *t) {
   if (t->reap_remove_runqueue)
     remove_from_runqueue(t);
 
-  klog_puts("[REAP] Step 1: remove from lists\n");
+  klog_debug_puts("[REAP] Step 1: remove from lists\n");
   spinlock_acquire(&tid_lock);
 
   // 1.5 Remove from global thread list
@@ -1336,7 +1343,7 @@ void sched_reap_thread(struct thread *t) {
   procfs_release_pid_dir(t->tid);
 
   // 3. Free fork_ctx (saved register state)
-  klog_puts("[REAP] Step 3: free fork_ctx\n");
+  klog_debug_puts("[REAP] Step 3: free fork_ctx\n");
   if (t->fork_ctx) {
     kfree(t->fork_ctx);
     t->fork_ctx = NULL;
@@ -1357,7 +1364,7 @@ void sched_reap_thread(struct thread *t) {
      * exactly one reaper responsible for final destruction. */
     int refs = __atomic_sub_fetch(&t->mm->ref_count, 1, __ATOMIC_ACQ_REL);
     if (refs == 0) {
-      klog_puts("[REAP] Last thread, freeing MM resources\n");
+      klog_debug_puts("[REAP] Last thread, freeing MM resources\n");
       if (t->cr3) {
         vmm_free_user_pages_vma(t->cr3, &t->mm->vmas);
         t->cr3 = 0;
@@ -1365,7 +1372,7 @@ void sched_reap_thread(struct thread *t) {
       vma_list_destroy(&t->mm->vmas);
       kfree(t->mm);
     } else {
-      klog_puts("[REAP] MM still shared, skipping CR3 free\n");
+      klog_debug_puts("[REAP] MM still shared, skipping CR3 free\n");
       t->cr3 = 0; // Don't free for THIS thread
     }
     t->mm = NULL;
@@ -1375,7 +1382,7 @@ void sched_reap_thread(struct thread *t) {
   thread_stack_release(t->stack_base);
   kfree(t);
 
-  klog_puts("[REAP] Done\n");
+  klog_debug_puts("[REAP] Done\n");
 }
 
 struct thread *sched_get_thread_by_tid(uint32_t tid) {
@@ -1436,10 +1443,14 @@ void sched_wakeup(struct thread *t) {
     }
     spinlock_release(&target->queue_lock);
 
-    // If the woken thread is on a different CPU, send an IPI
+    /* A same-CPU wake previously waited as long as a complete quantum. This
+     * is particularly visible in Xorg/client request-response workloads. */
     struct cpu_info *self = cpu_get_current();
     if (target->apic_id != self->apic_id) {
       lapic_send_ipi(target->apic_id, IPI_VECTOR_RESCHEDULE);
+    } else if (self->current_thread &&
+               t->priority <= self->current_thread->priority) {
+      lapic_timer_rearm_if_earlier(lapic_timer_get_ms() + 1);
     }
   } else {
     // Fallback: thread has no valid cpu_index (freshly created?)
