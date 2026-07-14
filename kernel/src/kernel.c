@@ -28,7 +28,6 @@
 #include "drivers/storage/ahci.h"
 #include "drivers/storage/ata.h"
 #include "drivers/storage/block.h"
-#include "drivers/storage/nvme.h"
 #include "drivers/storage/ramdisk.h"
 #include "drivers/timer/hpet.h"
 #include "drivers/timer/pit.h"
@@ -420,8 +419,6 @@ void kmain_high_half(void) {
   if (ahci_init() == 0) {
     ata_init();
   }
-
-  nvme_init();
 
   // Mount root filesystem
   struct block_device *boot_dev = NULL;

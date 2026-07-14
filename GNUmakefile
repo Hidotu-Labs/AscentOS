@@ -126,7 +126,7 @@ ascentos-dist.iso: limine/limine kernel disk.img limine.conf create_dist_usb.sh
 	./create_dist_usb.sh ascentos-dist.iso
 
 .PHONY: run-x86_64
-run-x86_64: edk2-ovmf $(IMAGE_NAME).iso disk.img nvme.img
+run-x86_64: edk2-ovmf $(IMAGE_NAME).iso disk.img
 	qemu-system-$(ARCH) \
 		-M q35,pcspk-audiodev=snd0 \
 		-drive if=pflash,unit=0,format=raw,file=edk2-ovmf/ovmf-code-$(ARCH).fd,readonly=on \
@@ -142,8 +142,6 @@ run-x86_64: edk2-ovmf $(IMAGE_NAME).iso disk.img nvme.img
 		-device intel-hda -device hda-duplex,audiodev=snd0 \
 		-device usb-ehci,id=ehci \
 		-device usb-tablet,bus=ehci.0 \
-		-drive file=nvme.img,if=none,id=nvm0 \
-		-device nvme,drive=nvm0,serial=ascentos-nvme-0 \
 		$(QEMUFLAGS)
 
 .PHONY: run-bios
@@ -555,9 +553,6 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 	rm ./part.img
 	@touch disk.img
 
-nvme.img:
-	dd if=/dev/zero of=nvme.img bs=1M count=128
-
 edk2-ovmf:
 	curl -L https://github.com/osdev0/edk2-ovmf-nightly/releases/latest/download/edk2-ovmf.tar.gz | gunzip | tar -xf -
 
@@ -610,7 +605,7 @@ clean:
 .PHONY: clean-all
 clean-all: clean-musl clean-doom clean-coreutils clean-tar
 	$(MAKE) -C kernel clean
-	rm -rf iso_root $(IMAGE_NAME).iso $(IMAGE_NAME).hdd nvme.img build/alpine
+	rm -rf iso_root $(IMAGE_NAME).iso $(IMAGE_NAME).hdd build/alpine
 
 .PHONY: clean-coreutils
 clean-coreutils:
