@@ -82,6 +82,14 @@ struct drm_connector *drm_connector_create(struct drm_device *dev, uint32_t type
     return conn;
 }
 
+static void drm_kms_add_output(struct drm_device *dev,uint32_t scanout){
+    uint32_t mask=scanout<32?(1U<<scanout):0;struct drm_plane *primary=drm_plane_create(dev,mask);if(!primary)return;drm_obj_set_prop(&primary->base,DRM_PROP_ID_TYPE,DRM_PLANE_TYPE_PRIMARY);struct drm_crtc *crtc=drm_crtc_create(dev,primary);if(!crtc)return;crtc->scanout_id=scanout;struct drm_plane *cursor=drm_plane_create(dev,mask);if(cursor){drm_obj_set_prop(&cursor->base,DRM_PROP_ID_TYPE,DRM_PLANE_TYPE_CURSOR);crtc->cursor=cursor;}struct drm_encoder *encoder=drm_encoder_create(dev,1,mask);if(encoder)encoder->scanout_id=scanout;struct drm_connector *connector=drm_connector_create(dev,11);if(connector){connector->encoder=encoder;connector->scanout_id=scanout;}
+}
+uint32_t drm_connector_scanout_id(uint32_t connector_id){struct drm_mode_object *o;list_for_each_entry(o,&global_drm_dev.kms_objects,list)if(o->type==DRM_MODE_OBJECT_CONNECTOR&&o->id==connector_id)return ((struct drm_connector*)o)->scanout_id;return 0;}
+uint32_t drm_crtc_scanout_id(uint32_t crtc_id){struct drm_mode_object *o;list_for_each_entry(o,&global_drm_dev.kms_objects,list)if(o->type==DRM_MODE_OBJECT_CRTC&&o->id==crtc_id)return ((struct drm_crtc*)o)->scanout_id;return 0;}
+void drm_ensure_outputs(struct drm_device *dev,uint32_t count){if(!dev)return;if(count>16)count=16;uint32_t have=0;spinlock_acquire(&dev->lock);struct drm_mode_object *o;list_for_each_entry(o,&dev->kms_objects,list)if(o->type==DRM_MODE_OBJECT_CONNECTOR)have++;spinlock_release(&dev->lock);while(have<count)drm_kms_add_output(dev,have++);}
+void drm_update_output_state(struct drm_device *dev,uint32_t scanout,bool connected){if(!dev)return;spinlock_acquire(&dev->lock);struct drm_mode_object *o;list_for_each_entry(o,&dev->kms_objects,list)if(o->type==DRM_MODE_OBJECT_CONNECTOR&&((struct drm_connector*)o)->scanout_id==scanout)((struct drm_connector*)o)->connection_status=connected?1:2;spinlock_release(&dev->lock);}
+
 void drm_kms_init(struct drm_device *dev) {
     klog_puts("[DRM] Initializing KMS components...\n");
     // 1. Create a primary plane
@@ -90,6 +98,7 @@ void drm_kms_init(struct drm_device *dev) {
 
     // 2. Create a CRTC and link to primary plane
     struct drm_crtc *crtc = drm_crtc_create(dev, primary);
+    crtc->scanout_id = 0;
 
     struct drm_plane *cursor = drm_plane_create(dev, 0x1);
     drm_obj_set_prop(&cursor->base, DRM_PROP_ID_TYPE, DRM_PLANE_TYPE_CURSOR);
@@ -97,10 +106,12 @@ void drm_kms_init(struct drm_device *dev) {
 
     // 3. Create an encoder linked to CRTC 1
     struct drm_encoder *encoder = drm_encoder_create(dev, 1 /* bits */, 0x1);
+    encoder->scanout_id = 0;
 
     // 4. Create a connector linked to encoder
     struct drm_connector *connector = drm_connector_create(dev, 11 /* HDMI */);
     connector->encoder = encoder;
+    connector->scanout_id = 0;
 
     klog_puts("[DRM] KMS Pipeline: Plane(");
     klog_uint64(primary->base.id);
@@ -149,7 +160,8 @@ void drm_framebuffer_free(struct drm_device *dev, struct drm_framebuffer *fb) {
 
     if (fb->gem_obj) {
         fb->gem_obj->refcount--;
-        // If we had a real GEM system we would check for 0 here
+        if (fb->gem_obj->refcount <= 0)
+            drm_gem_object_free(dev, fb->gem_obj);
     }
     kfree(fb);
 }

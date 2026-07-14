@@ -80,6 +80,7 @@ struct virtio_pci_device {
   // BAR virtual base addresses (cached for offset calculations)
   uint64_t bar_virt[6];
   uint64_t bar_size[6];
+  struct pci_msix msix;
 };
 
 // VirtIO PCI Transport API
@@ -97,7 +98,14 @@ void virtio_pci_write_features(struct virtio_pci_device *vdev, uint64_t features
 // Standard device initialization sequence helpers.
 void virtio_pci_set_status(struct virtio_pci_device *vdev, uint8_t status);
 uint8_t virtio_pci_get_status(struct virtio_pci_device *vdev);
-void virtio_pci_reset(struct virtio_pci_device *vdev);
+bool virtio_pci_reset(struct virtio_pci_device *vdev);
+
+// Perform the modern VirtIO reset/status/feature handshake.
+bool virtio_pci_negotiate(struct virtio_pci_device *vdev,
+                          uint64_t wanted, uint64_t required,
+                          uint64_t *negotiated);
+bool virtio_pci_set_driver_ok(struct virtio_pci_device *vdev);
+void virtio_pci_set_failed(struct virtio_pci_device *vdev);
 
 // Setup a virtqueue: allocates memory, writes addresses to device.
 // The queue_index selects which device queue to configure.
@@ -106,6 +114,16 @@ struct virtqueue;
 bool virtio_pci_setup_queue(struct virtio_pci_device *vdev,
                             uint16_t queue_index,
                             struct virtqueue *vq);
+
+bool virtio_pci_msix_init(struct virtio_pci_device *vdev);
+bool virtio_pci_msix_route(struct virtio_pci_device *vdev, uint16_t entry,
+                           uint8_t vector, uint8_t destination_apic);
+bool virtio_pci_msix_assign_queue(struct virtio_pci_device *vdev,
+                                  uint16_t queue, uint16_t entry);
+bool virtio_pci_msix_assign_config(struct virtio_pci_device *vdev,
+                                   uint16_t entry);
+bool virtio_pci_msix_enable(struct virtio_pci_device *vdev);
+void virtio_pci_msix_disable(struct virtio_pci_device *vdev);
 
 // Notify the device that new buffers are available on queue queue_index.
 void virtio_pci_notify(struct virtio_pci_device *vdev, uint16_t queue_index,

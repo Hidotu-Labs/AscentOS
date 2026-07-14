@@ -2,6 +2,7 @@
 #include "apic/lapic_timer.h"
 #include "drivers/storage/block.h"
 #include "drivers/gpu/drm/drm.h"
+#include "drivers/gpu/virtio_gpu/virtio_gpu.h"
 #include "drivers/timer/rtc.h"
 #include "cpu/tsc.h"
 #include "fs/ramfs.h"
@@ -48,9 +49,11 @@ uint32_t procfs_meminfo_read(vfs_node_t *node, uint32_t offset, uint32_t size,
 
 static uint32_t procfs_drmstats_read(vfs_node_t *node, uint32_t offset,
                                      uint32_t size, uint8_t *buffer) {
-  char buf[768];
+  char buf[2048];
   struct drm_stats stats;
+  struct virtio_gpu_stats gpu_stats;
   drm_stats_snapshot(&stats);
+  virtio_gpu_get_stats(&gpu_stats);
 
   uint64_t average_cycles = stats.copy_batches
                                 ? stats.copy_cycles / stats.copy_batches : 0;
@@ -65,7 +68,44 @@ static uint32_t procfs_drmstats_read(vfs_node_t *node, uint32_t offset,
       "copy_cycles: %llu\n"
       "average_copy_cycles: %llu\n"
       "max_copy_cycles: %llu\n"
-      "tsc_khz: %llu\n",
+      "tsc_khz: %llu\n"
+      "virtio_commands_submitted: %llu\n"
+      "virtio_commands_completed: %llu\n"
+      "virtio_present_batches: %llu\n"
+      "virtio_frames_presented: %llu\n"
+      "virtio_damage_pixels: %llu\n"
+      "virtio_present_wait_ms: %llu\n"
+      "virtio_max_present_wait_ms: %llu\n"
+      "virtio_present_failures: %llu\n"
+      "virtio_interrupt_mode: %llu\n"
+      "virtio_interrupts: %llu\n"
+      "virtio_msix_interrupts: %llu\n"
+      "virtio_intx_interrupts: %llu\n"
+      "virtio_control_interrupts: %llu\n"
+      "virtio_cursor_interrupts: %llu\n"
+      "virtio_config_interrupts: %llu\n"
+      "virtio_watchdog_polls: %llu\n"
+      "virtio_completions_per_interrupt_x1000: %llu\n"
+      "virtio_async_submitted: %llu\n"
+      "virtio_async_completed: %llu\n"
+      "virtio_async_dropped: %llu\n"
+      "virtio_cursor_commands: %llu\n"
+      "virtio_cursor_completions: %llu\n"
+      "virtio_cursor_moves: %llu\n"
+      "virtio_cursor_updates: %llu\n"
+      "virtio_cursor_hides: %llu\n"
+      "virtio_cursor_coalesced: %llu\n"
+      "virtio_cursor_failures: %llu\n"
+      "virtio_cursor_max_in_flight: %llu\n"
+      "virtio_cursor_runtime_ms: %llu\n"
+      "virtio_frames_in_flight: %llu\n"
+      "virtio_max_frames_in_flight: %llu\n"
+      "virtio_config_events: %llu\n"
+      "virtio_display_refreshes: %llu\n"
+      "virtio_hotplug_events: %llu\n"
+      "virtio_edid_reads: %llu\n"
+      "virtio_edid_failures: %llu\n"
+      "virtio_edid_modes: %llu\n",
       (unsigned long long)stats.commits,
       (unsigned long long)stats.full_commits,
       (unsigned long long)stats.damage_commits,
@@ -76,7 +116,45 @@ static uint32_t procfs_drmstats_read(vfs_node_t *node, uint32_t offset,
       (unsigned long long)stats.copy_cycles,
       (unsigned long long)average_cycles,
       (unsigned long long)stats.max_copy_cycles,
-      (unsigned long long)tsc_get_freq_khz());
+      (unsigned long long)tsc_get_freq_khz(),
+      (unsigned long long)gpu_stats.commands_submitted,
+      (unsigned long long)gpu_stats.commands_completed,
+      (unsigned long long)gpu_stats.present_batches,
+      (unsigned long long)gpu_stats.frames_presented,
+      (unsigned long long)gpu_stats.damage_pixels,
+      (unsigned long long)gpu_stats.present_wait_ms,
+      (unsigned long long)gpu_stats.max_present_wait_ms,
+      (unsigned long long)gpu_stats.present_failures,
+      (unsigned long long)gpu_stats.interrupt_mode,
+      (unsigned long long)gpu_stats.interrupts,
+      (unsigned long long)gpu_stats.msix_interrupts,
+      (unsigned long long)gpu_stats.intx_interrupts,
+      (unsigned long long)gpu_stats.control_interrupts,
+      (unsigned long long)gpu_stats.cursor_interrupts,
+      (unsigned long long)gpu_stats.config_interrupts,
+      (unsigned long long)gpu_stats.watchdog_polls,
+      (unsigned long long)(gpu_stats.interrupts ?
+          gpu_stats.commands_completed * 1000ULL / gpu_stats.interrupts : 0),
+      (unsigned long long)gpu_stats.async_submitted,
+      (unsigned long long)gpu_stats.async_completed,
+      (unsigned long long)gpu_stats.async_dropped,
+      (unsigned long long)gpu_stats.cursor_commands,
+      (unsigned long long)gpu_stats.cursor_completions,
+      (unsigned long long)gpu_stats.cursor_moves,
+      (unsigned long long)gpu_stats.cursor_updates,
+      (unsigned long long)gpu_stats.cursor_hides,
+      (unsigned long long)gpu_stats.cursor_coalesced,
+      (unsigned long long)gpu_stats.cursor_failures,
+      (unsigned long long)gpu_stats.cursor_max_in_flight,
+      (unsigned long long)gpu_stats.cursor_runtime_ms,
+      (unsigned long long)gpu_stats.frames_in_flight,
+      (unsigned long long)gpu_stats.max_frames_in_flight,
+      (unsigned long long)gpu_stats.config_events,
+      (unsigned long long)gpu_stats.display_refreshes,
+      (unsigned long long)gpu_stats.hotplug_events,
+      (unsigned long long)gpu_stats.edid_reads,
+      (unsigned long long)gpu_stats.edid_failures,
+      (unsigned long long)gpu_stats.edid_modes);
 
   node->length = (uint32_t)len;
   if (offset >= (uint32_t)len)
@@ -1125,7 +1203,7 @@ void procfs_init(void) {
       drmstats_node->flags = FS_FILE | FS_PERSISTENT;
       drmstats_node->mask = 0444;
       drmstats_node->read = procfs_drmstats_read;
-      drmstats_node->length = 768;
+      drmstats_node->length = 2048;
       ramfs_mount_node(procfs_root, drmstats_node);
     }
 

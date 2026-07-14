@@ -75,6 +75,24 @@ ISR_NOERRCODE 49
 ; TLB shootdown IPI vector
 ISR_NOERRCODE 50
 
+; Dynamically allocated MSI/MSI-X device vectors.
+%assign dynamic_vector 51
+%rep 204
+ISR_NOERRCODE dynamic_vector
+%assign dynamic_vector dynamic_vector+1
+%endrep
+
+section .rodata
+global isr_dynamic_stub_table
+isr_dynamic_stub_table:
+%assign dynamic_vector 51
+%rep 204
+    dq isr%+dynamic_vector
+%assign dynamic_vector dynamic_vector+1
+%endrep
+
+section .text
+
 ; LAPIC spurious interrupt vector
 ISR_NOERRCODE 255
 

@@ -56,4 +56,21 @@ uint32_t pci_get_device_count(void);
 // Get device by index
 struct pci_device *pci_get_device(uint32_t index);
 
+#define PCI_CAP_ID_MSIX 0x11
+#define PCI_MSIX_VECTOR_MASK 1U
+
+struct pci_msix {
+  struct pci_device *dev;
+  volatile uint32_t *table;
+  uint16_t capability, table_size;
+  bool initialized, enabled;
+};
+
+bool pci_msix_init(struct pci_device *dev, struct pci_msix *msix);
+bool pci_msix_program(struct pci_msix *msix, uint16_t entry,
+                      uint8_t vector, uint8_t destination_apic);
+void pci_msix_mask(struct pci_msix *msix, uint16_t entry, bool masked);
+bool pci_msix_enable(struct pci_msix *msix);
+void pci_msix_disable(struct pci_msix *msix);
+
 #endif

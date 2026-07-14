@@ -181,15 +181,17 @@ static void usb_mouse_process_report(struct usb_mouse_state *mouse,
     bool prev_right = (mouse->prev_buttons & USB_MOUSE_BTN_RIGHT) != 0;
     bool prev_middle = (mouse->prev_buttons & USB_MOUSE_BTN_MIDDLE) != 0;
 
+    bool changed = dx != 0 || dy != 0 || wheel != 0;
     if (cur_left != prev_left)
-      evdev_push_event(mdev, EV_KEY, BTN_LEFT, cur_left ? 1 : 0);
+      changed |= evdev_report_key(mdev, BTN_LEFT, cur_left);
     if (cur_right != prev_right)
-      evdev_push_event(mdev, EV_KEY, BTN_RIGHT, cur_right ? 1 : 0);
+      changed |= evdev_report_key(mdev, BTN_RIGHT, cur_right);
     if (cur_middle != prev_middle)
-      evdev_push_event(mdev, EV_KEY, BTN_MIDDLE, cur_middle ? 1 : 0);
+      changed |= evdev_report_key(mdev, BTN_MIDDLE, cur_middle);
 
     // SYN_REPORT marks the end of this event batch
-    evdev_push_event(mdev, EV_SYN, SYN_REPORT, 0);
+    if (changed)
+      evdev_sync(mdev);
   }
 
   // Update previous button state

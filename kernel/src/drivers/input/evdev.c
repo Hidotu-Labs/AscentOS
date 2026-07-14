@@ -31,9 +31,14 @@
 // Two global evdev devices
 static evdev_device_t kbd_evdev;
 static evdev_device_t mouse_evdev;
+static bool evdev_ready;
 
-evdev_device_t *evdev_get_keyboard(void) { return &kbd_evdev; }
-evdev_device_t *evdev_get_mouse(void) { return &mouse_evdev; }
+evdev_device_t *evdev_get_keyboard(void) {
+  return evdev_ready ? &kbd_evdev : NULL;
+}
+evdev_device_t *evdev_get_mouse(void) {
+  return evdev_ready ? &mouse_evdev : NULL;
+}
 
 // Timestamp helper
 extern uint64_t pit_get_ticks(void);
@@ -70,6 +75,36 @@ void evdev_push_event(evdev_device_t *dev, uint16_t type, uint16_t code,
   if (dev->vfs_node) {
     epoll_notify_event(dev->vfs_node, POLLIN);
   }
+}
+
+bool evdev_report_key(evdev_device_t *dev, uint16_t code, bool pressed) {
+  if (!dev || code > KEY_MAX_EV)
+    return false;
+
+  uint64_t flags;
+  spinlock_acquire_save(&dev->lock, &flags);
+  uint8_t mask = (uint8_t)(1u << (code & 7));
+  uint8_t *slot = &dev->key_state[code >> 3];
+  bool was_pressed = (*slot & mask) != 0;
+
+  if (!pressed && !was_pressed) {
+    spinlock_release_restore(&dev->lock, flags);
+    return false;
+  }
+  if (pressed)
+    *slot |= mask;
+  else
+    *slot &= (uint8_t)~mask;
+  spinlock_release_restore(&dev->lock, flags);
+
+  evdev_push_event(dev, EV_KEY, code,
+                   pressed ? (was_pressed ? 2 : 1) : 0);
+  return true;
+}
+
+void evdev_sync(evdev_device_t *dev) {
+  if (dev)
+    evdev_push_event(dev, EV_SYN, SYN_REPORT, 0);
 }
 
 // VFS read callback
@@ -249,7 +284,15 @@ static int evdev_vfs_ioctl(struct vfs_node *node, uint32_t request,
     if (!buf)
       return -14;
     uint32_t len = (request >> 16) & 0x3FFF;
-    memset(buf, 0, len); // All keys/LEDs/switches are 'off' initially
+    memset(buf, 0, len);
+    if ((request & 0xC000FFFF) == 0x80004518) {
+      uint32_t state_len = sizeof(dev->key_state);
+      if (state_len > len)
+        state_len = len;
+      spinlock_acquire(&dev->lock);
+      memcpy(buf, dev->key_state, state_len);
+      spinlock_release(&dev->lock);
+    }
     return 0;
   }
   
@@ -514,6 +557,8 @@ void evdev_init(void) {
   spinlock_init(&mouse_evdev.lock);
 
   evdev_create_node(&mouse_evdev, "event1", input_dir);
+
+  evdev_ready = true;
 
   klog_puts(
       "[OK] evdev input subsystem initialized (event0=kbd, event1=mouse)\n");

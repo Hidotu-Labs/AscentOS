@@ -1,7 +1,10 @@
 .SUFFIXES:
 
 ARCH := x86_64
-QEMUFLAGS := -m 2G
+QEMUFLAGS := -m 2G \
+	-vga none \
+	-device virtio-vga,xres=1280,yres=800 \
+	-display gtk,zoom-to-fit=off
 
 override IMAGE_NAME := ascentos-$(ARCH)
 
@@ -11,6 +14,14 @@ ASCENTD_CONFIG_FILES := \
 	initrd/ascentd/services/console.service \
 	initrd/ascentd/services/wayland.service \
 	initrd/ascentd/services/x11.service
+
+QUAKE2_BUNDLE_FILES := \
+	userland/quake2-launch.sh \
+	userland/quake2/quake2 \
+	userland/quake2/ref_soft.so \
+	userland/quake2/baseq2/game.so \
+	userland/quake2/baseq2/pak0.pak \
+	userland/quake2/baseq2/autoexec.cfg
 
 HOST_CC := cc
 HOST_CFLAGS := -g -O2 -pipe
@@ -195,6 +206,7 @@ run-fat32: edk2-ovmf $(IMAGE_NAME).iso fat32_test.img
 disk.img: scripts/configure-accounts.sh userland/ascent-account userland/test_accounts.sh userland/ascent-login.elf
 disk.img:  userland/dns_lookup.elf
 disk.img: userland/test_clone_futex.elf
+disk.img: $(QUAKE2_BUNDLE_FILES)
 disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets/doom1.wad assets/mc9.mp3 assets/train.mp3 assets/test.bmp assets/test.tar assets/room.png assets/logo.png assets/linus.gif userland/forkit.elf userland/forkit-launch.sh userland/about.elf userland/hello_glibc.elf userland/booter.elf userland/reboot.elf userland/shutdown.elf userland/apm.elf userland/test_cpp.elf  userland/kilo.elf  userland/ls.elf userland/lspci.elf userland/lsblk.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/asplay.elf userland/kria.elf userland/doom.elf userland/xrootcursor.elf  userland/jwm.elf userland/doom_x11.elf userland/gtk_test.elf userland/tglgears_fb.elf userland/tglgears_drm.elf userland/tglhello_drm.elf userland/test_mem_stress.elf userland/classicube.elf userland/terrain.png userland/texpacks/classicube.zip initrd/startx.sh initrd/startw.sh initrd/weston.ini userland/ascentd.elf $(ASCENTD_CONFIG_FILES)
 	@echo "Creating root filesystem (ext4)..."
 	rm -f ./part.img
@@ -394,6 +406,16 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 		./scripts/configure-accounts.sh build/alpine/rootfs; \
 		./scripts/populate-ext2-dir.sh ./part.img build/alpine/rootfs /; \
 	fi
+	@echo "Installing Quake II into disk image..."
+	@./scripts/populate-ext2-dir.sh ./part.img userland/quake2 opt/quake2
+	@{ \
+		echo "cd /"; \
+		echo "mkdir usr"; \
+		echo "mkdir usr/bin"; \
+		echo "rm usr/bin/quake2"; \
+		echo "write userland/quake2-launch.sh usr/bin/quake2"; \
+		echo "set_inode_field usr/bin/quake2 mode 0100755"; \
+	} | debugfs -w ./part.img >/dev/null 2>&1 || true
 	@echo "Fixing up glibc/musl library coexistence..."
 	@{ \
 		echo "cd /lib"; \
@@ -483,7 +505,7 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 		debugfs -w -R "mkdir .config" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "mkdir .config/fastfetch" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "mkdir fastfetch" ./part.img >/dev/null 2>&1 || true; \
-		echo '{"general": {"detectVersion": false}, "logo": {"source": "/fastfetch/logo.txt", "type": "auto"}, "modules": ["title", "separator", "os", "kernel", "uptime", "packages", {"type": "shell", "format": "bash"}, "terminal", "cursor", "cpu", "memory", "swap", "disk", "locale", "break", "colors"]}' > /tmp/ff_config.jsonc; \
+		echo '{"general": {"detectVersion": false}, "logo": {"source": "/fastfetch/logo.txt", "type": "auto"}, "modules": ["title", "separator", "os", "kernel", "uptime", "packages", {"type": "shell", "format": "bash"}, "terminal", "cursor", "cpu", {"type": "custom", "key": "GPU", "format": "VirtIO-GPU (virtio-vga, 2D) / Mesa llvmpipe (software 3D)"}, "memory", "swap", "disk", "locale", "break", "colors"]}' > /tmp/ff_config.jsonc; \
 		debugfs -w -R "rm .config/fastfetch/config.jsonc" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "write /tmp/ff_config.jsonc .config/fastfetch/config.jsonc" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "rm fastfetch/config.jsonc" ./part.img >/dev/null 2>&1 || true; \

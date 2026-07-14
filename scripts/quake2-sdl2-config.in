@@ -1,0 +1,8 @@
+#!/bin/sh
+# Minimal cross sdl2-config used by build-quake2.sh.
+case "${1:-}" in
+    --cflags) echo "-I@INCLUDE@ -D_REENTRANT" ;;
+    --libs) echo "-L@LIB@ -lSDL2 -lpthread" ;;
+    --version) echo "2" ;;
+    *) echo "Usage: sdl2-config [--cflags|--libs|--version]" >&2; exit 1 ;;
+esac

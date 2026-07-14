@@ -19,5 +19,6 @@ void af_netlink_init(void);
  */
 int netlink_create(socket_t *sock, int protocol);
 void netlink_broadcast(int protocol, uint32_t group, const void *data, size_t len);
+void netlink_broadcast_drm_hotplug(const char *devpath, uint32_t connector);
 
 #endif // AF_NETLINK_H

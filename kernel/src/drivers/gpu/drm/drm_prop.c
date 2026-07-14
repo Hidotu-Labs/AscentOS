@@ -5,7 +5,6 @@
 #include "../../../mm/heap.h"
 #include "drm.h"
 
-typedef void (*drm_pageflip_fn_t)(struct drm_file *, uint32_t, uint32_t, uint64_t);
 extern drm_pageflip_fn_t g_drm_pageflip_fn;
 
 /* ── Global property catalogue ──────────────────────────────────────────── */
@@ -709,7 +708,7 @@ int drm_ioctl_atomic(struct vfs_node *node, struct drm_file *file,
   /* Fire a page-flip complete event to the calling client's queue */
   if (!test_only && (req->flags & DRM_MODE_PAGE_FLIP_EVENT)) {
     if (g_drm_pageflip_fn) {
-      g_drm_pageflip_fn(file, event_crtc_id, 0, req->user_data);
+      g_drm_pageflip_fn(file, node, event_crtc_id, 0, req->user_data);
       spinlock_release(&dev->lock);
       goto done;
     }

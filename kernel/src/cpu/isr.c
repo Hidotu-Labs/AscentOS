@@ -405,11 +405,31 @@ static void print_context_summary(struct registers *regs) {
 
 static isr_t interrupt_handlers[256] = {0};
 static bool apic_mode = false;
+static bool allocated_device_vectors[256] = {0};
 
 void isr_set_apic_mode(bool enabled) { apic_mode = enabled; }
 
 void register_interrupt_handler(uint8_t n, isr_t handler) {
   interrupt_handlers[n] = handler;
+}
+
+int interrupt_vector_alloc(isr_t handler) {
+  if (!handler) return -1;
+  /* 0x60..0xDF avoids exceptions, legacy IRQs, timer/IPIs and spurious. */
+  for (uint16_t vector = 0x60; vector <= 0xDF; vector++) {
+    if (!__atomic_test_and_set(&allocated_device_vectors[vector],
+                               __ATOMIC_ACQ_REL)) {
+      interrupt_handlers[vector] = handler;
+      return (int)vector;
+    }
+  }
+  return -1;
+}
+
+void interrupt_vector_free(uint8_t vector) {
+  if (vector < 0x60 || vector > 0xDF) return;
+  interrupt_handlers[vector] = NULL;
+  __atomic_clear(&allocated_device_vectors[vector], __ATOMIC_RELEASE);
 }
 
 // Send End-of-Interrupt signal after handler completes.

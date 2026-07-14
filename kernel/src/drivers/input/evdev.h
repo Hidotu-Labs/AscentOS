@@ -220,6 +220,7 @@ typedef struct evdev_device {
   struct input_event ring[EVDEV_RING_SIZE];
   volatile uint32_t head;
   volatile uint32_t tail;
+  uint8_t key_state[(KEY_MAX_EV + 8) / 8];
 
   wait_queue_t wait;    // For blocking reads / poll
   spinlock_t lock;      // Protects head/tail and ring buffer
@@ -232,6 +233,11 @@ void evdev_init(void);
 // Push an event into a device's ring buffer (called from IRQ handlers)
 void evdev_push_event(evdev_device_t *dev, uint16_t type, uint16_t code,
                       int32_t value);
+
+// Stateful Linux EV_KEY reporting. Duplicate presses become value 2 repeats;
+// duplicate releases are discarded. Call evdev_sync() once per input packet.
+bool evdev_report_key(evdev_device_t *dev, uint16_t code, bool pressed);
+void evdev_sync(evdev_device_t *dev);
 
 // Get device handles so IRQ callbacks can push events
 evdev_device_t *evdev_get_keyboard(void);

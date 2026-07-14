@@ -257,6 +257,7 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
     break;
   }
   default:
+#if IOCTL_DEBUG_LOGGING
     klog_puts("[IOCTL] ENOTTY fd=");
     klog_uint64(fd);
     klog_puts(" request=0x");
@@ -266,6 +267,7 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
       klog_puts(t->fds[fd]->name);
     }
     klog_puts("\n");
+#endif
     ret = (uint64_t)-25; // ENOTTY
     break;
   }

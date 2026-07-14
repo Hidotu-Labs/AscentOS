@@ -5,6 +5,8 @@
 #include "drivers/pci/pcie.h"
 #include "io/io.h"
 #include "lib/string.h"
+#include "mm/pmm.h"
+#include "mm/vmm.h"
 #include <stddef.h>
 static struct pci_device devices[PCI_MAX_DEVICES];
 static uint32_t device_count = 0;
@@ -229,6 +231,82 @@ uint8_t pci_find_capability(struct pci_device *dev, uint8_t cap_id) {
     cap_ptr = (cap_reg >> 8) & 0xFF;
   }
   return 0;
+}
+
+static uint64_t pci_bar_phys(struct pci_device *dev, uint8_t bir) {
+  if (!dev || bir >= 6 || (dev->bar[bir] & 1U)) return 0;
+  uint64_t phys = dev->bar[bir] & ~0xFULL;
+  if (((dev->bar[bir] >> 1) & 3U) == 2U && bir < 5)
+    phys |= (uint64_t)dev->bar[bir + 1] << 32;
+  return phys;
+}
+
+bool pci_msix_init(struct pci_device *dev, struct pci_msix *msix) {
+  if (!dev || !msix) return false;
+  memset(msix, 0, sizeof(*msix));
+  uint8_t cap = pci_find_capability(dev, PCI_CAP_ID_MSIX);
+  if (!cap) return false;
+  uint16_t control = pci_config_read16(dev->bus, dev->slot, dev->func, cap + 2);
+  uint32_t table_info = pci_config_read32(dev->bus, dev->slot, dev->func, cap + 4);
+  uint8_t bir = table_info & 7U;
+  uint64_t table_phys = pci_bar_phys(dev, bir) + (table_info & ~7U);
+  uint16_t count = (control & 0x7FFU) + 1U;
+  if (!table_phys || !count) return false;
+  uint64_t first = table_phys & ~(PAGE_SIZE - 1ULL);
+  uint64_t last = (table_phys + (uint64_t)count * 16U - 1U) & ~(PAGE_SIZE - 1ULL);
+  uint64_t hhdm = pmm_get_hhdm_offset();
+  uint64_t *pml4 = vmm_get_active_pml4();
+  uint64_t flags = PAGE_FLAG_PRESENT | PAGE_FLAG_RW | (1ULL << 3) | (1ULL << 4);
+  for (uint64_t page = first; page <= last; page += PAGE_SIZE) {
+    uint64_t virt = page + hhdm;
+    if (!vmm_virt_to_phys(pml4, virt) && !vmm_map_page(pml4, virt, page, flags))
+      return false;
+    vmm_flush_tlb(virt);
+  }
+  msix->dev = dev;msix->capability = cap;msix->table_size = count;
+  msix->table = (volatile uint32_t *)(table_phys + hhdm);msix->initialized = true;
+  /* Function-mask while callers populate entries. */
+  pci_config_write16(dev->bus, dev->slot, dev->func, cap + 2,
+                     (uint16_t)((control | (1U << 14)) & ~(1U << 15)));
+  for (uint16_t i = 0; i < count; i++) msix->table[i * 4 + 3] = PCI_MSIX_VECTOR_MASK;
+  return true;
+}
+
+bool pci_msix_program(struct pci_msix *msix, uint16_t entry,
+                      uint8_t vector, uint8_t destination_apic) {
+  if (!msix || !msix->initialized || entry >= msix->table_size || vector < 32)
+    return false;
+  volatile uint32_t *e = msix->table + entry * 4;
+  e[3] = PCI_MSIX_VECTOR_MASK;
+  e[0] = 0xFEE00000U | ((uint32_t)destination_apic << 12);
+  e[1] = 0;e[2] = vector;
+  __atomic_thread_fence(__ATOMIC_SEQ_CST);
+  return true;
+}
+
+void pci_msix_mask(struct pci_msix *msix, uint16_t entry, bool masked) {
+  if (!msix || !msix->initialized || entry >= msix->table_size) return;
+  volatile uint32_t *control = msix->table + entry * 4 + 3;
+  if (masked) *control |= PCI_MSIX_VECTOR_MASK; else *control &= ~PCI_MSIX_VECTOR_MASK;
+  __atomic_thread_fence(__ATOMIC_SEQ_CST);
+}
+
+bool pci_msix_enable(struct pci_msix *msix) {
+  if (!msix || !msix->initialized) return false;
+  struct pci_device *d = msix->dev;
+  uint16_t control = pci_config_read16(d->bus, d->slot, d->func, msix->capability + 2);
+  control = (uint16_t)((control | (1U << 15)) & ~(1U << 14));
+  pci_config_write16(d->bus, d->slot, d->func, msix->capability + 2, control);
+  msix->enabled = true;return true;
+}
+
+void pci_msix_disable(struct pci_msix *msix) {
+  if (!msix || !msix->initialized) return;
+  struct pci_device *d = msix->dev;
+  uint16_t control = pci_config_read16(d->bus, d->slot, d->func, msix->capability + 2);
+  pci_config_write16(d->bus, d->slot, d->func, msix->capability + 2,
+                     (uint16_t)((control & ~(1U << 15)) | (1U << 14)));
+  msix->enabled = false;
 }
 
 uint32_t pci_get_device_count(void) { return device_count; }

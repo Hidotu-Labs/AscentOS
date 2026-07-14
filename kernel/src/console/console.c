@@ -18,6 +18,7 @@ static void console_clear_line_from_cursor(void);
 static void draw_char_colored(uint32_t c, uint32_t col, uint32_t row,
                               uint32_t fg, uint32_t bg, bool underline);
 static void draw_history_char(uint32_t col, uint32_t row);
+static void draw_cursor_block(uint32_t col, uint32_t row);
 static void console_wipe_history_unlocked(void);
 
 static bool terminal_escape = false;
@@ -164,15 +165,8 @@ static void console_redraw(void) {
     }
   }
 
-  if (view_scroll_offset == 0 && cursor_logical_visible && cursor_phys_on) {
-    uint32_t px = cursor_x * FONT_WIDTH;
-    uint32_t py = cursor_y * FONT_HEIGHT;
-    for (uint32_t y = FONT_HEIGHT - 3; y < FONT_HEIGHT; y++) {
-      for (uint32_t x = 0; x < FONT_WIDTH; x++) {
-        fb_put_pixel(px + x, py + y, FG_COLOR);
-      }
-    }
-  }
+  if (view_scroll_offset == 0 && cursor_logical_visible && cursor_phys_on)
+    draw_cursor_block(cursor_x, cursor_y);
 
   fb_swap_buffer();
   fb_set_backbuffer_mode(false);
@@ -219,7 +213,10 @@ static void scroll_up(void) {
   memcpy(dst, src, bytes_to_copy);
   fb_mark_dirty(0, 0, fb_w, move_height);
 
-  fb_fill_rect(0, fb_h - FONT_HEIGHT, fb_w, FONT_HEIGHT, BG_COLOR);
+  /* A terminal scroll exposes blank cells using the current rendition.
+   * Full-screen programs (including nyancat) commonly keep a non-default
+   * background selected while repainting. */
+  fb_fill_rect(0, fb_h - FONT_HEIGHT, fb_w, FONT_HEIGHT, current_bg);
 
   if (cursor_y > 0) {
     cursor_y--;
@@ -259,11 +256,11 @@ static void console_clear_line_from_cursor(void) {
   for (uint32_t x = cursor_x; x < max_cols; x++) {
     console_char_t *cell = &history[row][x];
     cell->c = 0;
-    cell->fg = FG_COLOR;
-    cell->bg = BG_COLOR;
+    cell->fg = current_fg;
+    cell->bg = current_bg;
     if (view_scroll_offset == 0) {
       fb_fill_rect(x * FONT_WIDTH, cursor_y * FONT_HEIGHT, FONT_WIDTH,
-                   FONT_HEIGHT, BG_COLOR);
+                   FONT_HEIGHT, current_bg);
     }
   }
 }
@@ -466,12 +463,12 @@ static void console_process_escape_sequence(void) {
         uint32_t row = console_history_row(y);
         for (uint32_t x = 0; x < max_cols; x++) {
           history[row][x].c = 0;
-          history[row][x].fg = FG_COLOR;
-          history[row][x].bg = BG_COLOR;
+          history[row][x].fg = current_fg;
+          history[row][x].bg = current_bg;
         }
         if (view_scroll_offset == 0) {
           fb_fill_rect(0, y * FONT_HEIGHT, fb_get_width(), FONT_HEIGHT,
-                       BG_COLOR);
+                       current_bg);
         }
       }
     } else if (value == 1) {
@@ -480,22 +477,22 @@ static void console_process_escape_sequence(void) {
         uint32_t row = console_history_row(y);
         for (uint32_t x = 0; x < max_cols; x++) {
           history[row][x].c = 0;
-          history[row][x].fg = FG_COLOR;
-          history[row][x].bg = BG_COLOR;
+          history[row][x].fg = current_fg;
+          history[row][x].bg = current_bg;
         }
         if (view_scroll_offset == 0) {
           fb_fill_rect(0, y * FONT_HEIGHT, fb_get_width(), FONT_HEIGHT,
-                       BG_COLOR);
+                       current_bg);
         }
       }
       uint32_t row = console_history_row(cursor_y);
       for (uint32_t x = 0; x <= cursor_x && x < max_cols; x++) {
         history[row][x].c = 0;
-        history[row][x].fg = FG_COLOR;
-        history[row][x].bg = BG_COLOR;
+        history[row][x].fg = current_fg;
+        history[row][x].bg = current_bg;
         if (view_scroll_offset == 0) {
           fb_fill_rect(x * FONT_WIDTH, cursor_y * FONT_HEIGHT, FONT_WIDTH,
-                       FONT_HEIGHT, BG_COLOR);
+                       FONT_HEIGHT, current_bg);
         }
       }
     } else if (value == 2) {
@@ -504,12 +501,12 @@ static void console_process_escape_sequence(void) {
         uint32_t row = console_history_row(y);
         for (uint32_t x = 0; x < max_cols; x++) {
           history[row][x].c = 0;
-          history[row][x].fg = FG_COLOR;
-          history[row][x].bg = BG_COLOR;
+          history[row][x].fg = current_fg;
+          history[row][x].bg = current_bg;
         }
         if (view_scroll_offset == 0) {
           fb_fill_rect(0, y * FONT_HEIGHT, fb_get_width(), FONT_HEIGHT,
-                       BG_COLOR);
+                       current_bg);
         }
       }
       cursor_x = 0;
@@ -528,11 +525,11 @@ static void console_process_escape_sequence(void) {
       uint32_t row = console_history_row(cursor_y);
       for (uint32_t x = 0; x <= cursor_x && x < max_cols; x++) {
         history[row][x].c = 0;
-        history[row][x].fg = FG_COLOR;
-        history[row][x].bg = BG_COLOR;
+        history[row][x].fg = current_fg;
+        history[row][x].bg = current_bg;
         if (view_scroll_offset == 0) {
           fb_fill_rect(x * FONT_WIDTH, cursor_y * FONT_HEIGHT, FONT_WIDTH,
-                       FONT_HEIGHT, BG_COLOR);
+                       FONT_HEIGHT, current_bg);
         }
       }
     } else if (value == 2) {
@@ -540,11 +537,11 @@ static void console_process_escape_sequence(void) {
       uint32_t row = console_history_row(cursor_y);
       for (uint32_t x = 0; x < max_cols; x++) {
         history[row][x].c = 0;
-        history[row][x].fg = FG_COLOR;
-        history[row][x].bg = BG_COLOR;
+        history[row][x].fg = current_fg;
+        history[row][x].bg = current_bg;
         if (view_scroll_offset == 0) {
           fb_fill_rect(x * FONT_WIDTH, cursor_y * FONT_HEIGHT, FONT_WIDTH,
-                       FONT_HEIGHT, BG_COLOR);
+                       FONT_HEIGHT, current_bg);
         }
       }
     }
@@ -786,8 +783,8 @@ static void console_process_escape_sequence(void) {
         history[row][x] = history[row][x + (uint32_t)n];
       } else {
         history[row][x].c = 0;
-        history[row][x].fg = FG_COLOR;
-        history[row][x].bg = BG_COLOR;
+        history[row][x].fg = current_fg;
+        history[row][x].bg = current_bg;
       }
     }
     (void)end;
@@ -809,8 +806,8 @@ static void console_process_escape_sequence(void) {
     for (uint32_t x = cursor_x; x < cursor_x + (uint32_t)n && x < max_cols;
          x++) {
       history[row][x].c = 0;
-      history[row][x].fg = FG_COLOR;
-      history[row][x].bg = BG_COLOR;
+      history[row][x].fg = current_fg;
+      history[row][x].bg = current_bg;
     }
     if (view_scroll_offset == 0) {
       for (uint32_t x = cursor_x; x < max_cols; x++)
@@ -854,6 +851,18 @@ static void draw_history_char(uint32_t col, uint32_t row) {
   draw_char_colored(ch->c, col, row, ch->fg, ch->bg, ch->underline);
 }
 
+static void draw_cursor_block(uint32_t col, uint32_t row) {
+  if (col >= max_cols || row >= max_rows)
+    return;
+
+  console_char_t *ch = &history[console_history_row(row)][col];
+  uint32_t cell_fg = ch->fg ? ch->fg : FG_COLOR;
+  uint32_t cp = ch->c ? ch->c : ' ';
+
+  /* A block cursor is the underlying cell rendered in reverse video. */
+  draw_char_colored(cp, col, row, ch->bg, cell_fg, false);
+}
+
 // Render a single decoded codepoint on the framebuffer console
 static void console_render_char(uint32_t cp) {
   if (cp == '\n') {
@@ -873,8 +882,8 @@ static void console_render_char(uint32_t cp) {
           uint32_t new_row = history_write_row % HISTORY_MAX;
           for (uint32_t i = 0; i < COLS_MAX; i++) {
             history[new_row][i].c = 0;
-            history[new_row][i].fg = FG_COLOR;
-            history[new_row][i].bg = BG_COLOR;
+            history[new_row][i].fg = current_fg;
+            history[new_row][i].bg = current_bg;
           }
         } else {
           cursor_y--;
@@ -898,13 +907,13 @@ static void console_render_char(uint32_t cp) {
       uint32_t row = console_history_row(cursor_y);
       for (uint32_t i = 0; i < COLS_MAX; i++) {
         history[row][i].c = 0;
-        history[row][i].fg = FG_COLOR;
-        history[row][i].bg = BG_COLOR;
+        history[row][i].fg = current_fg;
+        history[row][i].bg = current_bg;
       }
 
       if (view_scroll_offset == 0 && cursor_y < max_rows) {
         fb_fill_rect(0, cursor_y * FONT_HEIGHT, fb_get_width(), FONT_HEIGHT,
-                     BG_COLOR);
+                     current_bg);
       }
     }
 
@@ -914,8 +923,8 @@ static void console_render_char(uint32_t cp) {
         uint32_t new_row = history_write_row % HISTORY_MAX;
         for (uint32_t i = 0; i < COLS_MAX; i++) {
           history[new_row][i].c = 0;
-          history[new_row][i].fg = FG_COLOR;
-          history[new_row][i].bg = BG_COLOR;
+          history[new_row][i].fg = current_fg;
+          history[new_row][i].bg = current_bg;
         }
       } else {
         cursor_y--;
@@ -1239,20 +1248,18 @@ void console_write_batch(const char *buf, size_t len) {
 
   // Don't toggle cursor visibility - just skip drawing it and restore after
   bool cursor_was_on = cursor_phys_on;
+  if ((cursor_logical_visible || cursor_was_on) &&
+      view_scroll_offset == 0)
+    draw_history_char(cursor_x, cursor_y);
   cursor_phys_on = false;
 
   for (size_t i = 0; i < len; i++)
     console_putchar_unlocked(buf[i]);
 
-  // Restore cursor state and draw it once at the end
-  cursor_phys_on = cursor_was_on;
-  if (cursor_logical_visible && cursor_phys_on && view_scroll_offset == 0) {
-    uint32_t px = cursor_x * FONT_WIDTH;
-    uint32_t py = cursor_y * FONT_HEIGHT;
-    for (uint32_t y = FONT_HEIGHT - 3; y < FONT_HEIGHT; y++)
-      for (uint32_t x = 0; x < FONT_WIDTH; x++)
-        fb_put_pixel(px + x, py + y, FG_COLOR);
-  }
+  // Keep an interactive cursor visible at its new position after output.
+  cursor_phys_on = cursor_logical_visible;
+  if (cursor_phys_on && view_scroll_offset == 0)
+    draw_cursor_block(cursor_x, cursor_y);
 
   fb_swap_buffer();
   fb_set_backbuffer_mode(false);
@@ -1266,11 +1273,7 @@ static void console_set_cursor_visible_unlocked(bool visible) {
     cursor_phys_on = true;
     last_blink_ms = lapic_timer_get_ms();
 
-    uint32_t px = cursor_x * FONT_WIDTH;
-    uint32_t py = cursor_y * FONT_HEIGHT;
-    for (uint32_t y = FONT_HEIGHT - 3; y < FONT_HEIGHT; y++)
-      for (uint32_t x = 0; x < FONT_WIDTH; x++)
-        fb_put_pixel(px + x, py + y, FG_COLOR);
+    draw_cursor_block(cursor_x, cursor_y);
   } else {
     cursor_phys_on = false;
     draw_history_char(cursor_x, cursor_y);
@@ -1295,11 +1298,7 @@ static void console_refresh_cursor_unlocked(void) {
   cursor_phys_on = !cursor_phys_on;
 
   if (cursor_phys_on) {
-    uint32_t px = cursor_x * FONT_WIDTH;
-    uint32_t py = cursor_y * FONT_HEIGHT;
-    for (uint32_t y = FONT_HEIGHT - 3; y < FONT_HEIGHT; y++)
-      for (uint32_t x = 0; x < FONT_WIDTH; x++)
-        fb_put_pixel(px + x, py + y, FG_COLOR);
+    draw_cursor_block(cursor_x, cursor_y);
   } else {
     draw_history_char(cursor_x, cursor_y);
   }

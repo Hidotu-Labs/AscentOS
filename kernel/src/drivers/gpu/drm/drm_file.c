@@ -7,6 +7,7 @@
 #include "../../../mm/vmm.h"
 #include "../../../sched/sched.h"
 #include "drm.h"
+#include "drivers/gpu/virtio_gpu/virtio_gpu.h"
 
 /* ── Forward declarations ────────────────────────────────────────────────── */
 extern struct drm_gem_object *drm_gem_object_create(struct drm_device *dev,

@@ -288,8 +288,8 @@ static void process_modifier(uint8_t old_mods, uint8_t new_mods, uint8_t bit,
   if (kc) {
     evdev_device_t *kdev = evdev_get_keyboard();
     if (kdev) {
-      evdev_push_event(kdev, EV_KEY, kc, now ? 1 : 0);
-      evdev_push_event(kdev, EV_SYN, SYN_REPORT, 0);
+      if (evdev_report_key(kdev, kc, now))
+        evdev_sync(kdev);
     }
   }
 
@@ -337,8 +337,8 @@ static void usb_kbd_inject_key(struct usb_kbd_state *kbd, uint8_t usage,
   if (kc) {
     evdev_device_t *kdev = evdev_get_keyboard();
     if (kdev) {
-      evdev_push_event(kdev, EV_KEY, kc, 1); // press
-      evdev_push_event(kdev, EV_SYN, SYN_REPORT, 0);
+      if (evdev_report_key(kdev, kc, true))
+        evdev_sync(kdev);
     }
   }
 
@@ -477,8 +477,8 @@ static void usb_kbd_process_report(struct usb_kbd_state *kbd,
     if (kc) {
       evdev_device_t *kdev = evdev_get_keyboard();
       if (kdev) {
-        evdev_push_event(kdev, EV_KEY, kc, 0); // release
-        evdev_push_event(kdev, EV_SYN, SYN_REPORT, 0);
+        if (evdev_report_key(kdev, kc, false))
+          evdev_sync(kdev);
       }
     }
   }

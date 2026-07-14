@@ -39,6 +39,7 @@
 #include "drivers/usb/uhci.h"
 #include "drivers/usb/usb.h"
 #include "drivers/virtio/virtio.h"
+#include "drivers/gpu/virtio_gpu/virtio_gpu.h"
 
 #include "fb/framebuffer.h"
 #include "fs/ext2.h"
@@ -401,6 +402,10 @@ void kmain_high_half(void) {
   shm_init();
 
   pci_init();
+  if (!virtio_gpu_init()) {
+    klog_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET
+                           " VirtIO-GPU initialization failed; keeping GOP.\n");
+  }
   usb_init();
 
   ehci_init();
@@ -470,6 +475,22 @@ mount_success:
   block_repopulate_devices();
   fb_register_vfs();
   drm_init();
+  if (virtio_gpu_is_initialized()) {
+    if (!virtio_gpu_phase4_bind_drm()) {
+      klog_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET
+                " VirtIO-GPU DRM backend binding failed.\n");
+    } else if (!virtio_gpu_phase6_start()) {
+      klog_puts(KLOG_CLR_YELLOW "[ WARN ]" KLOG_CLR_RESET
+                " VirtIO-GPU Phase 6 unavailable; using synchronous presentation.\n");
+    } else {
+      if (!virtio_gpu_phase7_start())
+        klog_puts(KLOG_CLR_YELLOW "[ WARN ]" KLOG_CLR_RESET
+                  " VirtIO-GPU Phase 7 hardware cursor unavailable.\n");
+      if (!virtio_gpu_phase8_start())
+        klog_puts(KLOG_CLR_YELLOW "[ WARN ]" KLOG_CLR_RESET
+                  " VirtIO-GPU Phase 8 display management unavailable.\n");
+    }
+  }
   drm_register_vfs();
   fb_detect_drm_backend();
   mouse_register_vfs();

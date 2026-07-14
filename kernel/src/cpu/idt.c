@@ -136,6 +136,11 @@ void idt_init(void) {
   // TLB shootdown IPI vector
   idt_set_gate(50, (uint64_t)isr50, sel, flags);
 
+  extern void *isr_dynamic_stub_table[];
+  for (uint16_t vector = 51; vector < 255; vector++)
+    idt_set_gate((uint8_t)vector,
+                 (uint64_t)isr_dynamic_stub_table[vector - 51], sel, flags);
+
   // LAPIC spurious interrupt vector
   idt_set_gate(255, (uint64_t)isr255, sel, flags);
 

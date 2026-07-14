@@ -151,6 +151,10 @@ void netlink_broadcast(int protocol, uint32_t group, const void *data,
   spinlock_release(&netlink_lock);
 }
 
+void netlink_broadcast_drm_hotplug(const char *devpath,uint32_t connector){
+ char buf[512],tmp[192],num[12];size_t pos=0;memset(buf,0,sizeof(buf));strcpy(tmp,"change@");strcat(tmp,devpath);pos=ue_append(buf,pos,tmp);pos=ue_append(buf,pos,"ACTION=change");strcpy(tmp,"DEVPATH=");strcat(tmp,devpath);pos=ue_append(buf,pos,tmp);pos=ue_append(buf,pos,"SUBSYSTEM=drm");pos=ue_append(buf,pos,"DEVTYPE=drm_connector");pos=ue_append(buf,pos,"HOTPLUG=1");char *p=num+sizeof(num);*--p=0;uint32_t v=connector;if(!v)*--p=48;while(v){*--p=(char)(48+v%10);v/=10;}strcpy(tmp,"CONNECTOR=HDMI-A-");strcat(tmp,p);pos=ue_append(buf,pos,tmp);netlink_broadcast(15,1,buf,pos);
+}
+
 // AF_NETLINK Operations
 
 static int netlink_bind(socket_t *sock, struct sockaddr *addr, int addrlen) {

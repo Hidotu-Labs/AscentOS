@@ -135,19 +135,21 @@ static void mouse_callback(struct registers *regs) {
       bool cur_right = global_mouse_state.right_button;
       bool cur_middle = global_mouse_state.middle_button;
 
+      bool changed = dx != 0 || dy != 0;
       if (cur_left != prev_left)
-        evdev_push_event(mdev, EV_KEY, BTN_LEFT, cur_left ? 1 : 0);
+        changed |= evdev_report_key(mdev, BTN_LEFT, cur_left);
       if (cur_right != prev_right)
-        evdev_push_event(mdev, EV_KEY, BTN_RIGHT, cur_right ? 1 : 0);
+        changed |= evdev_report_key(mdev, BTN_RIGHT, cur_right);
       if (cur_middle != prev_middle)
-        evdev_push_event(mdev, EV_KEY, BTN_MIDDLE, cur_middle ? 1 : 0);
+        changed |= evdev_report_key(mdev, BTN_MIDDLE, cur_middle);
 
       prev_left = cur_left;
       prev_right = cur_right;
       prev_middle = cur_middle;
 
       // SYN_REPORT marks the end of this event batch
-      evdev_push_event(mdev, EV_SYN, SYN_REPORT, 0);
+      if (changed)
+        evdev_sync(mdev);
     }
     break;
   }

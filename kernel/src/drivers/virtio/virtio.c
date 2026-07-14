@@ -1,326 +1,424 @@
 #include "drivers/virtio/virtio.h"
-#include "mm/pmm.h"
 #include "console/klog.h"
 #include "lib/string.h"
+#include "mm/pmm.h"
 #include <stdint.h>
-
-// Helpers
-
-
-// Alignment helpers per VirtIO 1.0 spec
-// Descriptor table:  16-byte aligned
-// Available ring:     2-byte aligned
-// Used ring:          4-byte aligned
 
 #define ALIGN_UP(x, a) (((x) + (a) - 1) & ~((a) - 1))
 
-// Calculate Descriptor Table size
 static inline uint64_t virtq_desc_size(uint16_t num) {
   return (uint64_t)num * sizeof(struct virtq_desc);
 }
 
-// Calculate Available Ring size (including the used_event field)
 static inline uint64_t virtq_avail_size(uint16_t num) {
   return sizeof(uint16_t) * 2 + sizeof(uint16_t) * num + sizeof(uint16_t);
 }
 
-// Calculate Used Ring size (including the avail_event field)
 static inline uint64_t virtq_used_size(uint16_t num) {
   return sizeof(uint16_t) * 2 + sizeof(struct virtq_used_elem) * num +
          sizeof(uint16_t);
 }
 
-// Virtqueue Initialization
+static inline void virtq_dma_wmb(void) {
+  __atomic_thread_fence(__ATOMIC_RELEASE);
+}
+
+static inline void virtq_dma_rmb(void) {
+  __atomic_thread_fence(__ATOMIC_ACQUIRE);
+}
+
+static inline void virtq_dma_mb(void) {
+  __atomic_thread_fence(__ATOMIC_SEQ_CST);
+}
+
+static bool virtq_size_valid(uint16_t num) {
+  return num >= 2 && num <= VIRTQ_MAX_SIZE && (num & (num - 1)) == 0;
+}
 
 bool virtq_init(struct virtqueue *vq, uint16_t num) {
-  // Calculate total size needed with proper alignment
+  if (!vq || !virtq_size_valid(num))
+    return false;
+
+  memset(vq, 0, sizeof(*vq));
+  spinlock_init(&vq->lock);
+
   uint64_t desc_bytes = ALIGN_UP(virtq_desc_size(num), 16);
-  uint64_t avail_bytes = ALIGN_UP(virtq_avail_size(num), 4); // align for used
+  uint64_t avail_bytes = ALIGN_UP(virtq_avail_size(num), 4);
   uint64_t used_bytes = ALIGN_UP(virtq_used_size(num), 4);
-
   uint64_t total = desc_bytes + avail_bytes + used_bytes;
-  uint64_t pages_needed = (total + PAGE_SIZE - 1) / PAGE_SIZE;
+  uint32_t pages_needed = (uint32_t)((total + PAGE_SIZE - 1) / PAGE_SIZE);
 
-  // Allocate physically contiguous pages
   void *phys = pmm_alloc_pages(pages_needed);
   if (!phys) {
-    klog_puts("[VIRTIO] Failed to allocate virtqueue (");
-    klog_uint64(pages_needed);
-    klog_puts(" pages)\n");
+    klog_puts("[VIRTIO] Failed to allocate virtqueue\n");
     return false;
   }
 
   uint64_t phys_base = (uint64_t)phys;
   uint64_t virt_base = phys_base + pmm_get_hhdm_offset();
+  memset((void *)virt_base, 0, (size_t)pages_needed * PAGE_SIZE);
 
-  // Zero the entire region
-  memset((void *)virt_base, 0, pages_needed * PAGE_SIZE);
-
-  // Set up pointers
-  vq->desc_phys  = phys_base;
+  vq->desc_phys = phys_base;
   vq->avail_phys = phys_base + desc_bytes;
-  vq->used_phys  = phys_base + desc_bytes + avail_bytes;
-
-  vq->desc  = (volatile struct virtq_desc *)(virt_base);
+  vq->used_phys = phys_base + desc_bytes + avail_bytes;
+  vq->alloc_phys = phys_base;
+  vq->alloc_pages = pages_needed;
+  vq->desc = (volatile struct virtq_desc *)virt_base;
   vq->avail = (volatile struct virtq_avail *)(virt_base + desc_bytes);
-  vq->used  = (volatile struct virtq_used *)(virt_base + desc_bytes +
-                                              avail_bytes);
-
+  vq->used = (volatile struct virtq_used *)(virt_base + desc_bytes + avail_bytes);
   vq->num = num;
-  vq->free_head = 0;
   vq->num_free = num;
-  vq->last_used_idx = 0;
-  vq->notify_addr = NULL;
+  vq->free_head = 0;
 
-  // Build free descriptor chain
-  for (uint16_t i = 0; i < num - 1; i++) {
-    vq->desc[i].next = i + 1;
-    vq->desc[i].flags = VIRTQ_DESC_F_NEXT;
+  for (uint16_t i = 0; i < num; i++) {
+    vq->desc[i].next = (uint16_t)(i + 1);
+    vq->desc[i].flags = 0;
   }
   vq->desc[num - 1].next = 0;
-  vq->desc[num - 1].flags = 0;
-
-  // Initialize available ring
-  vq->avail->flags = 0;
-  vq->avail->idx = 0;
-
-  // Initialize used ring
-  vq->used->flags = 0;
-  vq->used->idx = 0;
-
   return true;
 }
 
-// Virtqueue Buffer Operations
+void virtq_destroy(struct virtqueue *vq) {
+  if (!vq || !vq->alloc_phys)
+    return;
+  pmm_free_pages((void *)vq->alloc_phys, vq->alloc_pages);
+  memset(vq, 0, sizeof(*vq));
+}
 
-static int alloc_desc(struct virtqueue *vq) {
-  if (vq->num_free == 0)
+static int virtq_alloc_desc_locked(struct virtqueue *vq) {
+  if (!vq->num_free)
     return -1;
 
   uint16_t idx = vq->free_head;
+  if (idx >= vq->num || vq->desc_in_use[idx])
+    return -1;
+
   vq->free_head = vq->desc[idx].next;
   vq->num_free--;
+  vq->desc_in_use[idx] = true;
   return idx;
+}
+
+static bool virtq_free_chain_locked(struct virtqueue *vq, uint16_t head) {
+  if (head >= vq->num || !vq->chain_head[head] || !vq->desc_in_use[head])
+    return false;
+
+  uint16_t idx = head;
+  for (uint16_t walked = 0; walked < vq->num; walked++) {
+    if (idx >= vq->num || !vq->desc_in_use[idx])
+      return false;
+
+    bool has_next = (vq->desc[idx].flags & VIRTQ_DESC_F_NEXT) != 0;
+    uint16_t next = vq->desc[idx].next;
+    vq->desc[idx].addr = 0;
+    vq->desc[idx].len = 0;
+    vq->desc[idx].flags = 0;
+    vq->desc[idx].next = vq->free_head;
+    vq->desc_in_use[idx] = false;
+    vq->free_head = idx;
+    vq->num_free++;
+
+    if (!has_next) {
+      vq->chain_head[head] = false;
+      vq->cookies[head] = NULL;
+      return true;
+    }
+    idx = next;
+  }
+  return false;
 }
 
 int virtq_add_buf_readonly(struct virtqueue *vq, uint64_t phys_addr,
                            uint32_t len) {
-  int idx = alloc_desc(vq);
-  if (idx < 0) return -1;
-
-  vq->desc[idx].addr  = phys_addr;
-  vq->desc[idx].len   = len;
-  vq->desc[idx].flags = 0; // Device reads (no WRITE flag)
-  vq->desc[idx].next  = 0;
-
+  if (!vq || !len)
+    return -1;
+  spinlock_acquire(&vq->lock);
+  int idx = virtq_alloc_desc_locked(vq);
+  if (idx >= 0) {
+    vq->desc[idx].addr = phys_addr;
+    vq->desc[idx].len = len;
+    vq->desc[idx].flags = 0;
+    vq->desc[idx].next = 0;
+    vq->chain_head[idx] = true;
+  }
+  spinlock_release(&vq->lock);
   return idx;
 }
 
-int virtq_add_buf_chain(struct virtqueue *vq,
-                        uint64_t req_phys, uint32_t req_len,
-                        uint64_t resp_phys, uint32_t resp_len) {
-  // Need two descriptors
-  if (vq->num_free < 2)
+int virtq_add_buf_chain(struct virtqueue *vq, uint64_t req_phys,
+                        uint32_t req_len, uint64_t resp_phys,
+                        uint32_t resp_len) {
+  if (!vq || !req_len || !resp_len)
     return -1;
 
-  int head = alloc_desc(vq);
-  int tail = alloc_desc(vq);
-  if (head < 0 || tail < 0)
+  spinlock_acquire(&vq->lock);
+  if (vq->num_free < 2) {
+    spinlock_release(&vq->lock);
     return -1;
+  }
 
-  // Request descriptor (device reads)
-  vq->desc[head].addr  = req_phys;
-  vq->desc[head].len   = req_len;
+  int head = virtq_alloc_desc_locked(vq);
+  int tail = virtq_alloc_desc_locked(vq);
+  vq->desc[head].addr = req_phys;
+  vq->desc[head].len = req_len;
   vq->desc[head].flags = VIRTQ_DESC_F_NEXT;
-  vq->desc[head].next  = (uint16_t)tail;
-
-  // Response descriptor (device writes)
-  vq->desc[tail].addr  = resp_phys;
-  vq->desc[tail].len   = resp_len;
+  vq->desc[head].next = (uint16_t)tail;
+  vq->desc[tail].addr = resp_phys;
+  vq->desc[tail].len = resp_len;
   vq->desc[tail].flags = VIRTQ_DESC_F_WRITE;
-  vq->desc[tail].next  = 0;
-
+  vq->desc[tail].next = 0;
+  vq->chain_head[head] = true;
+  spinlock_release(&vq->lock);
   return head;
 }
 
 void virtq_kick(struct virtqueue *vq) {
-  __asm__ volatile("" ::: "memory"); // Write barrier
-
-  // Put the descriptor head into the available ring
-  // Note: the caller should have set up the descriptor already.
-  // We assume the last alloc'd descriptor head was recorded by caller.
-  // This is a low-level "make avail ring visible" call.
-
-  // Actually, the typical pattern is:
-  //   head = virtq_add_buf_chain(...)
-  //   vq->avail->ring[vq->avail->idx % vq->num] = head
-  //   vq->avail->idx++
-  //   virtq_kick(vq)
-  // But we provide a convenience function.
-
-  // The memory barrier ensures the device sees the avail ring update.
-  __asm__ volatile("mfence" ::: "memory");
-
-  // Notify the device
-  if (vq->notify_addr) {
-    *vq->notify_addr = 0; // Queue index is typically part of the notify addr
-  }
+  if (!vq || !vq->notify_addr)
+    return;
+  virtq_dma_mb();
+  *vq->notify_addr = vq->queue_index;
 }
 
 bool virtq_poll(struct virtqueue *vq, uint32_t *id, uint32_t *len) {
-  __asm__ volatile("" ::: "memory"); // Read barrier
-
-  if (vq->last_used_idx == vq->used->idx)
+  if (!vq || !id || !len)
     return false;
-
-  uint16_t used_idx = vq->last_used_idx % vq->num;
-  *id = vq->used->ring[used_idx].id;
-  *len = vq->used->ring[used_idx].len;
+  spinlock_acquire(&vq->lock);
+  virtq_dma_rmb();
+  if (vq->last_used_idx == vq->used->idx) {
+    spinlock_release(&vq->lock);
+    return false;
+  }
+  uint16_t slot = (uint16_t)(vq->last_used_idx % vq->num);
+  *id = vq->used->ring[slot].id;
+  *len = vq->used->ring[slot].len;
   vq->last_used_idx++;
-
+  spinlock_release(&vq->lock);
   return true;
 }
 
 void virtq_free_desc(struct virtqueue *vq, uint16_t head) {
-  uint16_t idx = head;
-  while (1) {
-    bool has_next = (vq->desc[idx].flags & VIRTQ_DESC_F_NEXT);
-    uint16_t next = vq->desc[idx].next;
-
-    // Return this descriptor to the free list
-    vq->desc[idx].addr = 0;
-    vq->desc[idx].len = 0;
-    vq->desc[idx].flags = VIRTQ_DESC_F_NEXT;
-    vq->desc[idx].next = vq->free_head;
-    vq->free_head = idx;
-    vq->num_free++;
-
-    if (!has_next) break;
-    idx = next;
-  }
+  if (!vq)
+    return;
+  spinlock_acquire(&vq->lock);
+  if (!virtq_free_chain_locked(vq, head))
+    vq->stats.rejected++;
+  spinlock_release(&vq->lock);
 }
 
-// Self-Test
+static int virtq_submit_internal(struct virtqueue *vq,
+                 const struct virtq_iov *out, size_t out_count,
+                 const struct virtq_iov *in, size_t in_count,
+                 void *cookie, bool notify) {
+  if (!vq || (out_count && !out) || (in_count && !in))
+    return -1;
+  size_t count = out_count + in_count;
+  if (!count || count > vq->num)
+    return -1;
 
-void virtio_self_test(void) {
-  klog_puts("\n[VIRTIO] ═══ VirtIO Foundation Self-Test ═══\n");
+  spinlock_acquire(&vq->lock);
+  if (vq->num_free < count) {
+    vq->stats.rejected++;
+    spinlock_release(&vq->lock);
+    return -1;
+  }
 
-  // Test 1: Virtqueue allocation
-  struct virtqueue vq;
-  bool ok = virtq_init(&vq, 16);
-  if (!ok) {
-    klog_puts("[VIRTIO] FAIL: virtq_init failed\n");
-    return;
-  }
-  klog_puts("[VIRTIO] PASS: virtq_init(16) succeeded\n");
+  uint16_t ids[VIRTQ_MAX_SIZE];
+  for (size_t i = 0; i < count; i++)
+    ids[i] = (uint16_t)virtq_alloc_desc_locked(vq);
 
-  // Test 2: Check initial state
-  if (vq.num != 16 || vq.num_free != 16 || vq.free_head != 0) {
-    klog_puts("[VIRTIO] FAIL: bad initial state\n");
-    return;
-  }
-  klog_puts("[VIRTIO] PASS: initial state correct (num=16, free=16)\n");
-
-  // Test 3: Physical addresses must be page-aligned
-  if ((vq.desc_phys & 0xFFF) != 0) {
-    klog_puts("[VIRTIO] FAIL: desc_phys not page-aligned\n");
-    return;
-  }
-  klog_puts("[VIRTIO] PASS: desc_phys page-aligned at ");
-  klog_hex64(vq.desc_phys);
-  klog_puts("\n");
-
-  // Test 4: Allocate a single read-only buffer
-  uint64_t fake_phys = 0xDEADBEEF000;
-  int idx = virtq_add_buf_readonly(&vq, fake_phys, 256);
-  if (idx < 0) {
-    klog_puts("[VIRTIO] FAIL: virtq_add_buf_readonly failed\n");
-    return;
-  }
-  if (vq.num_free != 15) {
-    klog_puts("[VIRTIO] FAIL: free count wrong after alloc\n");
-    return;
-  }
-  klog_puts("[VIRTIO] PASS: alloc single descriptor idx=");
-  klog_uint64(idx);
-  klog_puts(" (free=15)\n");
-
-  // Test 5: Allocate a request/response chain
-  int head = virtq_add_buf_chain(&vq, 0x1000, 64, 0x2000, 128);
-  if (head < 0) {
-    klog_puts("[VIRTIO] FAIL: virtq_add_buf_chain failed\n");
-    return;
-  }
-  if (vq.num_free != 13) {
-    klog_puts("[VIRTIO] FAIL: free count wrong after chain alloc\n");
-    return;
-  }
-  // Verify chaining
-  if (!(vq.desc[head].flags & VIRTQ_DESC_F_NEXT)) {
-    klog_puts("[VIRTIO] FAIL: chain head missing NEXT flag\n");
-    return;
-  }
-  uint16_t tail_idx = vq.desc[head].next;
-  if (!(vq.desc[tail_idx].flags & VIRTQ_DESC_F_WRITE)) {
-    klog_puts("[VIRTIO] FAIL: chain tail missing WRITE flag\n");
-    return;
-  }
-  klog_puts("[VIRTIO] PASS: chain desc head=");
-  klog_uint64(head);
-  klog_puts(" -> tail=");
-  klog_uint64(tail_idx);
-  klog_puts(" (free=13)\n");
-
-  // Test 6: Free descriptors
-  virtq_free_desc(&vq, (uint16_t)idx);
-  if (vq.num_free != 14) {
-    klog_puts("[VIRTIO] FAIL: free count wrong after free single\n");
-    return;
-  }
-  klog_puts("[VIRTIO] PASS: freed single desc (free=14)\n");
-
-  virtq_free_desc(&vq, (uint16_t)head);
-  if (vq.num_free != 16) {
-    klog_puts("[VIRTIO] FAIL: free count wrong after free chain\n");
-    return;
-  }
-  klog_puts("[VIRTIO] PASS: freed chain desc (free=16)\n");
-
-  // Test 7: Exhaust all descriptors
-  int last = -1;
-  for (int i = 0; i < 16; i++) {
-    last = virtq_add_buf_readonly(&vq, 0x3000 + i * 0x1000, 64);
-    if (last < 0) {
-      klog_puts("[VIRTIO] FAIL: ran out of descs at i=");
-      klog_uint64(i);
-      klog_puts("\n");
-      return;
+  for (size_t i = 0; i < count; i++) {
+    bool writable = i >= out_count;
+    const struct virtq_iov *iov = writable ? &in[i - out_count] : &out[i];
+    vq->desc[ids[i]].addr = iov->phys_addr;
+    vq->desc[ids[i]].len = iov->len;
+    vq->desc[ids[i]].flags = writable ? VIRTQ_DESC_F_WRITE : 0;
+    if (i + 1 < count) {
+      vq->desc[ids[i]].flags |= VIRTQ_DESC_F_NEXT;
+      vq->desc[ids[i]].next = ids[i + 1];
+    } else {
+      vq->desc[ids[i]].next = 0;
     }
   }
-  if (vq.num_free != 0) {
-    klog_puts("[VIRTIO] FAIL: free should be 0\n");
+
+  uint16_t head = ids[0];
+  vq->chain_head[head] = true;
+  vq->cookies[head] = cookie;
+  uint16_t avail_idx = vq->avail->idx;
+  vq->avail->ring[avail_idx % vq->num] = head;
+  virtq_dma_wmb();
+  vq->avail->idx = (uint16_t)(avail_idx + 1);
+  vq->stats.submitted++;
+  virtq_dma_mb();
+  if (notify && vq->notify_addr)
+    *vq->notify_addr = vq->queue_index;
+  spinlock_release(&vq->lock);
+  return head;
+}
+
+int virtq_submit(struct virtqueue *vq, const struct virtq_iov *out,
+                 size_t out_count, const struct virtq_iov *in,
+                 size_t in_count, void *cookie) {
+  return virtq_submit_internal(vq, out, out_count, in, in_count, cookie, true);
+}
+
+int virtq_submit_deferred(struct virtqueue *vq, const struct virtq_iov *out,
+                          size_t out_count, const struct virtq_iov *in,
+                          size_t in_count, void *cookie) {
+  return virtq_submit_internal(vq, out, out_count, in, in_count, cookie, false);
+}
+
+bool virtq_poll_complete(struct virtqueue *vq, void **cookie, uint32_t *len) {
+  if (!vq || !cookie || !len)
+    return false;
+
+  spinlock_acquire(&vq->lock);
+  virtq_dma_rmb();
+  if (vq->last_used_idx == vq->used->idx) {
+    spinlock_release(&vq->lock);
+    return false;
+  }
+
+  uint16_t slot = (uint16_t)(vq->last_used_idx % vq->num);
+  uint32_t id = vq->used->ring[slot].id;
+  uint32_t used_len = vq->used->ring[slot].len;
+  vq->last_used_idx++;
+
+  if (id >= vq->num || !vq->chain_head[id] || !vq->desc_in_use[id]) {
+    vq->stats.invalid_used++;
+    spinlock_release(&vq->lock);
+    return false;
+  }
+
+  *cookie = vq->cookies[id];
+  *len = used_len;
+  if (!virtq_free_chain_locked(vq, (uint16_t)id)) {
+    vq->stats.invalid_used++;
+    spinlock_release(&vq->lock);
+    return false;
+  }
+  vq->stats.completed++;
+  spinlock_release(&vq->lock);
+  return true;
+}
+
+bool virtq_is_idle(struct virtqueue *vq) {
+  if (!vq)
+    return true;
+  spinlock_acquire(&vq->lock);
+  bool idle = vq->num_free == vq->num &&
+              vq->last_used_idx == vq->used->idx;
+  spinlock_release(&vq->lock);
+  return idle;
+}
+
+void virtq_get_stats(struct virtqueue *vq, struct virtq_stats *out) {
+  if (!vq || !out)
     return;
-  }
-  // One more should fail
-  int over = virtq_add_buf_readonly(&vq, 0xBAD, 1);
-  if (over != -1) {
-    klog_puts("[VIRTIO] FAIL: alloc should have returned -1\n");
-    return;
-  }
-  klog_puts("[VIRTIO] PASS: exhaustion test (16/16 used, alloc returns -1)\n");
+  spinlock_acquire(&vq->lock);
+  *out = vq->stats;
+  spinlock_release(&vq->lock);
+}
 
-  // Clean up
-  for (int i = 0; i < 16; i++) {
-    virtq_free_desc(&vq, (uint16_t)i);
+static void virtq_test_complete(struct virtqueue *vq, uint16_t head,
+                                uint32_t len) {
+  uint16_t used_idx = vq->used->idx;
+  vq->used->ring[used_idx % vq->num].id = head;
+  vq->used->ring[used_idx % vq->num].len = len;
+  virtq_dma_wmb();
+  vq->used->idx = (uint16_t)(used_idx + 1);
+}
+
+bool virtio_self_test(void) {
+  klog_puts("[VIRTIO] Phase 1 split-queue stress test starting\n");
+  size_t free_before = pmm_get_free_pages();
+  struct virtqueue vq;
+  if (!virtq_init(&vq, 64)) {
+    klog_puts("[VIRTIO] FAIL: queue allocation\n");
+    return false;
   }
 
-  // Free the underlying physical pages
-  uint64_t desc_bytes = ALIGN_UP(virtq_desc_size(16), 16);
-  uint64_t avail_bytes = ALIGN_UP(virtq_avail_size(16), 4);
-  uint64_t used_bytes = ALIGN_UP(virtq_used_size(16), 4);
-  uint64_t total = desc_bytes + avail_bytes + used_bytes;
-  uint64_t pages = (total + PAGE_SIZE - 1) / PAGE_SIZE;
-  pmm_free_pages((void *)vq.desc_phys, pages);
+  struct virtq_iov out = { .phys_addr = 0x1000, .len = 64 };
+  struct virtq_iov in = { .phys_addr = 0x2000, .len = 128 };
+  for (uint32_t i = 0; i < 1000000; i++) {
+    void *expected = (void *)(uintptr_t)(i + 1);
+    int head = virtq_submit(&vq, &out, 1, &in, 1, expected);
+    if (head < 0) {
+      klog_puts("[VIRTIO] FAIL: stress submission\n");
+      virtq_destroy(&vq);
+      return false;
+    }
+    virtq_test_complete(&vq, (uint16_t)head, in.len);
+    void *cookie = NULL;
+    uint32_t len = 0;
+    if (!virtq_poll_complete(&vq, &cookie, &len) ||
+        cookie != expected || len != in.len) {
+      klog_puts("[VIRTIO] FAIL: stress completion\n");
+      virtq_destroy(&vq);
+      return false;
+    }
+  }
 
-  klog_puts("[VIRTIO] ═══ All self-tests PASSED ═══\n\n");
+  if (!virtq_is_idle(&vq) || vq.avail->idx != (uint16_t)1000000 ||
+      vq.used->idx != (uint16_t)1000000) {
+    klog_puts("[VIRTIO] FAIL: index wrap or idle state\n");
+    virtq_destroy(&vq);
+    return false;
+  }
+
+  int heads[32];
+  for (int i = 0; i < 32; i++) {
+    heads[i] = virtq_submit(&vq, &out, 1, &in, 1,
+                            (void *)(uintptr_t)(i + 1));
+    if (heads[i] < 0) {
+      klog_puts("[VIRTIO] FAIL: exhaustion setup\n");
+      virtq_destroy(&vq);
+      return false;
+    }
+  }
+  if (virtq_submit(&vq, &out, 1, &in, 1, NULL) >= 0) {
+    klog_puts("[VIRTIO] FAIL: exhaustion not detected\n");
+    virtq_destroy(&vq);
+    return false;
+  }
+  for (int i = 0; i < 32; i++) {
+    virtq_test_complete(&vq, (uint16_t)heads[i], in.len);
+    void *cookie;
+    uint32_t len;
+    if (!virtq_poll_complete(&vq, &cookie, &len)) {
+      klog_puts("[VIRTIO] FAIL: exhaustion recovery\n");
+      virtq_destroy(&vq);
+      return false;
+    }
+  }
+
+  uint16_t bad_slot = vq.used->idx;
+  vq.used->ring[bad_slot % vq.num].id = vq.num;
+  vq.used->ring[bad_slot % vq.num].len = 0;
+  vq.used->idx = (uint16_t)(bad_slot + 1);
+  void *cookie;
+  uint32_t len;
+  if (virtq_poll_complete(&vq, &cookie, &len)) {
+    klog_puts("[VIRTIO] FAIL: invalid used id accepted\n");
+    virtq_destroy(&vq);
+    return false;
+  }
+
+  struct virtq_stats stats;
+  virtq_get_stats(&vq, &stats);
+  if (stats.submitted != 1000032 || stats.completed != 1000032 ||
+      stats.rejected != 1 || stats.invalid_used != 1 ||
+      vq.num_free != vq.num) {
+    klog_puts("[VIRTIO] FAIL: counter mismatch\n");
+    virtq_destroy(&vq);
+    return false;
+  }
+
+  virtq_destroy(&vq);
+  if (pmm_get_free_pages() != free_before) {
+    klog_puts("[VIRTIO] FAIL: queue page leak\n");
+    return false;
+  }
+
+  klog_puts("[VIRTIO] PASS: 1000000 cycles, wrap, exhaustion, invalid-id, teardown\n");
+  return true;
 }

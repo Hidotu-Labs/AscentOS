@@ -1,6 +1,8 @@
 #ifndef VIRTIO_VIRTIO_H
 #define VIRTIO_VIRTIO_H
 
+#include "lock/spinlock.h"
+
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
@@ -57,6 +59,18 @@ struct virtq_used {
   // Followed by: uint16_t avail_event; (if VIRTIO_F_EVENT_IDX)
 } __attribute__((packed));
 
+struct virtq_iov {
+  uint64_t phys_addr;
+  uint32_t len;
+};
+
+struct virtq_stats {
+  uint64_t submitted;
+  uint64_t completed;
+  uint64_t rejected;
+  uint64_t invalid_used;
+};
+
 // Virtqueue (driver-side bookkeeping)
 #define VIRTQ_MAX_SIZE 256
 
@@ -71,14 +85,23 @@ struct virtqueue {
   uint16_t free_head;          // Head of free descriptor list
   uint16_t num_free;           // Number of free descriptors
   uint16_t last_used_idx;      // Last seen used ring index
+  uint16_t queue_index;
 
   // Physical base of the entire allocation (for the device)
   uint64_t desc_phys;
   uint64_t avail_phys;
   uint64_t used_phys;
+  uint64_t alloc_phys;
+  uint32_t alloc_pages;
 
   // Notify offset multiplier and address
   volatile uint16_t *notify_addr;
+
+  spinlock_t lock;
+  void *cookies[VIRTQ_MAX_SIZE];
+  bool chain_head[VIRTQ_MAX_SIZE];
+  bool desc_in_use[VIRTQ_MAX_SIZE];
+  struct virtq_stats stats;
 };
 
 // Virtqueue Management API
@@ -86,6 +109,7 @@ struct virtqueue {
 // Allocate and initialize a virtqueue with 'num' entries.
 // Returns true on success. All physical/virtual pointers are filled in.
 bool virtq_init(struct virtqueue *vq, uint16_t num);
+void virtq_destroy(struct virtqueue *vq);
 
 // Add a single read-only buffer to the virtqueue (device reads from it).
 // Returns the descriptor index, or -1 on failure.
@@ -108,7 +132,22 @@ bool virtq_poll(struct virtqueue *vq, uint32_t *id, uint32_t *len);
 // Reclaim a descriptor (chain) so it can be reused.
 void virtq_free_desc(struct virtqueue *vq, uint16_t head);
 
+// Submit an arbitrary device-readable/device-writable descriptor chain.
+int virtq_submit(struct virtqueue *vq,
+                 const struct virtq_iov *out, size_t out_count,
+                 const struct virtq_iov *in, size_t in_count,
+                 void *cookie);
+int virtq_submit_deferred(struct virtqueue *vq,
+                          const struct virtq_iov *out, size_t out_count,
+                          const struct virtq_iov *in, size_t in_count,
+                          void *cookie);
+
+// Consume, validate, and reclaim one completed request.
+bool virtq_poll_complete(struct virtqueue *vq, void **cookie, uint32_t *len);
+bool virtq_is_idle(struct virtqueue *vq);
+void virtq_get_stats(struct virtqueue *vq, struct virtq_stats *out);
+
 // Self-test
-void virtio_self_test(void);
+bool virtio_self_test(void);
 
 #endif

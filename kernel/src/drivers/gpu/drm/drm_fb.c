@@ -198,11 +198,21 @@ void drm_framebuffer_free_full(struct drm_device *dev,
     list_del(&fb->base_fb.base.list);
     spinlock_release(&dev->lock);
 
+    struct drm_gem_object *release[DRM_MAX_FB_PLANES] = {0};
+    int release_count = 0;
     for (int p = 0; p < DRM_MAX_FB_PLANES; p++) {
-        if (fb->gem_obj[p]) {
-            fb->gem_obj[p]->refcount--;
+        struct drm_gem_object *gem = fb->gem_obj[p];
+        if (!gem) continue;
+        gem->refcount--;
+        if (gem->refcount <= 0) {
+            bool seen = false;
+            for (int i = 0; i < release_count; i++)
+                if (release[i] == gem) seen = true;
+            if (!seen) release[release_count++] = gem;
         }
     }
+    for (int i = 0; i < release_count; i++)
+        drm_gem_object_free(dev, release[i]);
     kfree(fb);
 }
 

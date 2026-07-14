@@ -16,36 +16,53 @@
 
 // BAR Mapping
 
-// Decode BAR size by writing all 1s and reading back.
+// Decode a BAR with PCI memory and I/O decoding disabled. A 64-bit BAR
+// must be probed as one value; probing its halves separately can manufacture a
+// near-2^64 size and make the mapper loop forever.
 static uint64_t pci_bar_size(struct pci_device *pci, int bar_idx) {
-  uint8_t reg = 0x10 + bar_idx * 4;
-  uint32_t orig = pci_config_read32(pci->bus, pci->slot, pci->func, reg);
+  if (!pci || bar_idx < 0 || bar_idx >= 6)
+    return 0;
 
-  pci_config_write32(pci->bus, pci->slot, pci->func, reg, 0xFFFFFFFF);
-  uint32_t sized = pci_config_read32(pci->bus, pci->slot, pci->func, reg);
-  pci_config_write32(pci->bus, pci->slot, pci->func, reg, orig);
+  uint16_t reg = (uint16_t)(0x10 + bar_idx * 4);
+  uint16_t command = pci_config_read16(pci->bus, pci->slot, pci->func, 0x04);
+  uint32_t orig_lo = pci_config_read32(pci->bus, pci->slot, pci->func, reg);
+  bool is_io = (orig_lo & 1U) != 0;
+  bool is_64 = !is_io && (((orig_lo >> 1) & 3U) == 2U) && bar_idx < 5;
+  uint32_t orig_hi = is_64 ? pci_config_read32(
+      pci->bus, pci->slot, pci->func, (uint16_t)(reg + 4)) : 0;
 
-  if (orig & 1) {
-    // IO BAR
-    return (~(sized & 0xFFFC) + 1) & 0xFFFF;
+  // Stop the function from decoding the temporary all-ones BAR address.
+  pci_config_write16(pci->bus, pci->slot, pci->func, 0x04,
+                     (uint16_t)(command & ~3U));
+  pci_config_write32(pci->bus, pci->slot, pci->func, reg, 0xFFFFFFFFU);
+  if (is_64)
+    pci_config_write32(pci->bus, pci->slot, pci->func,
+                       (uint16_t)(reg + 4), 0xFFFFFFFFU);
+
+  uint32_t sized_lo = pci_config_read32(pci->bus, pci->slot, pci->func, reg);
+  uint32_t sized_hi = is_64 ? pci_config_read32(
+      pci->bus, pci->slot, pci->func, (uint16_t)(reg + 4)) : 0;
+
+  // Restore the complete BAR before re-enabling decoding.
+  pci_config_write32(pci->bus, pci->slot, pci->func, reg, orig_lo);
+  if (is_64)
+    pci_config_write32(pci->bus, pci->slot, pci->func,
+                       (uint16_t)(reg + 4), orig_hi);
+  pci_config_write16(pci->bus, pci->slot, pci->func, 0x04, command);
+
+  if (is_io) {
+    uint32_t mask = sized_lo & ~3U;
+    return mask ? (uint64_t)((~mask) + 1U) : 0;
   }
 
-  // Memory BAR
-  uint64_t mask = ~(uint64_t)0xF;
-  uint64_t size64 = sized & mask;
-
-  // 64-bit BAR?
-  if (((orig >> 1) & 3) == 2) {
-    uint32_t orig_hi = pci_config_read32(pci->bus, pci->slot, pci->func,
-                                         reg + 4);
-    pci_config_write32(pci->bus, pci->slot, pci->func, reg + 4, 0xFFFFFFFF);
-    uint32_t sized_hi = pci_config_read32(pci->bus, pci->slot, pci->func,
-                                          reg + 4);
-    pci_config_write32(pci->bus, pci->slot, pci->func, reg + 4, orig_hi);
-    size64 |= ((uint64_t)sized_hi << 32);
-  }
-
-  return (~size64 + 1);
+  uint64_t mask = is_64 ? ((uint64_t)sized_hi << 32) |
+                              (uint64_t)(sized_lo & ~0xFU)
+                        : (uint64_t)(sized_lo & ~0xFU);
+  if (!mask)
+    return 0;
+  if (is_64)
+    return (~mask) + 1ULL;
+  return (uint64_t)((~(uint32_t)mask) + 1U);
 }
 
 // Map a PCI BAR into kernel virtual address space.
@@ -76,6 +93,15 @@ static uint64_t map_bar(struct pci_device *pci, int bar_idx, uint64_t *out_size)
   if (out_size) *out_size = size;
 
   if (size == 0 || phys == 0) return 0;
+
+  // VirtIO capability BARs are small. Refuse absurd results so a broken
+  // device or probe can never turn this into an unbounded mapping loop.
+  if (size > (256ULL * 1024 * 1024)) {
+    klog_puts("[VIRTIO-PCI] Refusing unreasonable BAR size: ");
+    klog_hex64(size);
+    klog_puts("\n");
+    return 0;
+  }
 
   // Map each page of the BAR into kernel address space.
   // We place it at the HHDM address (phys + hhdm_offset) for consistency,
@@ -285,12 +311,66 @@ uint8_t virtio_pci_get_status(struct virtio_pci_device *vdev) {
   return vdev->common->device_status;
 }
 
-void virtio_pci_reset(struct virtio_pci_device *vdev) {
+bool virtio_pci_reset(struct virtio_pci_device *vdev) {
+  if (!vdev || !vdev->common)
+    return false;
   vdev->common->device_status = 0;
-  __asm__ volatile("" ::: "memory");
-  // Wait for reset to complete (status reads back as 0)
-  while (vdev->common->device_status != 0)
+  __atomic_thread_fence(__ATOMIC_SEQ_CST);
+  for (uint32_t spins = 0; spins < 1000000; spins++) {
+    if (vdev->common->device_status == 0)
+      return true;
     hal_cpu_relax();
+  }
+  return false;
+}
+
+bool virtio_pci_negotiate(struct virtio_pci_device *vdev,
+                          uint64_t wanted, uint64_t required,
+                          uint64_t *negotiated) {
+  if (!vdev || !vdev->common || (required & ~wanted))
+    return false;
+
+  if (!virtio_pci_reset(vdev))
+    return false;
+  virtio_pci_set_status(vdev, VIRTIO_STATUS_ACKNOWLEDGE);
+  virtio_pci_set_status(vdev, VIRTIO_STATUS_ACKNOWLEDGE |
+                              VIRTIO_STATUS_DRIVER);
+
+  uint64_t offered = virtio_pci_read_features(vdev);
+  if ((offered & required) != required) {
+    virtio_pci_set_failed(vdev);
+    return false;
+  }
+
+  uint64_t accepted = offered & wanted;
+  virtio_pci_write_features(vdev, accepted);
+  uint8_t status = virtio_pci_get_status(vdev);
+  virtio_pci_set_status(vdev, status | VIRTIO_STATUS_FEATURES_OK);
+  status = virtio_pci_get_status(vdev);
+  if (!(status & VIRTIO_STATUS_FEATURES_OK)) {
+    virtio_pci_set_failed(vdev);
+    return false;
+  }
+  if (negotiated)
+    *negotiated = accepted;
+  return true;
+}
+
+bool virtio_pci_set_driver_ok(struct virtio_pci_device *vdev) {
+  if (!vdev || !vdev->common)
+    return false;
+  uint8_t status = virtio_pci_get_status(vdev);
+  if (!(status & VIRTIO_STATUS_FEATURES_OK) ||
+      (status & (VIRTIO_STATUS_FAILED | VIRTIO_STATUS_DEVICE_NEEDS_RESET)))
+    return false;
+  virtio_pci_set_status(vdev, status | VIRTIO_STATUS_DRIVER_OK);
+  return (virtio_pci_get_status(vdev) & VIRTIO_STATUS_DRIVER_OK) != 0;
+}
+
+void virtio_pci_set_failed(struct virtio_pci_device *vdev) {
+  if (vdev && vdev->common)
+    virtio_pci_set_status(vdev, virtio_pci_get_status(vdev) |
+                                VIRTIO_STATUS_FAILED);
 }
 
 bool virtio_pci_setup_queue(struct virtio_pci_device *vdev,
@@ -321,6 +401,8 @@ bool virtio_pci_setup_queue(struct virtio_pci_device *vdev,
     klog_puts("[VIRTIO-PCI] Failed to allocate virtqueue memory\n");
     return false;
   }
+
+  vq->queue_index = queue_index;
 
   // Write the queue size back (we may have reduced it)
   cfg->queue_size = qsz;
@@ -356,6 +438,41 @@ bool virtio_pci_setup_queue(struct virtio_pci_device *vdev,
   klog_puts("\n");
 
   return true;
+}
+
+bool virtio_pci_msix_init(struct virtio_pci_device *vdev) {
+  return vdev && vdev->pci && pci_msix_init(vdev->pci, &vdev->msix);
+}
+
+bool virtio_pci_msix_route(struct virtio_pci_device *vdev, uint16_t entry,
+                           uint8_t vector, uint8_t destination_apic) {
+  return vdev && pci_msix_program(&vdev->msix, entry, vector, destination_apic);
+}
+
+bool virtio_pci_msix_assign_queue(struct virtio_pci_device *vdev,
+                                  uint16_t queue, uint16_t entry) {
+  if (!vdev || !vdev->common || entry >= vdev->msix.table_size) return false;
+  vdev->common->queue_select = queue;
+  __atomic_thread_fence(__ATOMIC_SEQ_CST);
+  vdev->common->queue_msix_vector = entry;
+  __atomic_thread_fence(__ATOMIC_SEQ_CST);
+  return vdev->common->queue_msix_vector != 0xFFFF;
+}
+
+bool virtio_pci_msix_assign_config(struct virtio_pci_device *vdev,
+                                   uint16_t entry) {
+  if (!vdev || !vdev->common || entry >= vdev->msix.table_size) return false;
+  vdev->common->msix_config = entry;
+  __atomic_thread_fence(__ATOMIC_SEQ_CST);
+  return vdev->common->msix_config != 0xFFFF;
+}
+
+bool virtio_pci_msix_enable(struct virtio_pci_device *vdev) {
+  return vdev && pci_msix_enable(&vdev->msix);
+}
+
+void virtio_pci_msix_disable(struct virtio_pci_device *vdev) {
+  if (vdev) pci_msix_disable(&vdev->msix);
 }
 
 void virtio_pci_notify(struct virtio_pci_device *vdev, uint16_t queue_index,

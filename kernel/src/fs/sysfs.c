@@ -1,6 +1,7 @@
 #include "fs/sysfs.h"
 #include "console/klog.h"
 #include "drivers/pci/pci.h"
+#include "drivers/gpu/virtio_gpu/virtio_gpu.h"
 #include "drivers/storage/block.h"
 #include "fs/ramfs.h"
 #include "fs/vfs.h"
@@ -16,6 +17,10 @@ char sysfs_gpu_devpath[128] = "/devices/pci0000:00/0000:00:01.0/drm/card0";
 char sysfs_gpu_connector_devpath[128] =
     "/devices/pci0000:00/0000:00:01.0/drm/card0/card0-HDMI-A-1";
 static vfs_node_t *net_class_root;
+static vfs_node_t *gpu_status_nodes[VIRTIO_GPU_MAX_SCANOUTS];
+static vfs_node_t *gpu_enabled_nodes[VIRTIO_GPU_MAX_SCANOUTS];
+static vfs_node_t *gpu_modes_nodes[VIRTIO_GPU_MAX_SCANOUTS];
+static vfs_node_t *gpu_dpms_nodes[VIRTIO_GPU_MAX_SCANOUTS];
 
 // Helpers
 
@@ -93,11 +98,11 @@ static void sysfs_symlink(vfs_node_t *parent, const char *name,
 }
 
 // Create a read-only file under parent with the given content.
-static void sysfs_mkfile(vfs_node_t *parent, const char *name,
+static vfs_node_t *sysfs_mkfile(vfs_node_t *parent, const char *name,
                          const char *content) {
   vfs_node_t *f = kmalloc(sizeof(vfs_node_t));
   if (!f)
-    return;
+    return NULL;
   vfs_node_init(f);
   strncpy(f->name, name, 127);
   f->flags = FS_FILE | FS_PERSISTENT;
@@ -107,7 +112,7 @@ static void sysfs_mkfile(vfs_node_t *parent, const char *name,
   ramfs_file_t *rf = kmalloc(sizeof(ramfs_file_t));
   if (!rf) {
     kfree(f);
-    return;
+    return NULL;
   }
   rf->data = NULL;
   rf->capacity = 0;
@@ -120,7 +125,11 @@ static void sysfs_mkfile(vfs_node_t *parent, const char *name,
 
   uint32_t len = (uint32_t)strlen(content);
   vfs_write(f, 0, len, (uint8_t *)content);
+  return f;
 }
+
+static void sysfs_replace(vfs_node_t *node,const char *text){if(!node||!text)return;node->length=0;vfs_write(node,0,(uint32_t)strlen(text),(uint8_t *)text);}
+void sysfs_gpu_update_connector(uint32_t scanout,bool connected,const char *modes){if(scanout>=VIRTIO_GPU_MAX_SCANOUTS)return;sysfs_replace(gpu_status_nodes[scanout],connected?"connected\n":"disconnected\n");sysfs_replace(gpu_enabled_nodes[scanout],connected?"enabled\n":"disabled\n");sysfs_replace(gpu_modes_nodes[scanout],connected&&modes?modes:"");sysfs_replace(gpu_dpms_nodes[scanout],connected?"On\n":"Off\n");}
 
 // PCI bus population
 
@@ -461,15 +470,18 @@ void sysfs_init(void) {
                  "DEVTYPE=drm_minor\nSUBSYSTEM=drm\n");
 
     vfs_node_t *conn_dir = sysfs_mkdir(card0_dir, "card0-HDMI-A-1");
-    sysfs_mkfile(conn_dir, "status", "connected\n");
-    sysfs_mkfile(conn_dir, "enabled", "enabled\n");
-    sysfs_mkfile(conn_dir, "modes", "1280x800\n");
-    sysfs_mkfile(conn_dir, "dpms", "On\n");
+    char live_modes[512];bool live_connected=false;strcpy(live_modes,"1280x800\n");virtio_gpu_scanout_summary(0,&live_connected,live_modes,sizeof(live_modes));
+    gpu_status_nodes[0]=sysfs_mkfile(conn_dir, "status", live_connected?"connected\n":"disconnected\n");
+    gpu_enabled_nodes[0]=sysfs_mkfile(conn_dir, "enabled", live_connected?"enabled\n":"disabled\n");
+    gpu_modes_nodes[0]=sysfs_mkfile(conn_dir, "modes", live_connected?live_modes:"");
+    gpu_dpms_nodes[0]=sysfs_mkfile(conn_dir, "dpms", live_connected?"On\n":"Off\n");
     sysfs_mkfile(conn_dir, "uevent",
                  "DEVTYPE=drm_connector\nSUBSYSTEM=drm\nHOTPLUG=1\n"
                  "CONNECTOR=HDMI-A-1\n");
     sysfs_symlink(conn_dir, "subsystem", "../../../../../../class/drm");
     sysfs_symlink(conn_dir, "device", "../../..");
+    uint32_t live_heads=virtio_gpu_scanout_count();if(live_heads>VIRTIO_GPU_MAX_SCANOUTS)live_heads=VIRTIO_GPU_MAX_SCANOUTS;
+    for(uint32_t head=1;head<live_heads;head++){char nbuf[12],cname[40];u64_to_dec(head+1,nbuf);strcpy(cname,"card0-HDMI-A-");strcat(cname,nbuf);vfs_node_t *cdir=sysfs_mkdir(card0_dir,cname);char hmodes[512];bool hconnected=false;virtio_gpu_scanout_summary(head,&hconnected,hmodes,sizeof(hmodes));gpu_status_nodes[head]=sysfs_mkfile(cdir,"status",hconnected?"connected\n":"disconnected\n");gpu_enabled_nodes[head]=sysfs_mkfile(cdir,"enabled",hconnected?"enabled\n":"disabled\n");gpu_modes_nodes[head]=sysfs_mkfile(cdir,"modes",hconnected?hmodes:"");gpu_dpms_nodes[head]=sysfs_mkfile(cdir,"dpms",hconnected?"On\n":"Off\n");char hue[128];strcpy(hue,"DEVTYPE=drm_connector\nSUBSYSTEM=drm\nHOTPLUG=1\nCONNECTOR=HDMI-A-");strcat(hue,nbuf);strcat(hue,"\n");sysfs_mkfile(cdir,"uevent",hue);sysfs_symlink(cdir,"subsystem","../../../../../../class/drm");sysfs_symlink(cdir,"device","../../..");char target[160];strcpy(target,"../../devices/pci0000:00/");strcat(target,pci_addr);strcat(target,"/drm/card0/");strcat(target,cname);sysfs_symlink(drm_class,cname,target);}
     // subsystem symlink inside card0 → points back to /sys/class/drm
     // wlroots walks up the tree using this to identify the subsystem.
     // Relative from /sys/devices/pci0000:00/<addr>/drm/card0/ to
@@ -480,8 +492,7 @@ void sysfs_init(void) {
     // containers. Giving either a uevent file makes libudev treat it as a
     // device, but neither has a subsystem; Xorg then dereferences a NULL
     // subsystem while walking from card0 to its PCI parent.
-    sysfs_mkfile(gpu_dev, "uevent",
-                 "DRIVER=bochs-drm\nPCI_ID=1234:1111\nSUBSYSTEM=pci\n");
+    char gpu_uevent[128],ue_vid[5],ue_did[5];uint32_t uvid=0,udid=0;for(uint32_t ui=0;ui<pci_get_device_count();ui++){struct pci_device *upd=pci_get_device(ui);if(upd&&upd->class_code==0x03){uvid=upd->vendor_id;udid=upd->device_id;break;}}u32_to_hex(uvid,ue_vid,4);u32_to_hex(udid,ue_did,4);strcpy(gpu_uevent,"DRIVER=virtio-pci\nPCI_ID=");strcat(gpu_uevent,ue_vid);strcat(gpu_uevent,":");strcat(gpu_uevent,ue_did);strcat(gpu_uevent,"\nSUBSYSTEM=pci\n");sysfs_mkfile(gpu_dev,"uevent",gpu_uevent);
     sysfs_symlink(gpu_dev, "subsystem", "../../../bus/pci");
 
     // Mesa reads vendor/device/class from /sys/dev/char/226:0/device/vendor

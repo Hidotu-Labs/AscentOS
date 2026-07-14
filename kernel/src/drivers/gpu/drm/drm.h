@@ -30,6 +30,7 @@
 #define DRM_IOCTL_GEM_CREATE 0xC01064E0
 #define DRM_IOCTL_GEM_FREE 0x40086402
 #define DRM_IOCTL_GEM_MMAP 0xC0106403
+#define DRM_IOCTL_GEM_CLOSE 0x40086409
 #define DRM_IOCTL_WAIT_VBLANK 0xC018643A
 
 #define DRM_IOCTL_SET_MASTER 0x0000641E
@@ -399,6 +400,7 @@ struct drm_plane {
 
 struct drm_crtc {
   struct drm_mode_object base;
+  uint32_t scanout_id;
   struct drm_plane *primary;
   struct drm_plane *cursor;
   struct drm_framebuffer *fb;
@@ -414,6 +416,7 @@ struct drm_framebuffer {
 
 struct drm_encoder {
   struct drm_mode_object base;
+  uint32_t scanout_id;
   uint32_t possible_crtcs;
   uint32_t encoder_type;
 };
@@ -422,6 +425,7 @@ struct drm_connector {
   struct drm_mode_object base;
   uint32_t connector_type;
   uint32_t connection_status;
+  uint32_t scanout_id;
   struct drm_encoder *encoder;
 };
 
@@ -572,6 +576,9 @@ struct drm_file {
   uint32_t client_caps; /* DRM_FILE_CAP_* */
   uint32_t is_master;
 
+  /* Optional per-open state owned by the hardware driver. */
+  void *driver_private;
+
   spinlock_t lock;
   struct list_head list; /* linked into drm_device.file_list */
 };
@@ -627,6 +634,44 @@ struct drm_gem_object {
   int refcount;
   uint64_t (*get_page_phys)(struct drm_gem_object *obj, uint32_t page);
   void (*free)(struct drm_device *dev, struct drm_gem_object *obj);
+  void *driver_private;
 };
+
+typedef void (*drm_commit_damage_fn_t)(struct drm_device *dev,
+                                      const struct drm_clip_rect *clips,
+                                      uint32_t num_clips,
+                                      uint32_t target_fb_id);
+typedef void (*drm_pageflip_fn_t)(struct drm_file *file, struct vfs_node *node,
+                                  uint32_t crtc_id, uint32_t fb_id,
+                                  uint64_t user_data);
+typedef int (*drm_create_dumb_fn_t)(struct drm_device *dev, uint32_t width,
+                                   uint32_t height, uint32_t bpp,
+                                   struct drm_gem_object **obj_out);
+typedef void (*drm_cursor_fn_t)(uint32_t crtc_id,
+                                struct drm_gem_object *gem,
+                                uint32_t width, uint32_t height, uint32_t pitch,
+                                int32_t x, int32_t y,
+                                int32_t hot_x, int32_t hot_y,
+                                uint32_t flags);
+typedef void (*drm_get_modes_fn_t)(uint32_t connector_id,
+                                  struct drm_mode_modeinfo *modes,
+                                  uint32_t *count);
+uint32_t drm_connector_scanout_id(uint32_t connector_id);
+uint32_t drm_crtc_scanout_id(uint32_t crtc_id);
+void drm_ensure_outputs(struct drm_device *dev, uint32_t count);
+void drm_update_output_state(struct drm_device *dev, uint32_t scanout, bool connected);
+void drm_register_cursor_backend(drm_cursor_fn_t cursor);
+void drm_register_scanout_backend(drm_create_dumb_fn_t create_dumb,
+                                  drm_commit_damage_fn_t commit_damage,
+                                  drm_get_modes_fn_t get_modes,
+                                  drm_pageflip_fn_t pageflip);
+struct drm_gem_object *drm_gem_object_create(struct drm_device *dev, size_t size);
+void drm_gem_object_free(struct drm_device *dev, struct drm_gem_object *obj);
+void drm_file_send_event(struct drm_file *file, struct drm_event_vblank *ev,
+                         struct vfs_node *node);
+uint32_t drm_file_gem_register(struct drm_file *file, struct drm_gem_object *obj);
+struct drm_gem_object *drm_file_gem_lookup(struct drm_file *file, uint32_t handle);
+void drm_file_gem_release(struct drm_file *file, uint32_t handle);
+extern struct drm_device global_drm_dev;
 
 #endif

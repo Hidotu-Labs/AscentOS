@@ -7,6 +7,7 @@
 #include "drivers/input/keyboard.h"
 #include "drivers/serial.h"
 #include "drivers/storage/block.h"
+#include "drivers/virtio/virtio.h"
 #include "fs/ext2.h"
 #include "fs/vfs.h"
 #include "lib/string.h"
@@ -119,6 +120,7 @@ static void execute_command(char *cmd) {
     console_puts("  exec      - Execute an ELF (e.g. exec /mnt/hello_musl.elf "
                  "[args...])\n");
     console_puts("  pmmtest   - Test the PMM buddy allocator\n");
+    console_puts("  virtio-test - Stress the VirtIO split-queue transport\n");
     console_puts(
         "  vmmtest   - Test the VMM demand paging and mapping bounds\n");
     console_puts(
@@ -159,6 +161,9 @@ static void execute_command(char *cmd) {
     pcspeaker_play_sound(1000);
     lapic_timer_sleep(200);
     pcspeaker_nosound();
+  } else if (strcmp(cmd, "virtio-test") == 0) {
+    console_puts(virtio_self_test() ? "VirtIO transport stress: PASS\n"
+                                    : "VirtIO transport stress: FAIL\n");
   } else if (strcmp(cmd, "test-task") == 0) {
     for (int i = 0; i < 4; i++) {
       sched_create_kernel_thread(test_task_entry, NULL, true);

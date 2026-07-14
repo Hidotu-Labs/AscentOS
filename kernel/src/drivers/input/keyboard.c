@@ -173,8 +173,8 @@ static void keyboard_callback(struct registers *regs) {
       if (kc) {
         evdev_device_t *kdev = evdev_get_keyboard();
         if (kdev) {
-          evdev_push_event(kdev, EV_KEY, kc, release ? 0 : 1);
-          evdev_push_event(kdev, EV_SYN, SYN_REPORT, 0);
+          if (evdev_report_key(kdev, kc, !release))
+            evdev_sync(kdev);
         }
       }
     } else {
@@ -192,8 +192,8 @@ static void keyboard_callback(struct registers *regs) {
       if (kc) {
         evdev_device_t *kdev = evdev_get_keyboard();
         if (kdev) {
-          evdev_push_event(kdev, EV_KEY, kc, release ? 0 : 1);
-          evdev_push_event(kdev, EV_SYN, SYN_REPORT, 0);
+          if (evdev_report_key(kdev, kc, !release))
+            evdev_sync(kdev);
         }
       }
     }
@@ -218,8 +218,8 @@ static void keyboard_callback(struct registers *regs) {
     if (kc) {
       evdev_device_t *kdev = evdev_get_keyboard();
       if (kdev) {
-        evdev_push_event(kdev, EV_KEY, kc, release ? 0 : 1);
-        evdev_push_event(kdev, EV_SYN, SYN_REPORT, 0);
+        if (evdev_report_key(kdev, kc, !release))
+          evdev_sync(kdev);
       }
     }
   }
