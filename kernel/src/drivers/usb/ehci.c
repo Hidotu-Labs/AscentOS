@@ -307,9 +307,11 @@ int ehci_control_transfer(struct ehci_controller *hc, uint8_t addr,
 
 static int ehci_hcd_control_transfer(struct usb_hcd *hcd, uint8_t addr,
                                      struct usb_control_request *req,
-                                     void *data, uint16_t len, bool low_speed) {
+                                     void *data, uint16_t len,
+                                     enum usb_speed speed) {
   struct ehci_controller *hc = (struct ehci_controller *)hcd->priv;
-  return ehci_control_transfer(hc, addr, req, data, len, low_speed);
+  return ehci_control_transfer(hc, addr, req, data, len,
+                               usb_speed_is_low(speed));
 }
 
 
@@ -607,7 +609,10 @@ void ehci_init(void) {
       ehci_delay_ms(200);
 
       hc->hcd.priv = hc;
+      hc->hcd.name = "ehci";
       hc->hcd.control_transfer = ehci_hcd_control_transfer;
+      hc->hcd.address_device = NULL;
+      hc->hcd.device_removed = NULL;
 
       hc->present = true;
     }
@@ -683,7 +688,7 @@ static void ehci_enumerate_ports(struct ehci_controller *hc) {
       // Device is enabled — enumerate through USB core
       // This will call usb_device_discovered → usb_enumerate_device →
       // usb_kbd_probe / usb_mouse_probe
-      usb_device_discovered(&hc->hcd, p, false /* not low speed */);
+      usb_device_discovered(&hc->hcd, p, USB_SPEED_HIGH);
     } else {
       klog_puts("       Port ");
       klog_uint64(p);

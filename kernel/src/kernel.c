@@ -37,6 +37,7 @@
 #include "drivers/usb/ohci.h"
 #include "drivers/usb/uhci.h"
 #include "drivers/usb/usb.h"
+#include "drivers/usb/xhci.h"
 #include "drivers/virtio/virtio.h"
 #include "drivers/gpu/virtio_gpu/virtio_gpu.h"
 
@@ -411,6 +412,7 @@ void kmain_high_half(void) {
 
   ehci_init();
   ehci_hand_to_companion();
+  xhci_init();
   uhci_init();
   ohci_init();
 

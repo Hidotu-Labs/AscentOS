@@ -28,6 +28,7 @@ struct usb_mouse_report {
 // Try to attach a USB mouse driver to this device.
 // Returns true if the device is a mouse and was successfully initialized.
 bool usb_mouse_probe(struct usb_device *dev);
+void usb_mouse_disconnect(struct usb_device *dev);
 
 // Called periodically to poll the mouse for new data.
 // Invoked from the UHCI IRQ handler on IOC completion.

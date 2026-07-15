@@ -12,6 +12,7 @@
 #define MAX_USB_DEVICES 128
 static struct usb_device *devices[MAX_USB_DEVICES];
 static int device_count = 0;
+static uint32_t next_generation = 1;
 
 void usb_enumerate_device(struct usb_device *dev);
 
@@ -26,10 +27,81 @@ void usb_init(void) {
     devices[i] = NULL;
 }
 
-void usb_device_discovered(struct usb_hcd *hcd, uint8_t port, bool low_speed) {
+const char *usb_speed_name(enum usb_speed speed) {
+  switch (speed) {
+  case USB_SPEED_LOW: return "Low-Speed";
+  case USB_SPEED_FULL: return "Full-Speed";
+  case USB_SPEED_HIGH: return "High-Speed";
+  case USB_SPEED_SUPER: return "SuperSpeed";
+  case USB_SPEED_SUPER_PLUS: return "SuperSpeedPlus";
+  default: return "Unknown-Speed";
+  }
+}
+
+bool usb_speed_is_low(enum usb_speed speed) { return speed == USB_SPEED_LOW; }
+
+int usb_control_transfer(struct usb_device *dev,
+                         struct usb_control_request *req, void *data,
+                         uint16_t len) {
+  if (!dev || !dev->hcd || !dev->connected ||
+      (!dev->hcd->control_device && !dev->hcd->control_transfer))
+    return -1;
+  dev->hcd->stats.control_submitted++;
+  int result;
+  if (dev->hcd->control_device)
+    result = dev->hcd->control_device(dev->hcd, dev, req, data, len);
+  else
+    result = dev->hcd->control_transfer(dev->hcd, dev->address, req, data,
+                                        len, dev->speed);
+  if (result < 0)
+    dev->hcd->stats.control_failed++;
+  else
+    dev->hcd->stats.control_completed++;
+  return result;
+}
+
+struct usb_interrupt_pipe *usb_interrupt_open(
+    struct usb_device *dev, uint8_t endpoint, uint16_t max_packet,
+    uint8_t interval, void *buffer, uint64_t buffer_phys) {
+  if (!dev || !dev->connected || !dev->hcd || !dev->hcd->interrupt_open)
+    return NULL;
+  return dev->hcd->interrupt_open(dev->hcd, dev, endpoint, max_packet,
+                                  interval, buffer, buffer_phys);
+}
+
+bool usb_interrupt_completed(struct usb_interrupt_pipe *pipe) {
+  if (!pipe || !pipe->active || !pipe->dev || !pipe->dev->hcd ||
+      !pipe->dev->hcd->interrupt_completed)
+    return false;
+  bool completed = pipe->dev->hcd->interrupt_completed(pipe->dev->hcd, pipe);
+  if (completed)
+    pipe->dev->hcd->stats.interrupt_completed++;
+  return completed;
+}
+
+int usb_interrupt_resubmit(struct usb_interrupt_pipe *pipe) {
+  if (!pipe || !pipe->active || !pipe->dev || !pipe->dev->hcd ||
+      !pipe->dev->hcd->interrupt_resubmit)
+    return -1;
+  return pipe->dev->hcd->interrupt_resubmit(pipe->dev->hcd, pipe);
+}
+
+void usb_interrupt_cancel(struct usb_interrupt_pipe *pipe) {
+  if (!pipe || !pipe->active || !pipe->dev || !pipe->dev->hcd)
+    return;
+  if (pipe->dev->hcd->interrupt_cancel)
+    pipe->dev->hcd->interrupt_cancel(pipe->dev->hcd, pipe);
+  pipe->active = false;
+  pipe->dev->hcd->stats.cancellations++;
+}
+
+void usb_device_discovered(struct usb_hcd *hcd, uint8_t port,
+                           enum usb_speed speed) {
   klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " USB: New device detected on port ");
   klog_uint64(port + 1);
-  klog_puts(low_speed ? " (Low-Speed)\n" : " (Full-Speed)\n");
+  klog_puts(" (");
+  klog_puts(usb_speed_name(speed));
+  klog_puts(")\n");
 
   if (device_count >= MAX_USB_DEVICES)
     return;
@@ -41,10 +113,19 @@ void usb_device_discovered(struct usb_hcd *hcd, uint8_t port, bool low_speed) {
   dev->address = 0; // Not yet assigned
   dev->port = port;
   dev->connected = true;
-  dev->low_speed = low_speed;
+  dev->speed = speed;
+  dev->generation = next_generation++;
+  dev->hcd_data = NULL;
   dev->hcd = hcd;
+  hcd->stats.devices_connected++;
 
   devices[device_count++] = dev;
+
+  if (hcd->device_prepare && hcd->device_prepare(hcd, dev) < 0) {
+    dev->connected = false;
+    klog_puts("[USB] Host controller failed to prepare device\n");
+    return;
+  }
 
 
   usb_enumerate_device(dev);
@@ -62,8 +143,7 @@ void usb_enumerate_device(struct usb_device *dev) {
   req.index = 0;
   req.length = 8;
 
-  int res = dev->hcd->control_transfer(dev->hcd, 0, &req, &dev->desc, 8,
-                                       dev->low_speed);
+  int res = usb_control_transfer(dev, &req, &dev->desc, 8);
   if (res < 0) {
     klog_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " USB: Failed to get device descriptor (8 bytes)\n");
     return;
@@ -81,13 +161,20 @@ void usb_enumerate_device(struct usb_device *dev) {
   req.index = 0;
   req.length = 0;
 
-  res = dev->hcd->control_transfer(dev->hcd, 0, &req, NULL, 0, dev->low_speed);
+  if (dev->hcd->address_device) {
+    res = dev->hcd->address_device(dev->hcd, dev, new_addr);
+    if (res == 0 && dev->address == 0)
+      res = -1;
+  } else {
+    res = usb_control_transfer(dev, &req, NULL, 0);
+    if (res == 0)
+      dev->address = new_addr;
+  }
   if (res < 0) {
     klog_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " USB: Failed to set address\n");
     return;
   }
 
-  dev->address = new_addr;
   for (int i = 0; i < 1000; i++)
     io_wait(); // Wait for address to settle
 
@@ -98,8 +185,7 @@ void usb_enumerate_device(struct usb_device *dev) {
   req.index = 0;
   req.length = 18;
 
-  res = dev->hcd->control_transfer(dev->hcd, dev->address, &req, &dev->desc, 18,
-                                   dev->low_speed);
+  res = usb_control_transfer(dev, &req, &dev->desc, 18);
   if (res < 0) {
     klog_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET " USB: Failed to get full device descriptor\n");
     return;
@@ -116,5 +202,23 @@ void usb_enumerate_device(struct usb_device *dev) {
     klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " USB: Keyboard driver attached\n");
   } else if (usb_mouse_probe(dev)) {
     klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " USB: Mouse driver attached\n");
+  }
+}
+
+void usb_device_removed(struct usb_hcd *hcd, uint8_t port) {
+  for (int i = 0; i < device_count; i++) {
+    struct usb_device *dev = devices[i];
+    if (!dev || dev->hcd != hcd || dev->port != port || !dev->connected)
+      continue;
+    dev->connected = false;
+    hcd->stats.devices_removed++;
+    usb_kbd_disconnect(dev);
+    usb_mouse_disconnect(dev);
+    if (hcd->device_removed)
+      hcd->device_removed(hcd, dev);
+    klog_puts("[USB] Device removed from port ");
+    klog_uint64(port + 1);
+    klog_puts("\n");
+    return;
   }
 }

@@ -7,6 +7,7 @@
 #include "drivers/input/keyboard.h"
 #include "drivers/serial.h"
 #include "drivers/storage/block.h"
+#include "drivers/usb/xhci.h"
 #include "drivers/virtio/virtio.h"
 #include "fs/ext2.h"
 #include "fs/vfs.h"
@@ -121,6 +122,7 @@ static void execute_command(char *cmd) {
                  "[args...])\n");
     console_puts("  pmmtest   - Test the PMM buddy allocator\n");
     console_puts("  virtio-test - Stress the VirtIO split-queue transport\n");
+    console_puts("  xhci-phase2-test - Reset/ring stress for xHCI\n");
     console_puts(
         "  vmmtest   - Test the VMM demand paging and mapping bounds\n");
     console_puts(
@@ -1857,6 +1859,12 @@ static void execute_command(char *cmd) {
         console_puts("chown failed.\n");
       }
     }
+  } else if (strcmp(cmd, "xhci-phase2-test") == 0) {
+    console_puts("[XHCI] Phase 2 stress: 10 resets, 10000 commands...\n");
+    if (xhci_phase2_stress(10, 10000))
+      console_puts("[XHCI] Phase 2 stress PASS\n");
+    else
+      console_puts("[XHCI] Phase 2 stress FAIL\n");
   } else if (strcmp(cmd, "test_ring3_phase1") == 0) {
     console_puts("Phase 1: GDT & TSS Verification\n");
     uint8_t sgdt_buf[10];

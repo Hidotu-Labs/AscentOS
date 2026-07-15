@@ -33,6 +33,7 @@ struct usb_kbd_report {
 // Try to attach a USB keyboard driver to this device.
 // Returns true if the device is a keyboard and was successfully initialized.
 bool usb_kbd_probe(struct usb_device *dev);
+void usb_kbd_disconnect(struct usb_device *dev);
 
 // Called periodically to poll the keyboard for new data.
 

@@ -295,7 +295,8 @@ static void ohci_probe_ports(struct ohci_controller *hc) {
       status = ohci_read32(hc, reg);
       if ((status & OHCI_PORT_CCS) && (status & OHCI_PORT_PES)) {
         low_speed = (status & OHCI_PORT_LSDA) != 0;
-        usb_device_discovered(&hc->hcd, i, low_speed);
+        usb_device_discovered(&hc->hcd, i,
+                              low_speed ? USB_SPEED_LOW : USB_SPEED_FULL);
       } else {
         klog_puts("[OHCI] Port ");
         klog_uint64(i + 1);
@@ -449,9 +450,11 @@ static int ohci_control_transfer(struct ohci_controller *hc, uint8_t addr,
 
 static int ohci_hcd_control_transfer(struct usb_hcd *hcd, uint8_t addr,
                                      struct usb_control_request *req,
-                                     void *data, uint16_t len, bool low_speed) {
+                                     void *data, uint16_t len,
+                                     enum usb_speed speed) {
   struct ohci_controller *hc = (struct ohci_controller *)hcd->priv;
-  return ohci_control_transfer(hc, addr, req, data, len, low_speed);
+  return ohci_control_transfer(hc, addr, req, data, len,
+                               usb_speed_is_low(speed));
 }
 
 // Interrupt Handler
@@ -598,7 +601,10 @@ static bool ohci_probe_pci_device(struct pci_device *pci) {
 
   // Register as HCD
   hc->hcd.priv = hc;
+  hc->hcd.name = "ohci";
   hc->hcd.control_transfer = ohci_hcd_control_transfer;
+  hc->hcd.address_device = NULL;
+  hc->hcd.device_removed = NULL;
 
   // Enable PCI Bus Mastering
   pci_config_write32(hc->pci_bus, hc->pci_slot, hc->pci_func, 0x04, 0x07);

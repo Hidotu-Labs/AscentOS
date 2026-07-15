@@ -108,6 +108,7 @@ struct usb_mouse_state {
 
   // Interrupt transfer scheduling (EHCI path)
   struct ehci_int_pipe *ehci_pipe;
+  struct usb_interrupt_pipe *generic_pipe;
 
   bool active;
 };
@@ -221,7 +222,7 @@ static void usb_mouse_setup_interrupt_xfer(struct usb_mouse_state *mouse) {
   // Build the TD for an IN transfer from the interrupt endpoint
   mouse->int_td->link = TD_LINK_TERMINATE;
   mouse->int_td->status = TD_STATUS_ACTIVE | TD_STATUS_IOC | TD_STATUS_C_ERR;
-  if (mouse->dev->low_speed)
+  if (usb_speed_is_low(mouse->dev->speed))
     mouse->int_td->status |= TD_STATUS_LS;
 
   uint16_t max_len = mouse->max_packet - 1; // MaxLen field = actual_len - 1
@@ -276,7 +277,7 @@ static void usb_mouse_resubmit_td(struct usb_mouse_state *mouse) {
 
   mouse->int_td->link = TD_LINK_TERMINATE;
   mouse->int_td->status = TD_STATUS_ACTIVE | TD_STATUS_IOC | TD_STATUS_C_ERR;
-  if (mouse->dev->low_speed)
+  if (usb_speed_is_low(mouse->dev->speed))
     mouse->int_td->status |= TD_STATUS_LS;
 
   mouse->int_td->token = ((uint32_t)max_len << 21) |
@@ -294,7 +295,15 @@ static void usb_mouse_resubmit_td(struct usb_mouse_state *mouse) {
 // Probe & Initialization
 
 bool usb_mouse_probe(struct usb_device *dev) {
-  if (mouse_count >= MAX_USB_MICE)
+  int state_index = -1;
+  for (int i = 0; i < mouse_count; i++)
+    if (!mice[i].active) {
+      state_index = i;
+      break;
+    }
+  if (state_index < 0 && mouse_count < MAX_USB_MICE)
+    state_index = mouse_count++;
+  if (state_index < 0)
     return false;
 
   // Only cast to uhci_controller if this device is actually on a UHCI HCD.
@@ -316,8 +325,7 @@ bool usb_mouse_probe(struct usb_device *dev) {
   req.index = 0;
   req.length = 9;
 
-  int res = dev->hcd->control_transfer(dev->hcd, dev->address, &req, config_buf,
-                                       9, dev->low_speed);
+  int res = usb_control_transfer(dev, &req, config_buf, 9);
   if (res < 0) {
     klog_puts("[USB-MOUSE] Failed to get config descriptor header\n");
     return false;
@@ -331,8 +339,7 @@ bool usb_mouse_probe(struct usb_device *dev) {
 
   // Read the full configuration descriptor bundle
   req.length = total_len;
-  res = dev->hcd->control_transfer(dev->hcd, dev->address, &req, config_buf,
-                                   total_len, dev->low_speed);
+  res = usb_control_transfer(dev, &req, config_buf, total_len);
   if (res < 0) {
     klog_puts("[USB-MOUSE] Failed to get full config descriptor\n");
     return false;
@@ -412,8 +419,7 @@ bool usb_mouse_probe(struct usb_device *dev) {
   req.index = 0;
   req.length = 0;
 
-  res = dev->hcd->control_transfer(dev->hcd, dev->address, &req, NULL, 0,
-                                   dev->low_speed);
+  res = usb_control_transfer(dev, &req, NULL, 0);
   if (res < 0) {
     klog_puts("[USB-MOUSE] SET_CONFIGURATION failed\n");
     return false;
@@ -430,8 +436,7 @@ bool usb_mouse_probe(struct usb_device *dev) {
   req.index = 0;
   req.length = 0;
 
-  res = dev->hcd->control_transfer(dev->hcd, dev->address, &req, NULL, 0,
-                                   dev->low_speed);
+  res = usb_control_transfer(dev, &req, NULL, 0);
   if (res < 0) {
     klog_puts("[USB-MOUSE] SET_PROTOCOL failed (non-fatal)\n");
   }
@@ -443,8 +448,7 @@ bool usb_mouse_probe(struct usb_device *dev) {
   req.index = 0;
   req.length = 0;
 
-  res = dev->hcd->control_transfer(dev->hcd, dev->address, &req, NULL, 0,
-                                   dev->low_speed);
+  res = usb_control_transfer(dev, &req, NULL, 0);
   if (res < 0) {
     klog_puts("[USB-MOUSE] SET_IDLE failed (non-fatal)\n");
   }
@@ -463,7 +467,7 @@ bool usb_mouse_probe(struct usb_device *dev) {
     p[i] = 0;
 
   // 7. Set up mouse state
-  struct usb_mouse_state *ms = &mice[mouse_count];
+  struct usb_mouse_state *ms = &mice[state_index];
   ms->dev = dev;
   ms->hc = hc;
   ms->ep_addr = ep_addr;
@@ -476,10 +480,13 @@ bool usb_mouse_probe(struct usb_device *dev) {
   ms->prev_buttons = 0;
   ms->active = true;
 
-  mouse_count++;
-
   // 8. Schedule the interrupt transfer
-  if (ms->hc != NULL) {
+  ms->generic_pipe = usb_interrupt_open(
+      dev, ms->ep_addr, ms->max_packet, ms->interval, ms->report_buf,
+      ms->report_buf_phys);
+  if (ms->generic_pipe) {
+    klog_puts("[USB-MOUSE] Generic HCD interrupt pipe active\n");
+  } else if (ms->hc != NULL) {
     // UHCI path
     usb_mouse_setup_interrupt_xfer(ms);
   } else {
@@ -491,7 +498,7 @@ bool usb_mouse_probe(struct usb_device *dev) {
       if (ehc && dev->hcd->priv == ehc) {
         ms->ehci_pipe = ehci_setup_int_in(
             ehc, dev->address, ms->ep_number, ms->max_packet, ms->interval,
-            dev->low_speed, ms->report_buf, ms->report_buf_phys);
+            usb_speed_is_low(dev->speed), ms->report_buf, ms->report_buf_phys);
         if (ms->ehci_pipe)
           pipe_found = true;
         else
@@ -507,7 +514,7 @@ bool usb_mouse_probe(struct usb_device *dev) {
         if (ohc && dev->hcd->priv == ohc) {
           ms->ohci_pipe = ohci_setup_int_in(
               ohc, dev->address, ms->ep_number, ms->max_packet, ms->interval,
-              dev->low_speed, ms->report_buf, ms->report_buf_phys);
+              usb_speed_is_low(dev->speed), ms->report_buf, ms->report_buf_phys);
           if (ms->ohci_pipe)
             pipe_found = true;
           else
@@ -527,6 +534,20 @@ bool usb_mouse_probe(struct usb_device *dev) {
   return true;
 }
 
+void usb_mouse_disconnect(struct usb_device *dev) {
+  for (int i = 0; i < mouse_count; i++) {
+    struct usb_mouse_state *ms = &mice[i];
+    if (!ms->active || ms->dev != dev)
+      continue;
+    if (ms->generic_pipe)
+      usb_interrupt_cancel(ms->generic_pipe);
+    ms->generic_pipe = NULL;
+    ms->active = false;
+    ms->dev = NULL;
+    klog_puts("[USB-MOUSE] Mouse detached\n");
+  }
+}
+
 // Polling
 // Called from the UHCI IRQ handler on IOC completion to check if
 // any mouse has new data.
@@ -536,6 +557,19 @@ void usb_mouse_poll(void) {
     struct usb_mouse_state *ms = &mice[i];
     if (!ms->active)
       continue;
+
+    if (ms->generic_pipe) {
+      if (!usb_interrupt_completed(ms->generic_pipe))
+        continue;
+      uint8_t *buf = ms->generic_pipe->buffer;
+      bool has_motion = buf[1] != 0 || buf[2] != 0;
+      bool has_wheel = ms->max_packet >= 4 && buf[3] != 0;
+      bool btn_changed = buf[0] != ms->prev_buttons;
+      if (has_motion || has_wheel || btn_changed)
+        usb_mouse_process_report(ms, buf, ms->max_packet);
+      usb_interrupt_resubmit(ms->generic_pipe);
+      continue;
+    }
 
     // EHCI path
     if (ms->ehci_pipe) {

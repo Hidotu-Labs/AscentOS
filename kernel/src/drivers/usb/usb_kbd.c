@@ -264,6 +264,7 @@ struct usb_kbd_state {
 
   // Interrupt transfer scheduling (EHCI path)
   struct ehci_int_pipe *ehci_pipe;
+  struct usb_interrupt_pipe *generic_pipe;
 
   bool active;
   uint8_t last_pressed_usage;
@@ -534,8 +535,7 @@ static void usb_kbd_update_leds(struct usb_kbd_state *kbd) {
   req.index = kbd->interface_number;
   req.length = 1;
 
-  kbd->dev->hcd->control_transfer(kbd->dev->hcd, kbd->dev->address, &req,
-                                  &report, 1, kbd->dev->low_speed);
+  usb_control_transfer(kbd->dev, &req, &report, 1);
 }
 
 // Interrupt Transfer Setup
@@ -563,7 +563,7 @@ static void usb_kbd_setup_interrupt_xfer(struct usb_kbd_state *kbd) {
   // Build the TD for an IN transfer from the interrupt endpoint
   kbd->int_td->link = TD_LINK_TERMINATE;
   kbd->int_td->status = TD_STATUS_ACTIVE | TD_STATUS_IOC | TD_STATUS_C_ERR;
-  if (kbd->dev->low_speed)
+  if (usb_speed_is_low(kbd->dev->speed))
     kbd->int_td->status |= TD_STATUS_LS;
 
   uint16_t max_len = kbd->max_packet - 1; // MaxLen field = actual_len - 1
@@ -620,7 +620,7 @@ static void usb_kbd_resubmit_td(struct usb_kbd_state *kbd) {
 
   kbd->int_td->link = TD_LINK_TERMINATE;
   kbd->int_td->status = TD_STATUS_ACTIVE | TD_STATUS_IOC | TD_STATUS_C_ERR;
-  if (kbd->dev->low_speed)
+  if (usb_speed_is_low(kbd->dev->speed))
     kbd->int_td->status |= TD_STATUS_LS;
 
   kbd->int_td->token = ((uint32_t)max_len << 21) |
@@ -638,7 +638,15 @@ static void usb_kbd_resubmit_td(struct usb_kbd_state *kbd) {
 // Probe & Initialization
 
 bool usb_kbd_probe(struct usb_device *dev) {
-  if (kbd_count >= MAX_USB_KEYBOARDS)
+  int state_index = -1;
+  for (int i = 0; i < kbd_count; i++)
+    if (!keyboards[i].active) {
+      state_index = i;
+      break;
+    }
+  if (state_index < 0 && kbd_count < MAX_USB_KEYBOARDS)
+    state_index = kbd_count++;
+  if (state_index < 0)
     return false;
 
   // Only cast to uhci_controller if this device is actually on a UHCI HCD.
@@ -661,8 +669,7 @@ bool usb_kbd_probe(struct usb_device *dev) {
   req.index = 0;
   req.length = 9;
 
-  int res = dev->hcd->control_transfer(dev->hcd, dev->address, &req, config_buf,
-                                       9, dev->low_speed);
+  int res = usb_control_transfer(dev, &req, config_buf, 9);
   if (res < 0) {
     klog_puts("[USB-KBD] Failed to get config descriptor header\n");
     return false;
@@ -676,8 +683,7 @@ bool usb_kbd_probe(struct usb_device *dev) {
 
   // Read the full configuration descriptor bundle
   req.length = total_len;
-  res = dev->hcd->control_transfer(dev->hcd, dev->address, &req, config_buf,
-                                   total_len, dev->low_speed);
+  res = usb_control_transfer(dev, &req, config_buf, total_len);
   if (res < 0) {
     klog_puts("[USB-KBD] Failed to get full config descriptor\n");
     return false;
@@ -763,8 +769,7 @@ bool usb_kbd_probe(struct usb_device *dev) {
   req.index = 0;
   req.length = 0;
 
-  res = dev->hcd->control_transfer(dev->hcd, dev->address, &req, NULL, 0,
-                                   dev->low_speed);
+  res = usb_control_transfer(dev, &req, NULL, 0);
   if (res < 0) {
     klog_puts("[USB-KBD] SET_CONFIGURATION failed\n");
     return false;
@@ -782,8 +787,7 @@ bool usb_kbd_probe(struct usb_device *dev) {
   req.index = 0;
   req.length = 0;
 
-  res = dev->hcd->control_transfer(dev->hcd, dev->address, &req, NULL, 0,
-                                   dev->low_speed);
+  res = usb_control_transfer(dev, &req, NULL, 0);
   if (res < 0) {
     klog_puts("[USB-KBD] SET_PROTOCOL failed (non-fatal)\n");
     // Not fatal — many keyboards work in boot protocol by default
@@ -797,8 +801,7 @@ bool usb_kbd_probe(struct usb_device *dev) {
   req.index = 0;
   req.length = 0;
 
-  res = dev->hcd->control_transfer(dev->hcd, dev->address, &req, NULL, 0,
-                                   dev->low_speed);
+  res = usb_control_transfer(dev, &req, NULL, 0);
   if (res < 0) {
     klog_puts("[USB-KBD] SET_IDLE failed (non-fatal)\n");
   }
@@ -817,7 +820,7 @@ bool usb_kbd_probe(struct usb_device *dev) {
     p[i] = 0;
 
   // 7. Set up keyboard state
-  struct usb_kbd_state *kbd = &keyboards[kbd_count];
+  struct usb_kbd_state *kbd = &keyboards[state_index];
   kbd->dev = dev;
   kbd->hc = hc;
   kbd->ep_addr = ep_addr;
@@ -835,10 +838,13 @@ bool usb_kbd_probe(struct usb_device *dev) {
   for (int i = 0; i < 8; i++)
     ((uint8_t *)&kbd->prev_report)[i] = 0;
 
-  kbd_count++;
-
   // 8. Schedule the interrupt transfer
-  if (kbd->hc != NULL) {
+  kbd->generic_pipe = usb_interrupt_open(
+      dev, kbd->ep_addr, kbd->max_packet, kbd->interval, kbd->report_buf,
+      kbd->report_buf_phys);
+  if (kbd->generic_pipe) {
+    klog_puts("[USB-KBD] Generic HCD interrupt pipe active\n");
+  } else if (kbd->hc != NULL) {
     // UHCI path
     usb_kbd_setup_interrupt_xfer(kbd);
   } else {
@@ -850,7 +856,7 @@ bool usb_kbd_probe(struct usb_device *dev) {
       if (ehc && dev->hcd->priv == ehc) {
         kbd->ehci_pipe = ehci_setup_int_in(
             ehc, dev->address, kbd->ep_number, kbd->max_packet, kbd->interval,
-            dev->low_speed, kbd->report_buf, kbd->report_buf_phys);
+            usb_speed_is_low(dev->speed), kbd->report_buf, kbd->report_buf_phys);
         if (kbd->ehci_pipe)
           pipe_found = true;
         else
@@ -866,7 +872,7 @@ bool usb_kbd_probe(struct usb_device *dev) {
         if (ohc && dev->hcd->priv == ohc) {
           kbd->ohci_pipe = ohci_setup_int_in(
               ohc, dev->address, kbd->ep_number, kbd->max_packet, kbd->interval,
-              dev->low_speed, kbd->report_buf, kbd->report_buf_phys);
+              usb_speed_is_low(dev->speed), kbd->report_buf, kbd->report_buf_phys);
           if (kbd->ohci_pipe)
             pipe_found = true;
           else
@@ -886,6 +892,20 @@ bool usb_kbd_probe(struct usb_device *dev) {
   return true;
 }
 
+void usb_kbd_disconnect(struct usb_device *dev) {
+  for (int i = 0; i < kbd_count; i++) {
+    struct usb_kbd_state *kbd = &keyboards[i];
+    if (!kbd->active || kbd->dev != dev)
+      continue;
+    if (kbd->generic_pipe)
+      usb_interrupt_cancel(kbd->generic_pipe);
+    kbd->generic_pipe = NULL;
+    kbd->active = false;
+    kbd->dev = NULL;
+    klog_puts("[USB-KBD] Keyboard detached\n");
+  }
+}
+
 // Polling
 // Called from the UHCI/OHCI IRQ handler to check if any keyboard has new data.
 
@@ -894,6 +914,26 @@ void usb_kbd_poll(void) {
     struct usb_kbd_state *kbd = &keyboards[i];
     if (!kbd->active)
       continue;
+
+    if (kbd->generic_pipe) {
+      if (!usb_interrupt_completed(kbd->generic_pipe))
+        continue;
+      uint8_t *buf = kbd->generic_pipe->buffer;
+      struct usb_kbd_report report;
+      report.modifiers = buf[0];
+      report.reserved = buf[1];
+      for (int j = 0; j < 6; j++)
+        report.keys[j] = buf[j + 2];
+      bool changed = report.modifiers != kbd->prev_report.modifiers;
+      for (int j = 0; !changed && j < 6; j++)
+        changed = report.keys[j] != kbd->prev_report.keys[j];
+      if (changed)
+        usb_kbd_process_report(kbd, &report);
+      else
+        usb_kbd_handle_repeat(kbd);
+      usb_interrupt_resubmit(kbd->generic_pipe);
+      continue;
+    }
 
     // EHCI path
     if (kbd->ehci_pipe) {

@@ -4,6 +4,38 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+enum usb_speed {
+  USB_SPEED_UNKNOWN = 0,
+  USB_SPEED_LOW,
+  USB_SPEED_FULL,
+  USB_SPEED_HIGH,
+  USB_SPEED_SUPER,
+  USB_SPEED_SUPER_PLUS,
+};
+
+struct usb_device;
+struct usb_interrupt_pipe;
+
+struct usb_hcd_stats {
+  uint64_t control_submitted;
+  uint64_t control_completed;
+  uint64_t control_failed;
+  uint64_t devices_connected;
+  uint64_t devices_removed;
+  uint64_t interrupt_completed;
+  uint64_t cancellations;
+};
+
+struct usb_interrupt_pipe {
+  struct usb_device *dev;
+  void *hcd_data;
+  void *buffer;
+  uint64_t buffer_phys;
+  uint16_t buffer_len;
+  uint8_t endpoint;
+  bool active;
+};
+
 // USB Request Types
 #define USB_REQ_GET_STATUS 0x00
 #define USB_REQ_CLEAR_FEATURE 0x01
@@ -50,9 +82,29 @@ struct usb_device_descriptor {
 // Host Controller Interface
 struct usb_hcd {
   void *priv; // Pointer to controller-specific state (e.g. uhci_controller)
+  const char *name;
   int (*control_transfer)(struct usb_hcd *hcd, uint8_t addr,
                           struct usb_control_request *req, void *data,
-                          uint16_t len, bool low_speed);
+                          uint16_t len, enum usb_speed speed);
+  int (*control_device)(struct usb_hcd *hcd, struct usb_device *dev,
+                        struct usb_control_request *req, void *data,
+                        uint16_t len);
+  int (*device_prepare)(struct usb_hcd *hcd, struct usb_device *dev);
+  // On success the HCD stores the controller-assigned address in dev->address.
+  int (*address_device)(struct usb_hcd *hcd, struct usb_device *dev,
+                        uint8_t requested_address);
+  void (*device_removed)(struct usb_hcd *hcd, struct usb_device *dev);
+  struct usb_interrupt_pipe *(*interrupt_open)(
+      struct usb_hcd *hcd, struct usb_device *dev, uint8_t endpoint,
+      uint16_t max_packet, uint8_t interval, void *buffer,
+      uint64_t buffer_phys);
+  bool (*interrupt_completed)(struct usb_hcd *hcd,
+                              struct usb_interrupt_pipe *pipe);
+  int (*interrupt_resubmit)(struct usb_hcd *hcd,
+                            struct usb_interrupt_pipe *pipe);
+  void (*interrupt_cancel)(struct usb_hcd *hcd,
+                           struct usb_interrupt_pipe *pipe);
+  struct usb_hcd_stats stats;
 };
 
 // Device Structure
@@ -60,7 +112,9 @@ struct usb_device {
   uint8_t address;
   uint8_t port;
   bool connected;
-  bool low_speed;
+  enum usb_speed speed;
+  uint32_t generation;
+  void *hcd_data;
   struct usb_device_descriptor desc;
   struct usb_hcd *hcd; // Reference to the host controller driver
 };
@@ -69,8 +123,21 @@ struct usb_device {
 
 void usb_init(void);
 void usb_enumerate_device(struct usb_device *dev);
+const char *usb_speed_name(enum usb_speed speed);
+bool usb_speed_is_low(enum usb_speed speed);
+int usb_control_transfer(struct usb_device *dev,
+                         struct usb_control_request *req, void *data,
+                         uint16_t len);
+struct usb_interrupt_pipe *usb_interrupt_open(
+    struct usb_device *dev, uint8_t endpoint, uint16_t max_packet,
+    uint8_t interval, void *buffer, uint64_t buffer_phys);
+bool usb_interrupt_completed(struct usb_interrupt_pipe *pipe);
+int usb_interrupt_resubmit(struct usb_interrupt_pipe *pipe);
+void usb_interrupt_cancel(struct usb_interrupt_pipe *pipe);
 
 // Called by HC driver when a new device is detected on a root hub port
-void usb_device_discovered(struct usb_hcd *hcd, uint8_t port, bool low_speed);
+void usb_device_discovered(struct usb_hcd *hcd, uint8_t port,
+                           enum usb_speed speed);
+void usb_device_removed(struct usb_hcd *hcd, uint8_t port);
 
 #endif

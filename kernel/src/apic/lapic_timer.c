@@ -5,6 +5,7 @@
 #include "../console/console.h"
 #include "../console/klog.h"
 #include "../cpu/tsc.h"
+#include "../drivers/usb/xhci.h"
 #include "../io/io.h"
 #include "../sched/sched.h"
 #include "../smp/cpu.h"
@@ -48,6 +49,8 @@ void lapic_timer_handler(struct registers *regs) {
     if (cpu) cpu->timer_deadline_ms = 0;
     extern void timerfd_tick(void);
     timerfd_tick();
+    if (cpu == cpu_get_bsp())
+        xhci_msix_watchdog();
 
     // Send EOI BEFORE context switch. This is a special case - normally
     // isr_handler sends EOI after the handler returns. But the scheduler

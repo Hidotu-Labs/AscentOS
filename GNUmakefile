@@ -23,6 +23,13 @@ QUAKE2_BUNDLE_FILES := \
 	userland/quake2/baseq2/pak0.pak \
 	userland/quake2/baseq2/autoexec.cfg
 
+# The Quake II script produces the engine, renderer, game library, config, and
+# demo data as one bundle. A grouped target ensures parallel userland builds
+# invoke the script only once when any part of that bundle needs rebuilding.
+$(QUAKE2_BUNDLE_FILES) &: scripts/build-quake2.sh \
+		scripts/quake2-sdl2-config.in scripts/quake2-ascentos-evdev.h
+	./scripts/build-quake2.sh
+
 HOST_CC := cc
 HOST_CFLAGS := -g -O2 -pipe
 HOST_CPPFLAGS :=
@@ -132,7 +139,7 @@ run-x86_64: edk2-ovmf $(IMAGE_NAME).iso disk.img
 		-drive if=pflash,unit=0,format=raw,file=edk2-ovmf/ovmf-code-$(ARCH).fd,readonly=on \
 		-cdrom $(IMAGE_NAME).iso \
 		-drive file=disk.img,format=raw,if=ide \
-		-cpu host -enable-kvm \
+		-smp 4 \
 		-serial stdio \
 		-audiodev pa,id=snd0 \
 		-device rtl8139,netdev=net0 \
@@ -140,8 +147,9 @@ run-x86_64: edk2-ovmf $(IMAGE_NAME).iso disk.img
 		-device sb16,audiodev=snd0 \
 		-device AC97,audiodev=snd0 \
 		-device intel-hda -device hda-duplex,audiodev=snd0 \
-		-device usb-ehci,id=ehci \
-		-device usb-tablet,bus=ehci.0 \
+		-device qemu-xhci,id=xhci \
+		-device usb-kbd,bus=xhci.0 \
+		-device usb-mouse,bus=xhci.0 \
 		$(QEMUFLAGS)
 
 .PHONY: run-bios
