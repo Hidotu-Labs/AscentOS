@@ -80,30 +80,30 @@ bool pcie_available(uint8_t bus) {
     return false;
 }
 
-static void *pcie_get_config_addr(uint8_t bus, uint8_t slot, uint8_t func, uint16_t offset) {
-    struct device *pci_root = device_find_by_path("/sys/pci");
-    if (!pci_root) return NULL;
+static void *pcie_get_config_addr(uint8_t bus, uint8_t slot, uint8_t func,
+                                  uint16_t offset) {
+    if (!mcfg || slot >= 32 || func >= 8 || offset >= 4096)
+        return NULL;
 
-    // Iterate segments in the tree
-    struct device *seg = pci_root->first_child;
-    while (seg) {
-        // Find 'ecam' resource
-        for (size_t i = 0; i < seg->resource_count; i++) {
-            if (seg->resources[i].type == RES_MEM && strcmp(seg->resources[i].name, "ecam") == 0) {
-                // For simplicity, we assume one segment covers all buses for now, 
-                // or we could store bus ranges in the device properties.
-                // In a real UDM, we'd check if 'bus' is in this segment's range.
-                uint64_t addr = seg->resources[i].start;
-                addr += ((uint64_t)bus << 20);
-                addr += ((uint64_t)slot << 15);
-                addr += ((uint64_t)func << 12);
-                addr += offset;
-                return (void *)(addr + pmm_get_hhdm_offset());
-            }
-        }
-        seg = seg->next_sibling;
+    size_t entries =
+        (mcfg->header.length - sizeof(struct acpi_mcfg)) /
+        sizeof(struct acpi_mcfg_entry);
+    for (size_t i = 0; i < entries; i++) {
+        struct acpi_mcfg_entry *entry = &mcfg->entries[i];
+        if (entry->pci_segment_group_number != 0 ||
+            bus < entry->start_bus_number || bus > entry->end_bus_number)
+            continue;
+
+        /* ECAM bus offsets are relative to this allocation's start bus, not
+         * absolute PCI bus numbers. Using bus<<20 breaks firmware which splits
+         * segment zero into multiple MCFG allocations. */
+        uint64_t addr = entry->base_address;
+        addr += (uint64_t)(bus - entry->start_bus_number) << 20;
+        addr += (uint64_t)slot << 15;
+        addr += (uint64_t)func << 12;
+        addr += offset;
+        return (void *)(addr + pmm_get_hhdm_offset());
     }
-
     return NULL;
 }
 

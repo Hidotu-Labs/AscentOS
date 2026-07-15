@@ -145,6 +145,8 @@ struct ohci_controller {
   uint16_t vendor_id, device_id;
   uint8_t num_ports;
   bool present;
+  bool irq_registered;
+  uint64_t interrupts;
 
   struct ohci_hcca *hcca;
   uint32_t hcca_phys;

@@ -115,6 +115,8 @@ void usb_device_discovered(struct usb_hcd *hcd, uint8_t port,
   dev->connected = true;
   dev->speed = speed;
   dev->generation = next_generation++;
+  dev->configuration_value = 0;
+  dev->configured = false;
   dev->hcd_data = NULL;
   dev->hcd = hcd;
   hcd->stats.devices_connected++;
@@ -198,9 +200,12 @@ void usb_enumerate_device(struct usb_device *dev) {
   klog_puts("\n");
 
 
-  if (usb_kbd_probe(dev)) {
+  bool keyboard = usb_kbd_probe(dev);
+  bool mouse = usb_mouse_probe(dev);
+  if (keyboard) {
     klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " USB: Keyboard driver attached\n");
-  } else if (usb_mouse_probe(dev)) {
+  }
+  if (mouse) {
     klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " USB: Mouse driver attached\n");
   }
 }

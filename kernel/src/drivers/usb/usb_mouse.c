@@ -89,6 +89,7 @@ struct usb_mouse_state {
   uint16_t max_packet; // Max packet size from endpoint descriptor
   uint8_t interval;    // Polling interval (in ms frames)
   uint8_t data_toggle; // DATA0/DATA1 toggle for interrupt IN
+  uint8_t interface_number;
 
   // DMA buffer for interrupt transfer data
   void *report_buf;
@@ -352,6 +353,7 @@ bool usb_mouse_probe(struct usb_device *dev) {
   uint8_t config_value = cfg->config_value;
   bool found_mouse = false;
   bool in_mouse_iface = false;
+  uint8_t iface_num = 0;
 
   uint16_t offset = cfg->length;
   while (offset + 2 <= total_len) {
@@ -378,6 +380,7 @@ bool usb_mouse_probe(struct usb_device *dev) {
           iface->interface_protocol == USB_PROTOCOL_MOUSE) {
         found_mouse = true;
         in_mouse_iface = true;
+        iface_num = iface->interface_number;
       } else {
         in_mouse_iface = false;
       }
@@ -419,10 +422,14 @@ bool usb_mouse_probe(struct usb_device *dev) {
   req.index = 0;
   req.length = 0;
 
-  res = usb_control_transfer(dev, &req, NULL, 0);
-  if (res < 0) {
-    klog_puts("[USB-MOUSE] SET_CONFIGURATION failed\n");
-    return false;
+  if (!dev->configured || dev->configuration_value != config_value) {
+    res = usb_control_transfer(dev, &req, NULL, 0);
+    if (res < 0) {
+      klog_puts("[USB-MOUSE] SET_CONFIGURATION failed\n");
+      return false;
+    }
+    dev->configuration_value = config_value;
+    dev->configured = true;
   }
 
   // Small settle delay
@@ -433,7 +440,7 @@ bool usb_mouse_probe(struct usb_device *dev) {
   req.request_type = 0x21;
   req.request = USB_REQ_SET_PROTOCOL_M;
   req.value = HID_PROTOCOL_BOOT_M;
-  req.index = 0;
+  req.index = iface_num;
   req.length = 0;
 
   res = usb_control_transfer(dev, &req, NULL, 0);
@@ -445,7 +452,7 @@ bool usb_mouse_probe(struct usb_device *dev) {
   req.request_type = 0x21;
   req.request = USB_REQ_SET_IDLE_M;
   req.value = 0;
-  req.index = 0;
+  req.index = iface_num;
   req.length = 0;
 
   res = usb_control_transfer(dev, &req, NULL, 0);
@@ -475,6 +482,7 @@ bool usb_mouse_probe(struct usb_device *dev) {
   ms->max_packet = ep_max_packet;
   ms->interval = ep_interval;
   ms->data_toggle = 0;
+  ms->interface_number = iface_num;
   ms->report_buf = buf;
   ms->report_buf_phys = (uint32_t)phys;
   ms->prev_buttons = 0;

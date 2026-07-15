@@ -502,6 +502,7 @@ static void ehci_irq_handler(struct registers *regs) {
     if (active == 0)
       continue;
 
+    hc->interrupts++;
     // Acknowledge by writing back the active bits
     ehci_write_op(hc, EHCI_REG_USBSTS, active);
 
@@ -577,7 +578,9 @@ void ehci_init(void) {
       ehci_init_schedule(hc);
 
       // Register IRQ handler for EHCI interrupts
-      if (irq_install_handler(hc->irq_line, ehci_irq_handler, 0x000F)) {
+      hc->irq_registered =
+          irq_install_handler(hc->irq_line, ehci_irq_handler, 0x000F);
+      if (hc->irq_registered) {
         // Enable USB Interrupt, Error, Port Change, and Host System Error
         ehci_write_op(hc, EHCI_REG_USBINTR,
                       EHCI_INTR_USBINT | EHCI_INTR_ERROR | EHCI_INTR_PCD |

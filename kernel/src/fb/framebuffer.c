@@ -1214,9 +1214,15 @@ void fb_fill_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
 
 void fb_clear(uint32_t color) {
   void *target = backbuffer_enabled ? backbuffer : fb->address;
-  uint32_t total_pixels = fb->width * fb->height;
-  uint32_t *pixels = (uint32_t *)target;
-  fill_scanline32(pixels, total_pixels, color);
+  if (!target)
+    return;
+  for (uint32_t y = 0; y < fb->height; y++) {
+    uint32_t *line =
+        (uint32_t *)((uint8_t *)target + (uint64_t)y * fb->pitch);
+    fill_scanline32(line, fb->width, color);
+  }
+  if (!backbuffer_enabled)
+    __asm__ volatile("sfence" ::: "memory");
   fb_mark_dirty(0, 0, fb->width, fb->height);
 }
 

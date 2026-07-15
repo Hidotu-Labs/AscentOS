@@ -1,5 +1,6 @@
 #include "xhci.h"
 #include "../../apic/lapic.h"
+#include "../../apic/lapic_timer.h"
 #include "../../console/klog.h"
 #include "../../cpu/isr.h"
 #include "../../io/io.h"
@@ -32,8 +33,10 @@
 #define XHCI_TRB_DISABLE_SLOT 10U
 #define XHCI_TRB_ADDRESS_DEVICE 11U
 #define XHCI_TRB_CONFIGURE_ENDPOINT 12U
+#define XHCI_TRB_EVALUATE_CONTEXT 13U
 #define XHCI_TRB_RESET_ENDPOINT 14U
 #define XHCI_TRB_STOP_ENDPOINT 15U
+#define XHCI_TRB_SET_TR_DEQUEUE 16U
 #define XHCI_TRB_NOOP_CMD 23U
 #define XHCI_TRB_NORMAL 1U
 #define XHCI_TRB_TRANSFER_EVENT 32U
@@ -62,6 +65,13 @@
 
 static struct xhci_controller controllers[XHCI_MAX_CONTROLLERS];
 static int controller_count;
+static int matched_count;
+static const char *last_probe_failure = "none";
+static const char *last_dma_object = "none";
+static bool last_ac64;
+static const char *last_dma_layer = "none";
+static uint32_t last_dma_flags;
+static uint64_t last_dma_phys;
 
 static inline uint32_t mmio_read32(volatile void *base, uint32_t offset) {
   return *(volatile uint32_t *)((volatile uint8_t *)base + offset);
@@ -113,6 +123,14 @@ static bool xhci_wait32(volatile void *base, uint32_t offset, uint32_t mask,
   return false;
 }
 
+/* USB timing requirements are wall-clock requirements. A loop count based on
+   io_wait() is much shorter on physical machines than it is under emulation. */
+static void xhci_delay_ms(uint32_t ms) {
+  uint64_t deadline = lapic_timer_get_ms() + ms;
+  while (lapic_timer_get_ms() < deadline)
+    io_wait();
+}
+
 static void xhci_legacy_handoff(struct xhci_controller *hc,
                                 uint32_t hccparams1) {
   uint32_t offset = ((hccparams1 >> 16) & 0xFFFFU) * 4U;
@@ -132,7 +150,9 @@ static void xhci_legacy_handoff(struct xhci_controller *hc,
     }
     if (!next)
       return;
-    offset += next;
+    /* xECP Next is an absolute DWORD offset from the capability base, not an
+       offset relative to the current extended capability. */
+    offset = next;
   }
 }
 
@@ -154,28 +174,50 @@ static bool xhci_halt_reset(struct xhci_controller *hc) {
   return true;
 }
 
-static bool xhci_alloc_page(void **virt, uint64_t *phys) {
-  *virt = dma_alloc_page(phys);
+static bool xhci_alloc_page(struct xhci_controller *hc, void **virt,
+                            uint64_t *phys) {
+  uint32_t flags = hc->ac64 ? DMA_FLAG_ANYWHERE : DMA_FLAG_32BIT;
+  *virt = dma_alloc_page_flags(flags, phys);
+  return *virt != NULL && ((*phys & 0xFFFU) == 0);
+}
+
+static bool xhci_alloc_pages(struct xhci_controller *hc, size_t count,
+                             void **virt, uint64_t *phys) {
+  uint32_t flags = hc->ac64 ? DMA_FLAG_ANYWHERE : DMA_FLAG_32BIT;
+  *virt = dma_alloc_pages_flags(count, flags, phys);
   return *virt != NULL && ((*phys & 0xFFFU) == 0);
 }
 
 static bool xhci_alloc_runtime(struct xhci_controller *hc) {
-  if (!xhci_alloc_page(&hc->dcbaa, &hc->dcbaa_phys) ||
-      !xhci_alloc_page((void **)&hc->command_ring, &hc->command_ring_phys) ||
-      !xhci_alloc_page((void **)&hc->event_ring, &hc->event_ring_phys) ||
-      !xhci_alloc_page((void **)&hc->erst, &hc->erst_phys))
+  last_dma_object = "DCBAA";
+  if (!xhci_alloc_page(hc, &hc->dcbaa, &hc->dcbaa_phys))
+    return false;
+  last_dma_object = "command ring";
+  if (!xhci_alloc_page(hc, (void **)&hc->command_ring,
+                       &hc->command_ring_phys))
+    return false;
+  last_dma_object = "event ring";
+  if (!xhci_alloc_page(hc, (void **)&hc->event_ring, &hc->event_ring_phys))
+    return false;
+  last_dma_object = "ERST";
+  if (!xhci_alloc_page(hc, (void **)&hc->erst, &hc->erst_phys))
     return false;
 
   if (hc->scratchpad_count) {
-    if (hc->scratchpad_count > 32 ||
-        !xhci_alloc_page(&hc->scratchpad_array,
-                         &hc->scratchpad_array_phys))
+    last_dma_object = "scratchpad array";
+    size_t array_pages =
+        ((size_t)hc->scratchpad_count * sizeof(uint64_t) + 4095U) / 4096U;
+    if (!xhci_alloc_pages(hc, array_pages, &hc->scratchpad_array,
+                          &hc->scratchpad_array_phys))
       return false;
     uint64_t *array = (uint64_t *)hc->scratchpad_array;
     for (uint16_t i = 0; i < hc->scratchpad_count; i++) {
-      if (!xhci_alloc_page(&hc->scratchpads[i], &hc->scratchpad_phys[i]))
+      last_dma_object = "scratchpad page";
+      void *scratchpad;
+      uint64_t scratchpad_phys;
+      if (!xhci_alloc_page(hc, &scratchpad, &scratchpad_phys))
         return false;
-      array[i] = hc->scratchpad_phys[i];
+      array[i] = scratchpad_phys;
     }
     ((uint64_t *)hc->dcbaa)[0] = hc->scratchpad_array_phys;
   }
@@ -187,6 +229,7 @@ static bool xhci_alloc_runtime(struct xhci_controller *hc) {
       XHCI_TRB_TYPE(XHCI_TRB_LINK) | XHCI_TRB_CYCLE | (1U << 1);
   hc->erst[0].base = hc->event_ring_phys;
   hc->erst[0].size = XHCI_RING_TRBS;
+  last_dma_object = "none";
   return true;
 }
 
@@ -276,6 +319,8 @@ static bool xhci_submit_command(struct xhci_controller *hc, uint64_t parameter,
   uint16_t index = hc->command_enqueue;
   struct xhci_trb *trb = &hc->command_ring[index];
   uint64_t phys = hc->command_ring_phys + index * sizeof(*trb);
+  hc->debug_stage = "command submitted";
+  hc->debug_last_command_type = XHCI_TRB_TYPE_GET(control);
   trb->parameter = parameter;
   trb->status = status;
   trb->control = control | hc->command_cycle;
@@ -300,6 +345,9 @@ static bool xhci_submit_command(struct xhci_controller *hc, uint64_t parameter,
     if (cc) {
       if (slot_id)
         *slot_id = hc->last_command_slot;
+      hc->debug_last_slot = hc->last_command_slot;
+      hc->debug_stage = cc == XHCI_COMPLETION_SUCCESS ? "command completed"
+                                                     : "command failed";
       if (cc != XHCI_COMPLETION_SUCCESS) {
         klog_puts("[XHCI] Command failed: type=");
         klog_uint64(XHCI_TRB_TYPE_GET(control));
@@ -312,6 +360,9 @@ static bool xhci_submit_command(struct xhci_controller *hc, uint64_t parameter,
     io_wait();
   }
   hc->timeouts++;
+  hc->debug_stage = "command timeout";
+  hc->debug_usbcmd = mmio_read32(hc->op, XHCI_USBCMD);
+  hc->debug_usbsts = mmio_read32(hc->op, XHCI_USBSTS);
   klog_puts("[XHCI] Command timeout: USBSTS=0x");
   klog_hex32(mmio_read32(hc->op, XHCI_USBSTS));
   klog_puts(" enqueue=");
@@ -350,11 +401,13 @@ static uint16_t xhci_initial_mps(enum usb_speed speed) {
   return 8;
 }
 
-static bool xhci_slot_alloc(struct xhci_slot *slot) {
-  if (!xhci_alloc_page(&slot->output_context, &slot->output_context_phys) ||
-      !xhci_alloc_page(&slot->input_context, &slot->input_context_phys) ||
-      !xhci_alloc_page((void **)&slot->ep0_ring, &slot->ep0_ring_phys) ||
-      !xhci_alloc_page(&slot->control_buffer, &slot->control_buffer_phys))
+static bool xhci_slot_alloc(struct xhci_controller *hc,
+                            struct xhci_slot *slot) {
+  if (!xhci_alloc_page(hc, &slot->output_context,
+                       &slot->output_context_phys) ||
+      !xhci_alloc_page(hc, &slot->input_context, &slot->input_context_phys) ||
+      !xhci_alloc_page(hc, (void **)&slot->ep0_ring, &slot->ep0_ring_phys) ||
+      !xhci_alloc_page(hc, &slot->control_buffer, &slot->control_buffer_phys))
     return false;
   slot->ep0_cycle = 1;
   slot->ep0_ring[XHCI_RING_TRBS - 1].parameter = slot->ep0_ring_phys;
@@ -386,6 +439,8 @@ static void xhci_build_address_context(struct xhci_controller *hc,
 
 static int xhci_prepare_device(struct usb_hcd *hcd, struct usb_device *dev) {
   struct xhci_controller *hc = hcd->priv;
+  hc->debug_stage = "enable slot";
+  hc->debug_last_port = dev->port;
   uint8_t slot_id = 0;
   if (!xhci_submit_command(hc, 0, 0,
                            XHCI_TRB_TYPE(XHCI_TRB_ENABLE_SLOT), &slot_id) ||
@@ -399,53 +454,85 @@ static int xhci_prepare_device(struct usb_hcd *hcd, struct usb_device *dev) {
   slot->port = dev->port;
   slot->speed = dev->speed;
   slot->ep0_max_packet = xhci_initial_mps(dev->speed);
-  if (!xhci_slot_alloc(slot)) {
+  if (!xhci_slot_alloc(hc, slot)) {
     klog_puts("[XHCI] Slot DMA allocation failed\n");
     return -1;
   }
   ((uint64_t *)hc->dcbaa)[slot_id] = slot->output_context_phys;
+  hc->debug_stage = "address device";
   xhci_build_address_context(hc, slot);
   if (!xhci_submit_command(
           hc, slot->input_context_phys, 0,
-          XHCI_TRB_TYPE(XHCI_TRB_ADDRESS_DEVICE) | (1U << 9) |
+          XHCI_TRB_TYPE(XHCI_TRB_ADDRESS_DEVICE) |
               ((uint32_t)slot_id << 24),
           NULL)) {
-    klog_puts("[XHCI] Address Device (BSR=1) failed\n");
+    klog_puts("[XHCI] Address Device failed\n");
     return -1;
   }
   slot->enabled = true;
   dev->hcd_data = slot;
+  uint32_t *out_slot = xhci_context(slot->output_context, 0, hc->context_64);
+  dev->address = out_slot[3] & 0xFFU;
+  if (!dev->address) {
+    hc->debug_stage = "Address Device returned address zero";
+    return -1;
+  }
+  /* USB 2.0 requires a recovery interval after SET_ADDRESS before the next
+     request. Address Device performs that request on behalf of software. */
+  xhci_delay_ms(10);
+  hc->debug_stage = "device addressed";
   return 0;
 }
 
 static int xhci_address_device(struct usb_hcd *hcd, struct usb_device *dev,
                                uint8_t requested_address) {
-  (void)requested_address;
+  (void)requested_address; /* xHC assigned the address in device_prepare. */
   struct xhci_controller *hc = hcd->priv;
   struct xhci_slot *slot = dev->hcd_data;
   if (!slot || !slot->enabled)
     return -1;
-  xhci_build_address_context(hc, slot);
+
+  /* After the first eight descriptor bytes, tell the xHC the device's real
+     EP0 maximum packet size. Address Device must not be issued a second time
+     for an already-addressed slot; Evaluate Context is the specified update. */
+  uint16_t mps = dev->desc.max_packet_size;
+  if (dev->speed == USB_SPEED_SUPER ||
+      dev->speed == USB_SPEED_SUPER_PLUS)
+    mps = (mps < 16) ? (uint16_t)(1U << mps) : mps;
+  if (!mps)
+    return -1;
+  slot->ep0_max_packet = mps;
+  memset(slot->input_context, 0, 4096);
+  uint32_t *icc = xhci_context(slot->input_context, 0, hc->context_64);
+  uint32_t *input_ep0 = xhci_context(slot->input_context, 2,
+                                     hc->context_64);
+  uint32_t *output_ep0 = xhci_context(slot->output_context, 1,
+                                      hc->context_64);
+  icc[1] = 1U << 1; /* Add endpoint context DCI 1 only. */
+  memcpy(input_ep0, output_ep0, hc->context_64 ? 64U : 32U);
+  input_ep0[1] = (input_ep0[1] & 0x0000FFFFU) | ((uint32_t)mps << 16);
+  hc->debug_stage = "evaluate EP0 context";
   if (!xhci_submit_command(
           hc, slot->input_context_phys, 0,
-          XHCI_TRB_TYPE(XHCI_TRB_ADDRESS_DEVICE) |
+          XHCI_TRB_TYPE(XHCI_TRB_EVALUATE_CONTEXT) |
               ((uint32_t)slot->id << 24),
           NULL)) {
-    klog_puts("[XHCI] Address Device failed\n");
+    klog_puts("[XHCI] Evaluate EP0 Context failed\n");
     return -1;
   }
-  uint32_t *out_slot = xhci_context(slot->output_context, 0, hc->context_64);
-  dev->address = out_slot[3] & 0xFFU;
-  return dev->address ? 0 : -1;
+  hc->debug_stage = "EP0 context updated";
+  return 0;
 }
 
 static uint64_t xhci_ep0_enqueue(struct xhci_slot *slot, uint64_t parameter,
-                                 uint32_t status, uint32_t control) {
+                                 uint32_t status, uint32_t control,
+                                 bool defer_ownership) {
   uint16_t index = slot->ep0_enqueue;
   struct xhci_trb *trb = &slot->ep0_ring[index];
   trb->parameter = parameter;
   trb->status = status;
-  trb->control = control | slot->ep0_cycle;
+  trb->control = control | (defer_ownership ? (slot->ep0_cycle ^ 1U)
+                                             : slot->ep0_cycle);
   uint64_t phys = slot->ep0_ring_phys + index * sizeof(*trb);
   slot->ep0_enqueue++;
   if (slot->ep0_enqueue == XHCI_RING_TRBS - 1) {
@@ -455,6 +542,30 @@ static uint64_t xhci_ep0_enqueue(struct xhci_slot *slot, uint64_t parameter,
     slot->ep0_cycle ^= 1;
   }
   return phys;
+}
+
+static bool xhci_recover_ep0(struct xhci_controller *hc,
+                             struct xhci_slot *slot) {
+  hc->debug_stage = "reset halted EP0";
+  uint32_t endpoint = 1U << 16; /* DCI 1 is the default control endpoint. */
+  uint32_t slot_id = (uint32_t)slot->id << 24;
+  if (!xhci_submit_command(hc, 0, 0,
+                           XHCI_TRB_TYPE(XHCI_TRB_RESET_ENDPOINT) |
+                               endpoint | slot_id,
+                           NULL))
+    return false;
+
+  /* Skip every TRB left in the failed control TD. Reset Endpoint deliberately
+     preserves the old dequeue pointer, so Set TR Dequeue is required before a
+     retry can make progress. */
+  uint64_t dequeue = slot->ep0_ring_phys +
+                     slot->ep0_enqueue * sizeof(struct xhci_trb);
+  dequeue |= slot->ep0_cycle;
+  hc->debug_stage = "set EP0 dequeue";
+  return xhci_submit_command(hc, dequeue, 0,
+                             XHCI_TRB_TYPE(XHCI_TRB_SET_TR_DEQUEUE) |
+                                 endpoint | slot_id,
+                             NULL);
 }
 
 static int xhci_control_device(struct usb_hcd *hcd, struct usb_device *dev,
@@ -467,42 +578,107 @@ static int xhci_control_device(struct usb_hcd *hcd, struct usb_device *dev,
   uint64_t setup = 0;
   memcpy(&setup, req, sizeof(*req));
   bool in = (req->request_type & 0x80U) != 0;
+  hc->debug_stage = "EP0 transfer";
+  hc->debug_last_ep0_request = req->request;
+  hc->debug_last_ep0_value = req->value;
+  hc->debug_last_ep0_length = len;
+  uint8_t attempt = 0;
+
+retry:
+  attempt++;
+  hc->debug_stage = attempt == 1 ? "EP0 transfer" : "EP0 retry";
+  if (in && len)
+    memset(slot->control_buffer, 0, len);
   uint32_t trt = len ? (in ? 3U : 2U) : 0U;
+  uint16_t setup_index = slot->ep0_enqueue;
+  uint8_t setup_cycle = slot->ep0_cycle;
   xhci_ep0_enqueue(slot, setup, 8,
                    XHCI_TRB_TYPE(XHCI_TRB_SETUP_STAGE) | XHCI_TRB_IDT |
-                       XHCI_TRB_CHAIN | (trt << 16));
+                       (trt << 16),
+                   true);
   if (len) {
     if (!in && data)
       memcpy(slot->control_buffer, data, len);
     xhci_ep0_enqueue(slot, slot->control_buffer_phys, len,
                      XHCI_TRB_TYPE(XHCI_TRB_DATA_STAGE) |
-                         XHCI_TRB_CHAIN |
-                         (in ? XHCI_TRB_DIR_IN : 0));
+                         (in ? XHCI_TRB_DIR_IN : 0),
+                     false);
   }
   uint64_t status_trb = xhci_ep0_enqueue(
       slot, 0, 0, XHCI_TRB_TYPE(XHCI_TRB_STATUS_STAGE) | XHCI_TRB_IOC |
-                      ((!len || !in) ? XHCI_TRB_DIR_IN : 0));
+                      ((!len || !in) ? XHCI_TRB_DIR_IN : 0),
+      false);
   hc->last_transfer_trb = 0;
   hc->last_transfer_code = 0;
+  /* Publish the complete control TD atomically. The Setup TRB was written
+     with the inverse cycle bit so a fast physical xHC could not consume it
+     while its Data and Status stages were still being constructed. */
+  __atomic_thread_fence(__ATOMIC_RELEASE);
+  slot->ep0_ring[setup_index].control =
+      (slot->ep0_ring[setup_index].control & ~XHCI_TRB_CYCLE) | setup_cycle;
   __atomic_thread_fence(__ATOMIC_RELEASE);
   hc->doorbells[slot->id] = 1;
   for (uint32_t i = 0; i < XHCI_WAIT_LOOPS; i++) {
     xhci_drain_events(hc, 0);
+    /* An error is reported against the Setup or Data TRB, not necessarily the
+       IOC Status TRB. Waiting only for status turns a prompt transaction error
+       into a misleading timeout. */
+    if (hc->last_transfer_trb &&
+        hc->last_transfer_code != XHCI_COMPLETION_SUCCESS &&
+        hc->last_transfer_code != 13) {
+      uint8_t cc = hc->last_transfer_code;
+      hc->debug_stage = "EP0 transaction error";
+      klog_puts("[XHCI] EP0 TD failed before status: completion=");
+      klog_uint64(cc);
+      klog_puts(" attempt=");
+      klog_uint64(attempt);
+      klog_puts("\n");
+      if (attempt < 3 && xhci_recover_ep0(hc, slot))
+        goto retry;
+      return -1;
+    }
     if (hc->last_transfer_trb == status_trb) {
       uint8_t cc = hc->last_transfer_code;
       if (cc != XHCI_COMPLETION_SUCCESS && cc != 13) {
+        hc->debug_stage = "EP0 completion error";
         klog_puts("[XHCI] EP0 transfer failed: completion=");
         klog_uint64(cc);
         klog_puts("\n");
         return -1;
       }
       if (in && data && len)
+      {
+        /* Do not allow the compiler or CPU to move payload reads ahead of the
+           event-ring completion observed above. */
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+        for (uint8_t n = 0; n < 8 && n < len; n++)
+          hc->debug_ep0_data[n] = ((uint8_t *)slot->control_buffer)[n];
+
+        /* A successful Status Stage is not useful if a controller/device
+           returned no descriptor payload. Retry invalid descriptor headers;
+           this also handles devices needing a little more address recovery. */
+        if (req->request == USB_REQ_GET_DESCRIPTOR && len >= 2 &&
+            (((uint8_t *)slot->control_buffer)[0] < 2 ||
+             ((uint8_t *)slot->control_buffer)[1] != (req->value >> 8))) {
+          hc->debug_stage = "invalid descriptor payload";
+          klog_puts("[XHCI] Invalid descriptor payload, retrying\n");
+          if (attempt < 3) {
+            xhci_delay_ms(10);
+            goto retry;
+          }
+          return -1;
+        }
         memcpy(data, slot->control_buffer, len);
+      }
+      hc->debug_stage = "EP0 completed";
       return 0;
     }
     io_wait();
   }
   hc->timeouts++;
+  hc->debug_stage = "EP0 timeout";
+  hc->debug_usbcmd = mmio_read32(hc->op, XHCI_USBCMD);
+  hc->debug_usbsts = mmio_read32(hc->op, XHCI_USBSTS);
   klog_puts("[XHCI] EP0 transfer timed out\n");
   return -1;
 }
@@ -515,13 +691,19 @@ static uint32_t xhci_port_neutral(uint32_t portsc) {
 static bool xhci_reset_port(struct xhci_controller *hc, uint8_t port) {
   uint32_t offset = XHCI_PORTSC + port * 0x10U;
   uint32_t ps = mmio_read32(hc->op, offset);
+  hc->debug_stage = "port reset begin";
+  hc->debug_last_port = port;
+  hc->debug_portsc[port] = ps;
   if (!(ps & XHCI_PORT_CCS))
     return false;
   if (!(ps & XHCI_PORT_PP)) {
     mmio_write32(hc->op, offset, xhci_port_neutral(ps) | XHCI_PORT_PP);
-    for (uint32_t i = 0; i < 100000; i++)
-      io_wait();
+    /* Allow root-port power and an attached device to become stable. */
+    xhci_delay_ms(100);
     ps = mmio_read32(hc->op, offset);
+    hc->debug_portsc[port] = ps;
+    if (!(ps & XHCI_PORT_CCS))
+      return false;
   }
   uint8_t speed_id = XHCI_PORT_SPEED(ps);
   uint32_t reset = speed_id >= 4 ? XHCI_PORT_WPR : XHCI_PORT_PR;
@@ -531,16 +713,26 @@ static bool xhci_reset_port(struct xhci_controller *hc, uint8_t port) {
     if (!(ps & reset) && (ps & XHCI_PORT_PED)) {
       mmio_write32(hc->op, offset,
                    xhci_port_neutral(ps) | XHCI_PORT_CHANGE_MASK);
+      /* USB 2 devices require reset recovery before the first request. */
+      xhci_delay_ms(10);
+      hc->debug_portsc[port] = mmio_read32(hc->op, offset);
+      hc->debug_port_result[port] = 2;
+      hc->debug_stage = "port reset complete";
       return true;
     }
     io_wait();
   }
+  hc->debug_portsc[port] = ps;
+  hc->debug_port_result[port] = 3;
+  hc->debug_stage = "port reset timeout";
   return false;
 }
 
 static void xhci_enumerate_ports(struct xhci_controller *hc) {
   for (uint8_t port = 0; port < hc->max_ports; port++) {
     uint32_t ps = mmio_read32(hc->op, XHCI_PORTSC + port * 0x10U);
+    hc->debug_portsc[port] = ps;
+    hc->debug_port_result[port] = (ps & XHCI_PORT_CCS) ? 1 : 0;
     if (!(ps & XHCI_PORT_CCS))
       continue;
     enum usb_speed speed = xhci_usb_speed(XHCI_PORT_SPEED(ps));
@@ -549,6 +741,7 @@ static void xhci_enumerate_ports(struct xhci_controller *hc) {
       continue;
     }
     usb_device_discovered(&hc->hcd, port, speed);
+    hc->debug_stage = "device discovery returned";
     if (port < 32)
       hc->connected_ports |= 1U << port;
   }
@@ -667,7 +860,7 @@ static struct usb_interrupt_pipe *xhci_interrupt_open(
   memset(state, 0, sizeof(*state));
   state->endpoint_id = (endpoint & 0x0FU) * 2U + 1U;
   if (state->endpoint_id < 2 || state->endpoint_id > 31 ||
-      !xhci_alloc_page((void **)&state->ring, &state->ring_phys))
+      !xhci_alloc_page(hc, (void **)&state->ring, &state->ring_phys))
     return NULL;
   state->cycle = 1;
   state->ring[XHCI_RING_TRBS - 1].parameter = state->ring_phys;
@@ -764,13 +957,14 @@ static void xhci_interrupt_cancel(struct usb_hcd *hcd,
 static void xhci_irq(struct registers *regs) {
   for (int i = 0; i < controller_count; i++) {
     struct xhci_controller *hc = &controllers[i];
-    if (!hc->msix_enabled || regs->int_no != hc->irq_vector)
+    if (hc->irq_vector == 0xFF || regs->int_no != hc->irq_vector)
       continue;
     uint32_t iman = mmio_read32(hc->runtime + 0x20, 0);
     hc->interrupts++;
     if (!hc->irq_reported) {
       hc->irq_reported = true;
-      klog_puts("[XHCI] MSI-X interrupt received\n");
+      klog_puts(hc->msix_enabled ? "[XHCI] MSI-X interrupt received\n"
+                                 : "[XHCI] MSI interrupt received\n");
     }
     /* IMAN.IP is RW1C. Acknowledge this interrupter before consuming its
        event ring; ERDP.EHB is cleared as the dequeue pointer advances. */
@@ -790,8 +984,10 @@ void xhci_msix_watchdog(void) {
     return;
   for (int i = 0; i < controller_count; i++) {
     struct xhci_controller *hc = &controllers[i];
-    if (!hc->running || !hc->msix_enabled || hc->irq_reported)
+    if (!hc->running)
       continue;
+    /* This reads only cached DMA memory. It recovers lost interrupt edges and
+       supports controllers which expose neither MSI-X nor MSI. */
     uint64_t before = hc->events_seen;
     xhci_drain_events(hc, 0);
     if (hc->events_seen != before) {
@@ -825,19 +1021,39 @@ static bool xhci_setup_msix(struct xhci_controller *hc) {
   return true;
 }
 
+static bool xhci_setup_msi(struct xhci_controller *hc) {
+  int vector = interrupt_vector_alloc(xhci_irq);
+  if (vector < 0)
+    return false;
+  hc->irq_vector = (uint8_t)vector;
+  if (!pci_msi_enable(hc->pci, &hc->msi, hc->irq_vector,
+                      (uint8_t)lapic_get_id())) {
+    interrupt_vector_free(hc->irq_vector);
+    hc->irq_vector = 0xFF;
+    return false;
+  }
+  hc->msi_enabled = true;
+  return true;
+}
+
 static bool xhci_probe(struct pci_device *pci) {
+  last_probe_failure = "controller limit";
   if (controller_count >= XHCI_MAX_CONTROLLERS)
     return false;
   struct xhci_controller *hc = &controllers[controller_count];
   memset(hc, 0, sizeof(*hc));
+  hc->debug_stage = "probe begin";
   hc->pci = pci;
   hc->mmio_phys = xhci_bar0(pci);
-  if (!hc->mmio_phys)
+  if (!hc->mmio_phys) {
+    last_probe_failure = "invalid BAR0";
     return false;
+  }
   // PCI MMIO is not guaranteed to be covered by Limine's HHDM mappings.
   // Map the capability page first; DBOFF/RTSOFF then tell us how much more
   // of the aperture is required.
   if (!xhci_map_mmio(hc->mmio_phys, 4096)) {
+    last_probe_failure = "capability MMIO map";
     klog_puts("[XHCI] Failed to map capability MMIO page\n");
     return false;
   }
@@ -850,9 +1066,12 @@ static bool xhci_probe(struct pci_device *pci) {
   hc->max_slots = hcs1 & 0xFFU;
   hc->max_interrupters = (hcs1 >> 8) & 0x7FFU;
   hc->max_ports = (hcs1 >> 24) & 0xFFU;
-  hc->scratchpad_count = (((hcs2 >> 27) & 0x1FU) << 5) |
-                         ((hcs2 >> 21) & 0x1FU);
+  /* HCSPARAMS2 stores bits 4:0 of Max Scratchpad Buffers in 31:27 and
+     bits 9:5 in 25:21. These fields are easy to accidentally reverse. */
+  hc->scratchpad_count = ((hcs2 >> 27) & 0x1FU) |
+                         (((hcs2 >> 21) & 0x1FU) << 5);
   hc->ac64 = hcc1 & 1U;
+  last_ac64 = hc->ac64;
   hc->context_64 = hcc1 & (1U << 2);
   klog_puts("[XHCI] Found controller: version=0x");
   klog_hex32(hc->version);
@@ -866,6 +1085,7 @@ static bool xhci_probe(struct pci_device *pci) {
   if (hc->cap_length < 0x20 || !hc->max_slots || !hc->max_ports ||
       !hc->max_interrupters || !(mmio_read32(hc->cap + hc->cap_length,
                                              XHCI_PAGESIZE) & 1U)) {
+    last_probe_failure = "capability validation";
     klog_puts("[XHCI] Capability validation failed\n");
     return false;
   }
@@ -882,33 +1102,47 @@ static bool xhci_probe(struct pci_device *pci) {
     required = runtime_end;
   if (!dboff || !rtsoff || required > 0x100000U ||
       !xhci_map_mmio(hc->mmio_phys, required)) {
+    last_probe_failure = "register MMIO extent";
     klog_puts("[XHCI] Invalid or unmappable MMIO register extent\n");
     return false;
   }
   hc->op = hc->cap + hc->cap_length;
   hc->doorbells = (volatile uint32_t *)(hc->cap + dboff);
   hc->runtime = hc->cap + rtsoff;
+  hc->debug_stage = "registers mapped";
 
   uint16_t command = pci_config_read16(pci->bus, pci->slot, pci->func, 0x04);
   pci_config_write16(pci->bus, pci->slot, pci->func, 0x04,
                      command | 0x0006U | (1U << 10));
   xhci_legacy_handoff(hc, hcc1);
+  hc->debug_stage = "legacy handoff complete";
   if (!xhci_halt_reset(hc)) {
+    last_probe_failure = "halt/reset timeout";
     klog_puts("[XHCI] Controller halt/reset failed\n");
     return false;
   }
   if (!xhci_alloc_runtime(hc)) {
+    last_dma_layer = dma_get_last_failure();
+    last_dma_flags = dma_get_last_flags();
+    last_dma_phys = dma_get_last_phys();
+    last_probe_failure = "runtime DMA allocation";
     klog_puts("[XHCI] Runtime DMA allocation failed\n");
     return false;
   }
   if (!xhci_start(hc)) {
+    last_probe_failure = "controller start timeout";
     klog_puts("[XHCI] Controller start failed\n");
     return false;
   }
+  hc->debug_stage = "controller running";
   controller_count++;
-  xhci_setup_msix(hc);
+  if (!xhci_setup_msix(hc))
+    xhci_setup_msi(hc);
   if (!xhci_noop_command(hc))
+  {
+    last_probe_failure = "command ring timeout";
     return false;
+  }
   hc->hcd.priv = hc;
   hc->hcd.name = "xhci";
   hc->hcd.control_transfer = NULL;
@@ -922,23 +1156,54 @@ static bool xhci_probe(struct pci_device *pci) {
   hc->hcd.interrupt_cancel = xhci_interrupt_cancel;
   klog_puts("[XHCI] Command/event rings operational (v");
   klog_hex32(hc->version);
-  klog_puts(hc->msix_enabled ? ", MSI-X)\n" : ", polling)\n");
+  if (hc->msix_enabled)
+    klog_puts(", MSI-X)\n");
+  else if (hc->msi_enabled)
+    klog_puts(", MSI)\n");
+  else
+    klog_puts(", timer fallback)\n");
   xhci_enumerate_ports(hc);
+  hc->debug_usbcmd = mmio_read32(hc->op, XHCI_USBCMD);
+  hc->debug_usbsts = mmio_read32(hc->op, XHCI_USBSTS);
+  last_probe_failure = "none";
   return true;
 }
 
 void xhci_init(void) {
   controller_count = 0;
+  matched_count = 0;
+  last_probe_failure = "no xHCI PCI function";
+  last_dma_object = "none";
+  last_ac64 = false;
+  last_dma_layer = "none";
+  last_dma_flags = 0;
+  last_dma_phys = 0;
   uint32_t count = pci_get_device_count();
   for (uint32_t i = 0; i < count; i++) {
     struct pci_device *pci = pci_get_device(i);
     if (pci && pci->class_code == 0x0C && pci->subclass == 0x03 &&
-        pci->prog_if == 0x30)
+        pci->prog_if == 0x30) {
+      matched_count++;
       xhci_probe(pci);
+    }
   }
   if (!controller_count)
     klog_puts("[XHCI] No operational xHCI controller found\n");
 }
+
+int xhci_get_matched_count(void) { return matched_count; }
+
+const char *xhci_get_last_probe_failure(void) { return last_probe_failure; }
+
+const char *xhci_get_last_dma_object(void) { return last_dma_object; }
+
+bool xhci_get_last_ac64(void) { return last_ac64; }
+
+const char *xhci_get_last_dma_layer(void) { return last_dma_layer; }
+
+uint32_t xhci_get_last_dma_flags(void) { return last_dma_flags; }
+
+uint64_t xhci_get_last_dma_phys(void) { return last_dma_phys; }
 
 int xhci_get_controller_count(void) { return controller_count; }
 

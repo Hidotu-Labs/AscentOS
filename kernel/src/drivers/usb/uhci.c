@@ -105,6 +105,7 @@ static void uhci_irq_handler(struct registers *regs) {
 
     // Acknowledge the interrupt by writing 1 to the status bits
     uhci_write16(hc, UHCI_REG_USBSTS, sts);
+    hc->interrupts++;
     handled = true;
 
     if (sts & (UHCI_STS_HSE | UHCI_STS_HCPE)) {

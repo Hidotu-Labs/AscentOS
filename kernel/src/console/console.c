@@ -228,6 +228,10 @@ void console_init(struct limine_framebuffer *framebuffer) {
 
   max_cols = fb_get_width() / FONT_WIDTH;
   max_rows = fb_get_height() / FONT_HEIGHT;
+  if (max_cols > COLS_MAX)
+    max_cols = COLS_MAX;
+  if (max_rows > HISTORY_MAX)
+    max_rows = HISTORY_MAX;
   cursor_x = 0;
   cursor_y = 0;
   terminal_escape = false;
@@ -266,7 +270,18 @@ static void console_clear_line_from_cursor(void) {
 }
 
 static void console_wipe_history_unlocked(void) {
-  fb_clear(BG_COLOR);
+  /* Keep the front and back buffers synchronized. Clearing only the front
+     buffer allowed the next text swap to restore stale boot output and the
+     cursor drawn at its old position. */
+  if (fb_get_backbuffer()) {
+    fb_set_backbuffer_mode(true);
+    fb_clear(BG_COLOR);
+    fb_swap_buffer();
+    fb_set_backbuffer_mode(false);
+  } else {
+    fb_set_backbuffer_mode(false);
+    fb_clear(BG_COLOR);
+  }
   memset(history, 0, sizeof(history));
   cursor_x = 0;
   cursor_y = 0;
@@ -1309,6 +1324,14 @@ void console_refresh_cursor(void) {
     return;
   spinlock_acquire(&console_lock);
   console_refresh_cursor_unlocked();
+  spinlock_release(&console_lock);
+}
+
+void console_redraw_all(void) {
+  if (fb_get_kd_mode() == KD_GRAPHICS)
+    return;
+  spinlock_acquire(&console_lock);
+  console_redraw();
   spinlock_release(&console_lock);
 }
 

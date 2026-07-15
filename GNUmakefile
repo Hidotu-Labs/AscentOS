@@ -203,9 +203,9 @@ run-fat32: edk2-ovmf $(IMAGE_NAME).iso fat32_test.img
 		-device sb16,audiodev=snd0 \
 		-device AC97,audiodev=snd0 \
 		-device intel-hda -device hda-duplex,audiodev=snd0 \
-		-device usb-ehci,id=ehci \
-		-device usb-tablet,bus=ehci.0 \
-		-device usb-kbd,bus=ehci.0 \
+		-device qemu-xhci,id=xhci \
+		-device usb-kbd,bus=xhci.0 \
+		-device usb-mouse,bus=xhci.0 \
 		$(QEMUFLAGS)
 
 # Create a 64MB ext2 disk image with sample files for testing

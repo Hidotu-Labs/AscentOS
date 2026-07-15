@@ -162,6 +162,8 @@ struct ehci_controller {
   uint16_t device_id;
   uint8_t num_ports;
   bool present;
+  bool irq_registered;
+  uint64_t interrupts;
 
   // DMA Resources
   struct ehci_qh *async_qh; // Base QH for asynchronous schedule

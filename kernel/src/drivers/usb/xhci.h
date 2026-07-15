@@ -79,9 +79,6 @@ struct xhci_controller {
   uint64_t dcbaa_phys;
   void *scratchpad_array;
   uint64_t scratchpad_array_phys;
-  void *scratchpads[32];
-  uint64_t scratchpad_phys[32];
-
   struct xhci_trb *command_ring;
   uint64_t command_ring_phys;
   uint16_t command_enqueue;
@@ -95,8 +92,10 @@ struct xhci_controller {
   uint64_t erst_phys;
 
   struct pci_msix msix;
+  struct pci_msi msi;
   uint8_t irq_vector;
   bool msix_enabled;
+  bool msi_enabled;
   bool irq_reported;
   uint64_t commands_submitted;
   uint64_t commands_completed;
@@ -109,11 +108,30 @@ struct xhci_controller {
   volatile uint8_t last_command_slot;
   volatile uint64_t last_transfer_trb;
   volatile uint8_t last_transfer_code;
+  const char *debug_stage;
+  uint32_t debug_usbcmd;
+  uint32_t debug_usbsts;
+  uint32_t debug_portsc[256];
+  uint8_t debug_port_result[256];
+  uint8_t debug_last_port;
+  uint8_t debug_last_slot;
+  uint8_t debug_last_command_type;
+  uint8_t debug_last_ep0_request;
+  uint16_t debug_last_ep0_value;
+  uint16_t debug_last_ep0_length;
+  uint8_t debug_ep0_data[8];
 };
 
 void xhci_init(void);
 void xhci_msix_watchdog(void);
 int xhci_get_controller_count(void);
+int xhci_get_matched_count(void);
+const char *xhci_get_last_probe_failure(void);
+const char *xhci_get_last_dma_object(void);
+bool xhci_get_last_ac64(void);
+const char *xhci_get_last_dma_layer(void);
+uint32_t xhci_get_last_dma_flags(void);
+uint64_t xhci_get_last_dma_phys(void);
 struct xhci_controller *xhci_get_controller(int index);
 bool xhci_phase2_stress(uint32_t reset_cycles, uint32_t command_count);
 

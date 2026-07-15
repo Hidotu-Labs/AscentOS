@@ -1,22 +1,3 @@
-/*
- * USB HID Keyboard Driver — Phase 5
- *
- * Implements a USB Boot Protocol keyboard driver on top of the UHCI stack.
- * After device enumeration (Phase 4), this driver:
- *
- *   1. Reads the Configuration, Interface and Endpoint descriptors to find
- *      an HID keyboard interface with an IN interrupt endpoint.
- *   2. Sends SET_CONFIGURATION, SET_PROTOCOL (Boot Protocol), and SET_IDLE.
- *   3. Sets up a persistent UHCI interrupt transfer queue that polls the
- *      keyboard at the endpoint's bInterval rate.
- *   4. On each poll tick, reads the 8-byte Boot Keyboard Report and
- *      translates newly-pressed/released keys into the kernel's existing
- *      keyboard ring buffer and evdev subsystem.
- *
- * The HID Usage ID → PS/2 scancode mapping allows us to feed events into
- * keyboard_push_bytes() and evdev_push_event() without changing any
- * existing console or X11 input code.
- */
 
 #include "usb_kbd.h"
 #include "../../console/klog.h"
@@ -267,6 +248,8 @@ struct usb_kbd_state {
   struct usb_interrupt_pipe *generic_pipe;
 
   bool active;
+  bool report_format_known;
+  bool report_has_id;
   uint8_t last_pressed_usage;
   int repeat_delay_counter;
 };
@@ -324,6 +307,38 @@ extern const char scancode_to_char[];
 extern const char scancode_to_char_shift[];
 
 static void usb_kbd_update_leds(struct usb_kbd_state *kbd);
+
+static void usb_kbd_decode_report(struct usb_kbd_state *kbd,
+                                  const uint8_t *buf, uint16_t available,
+                                  struct usb_kbd_report *report) {
+  uint8_t offset = 0;
+
+  /* Boot reports are normally eight bytes, but some otherwise boot-compatible
+     keyboards keep a leading Report ID even after SET_PROTOCOL. If interpreted
+     as modifiers, Report ID 1 makes every letter a Ctrl character while Enter
+     appears to work normally. An idle or ordinary key report distinguishes
+     the two layouts unambiguously. */
+  if (!kbd->report_format_known && available >= 3) {
+    if (buf[0] != 0 && buf[1] == 0 && buf[2] == 0) {
+      kbd->report_has_id = true;
+      kbd->report_format_known = true;
+      klog_puts("[USB-KBD] HID report has leading Report ID=0x");
+      klog_hex32(buf[0]);
+      klog_puts("\n");
+    } else if (buf[1] == 0 && buf[2] >= 4) {
+      kbd->report_has_id = false;
+      kbd->report_format_known = true;
+      klog_puts("[USB-KBD] HID report uses standard 8-byte boot format\n");
+    }
+  }
+
+  if (kbd->report_has_id)
+    offset = 1;
+  report->modifiers = offset < available ? buf[offset] : 0;
+  report->reserved = offset + 1 < available ? buf[offset + 1] : 0;
+  for (int j = 0; j < 6; j++)
+    report->keys[j] = offset + j + 2 < available ? buf[offset + j + 2] : 0;
+}
 
 static void usb_kbd_inject_key(struct usb_kbd_state *kbd, uint8_t usage,
                                struct usb_kbd_report *report) {
@@ -769,10 +784,14 @@ bool usb_kbd_probe(struct usb_device *dev) {
   req.index = 0;
   req.length = 0;
 
-  res = usb_control_transfer(dev, &req, NULL, 0);
-  if (res < 0) {
-    klog_puts("[USB-KBD] SET_CONFIGURATION failed\n");
-    return false;
+  if (!dev->configured || dev->configuration_value != config_value) {
+    res = usb_control_transfer(dev, &req, NULL, 0);
+    if (res < 0) {
+      klog_puts("[USB-KBD] SET_CONFIGURATION failed\n");
+      return false;
+    }
+    dev->configuration_value = config_value;
+    dev->configured = true;
   }
 
   // Small settle delay
@@ -784,7 +803,7 @@ bool usb_kbd_probe(struct usb_device *dev) {
   req.request_type = 0x21;
   req.request = USB_REQ_SET_PROTOCOL;
   req.value = HID_PROTOCOL_BOOT;
-  req.index = 0;
+  req.index = iface_num;
   req.length = 0;
 
   res = usb_control_transfer(dev, &req, NULL, 0);
@@ -798,7 +817,7 @@ bool usb_kbd_probe(struct usb_device *dev) {
   req.request_type = 0x21;
   req.request = USB_REQ_SET_IDLE;
   req.value = (10 << 8); // duration=10 (40ms), report_id=0
-  req.index = 0;
+  req.index = iface_num;
   req.length = 0;
 
   res = usb_control_transfer(dev, &req, NULL, 0);
@@ -832,6 +851,8 @@ bool usb_kbd_probe(struct usb_device *dev) {
   kbd->report_buf_phys = (uint32_t)phys;
   kbd->interface_number = iface_num;
   kbd->caps_lock = false;
+  kbd->report_format_known = false;
+  kbd->report_has_id = false;
   kbd->active = true;
 
   // Zero out previous report
@@ -906,6 +927,15 @@ void usb_kbd_disconnect(struct usb_device *dev) {
   }
 }
 
+uint32_t usb_kbd_active_count(void) {
+  uint32_t active = 0;
+  for (int i = 0; i < kbd_count; i++) {
+    if (keyboards[i].active)
+      active++;
+  }
+  return active;
+}
+
 // Polling
 // Called from the UHCI/OHCI IRQ handler to check if any keyboard has new data.
 
@@ -920,10 +950,7 @@ void usb_kbd_poll(void) {
         continue;
       uint8_t *buf = kbd->generic_pipe->buffer;
       struct usb_kbd_report report;
-      report.modifiers = buf[0];
-      report.reserved = buf[1];
-      for (int j = 0; j < 6; j++)
-        report.keys[j] = buf[j + 2];
+      usb_kbd_decode_report(kbd, buf, kbd->generic_pipe->buffer_len, &report);
       bool changed = report.modifiers != kbd->prev_report.modifiers;
       for (int j = 0; !changed && j < 6; j++)
         changed = report.keys[j] != kbd->prev_report.keys[j];
@@ -942,10 +969,7 @@ void usb_kbd_poll(void) {
 
       uint8_t *buf = (uint8_t *)kbd->ehci_pipe->data_buf;
       struct usb_kbd_report report;
-      report.modifiers = buf[0];
-      report.reserved = buf[1];
-      for (int j = 0; j < 6; j++)
-        report.keys[j] = buf[j + 2];
+      usb_kbd_decode_report(kbd, buf, kbd->max_packet, &report);
 
       bool changed = (report.modifiers != kbd->prev_report.modifiers);
       if (!changed) {
@@ -973,10 +997,7 @@ void usb_kbd_poll(void) {
 
       uint8_t *buf = (uint8_t *)kbd->ohci_pipe->data_buf;
       struct usb_kbd_report report;
-      report.modifiers = buf[0];
-      report.reserved = buf[1];
-      for (int j = 0; j < 6; j++)
-        report.keys[j] = buf[j + 2];
+      usb_kbd_decode_report(kbd, buf, kbd->max_packet, &report);
 
       bool changed = (report.modifiers != kbd->prev_report.modifiers);
       if (!changed) {

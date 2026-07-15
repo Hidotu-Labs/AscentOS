@@ -7,6 +7,9 @@
 #include <stdbool.h>
 
 static spinlock_t dma_lock = SPINLOCK_INIT;
+static const char *dma_last_failure = "none";
+static uint32_t dma_last_flags;
+static uint64_t dma_last_phys;
 
 // DMA memory regions - we prefer low memory (1-16MB) for DMA buffers
 // to avoid conflicts with MMIO regions and framebuffers at higher addresses
@@ -21,12 +24,19 @@ dma_buffer_t *dma_alloc(size_t size, uint32_t flags) {
     return NULL;
 
   spinlock_acquire(&dma_lock);
+  dma_last_failure = "none";
+  dma_last_flags = flags;
+  dma_last_phys = 0;
 
   // Calculate number of pages needed
   size_t pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
 
   // Allocate physical memory
   void *phys = NULL;
+
+  if (flags & DMA_FLAG_ANYWHERE) {
+    phys = pmm_alloc_pages(pages);
+  }
 
   if (flags & DMA_FLAG_LOW) {
     // Try low memory first (1-16MB region)
@@ -38,7 +48,7 @@ dma_buffer_t *dma_alloc(size_t size, uint32_t flags) {
     phys = pmm_alloc_pages_range(pages, DMA_LOW_START, DMA_32BIT_END);
   }
 
-  if (!phys) {
+  if (!phys && !(flags & DMA_FLAG_ANYWHERE)) {
     // Default: try low memory, then anywhere below 4GB
     phys = pmm_alloc_pages_range(pages, DMA_LOW_START, DMA_LOW_END);
     if (!phys) {
@@ -47,10 +57,12 @@ dma_buffer_t *dma_alloc(size_t size, uint32_t flags) {
   }
 
   if (!phys) {
+    dma_last_failure = "PMM physical allocation";
     spinlock_release(&dma_lock);
     klog_puts("[DMA] Failed to allocate physical memory\n");
     return NULL;
   }
+  dma_last_phys = (uint64_t)phys;
 
   // Map as uncached by default (unless NOCACHE flag is NOT set)
   uint64_t virt = (uint64_t)phys + pmm_get_hhdm_offset();
@@ -67,6 +79,7 @@ dma_buffer_t *dma_alloc(size_t size, uint32_t flags) {
     if (!vmm_map_page(pml4, page_virt, page_phys, map_flags)) {
       // Failed to map - free physical memory
       // Note: we should free all pages, but pmm_free_pages expects contiguous
+      dma_last_failure = "VMM page mapping";
       klog_puts("[DMA] Failed to map page\n");
       spinlock_release(&dma_lock);
       return NULL;
@@ -84,6 +97,7 @@ dma_buffer_t *dma_alloc(size_t size, uint32_t flags) {
   if (!buf) {
     // Can't allocate structure - but physical memory is allocated
     // This is a leak, but better than crashing
+    dma_last_failure = "heap metadata allocation";
     klog_puts("[DMA] Failed to allocate buffer structure\n");
     spinlock_release(&dma_lock);
     return NULL;
@@ -122,7 +136,11 @@ void dma_free(dma_buffer_t *buf) {
 
 // Convenience function for single page allocation
 void *dma_alloc_page(uint64_t *phys_out) {
-  dma_buffer_t *buf = dma_alloc(PAGE_SIZE, DMA_FLAG_32BIT);
+  return dma_alloc_page_flags(DMA_FLAG_32BIT, phys_out);
+}
+
+void *dma_alloc_page_flags(uint32_t flags, uint64_t *phys_out) {
+  dma_buffer_t *buf = dma_alloc(PAGE_SIZE, flags);
   if (!buf)
     return NULL;
 
@@ -139,7 +157,12 @@ void *dma_alloc_page(uint64_t *phys_out) {
 }
 
 void *dma_alloc_pages(size_t count, uint64_t *phys_out) {
-  dma_buffer_t *buf = dma_alloc(count * PAGE_SIZE, DMA_FLAG_32BIT);
+  return dma_alloc_pages_flags(count, DMA_FLAG_32BIT, phys_out);
+}
+
+void *dma_alloc_pages_flags(size_t count, uint32_t flags,
+                            uint64_t *phys_out) {
+  dma_buffer_t *buf = dma_alloc(count * PAGE_SIZE, flags);
   if (!buf)
     return NULL;
 
@@ -162,3 +185,9 @@ void dma_free_page(void *virt) {
   uint64_t phys = (uint64_t)virt - pmm_get_hhdm_offset();
   pmm_free_page((void *)phys);
 }
+
+const char *dma_get_last_failure(void) { return dma_last_failure; }
+
+uint32_t dma_get_last_flags(void) { return dma_last_flags; }
+
+uint64_t dma_get_last_phys(void) { return dma_last_phys; }

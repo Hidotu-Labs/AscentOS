@@ -17,8 +17,46 @@ spinlock_t *vmm_get_lock(void) { return &vmm_lock; }
 // ---------------------------------------------------------------------------
 
 static uint64_t *get_next_level(uint64_t *current_level, size_t index,
-                                bool allocate) {
+                                bool allocate, unsigned level) {
   if (current_level[index] & PAGE_FLAG_PRESENT) {
+    if (current_level[index] & PAGE_FLAG_PS) {
+      if (!allocate || (level != 3 && level != 2))
+        return NULL;
+
+      uint64_t old = current_level[index];
+      void *new_table_phys = pmm_alloc();
+      if (!new_table_phys)
+        return NULL;
+      uint64_t *new_table = (uint64_t *)PHYS_TO_VIRT((uint64_t)new_table_phys);
+
+      if (level == 3) {
+        /* Split a 1 GiB PDPTE into 512 equivalent 2 MiB PDEs.  The PAT
+           position is bit 12 for both huge-page formats. */
+        const uint64_t address_mask = PAGE_MASK & ~((1ULL << 30) - 1ULL);
+        uint64_t base = old & address_mask;
+        uint64_t leaf_flags = old & ~address_mask;
+        for (size_t i = 0; i < 512; i++)
+          new_table[i] = (base + i * (1ULL << 21)) | leaf_flags;
+      } else {
+        /* Split a 2 MiB PDE into 512 4 KiB PTEs.  Huge-page PAT is bit 12;
+           the 4 KiB PTE encoding moves PAT to bit 7 (the former PS bit). */
+        const uint64_t address_mask = PAGE_MASK & ~((1ULL << 21) - 1ULL);
+        uint64_t base = old & address_mask;
+        bool pat = (old & (1ULL << 12)) != 0;
+        uint64_t leaf_flags = old & ~address_mask;
+        leaf_flags &= ~((1ULL << 12) | PAGE_FLAG_PS);
+        if (pat)
+          leaf_flags |= PAGE_FLAG_PAT;
+        for (size_t i = 0; i < 512; i++)
+          new_table[i] = (base + i * PAGE_SIZE) | leaf_flags;
+      }
+
+      uint64_t table_flags = old & (PAGE_FLAG_PRESENT | PAGE_FLAG_RW |
+                                    PAGE_FLAG_USER | PAGE_FLAG_PWT |
+                                    PAGE_FLAG_PCD);
+      current_level[index] = (uint64_t)new_table_phys | table_flags;
+      return new_table;
+    }
     uint64_t next_phys = current_level[index] & PAGE_MASK;
     return (uint64_t *)PHYS_TO_VIRT(next_phys);
   }
@@ -63,7 +101,7 @@ static bool vmm_map_page_nolock(uint64_t *pml4, uint64_t virtual_addr,
   uint64_t *pml4_virt      = (uint64_t *)PHYS_TO_VIRT((uint64_t)pml4);
   uint64_t  propagate_flags = flags & (PAGE_FLAG_USER | PAGE_FLAG_RW);
 
-  uint64_t *pdpt_virt = get_next_level(pml4_virt, pml4_index, true);
+  uint64_t *pdpt_virt = get_next_level(pml4_virt, pml4_index, true, 4);
   if (!pdpt_virt) {
     klog_puts("[VMM] Error: Failed to get/create PDPT for vaddr 0x");
     klog_uint64(virtual_addr);
@@ -72,7 +110,7 @@ static bool vmm_map_page_nolock(uint64_t *pml4, uint64_t virtual_addr,
   }
   pml4_virt[pml4_index] |= propagate_flags;
 
-  uint64_t *pd_virt = get_next_level(pdpt_virt, pdpt_index, true);
+  uint64_t *pd_virt = get_next_level(pdpt_virt, pdpt_index, true, 3);
   if (!pd_virt) {
     klog_puts("[VMM] Error: Failed to get/create PD for vaddr 0x");
     klog_uint64(virtual_addr);
@@ -81,7 +119,7 @@ static bool vmm_map_page_nolock(uint64_t *pml4, uint64_t virtual_addr,
   }
   pdpt_virt[pdpt_index] |= propagate_flags;
 
-  uint64_t *pt_virt = get_next_level(pd_virt, pd_index, true);
+  uint64_t *pt_virt = get_next_level(pd_virt, pd_index, true, 2);
   if (!pt_virt) {
     klog_puts("[VMM] Error: Failed to get/create PT for vaddr 0x");
     klog_uint64(virtual_addr);
@@ -107,12 +145,13 @@ static bool vmm_page_present_nolock(uint64_t *pml4, uint64_t virtual_addr) {
   size_t pt_index = (virtual_addr >> 12) & 0x1FF;
 
   uint64_t *pml4_virt = (uint64_t *)PHYS_TO_VIRT((uint64_t)pml4);
-  uint64_t *pdpt = get_next_level(pml4_virt, pml4_index, false);
+  uint64_t *pdpt = get_next_level(pml4_virt, pml4_index, false, 4);
   if (!pdpt) return false;
-  uint64_t *pd = get_next_level(pdpt, pdpt_index, false);
+  if (pdpt[pdpt_index] & PAGE_FLAG_PS) return true;
+  uint64_t *pd = get_next_level(pdpt, pdpt_index, false, 3);
   if (!pd) return false;
   if (pd[pd_index] & PAGE_FLAG_PS) return true;
-  uint64_t *pt = get_next_level(pd, pd_index, false);
+  uint64_t *pt = get_next_level(pd, pd_index, false, 2);
   return pt && (pt[pt_index] & PAGE_FLAG_PRESENT);
 }
 
@@ -145,12 +184,12 @@ bool vmm_map_huge_page(uint64_t *pml4, uint64_t virtual_addr,
   uint64_t *pml4_virt      = (uint64_t *)PHYS_TO_VIRT((uint64_t)pml4);
   uint64_t  propagate_flags = flags & (PAGE_FLAG_USER | PAGE_FLAG_RW);
 
-  uint64_t *pdpt_virt = get_next_level(pml4_virt, pml4_index, true);
+  uint64_t *pdpt_virt = get_next_level(pml4_virt, pml4_index, true, 4);
   if (!pdpt_virt)
     goto unlock;
   pml4_virt[pml4_index] |= propagate_flags;
 
-  uint64_t *pd_virt = get_next_level(pdpt_virt, pdpt_index, true);
+  uint64_t *pd_virt = get_next_level(pdpt_virt, pdpt_index, true, 3);
   if (!pd_virt)
     goto unlock;
   pdpt_virt[pdpt_index] |= propagate_flags;

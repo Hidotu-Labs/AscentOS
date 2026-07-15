@@ -16,6 +16,7 @@ void console_write_batch(const char *buf, size_t len);
 void console_clear(void);
 void console_set_cursor_visible(bool visible);
 void console_refresh_cursor(void);
+void console_redraw_all(void);
 void console_scroll_view(int delta);
 uint32_t console_get_rows(void);
 

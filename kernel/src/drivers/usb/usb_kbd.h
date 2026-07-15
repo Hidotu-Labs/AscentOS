@@ -38,5 +38,6 @@ void usb_kbd_disconnect(struct usb_device *dev);
 // Called periodically to poll the keyboard for new data.
 
 void usb_kbd_poll(void);
+uint32_t usb_kbd_active_count(void);
 
 #endif

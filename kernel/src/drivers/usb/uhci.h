@@ -123,6 +123,7 @@ struct uhci_controller {
   uint32_t *frame_list;     // Virtual address (1024 * 4 bytes)
   uint32_t frame_list_phys; // Physical address (4KB aligned)
   bool irq_registered;
+  uint64_t interrupts;
 
 
   struct uhci_td *td_pool;

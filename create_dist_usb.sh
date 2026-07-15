@@ -76,7 +76,10 @@ cp -v "kernel/bin-${ARCH}/kernel"   "$ISO_ROOT/boot/"
 
 # Limine loads the embedded disk image as a boot module. The kernel's ramdisk
 # driver locates it by the module string/path and exposes its first partition.
-cp -v limine.conf "$ISO_ROOT/boot/limine/"
+# Physical hardware should use the firmware/display preferred mode.
+# Strip the QEMU-only fixed resolution from the distributable image.
+sed '/^[[:space:]]*interface_resolution:/d; /^[[:space:]]*resolution:/d' \
+    limine.conf > "$ISO_ROOT/boot/limine/limine.conf"
 
 [ -f assets/boo.png ] && cp -v assets/boo.png "$ISO_ROOT/boot/limine/"
 cp -v limine/limine-bios.sys         "$ISO_ROOT/boot/limine/"

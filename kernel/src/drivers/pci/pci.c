@@ -309,6 +309,55 @@ void pci_msix_disable(struct pci_msix *msix) {
   msix->enabled = false;
 }
 
+bool pci_msi_enable(struct pci_device *dev, struct pci_msi *msi,
+                    uint8_t vector, uint8_t destination_apic) {
+  if (!dev || !msi || vector < 32)
+    return false;
+  uint8_t cap = pci_find_capability(dev, PCI_CAP_ID_MSI);
+  if (!cap)
+    return false;
+
+  uint16_t control = pci_config_read16(dev->bus, dev->slot, dev->func, cap + 2);
+  bool address_64 = (control & (1U << 7)) != 0;
+  bool per_vector_mask = (control & (1U << 8)) != 0;
+  uint16_t data_offset = address_64 ? 12 : 8;
+  uint16_t mask_offset = address_64 ? 16 : 12;
+
+  /* Program one fixed, edge-triggered message while delivery is disabled. */
+  pci_config_write16(dev->bus, dev->slot, dev->func, cap + 2,
+                     (uint16_t)(control & ~1U));
+  pci_config_write32(dev->bus, dev->slot, dev->func, cap + 4,
+                     0xFEE00000U | ((uint32_t)destination_apic << 12));
+  if (address_64)
+    pci_config_write32(dev->bus, dev->slot, dev->func, cap + 8, 0);
+  pci_config_write16(dev->bus, dev->slot, dev->func, cap + data_offset,
+                     vector);
+  if (per_vector_mask) {
+    uint32_t mask = pci_config_read32(dev->bus, dev->slot, dev->func,
+                                      cap + mask_offset);
+    pci_config_write32(dev->bus, dev->slot, dev->func, cap + mask_offset,
+                       mask & ~1U);
+  }
+
+  control = (uint16_t)((control & ~(7U << 4)) | 1U);
+  pci_config_write16(dev->bus, dev->slot, dev->func, cap + 2, control);
+  msi->dev = dev;
+  msi->capability = cap;
+  msi->enabled = true;
+  return true;
+}
+
+void pci_msi_disable(struct pci_msi *msi) {
+  if (!msi || !msi->enabled || !msi->dev)
+    return;
+  struct pci_device *dev = msi->dev;
+  uint16_t control = pci_config_read16(dev->bus, dev->slot, dev->func,
+                                       msi->capability + 2);
+  pci_config_write16(dev->bus, dev->slot, dev->func, msi->capability + 2,
+                     (uint16_t)(control & ~1U));
+  msi->enabled = false;
+}
+
 uint32_t pci_get_device_count(void) { return device_count; }
 
 struct pci_device *pci_get_device(uint32_t index) {

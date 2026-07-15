@@ -5,8 +5,13 @@
 #include "cpu/irq.h"
 #include "drivers/audio/pcspeaker.h"
 #include "drivers/input/keyboard.h"
+#include "drivers/pci/pci.h"
 #include "drivers/serial.h"
 #include "drivers/storage/block.h"
+#include "drivers/usb/ehci.h"
+#include "drivers/usb/ohci.h"
+#include "drivers/usb/uhci.h"
+#include "drivers/usb/usb_kbd.h"
 #include "drivers/usb/xhci.h"
 #include "drivers/virtio/virtio.h"
 #include "fs/ext2.h"
@@ -63,7 +68,234 @@ static void shell_print_uint64(uint64_t num) {
   }
 }
 
+static void shell_print_hex8(uint8_t value) {
+  static const char digits[] = "0123456789abcdef";
+  console_putchar(digits[value >> 4]);
+  console_putchar(digits[value & 0x0F]);
+}
+
+static void shell_print_hex32(uint32_t value) {
+  static const char digits[] = "0123456789abcdef";
+  for (int shift = 28; shift >= 0; shift -= 4)
+    console_putchar(digits[(value >> shift) & 0x0F]);
+}
+
 static void print_prompt(void) { console_puts("AscentOS> "); }
+
+static void print_usb_diagnostics(void) {
+  int xhci_count = xhci_get_controller_count();
+  int ehci_count = ehci_get_controller_count();
+  int ohci_count = ohci_get_controller_count();
+  int uhci_count = uhci_get_controller_count();
+  uint32_t pci_count = pci_get_device_count();
+  uint32_t pci_usb_count = 0;
+  for (uint32_t i = 0; i < pci_count; i++) {
+    struct pci_device *dev = pci_get_device(i);
+    if (dev && dev->class_code == 0x0C && dev->subclass == 0x03)
+      pci_usb_count++;
+  }
+  console_puts("[PCI] devices=");
+  shell_print_uint64(pci_count);
+  console_puts(" USB-hosts=");
+  shell_print_uint64(pci_usb_count);
+  console_putchar('\n');
+  for (uint32_t i = 0; i < pci_count; i++) {
+    struct pci_device *dev = pci_get_device(i);
+    if (!dev || dev->class_code != 0x0C || dev->subclass != 0x03)
+      continue;
+    console_puts("[PCI-USB] ");
+    shell_print_hex8(dev->bus);
+    console_putchar(':');
+    shell_print_hex8(dev->slot);
+    console_putchar('.');
+    console_putchar('0' + dev->func);
+    console_puts(" prog-if=0x");
+    shell_print_hex8(dev->prog_if);
+    console_putchar('\n');
+  }
+  console_puts("[XHCI] matched=");
+  shell_print_uint64((uint64_t)xhci_get_matched_count());
+  console_puts(" last-failure=");
+  console_puts(xhci_get_last_probe_failure());
+  console_putchar('\n');
+  console_puts("[XHCI-DMA] AC64=");
+  console_puts(xhci_get_last_ac64() ? "yes" : "no");
+  console_puts(" object=");
+  console_puts(xhci_get_last_dma_object());
+  console_puts(" layer=");
+  console_puts(xhci_get_last_dma_layer());
+  console_puts(" flags=");
+  shell_print_uint64(xhci_get_last_dma_flags());
+  console_puts(" phys=");
+  shell_print_uint64(xhci_get_last_dma_phys());
+  console_putchar('\n');
+  console_puts("[USB] controllers: xHCI=");
+  shell_print_uint64((uint64_t)xhci_count);
+  console_puts(" EHCI=");
+  shell_print_uint64((uint64_t)ehci_count);
+  console_puts(" OHCI=");
+  shell_print_uint64((uint64_t)ohci_count);
+  console_puts(" UHCI=");
+  shell_print_uint64((uint64_t)uhci_count);
+  console_puts(" keyboards=");
+  shell_print_uint64(usb_kbd_active_count());
+  console_putchar('\n');
+
+  for (int i = 0; i < xhci_count; i++) {
+    struct xhci_controller *hc = xhci_get_controller(i);
+    if (!hc)
+      continue;
+    console_puts("[USB] xHCI ");
+    shell_print_uint64((uint64_t)i);
+    console_puts(" mode=");
+    if (hc->msix_enabled)
+      console_puts("MSI-X");
+    else if (hc->msi_enabled)
+      console_puts("MSI");
+    else
+      console_puts("timer");
+    console_puts(" irq=");
+    console_puts(hc->irq_reported ? "yes" : "no");
+    console_puts(" events=");
+    shell_print_uint64(hc->events_seen);
+    console_puts(" timeouts=");
+    shell_print_uint64(hc->timeouts);
+    console_putchar('\n');
+
+    console_puts("[XHCI-STATE] hc=");
+    shell_print_uint64((uint64_t)i);
+    console_puts(" pci=");
+    shell_print_hex8(hc->pci->bus);
+    console_putchar(':');
+    shell_print_hex8(hc->pci->slot);
+    console_putchar('.');
+    console_putchar('0' + hc->pci->func);
+    console_puts(" stage=");
+    console_puts(hc->debug_stage ? hc->debug_stage : "none");
+    console_puts(" running=");
+    console_puts(hc->running ? "yes" : "no");
+    console_puts(" cmd=0x");
+    shell_print_hex32(hc->debug_usbcmd);
+    console_puts(" sts=0x");
+    shell_print_hex32(hc->debug_usbsts);
+    console_putchar('\n');
+
+    console_puts("[XHCI-CAPS] hc=");
+    shell_print_uint64((uint64_t)i);
+    console_puts(" ver=0x");
+    shell_print_hex32(hc->version);
+    console_puts(" caplen=");
+    shell_print_uint64(hc->cap_length);
+    console_puts(" slots=");
+    shell_print_uint64(hc->max_slots);
+    console_puts(" ports=");
+    shell_print_uint64(hc->max_ports);
+    console_puts(" intrs=");
+    shell_print_uint64(hc->max_interrupters);
+    console_puts(" ctx=");
+    console_puts(hc->context_64 ? "64" : "32");
+    console_puts(" AC64=");
+    console_puts(hc->ac64 ? "yes" : "no");
+    console_putchar('\n');
+
+    console_puts("[XHCI-RINGS] hc=");
+    shell_print_uint64((uint64_t)i);
+    console_puts(" submitted=");
+    shell_print_uint64(hc->commands_submitted);
+    console_puts(" completed=");
+    shell_print_uint64(hc->commands_completed);
+    console_puts(" cmd-enq=");
+    shell_print_uint64(hc->command_enqueue);
+    console_puts(" evt-deq=");
+    shell_print_uint64(hc->event_dequeue);
+    console_puts(" wraps=");
+    shell_print_uint64(hc->ring_wraps);
+    console_puts(" irqs=");
+    shell_print_uint64(hc->interrupts);
+    console_putchar('\n');
+
+    console_puts("[XHCI-LAST] hc=");
+    shell_print_uint64((uint64_t)i);
+    console_puts(" port=");
+    shell_print_uint64((uint64_t)hc->debug_last_port + 1);
+    console_puts(" slot=");
+    shell_print_uint64(hc->debug_last_slot);
+    console_puts(" cmd-type=");
+    shell_print_uint64(hc->debug_last_command_type);
+    console_puts(" cmd-cc=");
+    shell_print_uint64(hc->last_completion_code);
+    console_puts(" xfer-cc=");
+    shell_print_uint64(hc->last_transfer_code);
+    console_puts(" ep0-req=0x");
+    shell_print_hex8(hc->debug_last_ep0_request);
+    console_puts(" value=0x");
+    shell_print_hex32(hc->debug_last_ep0_value);
+    console_puts(" len=");
+    shell_print_uint64(hc->debug_last_ep0_length);
+    console_puts(" data=");
+    for (uint8_t n = 0; n < 8; n++)
+      shell_print_hex8(hc->debug_ep0_data[n]);
+    console_putchar('\n');
+
+    for (uint16_t port = 0; port < hc->max_ports; port++) {
+      uint32_t ps = hc->debug_portsc[port];
+      console_puts("[XHCI-PORT] hc=");
+      shell_print_uint64((uint64_t)i);
+      console_puts(" port=");
+      shell_print_uint64((uint64_t)port + 1);
+      console_puts(" PORTSC=0x");
+      shell_print_hex32(ps);
+      console_puts(" CCS=");
+      console_puts((ps & 1U) ? "1" : "0");
+      console_puts(" PED=");
+      console_puts((ps & 2U) ? "1" : "0");
+      console_puts(" PP=");
+      console_puts((ps & (1U << 9)) ? "1" : "0");
+      console_puts(" speed=");
+      shell_print_uint64((ps >> 10) & 0xFU);
+      console_puts(" result=");
+      switch (hc->debug_port_result[port]) {
+      case 0: console_puts("disconnected"); break;
+      case 1: console_puts("connected"); break;
+      case 2: console_puts("reset-ok"); break;
+      case 3: console_puts("reset-timeout"); break;
+      default: console_puts("unknown"); break;
+      }
+      console_putchar('\n');
+    }
+  }
+
+  for (int i = 0; i < ehci_count; i++) {
+    struct ehci_controller *hc = ehci_get_controller(i);
+    console_puts("[USB] EHCI irq=");
+    shell_print_uint64(hc->irq_line);
+    console_puts(" registered=");
+    console_puts(hc->irq_registered ? "yes" : "no");
+    console_puts(" hits=");
+    shell_print_uint64(hc->interrupts);
+    console_putchar('\n');
+  }
+  for (int i = 0; i < ohci_count; i++) {
+    struct ohci_controller *hc = ohci_get_controller(i);
+    console_puts("[USB] OHCI irq=");
+    shell_print_uint64(hc->irq_line);
+    console_puts(" registered=");
+    console_puts(hc->irq_registered ? "yes" : "no");
+    console_puts(" hits=");
+    shell_print_uint64(hc->interrupts);
+    console_putchar('\n');
+  }
+  for (int i = 0; i < uhci_count; i++) {
+    struct uhci_controller *hc = uhci_get_controller(i);
+    console_puts("[USB] UHCI irq=");
+    shell_print_uint64(hc->irq_line);
+    console_puts(" registered=");
+    console_puts(hc->irq_registered ? "yes" : "no");
+    console_puts(" hits=");
+    shell_print_uint64(hc->interrupts);
+    console_putchar('\n');
+  }
+}
 
 static void execute_command(char *cmd) {
   // Strip trailing spaces
@@ -122,6 +354,7 @@ static void execute_command(char *cmd) {
                  "[args...])\n");
     console_puts("  pmmtest   - Test the PMM buddy allocator\n");
     console_puts("  virtio-test - Stress the VirtIO split-queue transport\n");
+    console_puts("  usbdiag   - Print the full persistent USB/xHCI debug snapshot\n");
     console_puts("  xhci-phase2-test - Reset/ring stress for xHCI\n");
     console_puts(
         "  vmmtest   - Test the VMM demand paging and mapping bounds\n");
@@ -1859,6 +2092,8 @@ static void execute_command(char *cmd) {
         console_puts("chown failed.\n");
       }
     }
+  } else if (strcmp(cmd, "usbdiag") == 0) {
+    print_usb_diagnostics();
   } else if (strcmp(cmd, "xhci-phase2-test") == 0) {
     console_puts("[XHCI] Phase 2 stress: 10 resets, 10000 commands...\n");
     if (xhci_phase2_stress(10, 10000))
@@ -1994,6 +2229,7 @@ static void execute_command(char *cmd) {
 void shell_init(void) {
   // Wait a brief moment or setup anything needed
   console_puts("\nWelcome to AscentOS Shell.\n");
+  print_usb_diagnostics();
 }
 
 void shell_run(void) {
@@ -2001,6 +2237,9 @@ void shell_run(void) {
   cmd_buffer[0] = '\0';
   print_prompt();
 
+  /* Reconstruct the complete viewport from terminal state before enabling the
+     cursor. This removes any stale cursor cell left by early boot output. */
+  console_redraw_all();
   console_set_cursor_visible(true);
 
   while (1) {

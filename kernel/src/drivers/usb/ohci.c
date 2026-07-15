@@ -470,6 +470,7 @@ static void ohci_irq_handler(struct registers *regs) {
     if (status == 0 || status == 0xFFFFFFFF)
       continue;
 
+    hc->interrupts++;
     ohci_write32(hc, OHCI_REG_INTERRUPT_STATUS, status);
 
     if (status & OHCI_INTR_WDH) {
@@ -588,7 +589,9 @@ static bool ohci_probe_pci_device(struct pci_device *pci) {
   ohci_write32(hc, OHCI_REG_BULK_HEAD_ED, 0);
 
   // Hook Interrupts
-  if (irq_install_handler(hc->irq_line, ohci_irq_handler, 0x000F)) {
+  hc->irq_registered =
+      irq_install_handler(hc->irq_line, ohci_irq_handler, 0x000F);
+  if (hc->irq_registered) {
     ohci_write32(hc, OHCI_REG_INTERRUPT_ENABLE,
                  OHCI_INTR_MIE | OHCI_INTR_WDH | OHCI_INTR_UE | OHCI_INTR_RHSC);
   }

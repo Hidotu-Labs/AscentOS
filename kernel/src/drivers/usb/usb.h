@@ -114,6 +114,8 @@ struct usb_device {
   bool connected;
   enum usb_speed speed;
   uint32_t generation;
+  uint8_t configuration_value;
+  bool configured;
   void *hcd_data;
   struct usb_device_descriptor desc;
   struct usb_hcd *hcd; // Reference to the host controller driver
