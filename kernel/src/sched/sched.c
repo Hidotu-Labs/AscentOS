@@ -246,6 +246,11 @@ static void sched_deadline_insert_locked(struct cpu_info *cpu,
   t->deadline_queued = true;
 }
 
+static void sched_runqueue_append_locked(struct cpu_info *cpu,
+                                         struct thread *t, uint8_t priority);
+static bool sched_runqueue_remove_locked(struct cpu_info *cpu,
+                                         struct thread *t);
+
 static void sched_deadline_expire_locked(struct cpu_info *cpu, uint64_t now) {
   while (cpu->deadline_head && cpu->deadline_head->wakeup_ticks <= now) {
     struct thread *t = cpu->deadline_head;
@@ -257,9 +262,12 @@ static void sched_deadline_expire_locked(struct cpu_info *cpu, uint64_t now) {
       bool still_current = cpu->current_thread == t;
       t->state = still_current ? THREAD_RUNNING : THREAD_READY;
       t->wakeup_ticks = 0;
-      cpu->runqueue_bitmap |= (1U << t->priority);
-      if (!still_current)
+      t->ready_since_ms = still_current ? 0 : now;
+      if (!still_current) {
+        t->priority = t->static_priority;
+        sched_runqueue_append_locked(cpu, t, t->priority);
         cpu->runnable_count++;
+      }
     } else {
       t->wakeup_ticks = 0;
     }
@@ -280,6 +288,109 @@ static void sched_arm_next_deadline(struct cpu_info *cpu,
       (!deadline || cpu->deadline_head->wakeup_ticks < deadline))
     deadline = cpu->deadline_head->wakeup_ticks;
   if (deadline) lapic_timer_rearm_if_earlier(deadline);
+}
+
+
+/* All run-queue helpers require cpu->queue_lock. */
+static void sched_runqueue_append_locked(struct cpu_info *cpu,
+                                         struct thread *t, uint8_t priority) {
+  if (t->on_runqueue || priority >= SCHED_PRIORITY_LEVELS ||
+      (t->state != THREAD_READY && t->state != THREAD_RUNNING)) return;
+  struct thread *head = cpu->runqueues[priority];
+  struct thread *tail = cpu->runqueue_tails[priority];
+  if (!head) {
+    cpu->runqueues[priority] = t;
+    cpu->runqueue_tails[priority] = t;
+    t->rq_next = t;
+    t->rq_prev = t;
+  } else {
+    t->rq_prev = tail;
+    t->rq_next = head;
+    tail->rq_next = t;
+    head->rq_prev = t;
+    cpu->runqueue_tails[priority] = t;
+  }
+  t->on_runqueue = true;
+  t->queued_priority = priority;
+  t->priority = priority;
+  if (t->state == THREAD_READY || t->state == THREAD_RUNNING)
+    cpu->runqueue_bitmap |= (1U << priority);
+}
+
+static bool sched_runqueue_remove_locked(struct cpu_info *cpu,
+                                         struct thread *t) {
+  if (!t->on_runqueue || t->cpu_index != cpu->cpu_id ||
+      t->queued_priority >= SCHED_PRIORITY_LEVELS ||
+      !t->rq_next || !t->rq_prev)
+    return false;
+  uint8_t p = t->queued_priority;
+  if (cpu->runqueues[p] == t && t->rq_next == t) {
+    cpu->runqueues[p] = NULL;
+    cpu->runqueue_tails[p] = NULL;
+    cpu->runqueue_bitmap &= ~(1U << p);
+  } else {
+    t->rq_prev->rq_next = t->rq_next;
+    t->rq_next->rq_prev = t->rq_prev;
+    if (cpu->runqueues[p] == t) cpu->runqueues[p] = t->rq_next;
+    if (cpu->runqueue_tails[p] == t) cpu->runqueue_tails[p] = t->rq_prev;
+  }
+  t->rq_next = NULL;
+  t->rq_prev = NULL;
+  t->on_runqueue = false;
+  t->queued_priority = SCHED_PRIORITY_LEVELS;
+  return true;
+}
+
+static bool sched_requeue_priority_locked(struct cpu_info *cpu,
+                                          struct thread *t,
+                                          uint8_t new_priority) {
+  if (t->priority == new_priority && t->on_runqueue) return true;
+  if (!sched_runqueue_remove_locked(cpu, t)) return false;
+  sched_runqueue_append_locked(cpu, t, new_priority);
+  return true;
+}
+
+static void sched_age_runqueues_locked(struct cpu_info *cpu, uint64_t now) {
+  if (now < cpu->next_aging_scan_ms) return;
+  cpu->next_aging_scan_ms = now + SCHED_AGING_SCAN_INTERVAL_MS;
+  for (uint8_t p = 1; p < SCHED_PRIORITY_LEVELS; p++) {
+    struct thread *head = cpu->runqueues[p];
+    if (!head) continue;
+    struct thread *it = head;
+    uint32_t count = 1;
+    while ((it = it->rq_next) != head) count++;
+    it = head;
+    while (count--) {
+      struct thread *next = it->rq_next;
+      if (it->state == THREAD_READY && it->ready_since_ms && now > it->ready_since_ms) {
+        uint64_t boost = (now - it->ready_since_ms) / SCHED_AGING_STEP_MS;
+        uint8_t target = boost >= it->static_priority ? 0 :
+                         (uint8_t)(it->static_priority - boost);
+        if (target < it->priority) sched_requeue_priority_locked(cpu, it, target);
+      }
+      it = next;
+    }
+  }
+}
+
+static struct thread *sched_pick_next_locked(struct cpu_info *cpu) {
+  while (cpu->runqueue_bitmap) {
+    uint8_t p = (uint8_t)__builtin_ctz(cpu->runqueue_bitmap);
+    struct thread *head = cpu->runqueues[p];
+    if (!head) {
+      cpu->runqueue_bitmap &= ~(1U << p);
+      continue;
+    }
+    if (head->state != THREAD_READY && head->state != THREAD_RUNNING) {
+      sched_runqueue_remove_locked(cpu, head);
+      if (cpu->runnable_count) cpu->runnable_count--;
+      continue;
+    }
+    cpu->runqueues[p] = head->rq_next;
+    cpu->runqueue_tails[p] = head;
+    return head;
+  }
+  return NULL;
 }
 
 // Global list of all threads (for wait4)
@@ -303,9 +414,12 @@ void sched_init(void) {
     // Initialize all runqueues
     for (int p = 0; p < SCHED_PRIORITY_LEVELS; p++) {
       cpu->runqueues[p] = NULL;
+      cpu->runqueue_tails[p] = NULL;
     }
     cpu->runqueue_bitmap = 0;
     cpu->deadline_head = NULL;
+    cpu->next_aging_scan_ms = lapic_timer_get_ms() +
+                              SCHED_AGING_SCAN_INTERVAL_MS;
 
     // Register reschedule IPI handler once on BSP
     if (i == 0) {
@@ -419,28 +533,15 @@ void sched_enqueue_thread(struct thread *t, struct cpu_info *explicit_cpu) {
   if (p >= SCHED_PRIORITY_LEVELS)
     p = SCHED_PRIORITY_DEFAULT;
 
-  if (!target_cpu->runqueues[p]) {
-    target_cpu->runqueues[p] = t;
-    t->next = t;
-  } else {
-    // Insert at tail of circular list
-    struct thread *head = target_cpu->runqueues[p];
-    struct thread *tail = head;
-    while (tail->next != head) {
-      tail = tail->next;
-    }
-    tail->next = t;
-    t->next = head;
+  if (t->on_runqueue) {
+    spinlock_release(&target_cpu->queue_lock);
+    hal_irq_enable();
+    return;
   }
-
-  /* A priority bit may have been cleared when its existing threads were all
-   * blocked.  Appending a newly runnable thread to that non-empty list must
-   * make the priority visible to the selector again. */
-  target_cpu->runqueue_bitmap |= (1U << p);
-
-  if (t->state == THREAD_READY || t->state == THREAD_RUNNING) {
+  t->ready_since_ms = lapic_timer_get_ms();
+  sched_runqueue_append_locked(target_cpu, t, p);
+  if (t->state == THREAD_READY || t->state == THREAD_RUNNING)
     target_cpu->runnable_count++;
-  }
 
   t->cpu_index = target_cpu->cpu_id;
 
@@ -510,6 +611,9 @@ struct thread *sched_create_kernel_thread(void (*entry)(void),
     t->cpu_affinity = ~0ULL;
 
   t->state = THREAD_READY;
+  t->priority = SCHED_PRIORITY_DEFAULT;
+  t->static_priority = SCHED_PRIORITY_DEFAULT;
+  t->nice_value = 0;
   t->stack_size = THREAD_STACK_SIZE;
 
   t->stack_base = (uint64_t)thread_stack_alloc();
@@ -580,7 +684,7 @@ struct thread *sched_create_kernel_thread(void (*entry)(void),
   global_thread_list = t;
   spinlock_release(&tid_lock);
 
-  // Balance and add to a CPU.s runqueue conditionally
+  // Balance and add to a CPU's runqueue conditionally
   if (enqueue) {
     sched_enqueue_thread(t, explicit_cpu);
   }
@@ -617,18 +721,14 @@ static void sched_balance(struct cpu_info *cpu) {
   if (!spinlock_try_acquire(&richest_cpu->queue_lock))
     return;
 
-  // Find a thread to steal.
+  // Find a READY thread to steal. Removal is O(1) once selected.
   struct thread *stolen = NULL;
-  for (int p = 0; p < SCHED_PRIORITY_LEVELS; p++) {
+  for (int p = 0; p < SCHED_PRIORITY_LEVELS && !stolen; p++) {
     struct thread *head = richest_cpu->runqueues[p];
-    if (!head)
-      continue;
-
+    if (!head) continue;
     struct thread *curr = head;
-    struct thread *prev = NULL;
     do {
-      // Find a READY thread (don't steal the currently running one).
-      // Ensure the thread is allowed to run on THIS CPU (the stealing CPU).
+      struct thread *next = curr->rq_next;
       if (curr->state == THREAD_READY && !curr->is_idle &&
           curr != __atomic_load_n(&richest_cpu->current_thread,
                                   __ATOMIC_ACQUIRE) &&
@@ -636,52 +736,20 @@ static void sched_balance(struct cpu_info *cpu) {
                                   __ATOMIC_ACQUIRE) &&
           (curr->cpu_affinity & (1ULL << cpu->cpu_id))) {
         stolen = curr;
-
-        // Remove from remote runqueue
-        if (curr->next == curr) {
-          richest_cpu->runqueues[p] = NULL;
-          richest_cpu->runqueue_bitmap &= ~(1 << p);
-        } else {
-          if (!prev) {
-            // Find predecessor in circular list
-            prev = head;
-            while (prev->next != curr)
-              prev = prev->next;
-          }
-          prev->next = curr->next;
-          if (richest_cpu->runqueues[p] == curr) {
-            richest_cpu->runqueues[p] = curr->next;
-          }
-        }
+        sched_runqueue_remove_locked(richest_cpu, curr);
         richest_cpu->runnable_count--;
         break;
       }
-      prev = curr;
-      curr = curr->next;
+      curr = next;
     } while (curr != head);
-
-    if (stolen)
-      break;
   }
 
   spinlock_release(&richest_cpu->queue_lock);
 
   if (stolen) {
-    // Add to local runqueue
+    // Add to local runqueue in O(1).
     stolen->cpu_index = cpu->cpu_id;
-    uint8_t p = stolen->priority;
-    if (!cpu->runqueues[p]) {
-      cpu->runqueues[p] = stolen;
-      stolen->next = stolen;
-      cpu->runqueue_bitmap |= (1 << p);
-    } else {
-      struct thread *head = cpu->runqueues[p];
-      struct thread *tail = head;
-      while (tail->next != head)
-        tail = tail->next;
-      tail->next = stolen;
-      stolen->next = head;
-    }
+    sched_runqueue_append_locked(cpu, stolen, stolen->priority);
     cpu->runnable_count++;
 
     klog_puts("[SCHED] CPU ");
@@ -746,101 +814,37 @@ void sched_yield(void) {
     }
   }
   sched_deadline_expire_locked(cpu, now);
+  sched_age_runqueues_locked(cpu, now);
 
-  // 1. If prev is ZOMBIE or DEAD, remove it from the runqueue entirely.
-  //    BLOCKED/SLEEPING threads stay in the queue so sched_wakeup can
-  //    find them in O(1) via cpu_index without re-enqueueing.
+  // Keep only runnable threads on run queues. Timed sleepers remain on the
+  // deadline list and are re-enqueued when their timeout expires.
   if (prev->state == THREAD_ZOMBIE || prev->state == THREAD_DEAD) {
     sched_deadline_remove_locked(cpu, prev);
-    uint8_t p = prev->priority;
-    if (cpu->runqueues[p]) {
-      if (prev->next == prev) {
-        cpu->runqueues[p] = NULL;
-        cpu->runqueue_bitmap &= ~(1 << p);
-      } else {
-        struct thread *pred = prev;
-        while (pred->next != prev)
-          pred = pred->next;
-        pred->next = prev->next;
-        if (cpu->runqueues[p] == prev)
-          cpu->runqueues[p] = prev->next;
-      }
-    }
+    sched_runqueue_remove_locked(cpu, prev);
     cpu->runnable_count--;
   } else if (prev->state == THREAD_BLOCKED || prev->state == THREAD_SLEEPING) {
-    // Thread just transitioned out of a runnable state
-    cpu->runnable_count--;
+    if (sched_runqueue_remove_locked(cpu, prev) && cpu->runnable_count)
+      cpu->runnable_count--;
   }
 
-  // 2. Select the next thread to run.
-  //    Scan each priority level's circular list for a READY/RUNNING thread.
-  //    Skip BLOCKED/SLEEPING threads (they remain in the queue for fast
-  //    wakeup). If no runnable thread is found at a level, clear the bitmap
-  //    bit.
-  struct thread *next_t = NULL;
-  uint32_t bitmap_copy = cpu->runqueue_bitmap;
-
-  while (bitmap_copy != 0) {
-    int p = __builtin_ctz(bitmap_copy);
-    struct thread *head = cpu->runqueues[p];
-    if (!head) {
-      cpu->runqueue_bitmap &= ~(1 << p);
-      bitmap_copy &= ~(1 << p);
-      continue;
-    }
-
-    struct thread *curr = head;
-    bool found = false;
-    do {
-      if (curr->state == THREAD_READY || curr->state == THREAD_RUNNING) {
-        next_t = curr;
-        // Advance head past selected thread for round-robin
-        cpu->runqueues[p] = curr->next;
-        found = true;
-        break;
-      }
-      curr = curr->next;
-    } while (curr != head);
-
-    if (found)
-      break;
-
-    // No runnable thread at this priority — clear the bitmap bit
-    cpu->runqueue_bitmap &= ~(1 << p);
-    bitmap_copy &= ~(1 << p);
-  }
+  // 2. Select the highest effective-priority runnable thread.
+  struct thread *next_t = sched_pick_next_locked(cpu);
 
   // 2.5 Load Balancing (Work Stealing)
   // If we found no READY thread on this CPU, try to steal one from others.
   if (!next_t) {
     sched_balance(cpu);
-    // Try to select again if we stole something.
-    if (cpu->runqueue_bitmap != 0) {
-      bitmap_copy = cpu->runqueue_bitmap;
-      while (bitmap_copy != 0) {
-        int p = __builtin_ctz(bitmap_copy);
-        struct thread *head = cpu->runqueues[p];
-        if (head) {
-          struct thread *curr = head;
-          do {
-            if (curr->state == THREAD_READY) {
-              next_t = curr;
-              cpu->runqueues[p] = curr->next;
-              break;
-            }
-            curr = curr->next;
-          } while (curr != head);
-        }
-        if (next_t)
-          break;
-        bitmap_copy &= ~(1 << p);
-      }
-    }
+    next_t = sched_pick_next_locked(cpu);
   }
 
   // 3. Perform the switch
   if (!next_t) {
     next_t = cpu->idle_thread;
+  }
+  if (next_t && !next_t->is_idle) {
+    next_t->ready_since_ms = 0;
+    if (next_t->priority != next_t->static_priority)
+      sched_requeue_priority_locked(cpu, next_t, next_t->static_priority);
   }
 
   sched_arm_next_deadline(cpu, next_t);
@@ -848,6 +852,7 @@ void sched_yield(void) {
   if (next_t && next_t != prev) {
     if (prev->state == THREAD_RUNNING) {
       prev->state = THREAD_READY;
+      prev->ready_since_ms = now;
     }
     next_t->state = THREAD_RUNNING;
     // current_thread must describe the arriving task before interrupts can
@@ -959,6 +964,64 @@ void sched_tick(struct registers *regs) {
 
 struct thread *sched_get_current(void) {
   return cpu_get_current()->current_thread;
+}
+
+bool sched_validate_runqueues(struct cpu_info *cpu) {
+  if (!cpu) return false;
+  hal_irq_state_t flags = hal_irq_save();
+  spinlock_acquire(&cpu->queue_lock);
+  bool valid = true;
+  uint32_t count = 0;
+  uint32_t bitmap = 0;
+  for (uint8_t p = 0; p < SCHED_PRIORITY_LEVELS && valid; p++) {
+    struct thread *head = cpu->runqueues[p];
+    struct thread *tail = cpu->runqueue_tails[p];
+    if (!!head != !!tail) { valid = false; break; }
+    if (!head) continue;
+    if (head->rq_prev != tail || tail->rq_next != head) { valid = false; break; }
+    struct thread *it = head;
+    uint32_t guard = 0;
+    do {
+      if (!it->on_runqueue || it->queued_priority != p || it->priority != p ||
+          (it->state != THREAD_READY && it->state != THREAD_RUNNING) ||
+          !it->rq_next || !it->rq_prev || it->rq_next->rq_prev != it ||
+          it->rq_prev->rq_next != it || it->cpu_index != cpu->cpu_id) {
+        valid = false;
+        break;
+      }
+      count++;
+      bitmap |= (1U << p);
+      it = it->rq_next;
+    } while (it != head && ++guard < 100000);
+    if (guard >= 100000) valid = false;
+  }
+  if (count != cpu->runnable_count || bitmap != cpu->runqueue_bitmap)
+    valid = false;
+  spinlock_release(&cpu->queue_lock);
+  hal_irq_restore(flags);
+  return valid;
+}
+
+bool sched_set_priority(struct thread *t, uint8_t priority, int8_t nice_value) {
+  if (!t || t->is_idle || priority >= SCHED_PRIORITY_LEVELS) return false;
+  struct cpu_info *cpu = cpu_get_info(t->cpu_index);
+  if (!cpu || cpu->status == CPU_STATUS_OFFLINE) return false;
+  hal_irq_state_t flags = hal_irq_save();
+  spinlock_acquire(&cpu->queue_lock);
+  uint8_t old_priority = t->priority;
+  t->static_priority = priority;
+  t->nice_value = nice_value;
+  sched_requeue_priority_locked(cpu, t, priority);
+  bool preempt = (t->state == THREAD_READY || t->state == THREAD_RUNNING) &&
+                 priority < old_priority;
+  spinlock_release(&cpu->queue_lock);
+  if (preempt && lapic_is_ready()) {
+    struct cpu_info *self = cpu_get_current();
+    if (cpu == self) lapic_timer_rearm_if_earlier(lapic_timer_get_ms() + 1);
+    else lapic_send_ipi(cpu->apic_id, IPI_VECTOR_RESCHEDULE);
+  }
+  hal_irq_restore(flags);
+  return true;
 }
 
 void sched_terminate_thread_group(struct thread *current) {
@@ -1075,7 +1138,7 @@ void sched_print_tasks(void) {
           }
           console_putchar('\n');
 
-          curr = curr->next;
+          curr = curr->rq_next;
         } while (curr != first);
       }
     }
@@ -1085,35 +1148,17 @@ void sched_print_tasks(void) {
 }
 
 bool sched_terminate_thread(uint32_t tid) {
-  // Cannot kill idle threads
-  // (We check by TID since we'll search for the thread by TID first)
-
-  for (uint32_t i = 0; i < cpu_get_count(); i++) {
-    struct cpu_info *cpu = cpu_get_info(i);
-    if (!cpu || cpu->status == CPU_STATUS_OFFLINE)
-      continue;
-
-    hal_irq_disable();
-    spinlock_acquire(&cpu->queue_lock);
-    for (int p = 0; p < SCHED_PRIORITY_LEVELS; p++) {
-      struct thread *first = cpu->runqueues[p];
-      struct thread *curr = first;
-      if (curr) {
-        do {
-          if (curr->tid == tid && !curr->is_idle) {
-            curr->state = THREAD_DEAD;
-            spinlock_release(&cpu->queue_lock);
-            hal_irq_enable();
-            return true;
-          }
-          curr = curr->next;
-        } while (curr != first);
-      }
-    }
-    spinlock_release(&cpu->queue_lock);
-    hal_irq_enable();
-  }
-  return false;
+  struct thread *t = sched_get_thread_by_tid(tid);
+  if (!t || t->is_idle || t->state == THREAD_DEAD ||
+      t->state == THREAD_ZOMBIE)
+    return false;
+  __atomic_store_n(&t->state, THREAD_DEAD, __ATOMIC_RELEASE);
+  struct cpu_info *cpu = cpu_get_info(t->cpu_index);
+  if (cpu && cpu->status != CPU_STATUS_OFFLINE &&
+      __atomic_load_n(&cpu->current_thread, __ATOMIC_ACQUIRE) == t)
+    lapic_send_ipi(cpu->apic_id, IPI_VECTOR_RESCHEDULE);
+  sched_queue_reap(t);
+  return true;
 }
 
 // Helper: remove thread from global thread list
@@ -1138,89 +1183,30 @@ static void remove_from_global_list(struct thread *t) {
   spinlock_release(&tid_lock);
 }
 
-// Helper: remove thread from its CPU's runqueue
+// Helper: remove thread from its CPU's runqueue.
 static void remove_from_runqueue(struct thread *t) {
-  // Find which CPU has this thread
-  for (uint32_t i = 0; i < cpu_get_count(); i++) {
-    struct cpu_info *cpu_local = cpu_get_info(i);
-    if (!cpu_local || cpu_local->status == CPU_STATUS_OFFLINE)
-      continue;
-
-    spinlock_acquire(&cpu_local->queue_lock);
-
-    if (t->cpu_index == cpu_local->cpu_id)
-      sched_deadline_remove_locked(cpu_local, t);
-
-    // Check all priority levels
-    for (int p = 0; p < SCHED_PRIORITY_LEVELS; p++) {
-      struct thread *head = cpu_local->runqueues[p];
-      if (!head)
-        continue;
-
-      struct thread *curr = head;
-      struct thread *prev_node = NULL;
-      bool found = false;
-
-      // Find t and its predecessor
+  if (!t) return;
+  struct cpu_info *cpu_local = cpu_get_info(t->cpu_index);
+  if (!cpu_local || cpu_local->status == CPU_STATUS_OFFLINE) return;
+  spinlock_acquire(&cpu_local->queue_lock);
+  sched_deadline_remove_locked(cpu_local, t);
+  if (sched_runqueue_remove_locked(cpu_local, t)) {
+    cpu_local->runnable_count = 0;
+    cpu_local->runqueue_bitmap = 0;
+    for (int q = 0; q < SCHED_PRIORITY_LEVELS; q++) {
+      struct thread *head = cpu_local->runqueues[q];
+      if (!head) continue;
+      struct thread *it = head;
       do {
-        if (curr == t) {
-          found = true;
-          break;
-        }
-        prev_node = curr;
-        curr = curr->next;
-      } while (curr != head);
-
-      if (!found)
-        continue;
-
-      if (t->next == t) {
-        // Only thread in this priority queue
-        cpu_local->runqueues[p] = NULL;
-        cpu_local->runqueue_bitmap &= ~(1 << p);
-      } else {
-        // More than one thread. We need to find the predecessor if we haven't
-        // already.
-        if (!prev_node) {
-          prev_node = head;
-          while (prev_node->next != t)
-            prev_node = prev_node->next;
-        }
-        prev_node->next = t->next;
-        if (cpu_local->runqueues[p] == t) {
-          cpu_local->runqueues[p] = t->next;
-        }
-      }
-
-      /* A remote exit_group changes the victim to DEAD before it gets here,
-       * so its old state no longer tells us whether runnable_count included
-       * it. Rebuild the small per-CPU summary after the rare removal. */
-      cpu_local->runnable_count = 0;
-      cpu_local->runqueue_bitmap = 0;
-      for (int q = 0; q < SCHED_PRIORITY_LEVELS; q++) {
-        struct thread *qhead = cpu_local->runqueues[q];
-        if (!qhead)
-          continue;
-        struct thread *qcur = qhead;
-        do {
-          bool runnable = qcur->state == THREAD_READY ||
-                          qcur->state == THREAD_RUNNING;
-          /* sched_yield accounts the current task until it removes/switches
-           * it, even after that task changes to BLOCKED, ZOMBIE, or DEAD. */
-          if (runnable || cpu_local->current_thread == qcur)
-            cpu_local->runnable_count++;
-          if (runnable)
-            cpu_local->runqueue_bitmap |= (1U << q);
-          qcur = qcur->next;
-        } while (qcur && qcur != qhead);
-      }
-
-      spinlock_release(&cpu_local->queue_lock);
-      return;
+        bool runnable = it->state == THREAD_READY || it->state == THREAD_RUNNING;
+        if (runnable || cpu_local->current_thread == it)
+          cpu_local->runnable_count++;
+        if (runnable) cpu_local->runqueue_bitmap |= (1U << q);
+        it = it->rq_next;
+      } while (it != head);
     }
-
-    spinlock_release(&cpu_local->queue_lock);
   }
+  spinlock_release(&cpu_local->queue_lock);
 }
 
 void sched_reparent_children(struct thread *parent) {
@@ -1421,8 +1407,8 @@ void sched_wakeup(struct thread *t) {
 
   hal_irq_state_t rflags = hal_irq_save();
 
-  // O(1) wakeup: blocked threads stay in their CPU's runqueue,
-  // so we just use the stored cpu_index to flip state + bitmap.
+  // O(1) wakeup: use the saved CPU assignment and append a descheduled
+  // blocked thread to its base-priority queue.
   struct cpu_info *target = cpu_get_info(t->cpu_index);
   if (target && target->status != CPU_STATUS_OFFLINE) {
     spinlock_acquire(&target->queue_lock);
@@ -1437,9 +1423,14 @@ void sched_wakeup(struct thread *t) {
       sched_deadline_remove_locked(target, t);
       t->state = still_current ? THREAD_RUNNING : THREAD_READY;
       t->wakeup_ticks = 0;
-      target->runqueue_bitmap |= (1 << t->priority);
-      if (!still_current)
+      if (!still_current) {
+        t->priority = t->static_priority;
+        t->ready_since_ms = lapic_timer_get_ms();
+        sched_runqueue_append_locked(target, t, t->priority);
         target->runnable_count++;
+      } else {
+        t->ready_since_ms = 0;
+      }
     }
     spinlock_release(&target->queue_lock);
 

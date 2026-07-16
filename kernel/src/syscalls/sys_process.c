@@ -862,6 +862,9 @@ uint64_t sys_fork(struct syscall_regs *regs) {
   child->fork_ctx = child_regs;
   child->parent = parent;
   child->cpu_affinity = parent->cpu_affinity;
+  child->priority = parent->static_priority;
+  child->static_priority = parent->static_priority;
+  child->nice_value = parent->nice_value;
   child->tgid = child->tid; // Fork creates a new process (new thread group)
 
   // 6. Copy file descriptors from parent to child (with reference counting)
@@ -1013,6 +1016,9 @@ static uint64_t sys_clone_internal(struct syscall_regs *regs, uint64_t flags,
   child->fork_ctx = child_regs;
   child->parent = parent;
   child->cpu_affinity = parent->cpu_affinity;
+  child->priority = parent->static_priority;
+  child->static_priority = parent->static_priority;
+  child->nice_value = parent->nice_value;
   child->clone_flags = flags;
   child->tgid = (flags & CLONE_THREAD) ? parent->tgid : child->tid;
   child->fs_base = (flags & CLONE_SETTLS) ? newtls : parent->fs_base;
@@ -1843,7 +1849,9 @@ static uint64_t sys_sched_setparam(uint64_t pid, uint64_t param_ptr,
   if (!param_ptr || !vmm_is_user_addr_range_valid(param_ptr, sizeof(int)))
     return (uint64_t)-14; // EFAULT
 
-  // Stub: accept any priority change silently
+  int sched_priority = *(int *)param_ptr;
+  if (sched_priority != 0)
+    return (uint64_t)-22; // SCHED_OTHER requires priority zero
   return 0;
 }
 
@@ -1938,61 +1946,48 @@ static uint64_t sys_sched_setscheduler(uint64_t pid, uint64_t policy,
 }
 
 // sys_setpriority (syscall 141)
-// Sets the scheduling priority for a process, process group, or user.
-// Stub: accepts silently since we don't track nice values.
+// Sets the nice value for one process and maps it onto 32 kernel priorities.
 #define PRIO_PROCESS 0
 #define PRIO_PGRP 1
 #define PRIO_USER 2
 
+static uint8_t nice_to_sched_priority(int nice);
+
 static uint64_t sys_setpriority(uint64_t which, uint64_t who, uint64_t prio,
                                 uint64_t a3, uint64_t a4, uint64_t a5) {
-  (void)which;
-  (void)who;
-  (void)prio;
-  (void)a3;
-  (void)a4;
-  (void)a5;
-
-  if (which > PRIO_USER)
-    return (uint64_t)-22; // EINVAL
-
+  (void)a3; (void)a4; (void)a5;
+  if (which != PRIO_PROCESS) return (uint64_t)-22;
+  int nice = (int)(int64_t)prio;
+  if (nice < -20) nice = -20;
+  if (nice > 19) nice = 19;
   struct thread *current = sched_get_current();
-  if (!current) return (uint64_t)-1;
-  if (which == PRIO_PROCESS) {
-    struct thread *target = who == 0 ? current : sched_get_thread_by_tid((uint32_t)who);
-    if (!target) return (uint64_t)-3;
-    if (current->euid != 0 && current->uid != target->uid &&
-        current->euid != target->uid) return (uint64_t)-1;
-  } else if (current->euid != 0) {
-    return (uint64_t)-1;
-  }
-
-  // Stub: accept any priority change silently
+  struct thread *target = who == 0 ? current :
+      sched_get_thread_by_tid((uint32_t)who);
+  if (!target) return (uint64_t)-3;
+  if (current->euid != 0 && current->uid != target->uid &&
+      current->euid != target->uid) return (uint64_t)-1;
+  if (nice < target->nice_value && current->euid != 0)
+    return (uint64_t)-13;
+  if (!sched_set_priority(target, nice_to_sched_priority(nice), (int8_t)nice))
+    return (uint64_t)-3;
   return 0;
 }
 
 // sys_getpriority (syscall 140)
 // Returns 20 - nice_value (Linux convention: returns value in range 1..40).
-// Since we always have nice=0, we return 20.
+static uint8_t nice_to_sched_priority(int nice) {
+  return (uint8_t)(((nice + 20) * (SCHED_PRIORITY_LEVELS - 1) + 19) / 39);
+}
+
 static uint64_t sys_getpriority(uint64_t which, uint64_t who, uint64_t a2,
                                 uint64_t a3, uint64_t a4, uint64_t a5) {
-  (void)a2;
-  (void)a3;
-  (void)a4;
-  (void)a5;
-
-  if (which > PRIO_USER)
-    return (uint64_t)-22; // EINVAL
-
-  // Validate the target exists
-  if (which == PRIO_PROCESS && who != 0) {
-    struct thread *target = sched_get_thread_by_tid((uint32_t)who);
-    if (!target)
-      return (uint64_t)-3; // ESRCH
-  }
-
-  // Linux returns 20 - nice. Nice defaults to 0, so return 20.
-  return 20;
+  (void)a2; (void)a3; (void)a4; (void)a5;
+  if (which != PRIO_PROCESS) return (uint64_t)-22;
+  struct thread *current = sched_get_current();
+  struct thread *target = who == 0 ? current :
+      sched_get_thread_by_tid((uint32_t)who);
+  if (!target) return (uint64_t)-3;
+  return (uint64_t)(20 - target->nice_value);
 }
 
 static uint64_t sys_set_robust_list(uint64_t head, uint64_t len, uint64_t a2,

@@ -2,6 +2,8 @@
 #include "../console/klog.h"
 #include "../fs/sysfs.h"
 #include "../lib/string.h"
+#include "../net/core.h"
+#include "../net/ipv4.h"
 #include "../mm/heap.h"
 #include "../sched/sched.h"
 #include "epoll.h"
@@ -22,6 +24,92 @@ struct nlmsghdr_min {
 
 #define NLMSG_DONE 3
 #define NLM_F_MULTI 2
+
+#define RTM_NEWLINK 16
+#define RTM_GETLINK 18
+#define RTM_NEWADDR 20
+#define RTM_GETADDR 22
+#define IFLA_ADDRESS 1
+#define IFLA_IFNAME 3
+#define IFLA_MTU 4
+#define IFA_ADDRESS 1
+#define IFA_LOCAL 2
+#define IFA_LABEL 3
+#define IFA_BROADCAST 4
+#define IFF_UP 0x1
+#define IFF_BROADCAST 0x2
+#define IFF_RUNNING 0x40
+#define IFF_MULTICAST 0x1000
+#define NL_ALIGN(n) (((n) + 3U) & ~3U)
+
+struct ifinfomsg_min {
+  uint8_t family, pad; uint16_t type; int32_t index;
+  uint32_t flags, change;
+};
+struct ifaddrmsg_min {
+  uint8_t family, prefixlen, flags, scope; uint32_t index;
+};
+struct rtattr_min { uint16_t len, type; };
+
+static size_t route_attr(uint8_t *msg, size_t pos, size_t cap, uint16_t type,
+                         const void *data, size_t len) {
+  size_t total = sizeof(struct rtattr_min) + len, aligned = NL_ALIGN(total);
+  if (pos + aligned > cap) return pos;
+  struct rtattr_min *a = (struct rtattr_min *)(msg + pos);
+  a->len = (uint16_t)total; a->type = type;
+  memcpy(a + 1, data, len);
+  if (aligned > total) memset(msg + pos + total, 0, aligned - total);
+  return pos + aligned;
+}
+
+static int route_queue(netlink_sock_t *nsk, const void *data, size_t len) {
+  sk_buff_t *skb = alloc_skb(len);
+  if (!skb) return -12;
+  memcpy(skb->data, data, len); skb->len = len;
+  skb_queue_tail(&nsk->recv_queue, skb);
+  return 0;
+}
+
+static uint8_t ipv4_prefix(uint32_t mask) {
+  uint8_t bits = 0;
+  while (mask & 0x80000000U) { bits++; mask <<= 1; }
+  return bits;
+}
+
+static void ipv4_bytes(uint8_t out[4], uint32_t ip) {
+  out[0] = ip >> 24; out[1] = ip >> 16; out[2] = ip >> 8; out[3] = ip;
+}
+
+static int route_link(netlink_sock_t *nsk, uint32_t seq,
+                      const struct net_device *dev) {
+  uint8_t msg[128]; memset(msg, 0, sizeof(msg));
+  struct nlmsghdr_min *h = (struct nlmsghdr_min *)msg;
+  struct ifinfomsg_min *i = (struct ifinfomsg_min *)(h + 1);
+  h->nlmsg_type = RTM_NEWLINK; h->nlmsg_flags = NLM_F_MULTI; h->nlmsg_seq = seq;
+  i->index = 2; i->flags = IFF_UP | IFF_BROADCAST | IFF_RUNNING | IFF_MULTICAST;
+  i->change = 0xffffffffU;
+  size_t pos = sizeof(*h) + sizeof(*i);
+  pos = route_attr(msg, pos, sizeof(msg), IFLA_IFNAME, dev->name, strlen(dev->name) + 1);
+  pos = route_attr(msg, pos, sizeof(msg), IFLA_MTU, &dev->mtu, sizeof(dev->mtu));
+  pos = route_attr(msg, pos, sizeof(msg), IFLA_ADDRESS, dev->mac, 6);
+  h->nlmsg_len = pos; return route_queue(nsk, msg, pos);
+}
+
+static int route_address(netlink_sock_t *nsk, uint32_t seq, const char *name,
+                         uint32_t address, uint32_t mask) {
+  uint8_t msg[128], ip[4], broadcast[4]; memset(msg, 0, sizeof(msg));
+  ipv4_bytes(ip, address); ipv4_bytes(broadcast, address | ~mask);
+  struct nlmsghdr_min *h = (struct nlmsghdr_min *)msg;
+  struct ifaddrmsg_min *i = (struct ifaddrmsg_min *)(h + 1);
+  h->nlmsg_type = RTM_NEWADDR; h->nlmsg_flags = NLM_F_MULTI; h->nlmsg_seq = seq;
+  i->family = 2; i->prefixlen = ipv4_prefix(mask); i->index = 2;
+  size_t pos = sizeof(*h) + sizeof(*i);
+  pos = route_attr(msg, pos, sizeof(msg), IFA_ADDRESS, ip, 4);
+  pos = route_attr(msg, pos, sizeof(msg), IFA_LOCAL, ip, 4);
+  pos = route_attr(msg, pos, sizeof(msg), IFA_LABEL, name, strlen(name) + 1);
+  pos = route_attr(msg, pos, sizeof(msg), IFA_BROADCAST, broadcast, 4);
+  h->nlmsg_len = pos; return route_queue(nsk, msg, pos);
+}
 
 // Append a null-terminated field to uevent buffer, return new position
 static size_t ue_append(char *buf, size_t pos, const char *str) {
@@ -356,6 +444,17 @@ static ssize_t netlink_sendto(socket_t *sock, const void *buf, size_t len,
 
     const struct nlmsghdr_min *request =
         (const struct nlmsghdr_min *)buf;
+    struct net_device *dev = net_device_default();
+    const struct ipv4_config *cfg = ipv4_get_config();
+    int route_ret = 0;
+    if (request->nlmsg_type == RTM_GETLINK && dev)
+      route_ret = route_link(nsk, request->nlmsg_seq, dev);
+    else if (request->nlmsg_type == RTM_GETADDR && dev && cfg && cfg->address)
+      route_ret = route_address(nsk, request->nlmsg_seq, dev->name,
+                                cfg->address, cfg->netmask);
+    if (route_ret != 0)
+      return route_ret;
+
     struct nlmsghdr_min done;
     memset(&done, 0, sizeof(done));
     done.nlmsg_len = sizeof(done);
@@ -363,12 +462,8 @@ static ssize_t netlink_sendto(socket_t *sock, const void *buf, size_t len,
     done.nlmsg_flags = NLM_F_MULTI;
     done.nlmsg_seq = request->nlmsg_seq;
 
-    sk_buff_t *skb = alloc_skb(sizeof(done));
-    if (!skb)
+    if (route_queue(nsk, &done, sizeof(done)) != 0)
       return -12; // ENOMEM
-    memcpy(skb->data, &done, sizeof(done));
-    skb->len = sizeof(done);
-    skb_queue_tail(&nsk->recv_queue, skb);
     socket_wake(sock);
     if (sock->node)
       epoll_notify_event(sock->node, EPOLLIN);

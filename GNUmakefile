@@ -1,12 +1,11 @@
 .SUFFIXES:
 
 ARCH := x86_64
-QEMU_CPU ?= Nehalem
-QEMUFLAGS := -cpu $(QEMU_CPU) \
-	-m 2G \
+QEMUFLAGS := -m 2G \
 	-vga none \
 	-device virtio-vga,xres=1280,yres=800 \
 	-display gtk,zoom-to-fit=off
+
 
 override IMAGE_NAME := ascentos-$(ARCH)
 
@@ -211,7 +210,7 @@ run-fat32: edk2-ovmf $(IMAGE_NAME).iso fat32_test.img
 		$(QEMUFLAGS)
 
 # Create a 64MB ext2 disk image with sample files for testing
-disk.img: userland/icewmrc userland/winoptions userland/icewm-menu
+disk.img: GNUmakefile userland/icewmrc userland/winoptions userland/icewm-menu
 disk.img: scripts/configure-accounts.sh userland/ascent-account userland/test_accounts.sh userland/ascent-login.elf
 disk.img:  userland/dns_lookup.elf
 disk.img: userland/test_clone_futex.elf
@@ -481,6 +480,7 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 		echo "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/opt/coreutils/bin:/usr/bin:/sbin:/bin:/opt/bash/bin:/opt/tcc/bin" >> /tmp/bashrc; \
 		echo "HOME=/" >> /tmp/bashrc; \
 		echo "TERM=xterm-256color" >> /tmp/bashrc; \
+		echo 'if [ -n "$$DISPLAY" ]; then unset TERM_PROGRAM TERM_PROGRAM_VERSION; else export TERM_PROGRAM=vt; fi' >> /tmp/bashrc; \
 		echo "export TERM" >> /tmp/bashrc; \
 		echo "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt" >> /tmp/bashrc; \
 		echo "SSL_CERT_DIR=/etc/ssl/certs" >> /tmp/bashrc; \
@@ -512,7 +512,7 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 		debugfs -w -R "mkdir .config" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "mkdir .config/fastfetch" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "mkdir fastfetch" ./part.img >/dev/null 2>&1 || true; \
-		echo '{"general": {"detectVersion": false}, "logo": {"source": "/fastfetch/logo.txt", "type": "auto"}, "modules": ["title", "separator", "os", "kernel", "uptime", "packages", {"type": "shell", "format": "bash"}, "terminal", "cursor", "cpu", {"type": "custom", "key": "GPU", "format": "VirtIO-GPU (virtio-vga, 2D) / Mesa llvmpipe (software 3D)"}, "memory", "swap", "disk", "locale", "break", "colors"]}' > /tmp/ff_config.jsonc; \
+		echo '{"general": {"detectVersion": false}, "logo": {"source": "/fastfetch/logo.txt", "type": "auto"}, "modules": ["title", "separator", "os", "kernel", "uptime", "packages", {"type": "shell", "format": "bash"}, "de", "wm", "terminal", "cursor", "cpu", {"type": "custom", "key": "GPU", "format": "VirtIO-GPU (virtio-vga, 2D) / Mesa llvmpipe (software 3D)"}, "memory", "swap", "disk", {"type": "localip", "key": "Local IP", "showIpv6": false}, "locale", "break", "colors"]}' > /tmp/ff_config.jsonc; \
 		debugfs -w -R "rm .config/fastfetch/config.jsonc" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "write /tmp/ff_config.jsonc .config/fastfetch/config.jsonc" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "rm fastfetch/config.jsonc" ./part.img >/dev/null 2>&1 || true; \

@@ -90,6 +90,11 @@ void sched_run_phase1_test(void) {
   sched_enqueue_thread(t2, bsp);
   sched_enqueue_thread(t3, bsp);
 
+  if (sched_validate_runqueues(bsp))
+    console_puts("Runqueue linkage/membership validation: PASS\n");
+  else
+    console_puts("Runqueue linkage/membership validation: FAIL\n");
+
   console_puts("All threads enqueued. Yielding BSP to start test...\n");
   sched_yield();
 }

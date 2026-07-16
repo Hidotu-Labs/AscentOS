@@ -56,29 +56,22 @@ static uint64_t do_poll(struct pollfd *fds, uint64_t nfds,
   if (ready > 0 || timeout_ms == 0)
     goto done;
 
-  /* Sleep between readiness checks. Unlike sched_yield(), this removes the
-   * caller from the runnable set and avoids burning CPU while idle. Ten-ms
-   * fallback checks bound latency without creating a WebKit poll wake storm. */
+  /* Slow path: re-check readiness while honoring the timeout. */
   uint64_t deadline = (timeout_ms != (uint64_t)-1)
                           ? lapic_timer_get_ticks() + timeout_ms
                           : (uint64_t)-1;
 
   while (1) {
-    uint64_t now = lapic_timer_get_ticks();
-    if (deadline != (uint64_t)-1 && now >= deadline)
-      break;
-
-    uint64_t wakeup = now + 10;
-    if (deadline != (uint64_t)-1 && wakeup > deadline)
-      wakeup = deadline;
-    t->wakeup_ticks = wakeup;
-    t->state = THREAD_SLEEPING;
-    sched_yield();
-    t->state = THREAD_RUNNING;
-
     ready = poll_check_fds(fds, nfds, t);
     if (ready > 0)
       break;
+
+    /* Check timeout. */
+    if (deadline != (uint64_t)-1 && lapic_timer_get_ticks() >= deadline)
+      break;
+
+    /* Yield so other runnable threads get CPU time. */
+    sched_yield();
   }
 
 done:
@@ -103,8 +96,6 @@ static uint64_t sys_poll(uint64_t fds_ptr, uint64_t nfds, uint64_t timeout_ms,
     }
     return 0;
   }
-  if (nfds > MAX_FDS)
-    return (uint64_t)-22;
   if (!is_user_ptr(fds_ptr) ||
       !vmm_is_user_addr_range_valid(fds_ptr, nfds * sizeof(struct pollfd)))
     return (uint64_t)-14;

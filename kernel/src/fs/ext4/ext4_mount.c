@@ -288,8 +288,12 @@ int ext4_mount_root(struct block_device *dev) {
 
     strcpy(root_vfs->name, "/");
     base->root_node = root_vfs;
+    root_vfs->statfs = ext4_statfs_impl;
 
     fs_root = root_vfs;
+
+    if (vfs_mount_ex(NULL, root_vfs, dev->name, "ext4") != 0)
+        klog_puts("[WARN] Failed to register ext4 root mount metadata.\n");
 
     klog_puts("[OK] Ext4 filesystem mounted as root (/)\n");
     return 0;

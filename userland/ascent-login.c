@@ -48,6 +48,7 @@ static void run_session(const struct passwd *pw) {
     setenv("SHELL", shell, 1);
     setenv("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/opt/coreutils/bin:/usr/bin:/sbin:/bin", 1);
     setenv("TERM", "xterm-256color", 1);
+    setenv("TERM_PROGRAM", "vt", 1);
 
     const char *base = strrchr(shell, '/');
     base = base ? base + 1 : shell;

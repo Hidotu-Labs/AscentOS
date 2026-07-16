@@ -116,6 +116,8 @@ typedef enum {
 #define SCHED_PRIORITY_DEFAULT 16
 #define SCHED_PRIORITY_BACKGROUND 24
 #define SCHED_PRIORITY_IDLE 31
+#define SCHED_AGING_SCAN_INTERVAL_MS 50
+#define SCHED_AGING_STEP_MS 250
 
 // Information saved on context switch.
 // We push callee-saved registers manually in switch.asm.
@@ -160,7 +162,11 @@ struct thread {
   int exit_status;             // Status code when exiting (for wait4)
   uint64_t *tid_address;       // Pointer to user-space TID for set_tid_address
   struct thread *global_next;  // Used to link all threads together
-  struct thread *next;         // Used for runqueue / blocked queue
+  struct thread *rq_next;      // Next thread in circular run queue
+  struct thread *rq_prev;      // Previous thread in circular run queue
+  bool on_runqueue;            // Protected by owning CPU queue_lock
+  uint8_t queued_priority;     // Queue containing this thread
+  uint64_t ready_since_ms;     // Start of current runnable wait
   struct thread *reap_next;    // Used for automatic reaping of detached threads
   bool reap_remove_runqueue;   // Remote exit_group victim still needs unlink
   char cwd_path[256];          // Current working directory
@@ -207,6 +213,7 @@ struct thread {
   uint32_t cpu_index;      // Index of CPU this thread is enqueued on
   uint8_t priority;        // Current dynamic priority (0-31)
   uint8_t static_priority; // Base priority
+  int8_t nice_value;       // Userspace nice value (-20..19)
   uint64_t time_slice;     // Remaining ticks in current quantum
   uint64_t
       runtime_total; // Total CPU time consumed (in LAPIC ticks, 1 tick = 1ms)
@@ -238,6 +245,8 @@ struct thread *sched_get_current(void);
 
 // Load balancing / dispatching
 void sched_enqueue_thread(struct thread *t, struct cpu_info *explicit_cpu);
+bool sched_set_priority(struct thread *t, uint8_t priority, int8_t nice_value);
+bool sched_validate_runqueues(struct cpu_info *cpu);
 
 // Task management for shell
 void sched_print_tasks(void);

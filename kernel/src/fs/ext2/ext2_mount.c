@@ -188,6 +188,9 @@ int ext2_mount_root(struct block_device *dev) {
 
   fs_root = root_vfs;
 
+  if (vfs_mount_ex(NULL, root_vfs, dev->name, "ext2") != 0)
+    klog_puts("[WARN] Failed to register ext2 root mount metadata.\n");
+
   ext3_init_journal(mnt);
 
   klog_puts("[OK] Ext2/3 filesystem mounted as root (/)\n");

@@ -49,6 +49,8 @@ struct cpu_info {
   uint64_t sigreturn_frame;
   // Timed sleepers ordered by wakeup_ticks. Protected by queue_lock.
   struct thread *deadline_head;
+  struct thread *runqueue_tails[32]; // Tails; placed after assembly ABI fields
+  uint64_t next_aging_scan_ms;      // Next per-thread aging pass
 } __attribute__((aligned(64)));
 
 _Static_assert(offsetof(struct cpu_info, scratch_rsp) == 368,

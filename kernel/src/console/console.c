@@ -24,6 +24,11 @@ static void console_wipe_history_unlocked(void);
 static bool terminal_escape = false;
 static char terminal_escape_buffer[64];
 static size_t terminal_escape_len = 0;
+// Operating System Command (OSC) strings, such as OSC 8 hyperlinks, are not
+// useful on the framebuffer console. Consume them through their BEL or ST
+// terminator so their payload is not rendered as ordinary text.
+static bool terminal_osc = false;
+static bool terminal_osc_esc = false;
 
 // UTF-8 multi-byte decoder state
 static uint32_t utf8_codepoint = 0;
@@ -1022,6 +1027,29 @@ static void console_render_char(uint32_t cp) {
 static void console_putchar_unlocked(char c) {
   unsigned char uc = (unsigned char)c;
 
+  // OSC strings end with BEL or ST (ESC followed by '\\'). Unsupported OSC
+  // commands are deliberately ignored, matching terminals which do not
+  // implement hyperlinks, title changes, clipboard access, etc.
+  if (terminal_osc) {
+    if (uc == 0x07 || uc == 0x9C) {
+      terminal_osc = false;
+      terminal_osc_esc = false;
+      return;
+    }
+    if (terminal_osc_esc) {
+      if (c == '\\') {
+        terminal_osc = false;
+        terminal_osc_esc = false;
+        return;
+      }
+      terminal_osc_esc = (uc == 0x1B);
+      return;
+    }
+    if (uc == 0x1B)
+      terminal_osc_esc = true;
+    return;
+  }
+
   // ANSI escape sequences (all ASCII, no UTF-8 conflict)
   if (terminal_escape) {
     if (terminal_escape_len < sizeof(terminal_escape_buffer) - 1) {
@@ -1036,6 +1064,13 @@ static void console_putchar_unlocked(char c) {
     // first byte.
     if (terminal_escape_len == 1) {
       // First byte after ESC
+      if (c == ']') {
+        terminal_escape = false;
+        terminal_escape_len = 0;
+        terminal_osc = true;
+        terminal_osc_esc = false;
+        return;
+      }
       if (c == '[' || c == 'O') {
         // CSI or SS3 — accumulate until final byte
         return;
