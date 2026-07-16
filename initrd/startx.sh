@@ -25,7 +25,7 @@ if [ ! -x "$XORG" ]; then
     exit 1
 fi
 
-"$XORG" "$DISPLAY" -retro -noreset -nolisten tcp \
+"$XORG" "$DISPLAY" -noreset -nolisten tcp \
     -configdir /etc/X11/xorg.conf.d \
     -logfile "$XORG_LOG" &
 XORG_PID=$!

@@ -192,6 +192,8 @@ uint32_t procfs_cpuinfo_read(vfs_node_t *node, uint32_t offset, uint32_t size,
     __asm__ volatile("cpuid"
                      : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
                      : "a"(1));
+    uint32_t features_ecx = ecx;
+    uint32_t features_edx = edx;
     uint32_t stepping = eax & 0xF;
     uint32_t model    = (eax >> 4) & 0xF;
     uint32_t family   = (eax >> 8) & 0xF;
@@ -227,15 +229,38 @@ uint32_t procfs_cpuinfo_read(vfs_node_t *node, uint32_t offset, uint32_t size,
       pos += snprintf(buf + pos, 16384 - pos, "model name      : %s\n", trimmed);
     }
 
-    pos += snprintf(buf + pos, 16384 - pos,
-        "flags           : fpu vme de pse tsc msr pae mce cx8 apic sep "
-        "mtrr pge mca cmov pat pse36 clflush dts acpi mmx fxsr sse "
-        "sse2 ss ht tm pbe syscall nx pdpe1gb rdtscp lm constant_tsc "
-        "art arch_perfmon pebs bts rep_good nopl cpuid nonstop_tsc "
-        "cpuid_fault tpm tm2 est immortality sse3 pclmulqdq dtes64 "
-        "monitor ds_cpl vmx smx est tm2 ssse3 sdbg fma cx16 xtpr pdcm "
-        "pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes "
-        "xsave avx f16c rdrand lahf_lm abm 3dnowprefetch\n\n");
+    pos += snprintf(buf + pos, 16384 - pos, "flags           :");
+#define CPUINFO_FLAG(bits, bit, name)                                          \
+    do {                                                                        \
+      if ((bits) & (1U << (bit)))                                               \
+        pos += snprintf(buf + pos, 16384 - pos, " " name);                     \
+    } while (0)
+    CPUINFO_FLAG(features_edx, 0, "fpu");
+    CPUINFO_FLAG(features_edx, 4, "tsc");
+    CPUINFO_FLAG(features_edx, 5, "msr");
+    CPUINFO_FLAG(features_edx, 6, "pae");
+    CPUINFO_FLAG(features_edx, 8, "cx8");
+    CPUINFO_FLAG(features_edx, 9, "apic");
+    CPUINFO_FLAG(features_edx, 11, "sep");
+    CPUINFO_FLAG(features_edx, 15, "cmov");
+    CPUINFO_FLAG(features_edx, 16, "pat");
+    CPUINFO_FLAG(features_edx, 19, "clflush");
+    CPUINFO_FLAG(features_edx, 23, "mmx");
+    CPUINFO_FLAG(features_edx, 24, "fxsr");
+    CPUINFO_FLAG(features_edx, 25, "sse");
+    CPUINFO_FLAG(features_edx, 26, "sse2");
+    CPUINFO_FLAG(features_ecx, 0, "sse3");
+    CPUINFO_FLAG(features_ecx, 1, "pclmulqdq");
+    CPUINFO_FLAG(features_ecx, 9, "ssse3");
+    CPUINFO_FLAG(features_ecx, 13, "cx16");
+    CPUINFO_FLAG(features_ecx, 19, "sse4_1");
+    CPUINFO_FLAG(features_ecx, 20, "sse4_2");
+    CPUINFO_FLAG(features_ecx, 22, "movbe");
+    CPUINFO_FLAG(features_ecx, 23, "popcnt");
+    CPUINFO_FLAG(features_ecx, 25, "aes");
+    CPUINFO_FLAG(features_ecx, 30, "rdrand");
+#undef CPUINFO_FLAG
+    pos += snprintf(buf + pos, 16384 - pos, "\n\n");
   }
 
   node->length = (uint32_t)pos;

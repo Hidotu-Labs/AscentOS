@@ -177,12 +177,12 @@ static bool arp_lookup(uint32_t ip, uint8_t mac[6]) {
   bool found = false;
   spinlock_acquire(&arp_lock);
   struct arp_entry *entry = arp_find_locked(ip);
-  if (entry && entry->state == ARP_REACHABLE &&
-      lapic_timer_get_ticks() - entry->updated < ARP_REACHABLE_MS) {
+  /* Keep learned entries usable until an explicit cache/config flush.
+   * Expiring one synchronously from the RX worker would make TCP ACK output
+   * enter arp_resolve() and wait for a reply that only this worker can process. */
+  if (entry && entry->state == ARP_REACHABLE) {
     memcpy(mac, entry->mac, 6);
     found = true;
-  } else if (entry && entry->state == ARP_REACHABLE) {
-    entry->state = ARP_FREE;
   }
   spinlock_release(&arp_lock);
   return found;

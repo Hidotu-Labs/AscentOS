@@ -97,6 +97,73 @@ extern void fork_return_to_userspace(struct syscall_regs *regs)
 extern spinlock_t tid_lock;
 extern struct thread *global_thread_list;
 
+struct pidfd_ctx { uint32_t pid; };
+
+static bool pidfd_task_state(uint32_t pid, bool *exited) {
+  bool found = false;
+  spinlock_acquire(&tid_lock);
+  for (struct thread *t = global_thread_list; t; t = t->global_next) {
+    if (t->tid == pid && t->tgid == t->tid) {
+      found = true;
+      *exited = t->state == THREAD_ZOMBIE || t->state == THREAD_DEAD;
+      break;
+    }
+  }
+  spinlock_release(&tid_lock);
+  return found;
+}
+
+static int pidfd_poll(vfs_node_t *node, int events) {
+  struct pidfd_ctx *ctx = node ? node->device : NULL;
+  bool exited = true;
+  if (!ctx) return -1;
+  if (!pidfd_task_state(ctx->pid, &exited)) exited = true;
+  return exited ? (events & (POLLIN | 0x0040)) : 0;
+}
+
+static void pidfd_close(vfs_node_t *node) {
+  if (node && node->device) {
+    kfree(node->device);
+    node->device = NULL;
+  }
+}
+
+static uint64_t sys_pidfd_open(uint64_t pid, uint64_t flags, uint64_t a2,
+                               uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a2; (void)a3; (void)a4; (void)a5;
+  const uint64_t PIDFD_NONBLOCK = 0x800;
+  if (pid == 0 || pid > UINT32_MAX || (flags & ~PIDFD_NONBLOCK))
+    return (uint64_t)-22;
+  bool exited = false;
+  if (!pidfd_task_state((uint32_t)pid, &exited)) return (uint64_t)-3;
+  struct thread *current = sched_get_current();
+  int fd = alloc_fd(current);
+  if (fd < 0) return (uint64_t)-24;
+  struct pidfd_ctx *ctx = kmalloc(sizeof(*ctx));
+  vfs_node_t *node = kmalloc(sizeof(*node));
+  if (!ctx || !node) {
+    if (ctx) kfree(ctx);
+    if (node) kfree(node);
+    current->fds[fd] = NULL;
+    if ((uint32_t)fd < current->files->next_fd)
+      current->files->next_fd = (uint32_t)fd;
+    return (uint64_t)-12;
+  }
+  ctx->pid = (uint32_t)pid;
+  vfs_node_init(node);
+  strcpy(node->name, "pidfd");
+  node->flags = FS_CHARDEV;
+  node->mask = 0600;
+  node->device = ctx;
+  node->poll = pidfd_poll;
+  node->close = pidfd_close;
+  current->fds[fd] = node;
+  current->fd_offsets[fd] = 0;
+  current->fd_flags[fd] = FD_FLAGS_CLOEXEC_BIT |
+                          (flags & PIDFD_NONBLOCK ? O_NONBLOCK : 0);
+  return (uint64_t)fd;
+}
+
 // exit / exit_group (shared)
 void process_do_exit(uint64_t status) __attribute__((noreturn));
 void process_do_exit(uint64_t status) {
@@ -2062,4 +2129,5 @@ void syscall_register_process(void) {
   syscall_register(SYS_GETPRIORITY, sys_getpriority);
   syscall_register(SYS_SET_ROBUST_LIST, sys_set_robust_list);
   syscall_register(SYS_REBOOT, sys_reboot);
+  syscall_register(SYS_PIDFD_OPEN, sys_pidfd_open);
 }

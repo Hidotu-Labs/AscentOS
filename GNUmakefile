@@ -1,7 +1,9 @@
 .SUFFIXES:
 
 ARCH := x86_64
-QEMUFLAGS := -m 2G \
+QEMU_CPU ?= Nehalem
+QEMUFLAGS := -cpu $(QEMU_CPU) \
+	-m 2G \
 	-vga none \
 	-device virtio-vga,xres=1280,yres=800 \
 	-display gtk,zoom-to-fit=off
@@ -214,7 +216,7 @@ disk.img: scripts/configure-accounts.sh userland/ascent-account userland/test_ac
 disk.img:  userland/dns_lookup.elf
 disk.img: userland/test_clone_futex.elf
 disk.img: $(QUAKE2_BUNDLE_FILES)
-disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets/doom1.wad assets/mc9.mp3 assets/train.mp3 assets/test.bmp assets/test.tar assets/room.png assets/logo.png assets/linus.gif userland/forkit.elf userland/forkit-launch.sh userland/about.elf userland/hello_glibc.elf userland/booter.elf userland/reboot.elf userland/shutdown.elf userland/apm.elf userland/test_cpp.elf  userland/kilo.elf  userland/ls.elf userland/lspci.elf userland/lsblk.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/asplay.elf userland/kria.elf userland/doom.elf userland/xrootcursor.elf  userland/jwm.elf userland/doom_x11.elf userland/gtk_test.elf userland/tglgears_fb.elf userland/tglgears_drm.elf userland/tglhello_drm.elf userland/test_mem_stress.elf userland/classicube.elf userland/terrain.png userland/texpacks/classicube.zip initrd/startx.sh initrd/startw.sh initrd/weston.ini userland/ascentd.elf $(ASCENTD_CONFIG_FILES)
+disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets/mc9.mp3 assets/train.mp3 assets/test.bmp assets/test.tar assets/room.png assets/logo.png assets/linus.gif userland/forkit.elf userland/forkit-launch.sh userland/about.elf userland/hello_glibc.elf userland/booter.elf userland/reboot.elf userland/shutdown.elf userland/apm.elf userland/test_cpp.elf  userland/kilo.elf  userland/ls.elf userland/lspci.elf userland/lsblk.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/asplay.elf userland/kria.elf userland/doom.elf userland/xrootcursor.elf  userland/jwm.elf userland/doom_x11.elf userland/gtk_test.elf userland/tglgears_fb.elf userland/tglgears_drm.elf userland/tglhello_drm.elf userland/test_mem_stress.elf userland/classicube.elf userland/terrain.png userland/texpacks/classicube.zip initrd/startx.sh initrd/startw.sh initrd/weston.ini userland/ascentd.elf $(ASCENTD_CONFIG_FILES)
 	@echo "Creating root filesystem (ext4)..."
 	rm -f ./part.img
 	dd if=/dev/zero of=./part.img bs=1M count=2047
@@ -317,8 +319,6 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 		echo "rm test.wav"; \
 		echo "write assets/test.wav test.wav"; \
 		echo "rm boot.wav"; \
-		echo "write assets/doom1.wad doom1.wad"; \
-		echo "rm doom1.wad"; \
 		echo "write userland/test.c test.c"; \
 		echo "rm test.c"; \
 		echo "write assets/boot.wav boot.wav"; \
