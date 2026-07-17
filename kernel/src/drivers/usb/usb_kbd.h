@@ -39,5 +39,6 @@ void usb_kbd_disconnect(struct usb_device *dev);
 
 void usb_kbd_poll(void);
 uint32_t usb_kbd_active_count(void);
+const char *usb_kbd_report_format(void);
 
 #endif

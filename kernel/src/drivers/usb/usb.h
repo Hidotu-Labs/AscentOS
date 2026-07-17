@@ -32,6 +32,7 @@ struct usb_interrupt_pipe {
   void *buffer;
   uint64_t buffer_phys;
   uint16_t buffer_len;
+  uint16_t actual_length; // Bytes received by the most recent transfer.
   uint8_t endpoint;
   bool active;
 };

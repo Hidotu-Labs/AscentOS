@@ -292,8 +292,6 @@ static uint64_t sys_gettimeofday(uint64_t tv_ptr, uint64_t tz_ptr, uint64_t a2,
   return 0;
 }
 
-// mlock(addr, len) - syscall 55 (stub)
-// We don't implement memory locking, just return success
 static uint64_t sys_mlock(uint64_t addr, uint64_t len, uint64_t a2, uint64_t a3,
                           uint64_t a4, uint64_t a5) {
   (void)addr;

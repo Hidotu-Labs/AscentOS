@@ -7,6 +7,13 @@
 #include <signal.h>
 #include <time.h>
 #include <sys/resource.h>
+#include <sys/time.h>
+#include <grp.h>
+#include <sys/fsuid.h>
+#include <sys/file.h>
+#include <sys/ioctl.h>
+#include <sys/shm.h>
+#include <sys/signalfd.h>
 #include <sys/timerfd.h>
 #include <sys/eventfd.h>
 #include <sys/inotify.h>
@@ -32,6 +39,16 @@
 #include <unistd.h>
 
 #define DEBUGLOG(...) printf(__VA_ARGS__)
+
+#ifndef SYS_pidfd_open
+#define SYS_pidfd_open 434
+#endif
+#ifndef SYS_close_range
+#define SYS_close_range 436
+#endif
+#ifndef SYS_faccessat2
+#define SYS_faccessat2 439
+#endif
 
 #define NUM_ITERATIONS 100
 #define NUM_BLOCKS 128
@@ -225,6 +242,27 @@ static int prime_wait4_caches(void) {
   if (result == 0)
     result = waitpid(pid, &status, 0);
   return result == pid ? 0 : -1;
+}
+
+static void run_registered_syscall_coverage(int iterations);
+
+static int prime_registered_syscall_caches(void) {
+  sigset_t mask;
+  sigemptyset(&mask);
+  sigaddset(&mask, SIGUSR1);
+
+  int sfd = signalfd(-1, &mask, SFD_NONBLOCK | SFD_CLOEXEC);
+  if (sfd < 0)
+    return -1;
+  close(sfd);
+
+  int pidfd = syscall(SYS_pidfd_open, getpid(), 0);
+  if (pidfd < 0)
+    return -1;
+  close(pidfd);
+
+  run_registered_syscall_coverage(1);
+  return 0;
 }
 
 void test_mmap_stress() {
@@ -1807,6 +1845,162 @@ void test_wait4_stress() {
   DEBUGLOG("WAIT4 stress test PASSED\n");
 }
 
+// ---- remaining registered syscall families ----
+// These complement the focused stress tests above. Privileged calls are made
+// with invalid authorization arguments, so the handler is exercised without
+// changing machine state.
+static void run_registered_syscall_coverage(int iterations) {
+  DEBUGLOG("Starting registered-syscall coverage stress test...\n");
+
+  for (int i = 0; i < iterations; i++) {
+    char path[64];
+    snprintf(path, sizeof(path), "/tmp/syscall_coverage_%d.tmp", i);
+    int fd = open(path, O_CREAT | O_RDWR | O_TRUNC, 0600);
+    if (fd < 0) continue;
+    write(fd, "coverage", 8);
+
+    // Descriptor and legacy I/O variants.
+    ioctl(fd, 0, NULL);                 // expected ENOTTY
+    flock(fd, LOCK_EX | LOCK_NB);
+    flock(fd, LOCK_UN);
+    fdatasync(fd);
+    posix_fadvise(fd, 0, 0, POSIX_FADV_NORMAL);
+    syscall(SYS_faccessat2, AT_FDCWD, path, F_OK, 0);
+
+    int doomed = dup(fd);
+    if (doomed >= 0)
+      syscall(SYS_close_range, (unsigned)doomed, (unsigned)doomed, 0);
+
+    // Old and new stat/directory ABIs.
+    struct statx sx;
+    memset(&sx, 0, sizeof(sx));
+    statx(AT_FDCWD, path, 0, STATX_BASIC_STATS, &sx);
+    int dfd = open("/tmp", O_RDONLY | O_DIRECTORY);
+    if (dfd >= 0) {
+      char dents[1024];
+      syscall(SYS_getdents, dfd, dents, sizeof(dents));
+      close(dfd);
+    }
+
+    // select/pselect and the original epoll ABI, all nonblocking.
+    struct timeval zero_tv = {0, 0};
+    struct timespec zero_ts = {0, 0};
+    select(0, NULL, NULL, NULL, &zero_tv);
+    pselect(0, NULL, NULL, NULL, &zero_ts, NULL);
+    int ep = epoll_create(1);
+    if (ep >= 0) {
+      struct epoll_event event;
+      epoll_pwait(ep, &event, 1, 0, NULL);
+      close(ep);
+    }
+
+    // clock_getres and clock_nanosleep have distinct syscall entries.
+    struct timespec resolution;
+    clock_getres(CLOCK_MONOTONIC, &resolution);
+    clock_nanosleep(CLOCK_MONOTONIC, 0, &zero_ts, NULL);
+
+    close(fd);
+    unlink(path);
+  }
+
+  // SysV shared-memory allocation/attach/detach/removal lifecycle.
+  for (int i = 0; i < iterations; i++) {
+    int id = shmget(IPC_PRIVATE, 4096, IPC_CREAT | 0600);
+    if (id < 0) break;
+    void *p = shmat(id, NULL, 0);
+    if (p != (void *)-1) {
+      memset(p, i, 4096);
+      shmdt(p);
+    }
+    shmctl(id, IPC_RMID, NULL);
+  }
+
+  // signalfd, sigaltstack, tkill and tgkill.
+  sigset_t mask, oldmask;
+  sigemptyset(&mask);
+  sigaddset(&mask, SIGUSR1);
+  sigprocmask(SIG_BLOCK, &mask, &oldmask);
+  for (int i = 0; i < iterations; i++) {
+    int sfd = signalfd(-1, &mask, SFD_NONBLOCK | SFD_CLOEXEC);
+    if (sfd >= 0) {
+      syscall(SYS_tkill, syscall(SYS_gettid), 0);
+      syscall(SYS_tgkill, getpid(), syscall(SYS_gettid), 0);
+      close(sfd);
+    }
+  }
+  sigprocmask(SIG_SETMASK, &oldmask, NULL);
+
+  void *alt_mem = malloc(SIGSTKSZ);
+  if (alt_mem) {
+    stack_t old_ss, ss = {.ss_sp = alt_mem, .ss_size = SIGSTKSZ, .ss_flags = 0};
+    if (sigaltstack(&ss, &old_ss) == 0) sigaltstack(&old_ss, NULL);
+    free(alt_mem);
+  }
+
+  // Socket message and address-query entries.
+  for (int i = 0; i < iterations; i++) {
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_DGRAM, 0, sv) < 0) break;
+    char byte = 'x', out = 0, control[32];
+    struct iovec tx = {.iov_base = &byte, .iov_len = 1};
+    struct iovec rx = {.iov_base = &out, .iov_len = 1};
+    struct msghdr msg = {.msg_iov = &tx, .msg_iovlen = 1};
+    sendmsg(sv[0], &msg, 0);
+    memset(&msg, 0, sizeof(msg));
+    msg.msg_iov = &rx; msg.msg_iovlen = 1;
+    msg.msg_control = control; msg.msg_controllen = sizeof(control);
+    recvmsg(sv[1], &msg, 0);
+    struct sockaddr_storage addr;
+    socklen_t len = sizeof(addr);
+    getsockname(sv[0], (struct sockaddr *)&addr, &len);
+    len = sizeof(addr);
+    getpeername(sv[0], (struct sockaddr *)&addr, &len);
+    close(sv[0]); close(sv[1]);
+  }
+
+  // Process-local query/setter entries. Preserve every observable value.
+  gid_t groups[32];
+  int ngroups = getgroups(32, groups);
+  if (ngroups >= 0) setgroups((size_t)ngroups, groups);
+  setfsuid(geteuid());
+  setfsgid(getegid());
+  syscall(SYS_membarrier, 0, 0);
+  uint64_t fsbase = 0;
+  syscall(SYS_arch_prctl, 0x1003 /* ARCH_GET_FS */, &fsbase);
+  syscall(399 /* AscentOS SYS_UPTIME */);
+  int pidfd = syscall(SYS_pidfd_open, getpid(), 0);
+  if (pidfd >= 0) close(pidfd);
+
+  // Thread-runtime bookkeeping calls are isolated because set_tid_address and
+  // robust-list state are intentionally persistent until thread exit.
+  pid_t child = fork();
+  if (child == 0) {
+    int clear_tid = 0;
+    syscall(SYS_set_tid_address, &clear_tid);
+    syscall(SYS_set_robust_list, NULL, 0);
+    syscall(SYS_rseq, NULL, 0, 0, 0);
+    syscall(SYS_exit, 0);
+    __builtin_unreachable();
+  }
+  if (child > 0) waitpid(child, NULL, 0);
+  child = fork();
+  if (child == 0) {
+    syscall(SYS_exit_group, 0);
+    __builtin_unreachable();
+  }
+  if (child > 0) waitpid(child, NULL, 0);
+
+  // Exercise privileged dispatch paths without authorizing an operation.
+  syscall(SYS_mount, NULL, NULL, NULL, 0, NULL);
+  syscall(SYS_reboot, 0, 0, 0, NULL);
+
+  DEBUGLOG("Registered-syscall coverage stress test PASSED\n");
+}
+
+void test_registered_syscall_coverage(void) {
+  run_registered_syscall_coverage(NUM_ITERATIONS);
+}
+
 void check_leak(const char *test_name, long *last_mem) {
   long current_mem = get_free_mem_kb();
   if (current_mem == -1)
@@ -1836,13 +2030,20 @@ int main(int argc, char **argv) {
     printf("CRITICAL: epoll allocator warm-up failed: %s\n", strerror(errno));
     return 1;
   }
-  if (prime_mmap_vfs_caches() < 0) {
-    printf("CRITICAL: mmap/VFS allocator warm-up failed: %s\n",
+  if (prime_wait4_caches() < 0) {
+    printf("CRITICAL: wait4 allocator warm-up failed: %s\n", strerror(errno));
+    return 1;
+  }
+  if (prime_registered_syscall_caches() < 0) {
+    printf("CRITICAL: syscall descriptor cache warm-up failed: %s\n",
            strerror(errno));
     return 1;
   }
-  if (prime_wait4_caches() < 0) {
-    printf("CRITICAL: wait4 allocator warm-up failed: %s\n", strerror(errno));
+  /* Run this last: the other warm-ups can change the process VMA layout and
+   * make the first measured mmap require another page-table/slab page. */
+  if (prime_mmap_vfs_caches() < 0) {
+    printf("CRITICAL: mmap/VFS allocator warm-up failed: %s\n",
+           strerror(errno));
     return 1;
   }
 
@@ -2086,6 +2287,10 @@ int main(int argc, char **argv) {
   printf("\n--- Running WAIT4 Stress ---\n");
   test_wait4_stress();
   check_leak("WAIT4 Stress", &current_mem);
+
+  printf("\n--- Running REGISTERED SYSCALL COVERAGE Stress ---\n");
+  test_registered_syscall_coverage();
+  check_leak("Registered Syscall Coverage Stress", &current_mem);
 
   printf("Verifying memory levels...\n");
   long final_mem = get_free_mem_kb();

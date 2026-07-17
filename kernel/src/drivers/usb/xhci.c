@@ -299,6 +299,13 @@ static uint32_t xhci_drain_events(struct xhci_controller *hc,
             state->expected_trb != (event->parameter & ~0xFULL))
           continue;
         state->completion_code = XHCI_COMPLETION_GET(event->status);
+        {
+          uint32_t residual = event->status & 0xFFFFFFU;
+          state->pipe.actual_length =
+              residual < state->pipe.buffer_len
+                  ? (uint16_t)(state->pipe.buffer_len - residual)
+                  : 0;
+        }
         state->completed = true;
         state->completions++;
         break;
@@ -827,6 +834,7 @@ static int xhci_interrupt_submit(struct xhci_controller *hc,
   state->expected_trb = state->ring_phys + index * sizeof(*trb);
   state->completed = false;
   state->completion_code = 0;
+  state->pipe.actual_length = 0;
   state->enqueue++;
   if (state->enqueue == XHCI_RING_TRBS - 1) {
     state->ring[XHCI_RING_TRBS - 1].control =
@@ -909,6 +917,7 @@ static struct usb_interrupt_pipe *xhci_interrupt_open(
   state->pipe.buffer = buffer;
   state->pipe.buffer_phys = buffer_phys;
   state->pipe.buffer_len = max_packet;
+  state->pipe.actual_length = 0;
   state->pipe.endpoint = endpoint;
   state->pipe.active = true;
   if (xhci_interrupt_submit(hc, state) < 0)

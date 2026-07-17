@@ -151,6 +151,14 @@ install_apk "libxext" "main"
 install_apk "libxkbfile" "main"
 install_apk "xeyes" "community" "edge"
 
+# Upstream xeyes enables non-rectangular SHAPE windows by default.  Use a
+# regular rectangular window so the desktop window manager can frame it.
+mkdir -p "${ROOTFS_DIR}/usr/share/X11/app-defaults"
+cp "${ROOT_DIR}/userland/XEyes" \
+   "${ROOTFS_DIR}/usr/share/X11/app-defaults/XEyes"
+cp "${ROOT_DIR}/userland/xeyes-launch.sh" "${ROOTFS_DIR}/bin/xeyes"
+chmod +x "${ROOTFS_DIR}/bin/xeyes"
+
 # Minimal GTK (GTK 2.0) and core dependencies
 echo "[*] Installing GTK 2.0 and core dependencies..."
 install_apk "gtk+2.0" "community"

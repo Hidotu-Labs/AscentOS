@@ -1,4 +1,4 @@
 # IceWM Window Rules
-# Force decoration on xeyes windows
-
-xeyes.xeyes: option noshape +fullKeys +decor +titlebar
+#
+# xeyes shaping is disabled in usr/share/X11/app-defaults/XEyes.  Shape is an
+# application resource, not an IceWM window option.

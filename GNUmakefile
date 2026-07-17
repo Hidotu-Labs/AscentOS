@@ -210,7 +210,7 @@ run-fat32: edk2-ovmf $(IMAGE_NAME).iso fat32_test.img
 		$(QEMUFLAGS)
 
 # Create a 64MB ext2 disk image with sample files for testing
-disk.img: GNUmakefile userland/icewmrc userland/winoptions userland/icewm-menu
+disk.img: GNUmakefile userland/winoptions userland/icewm-menu
 disk.img: scripts/configure-accounts.sh userland/ascent-account userland/test_accounts.sh userland/ascent-login.elf
 disk.img:  userland/dns_lookup.elf
 disk.img: userland/test_clone_futex.elf
@@ -521,11 +521,9 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 		debugfs -w -R "write assets/ascii-art.txt fastfetch/logo.txt" ./part.img >/dev/null 2>&1 || true; \
 		rm -f /tmp/bashrc /tmp/resolv.conf /tmp/hosts /tmp/ff_config.jsonc /tmp/os-release; \
 	fi
-	@if [ -f userland/icewmrc ] && [ -f userland/winoptions ] && [ -f userland/icewm-menu ]; then \
+	@if [ -f userland/winoptions ] && [ -f userland/icewm-menu ]; then \
 		echo "Installing IceWM configuration into disk image..."; \
 		debugfs -w -R "mkdir etc/icewm" ./part.img >/dev/null 2>&1 || true; \
-		debugfs -w -R "rm etc/icewm/icewmrc" ./part.img >/dev/null 2>&1 || true; \
-		debugfs -w -R "write userland/icewmrc etc/icewm/icewmrc" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "rm etc/icewm/winoptions" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "write userland/winoptions etc/icewm/winoptions" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "rm etc/icewm/menu" ./part.img >/dev/null 2>&1 || true; \
@@ -692,7 +690,8 @@ userland/readelf.elf: userland/readelf.c $(MUSL_LIBC)
 
 userland/pong.elf: userland/pong.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
-		userland/pong.c -o userland/pong.elf
+		userland/pong.c -o userland/pong.elf \
+		-lX11 -lxcb -lXau -lXdmcp -lmd -lm
 
 userland/raycast.elf: userland/raycast.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \

@@ -1,5 +1,6 @@
 
 #include "usb_kbd.h"
+#include "../../console/console.h"
 #include "../../console/klog.h"
 #include "../../io/io.h"
 #include "../../mm/dma_alloc.h"
@@ -313,6 +314,15 @@ static void usb_kbd_decode_report(struct usb_kbd_state *kbd,
                                   struct usb_kbd_report *report) {
   uint8_t offset = 0;
 
+  /* A 9-byte packet is an 8-byte boot report prefixed by a Report ID.
+     xHCI now supplies the actual transfer length, so this is unambiguous. */
+  if (!kbd->report_format_known && available == 9) {
+    kbd->report_has_id = true;
+    kbd->report_format_known = true;
+    klog_puts("[USB-KBD] 9-byte HID report has a leading Report ID\n");
+    console_puts("[USB-KBD] 9-byte HID report has a leading Report ID\n");
+  }
+
   /* Boot reports are normally eight bytes, but some otherwise boot-compatible
      keyboards keep a leading Report ID even after SET_PROTOCOL. If interpreted
      as modifiers, Report ID 1 makes every letter a Ctrl character while Enter
@@ -329,6 +339,7 @@ static void usb_kbd_decode_report(struct usb_kbd_state *kbd,
       kbd->report_has_id = false;
       kbd->report_format_known = true;
       klog_puts("[USB-KBD] HID report uses standard 8-byte boot format\n");
+      console_puts("[USB-KBD] HID report uses standard 8-byte boot format\n");
     }
   }
 
@@ -936,6 +947,19 @@ uint32_t usb_kbd_active_count(void) {
   return active;
 }
 
+const char *usb_kbd_report_format(void) {
+  for (int i = 0; i < kbd_count; i++) {
+    struct usb_kbd_state *kbd = &keyboards[i];
+    if (!kbd->active)
+      continue;
+    if (!kbd->report_format_known)
+      return "waiting for first key report";
+    return kbd->report_has_id ? "9-byte report with Report ID"
+                              : "standard 8-byte boot format";
+  }
+  return "no keyboard detected";
+}
+
 // Polling
 // Called from the UHCI/OHCI IRQ handler to check if any keyboard has new data.
 
@@ -950,7 +974,10 @@ void usb_kbd_poll(void) {
         continue;
       uint8_t *buf = kbd->generic_pipe->buffer;
       struct usb_kbd_report report;
-      usb_kbd_decode_report(kbd, buf, kbd->generic_pipe->buffer_len, &report);
+      uint16_t report_len = kbd->generic_pipe->actual_length
+                                ? kbd->generic_pipe->actual_length
+                                : kbd->generic_pipe->buffer_len;
+      usb_kbd_decode_report(kbd, buf, report_len, &report);
       bool changed = report.modifiers != kbd->prev_report.modifiers;
       for (int j = 0; !changed && j < 6; j++)
         changed = report.keys[j] != kbd->prev_report.keys[j];

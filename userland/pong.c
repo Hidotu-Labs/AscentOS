@@ -13,6 +13,9 @@
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
+#include <X11/Xlib.h>
+#include <X11/Xutil.h>
+#include <X11/keysym.h>
 
 // ---------------------------------------------------------------------------
 // Linux framebuffer ioctls
@@ -57,9 +60,11 @@ struct fb_fix_screeninfo {
 #define PADDLE_WIDTH  15
 #define PADDLE_HEIGHT 80
 #define BALL_SIZE     12
-#define PADDLE_SPEED  8
-#define BALL_SPEED    5
-#define AI_SPEED      3
+#define PADDLE_SPEED  11
+#define BALL_SPEED    7
+#define AI_SPEED      5
+#define BALL_MAX_X    17
+#define BALL_MAX_Y    11
 
 // Colors 0xAARRGGBB
 #define COLOR_BG      0xFF1a1a2e
@@ -99,6 +104,14 @@ static uint8_t *fb_mem = NULL;
 static uint32_t fb_width  = 0;
 static uint32_t fb_height = 0;
 static uint32_t fb_pitch  = 0;
+static int use_x11 = 0;
+static Display *x_display = NULL;
+static Window x_window;
+static GC x_gc;
+static Atom wm_delete_window;
+static int move_up = 0;
+static int move_down = 0;
+static int running = 1;
 
 static struct termios orig_termios;
 
@@ -119,13 +132,18 @@ static int ai_score     = 0;
 // Cleanup / signals
 // ---------------------------------------------------------------------------
 static void cleanup(void) {
-  tcsetattr(STDIN_FILENO, TCSANOW, &orig_termios);
+  if (!use_x11) tcsetattr(STDIN_FILENO, TCSANOW, &orig_termios);
 
   /* Kill sound child */
   if (snd_pipe[1] >= 0) { close(snd_pipe[1]); snd_pipe[1] = -1; }
   if (snd_pipe[0] >= 0) { close(snd_pipe[0]); snd_pipe[0] = -1; }
   if (snd_pid > 0) { kill(snd_pid, SIGTERM); waitpid(snd_pid, NULL, 0); snd_pid = -1; }
 
+  if (x_display) {
+    if (x_gc) XFreeGC(x_display, x_gc);
+    if (x_window) XDestroyWindow(x_display, x_window);
+    XCloseDisplay(x_display); x_display = NULL;
+  }
   if (fb_mem)     { free(fb_mem);  fb_mem  = NULL; }
   if (fb_fd >= 0) { close(fb_fd);  fb_fd   = -1;   }
   if (tty_fd >= 0){ close(tty_fd); tty_fd  = -1;   }
@@ -251,6 +269,36 @@ static int setup_framebuffer(void) {
   return 0;
 }
 
+static int setup_x11(void) {
+  x_display = XOpenDisplay(NULL);
+  if (!x_display) return -1;
+
+  int screen = DefaultScreen(x_display);
+  fb_width = 800;
+  fb_height = 600;
+  fb_pitch = fb_width * 4;
+  x_window = XCreateSimpleWindow(
+      x_display, RootWindow(x_display, screen), 0, 0, fb_width, fb_height, 0,
+      BlackPixel(x_display, screen), BlackPixel(x_display, screen));
+  XStoreName(x_display, x_window, "Pong");
+  XSelectInput(x_display, x_window,
+               ExposureMask | KeyPressMask | KeyReleaseMask | StructureNotifyMask);
+
+  XSizeHints hints;
+  memset(&hints, 0, sizeof(hints));
+  hints.flags = PMinSize | PMaxSize;
+  hints.min_width = hints.max_width = (int)fb_width;
+  hints.min_height = hints.max_height = (int)fb_height;
+  XSetWMNormalHints(x_display, x_window, &hints);
+  wm_delete_window = XInternAtom(x_display, "WM_DELETE_WINDOW", False);
+  XSetWMProtocols(x_display, x_window, &wm_delete_window, 1);
+
+  x_gc = XCreateGC(x_display, x_window, 0, NULL);
+  XMapWindow(x_display, x_window);
+  XFlush(x_display);
+  return 0;
+}
+
 static int setup_tty(void) {
   tty_fd = open("/dev/tty0", O_RDWR);
   if (tty_fd < 0) tty_fd = open("/dev/console", O_RDWR);
@@ -282,24 +330,23 @@ static void setup_sound(void) {
 // ---------------------------------------------------------------------------
 // Drawing
 // ---------------------------------------------------------------------------
-static inline void put_pixel(int x, int y, uint32_t color) {
-  if (x < 0 || (uint32_t)x >= fb_width || y < 0 || (uint32_t)y >= fb_height) return;
-  *(uint32_t *)(fb_mem + (uint32_t)y * fb_pitch + (uint32_t)x * 4) = color;
-}
-
 static void fill_rect(int x, int y, int w, int h, uint32_t color) {
-  for (int dy = 0; dy < h; dy++)
-    for (int dx = 0; dx < w; dx++)
-      put_pixel(x + dx, y + dy, color);
+  if (x < 0) { w += x; x = 0; }
+  if (y < 0) { h += y; y = 0; }
+  if (x + w > (int)fb_width) w = (int)fb_width - x;
+  if (y + h > (int)fb_height) h = (int)fb_height - y;
+  if (w <= 0 || h <= 0) return;
+  for (int dy = 0; dy < h; dy++) {
+    uint32_t *p = (uint32_t *)(fb_mem + (uint32_t)(y + dy) * fb_pitch) + x;
+    for (int dx = 0; dx < w; dx++) p[dx] = color;
+  }
 }
 
 static void clear_screen(void) {
-  uint32_t bg = COLOR_BG;
-  for (uint32_t row = 0; row < fb_height; row++) {
-    uint32_t *line = (uint32_t *)(fb_mem + row * fb_pitch);
-    for (uint32_t col = 0; col < fb_width; col++)
-      line[col] = bg;
-  }
+  uint32_t *first = (uint32_t *)fb_mem;
+  for (uint32_t col = 0; col < fb_width; col++) first[col] = COLOR_BG;
+  for (uint32_t row = 1; row < fb_height; row++)
+    memcpy(fb_mem + row * fb_pitch, first, (size_t)fb_width * 4);
 }
 
 /* Draw one digit glyph at pixel position (px, py), scaled by `scale` */
@@ -338,7 +385,75 @@ static void draw_net(void) {
     fill_rect(net_x - 2, y, 4, 10, COLOR_NET);
 }
 
+static unsigned long x11_color(uint32_t argb) {
+  /* AscentOS Xorg uses the standard 24-bit TrueColor visual. */
+  return (unsigned long)(argb & 0x00ffffffU);
+}
+
+static void draw_x11_digit(int digit, int px, int py, int scale) {
+  if (digit < 0 || digit > 9) return;
+  XRectangle rects[FONT_W * FONT_H];
+  int count = 0;
+  for (int row = 0; row < FONT_H; row++) {
+    uint8_t bits = digit_glyphs[digit][row];
+    for (int col = 0; col < FONT_W; col++) {
+      if (bits & (0x80 >> col)) {
+        rects[count].x = (short)(px + col * scale);
+        rects[count].y = (short)(py + row * scale);
+        rects[count].width = (unsigned short)scale;
+        rects[count].height = (unsigned short)scale;
+        count++;
+      }
+    }
+  }
+  XFillRectangles(x_display, x_window, x_gc, rects, count);
+}
+
+static void draw_x11_number(int number, int center_x, int py, int scale) {
+  if (number > 99) number = 99;
+  int glyph_width = FONT_W * scale;
+  if (number >= 10) {
+    int total_width = glyph_width * 2 + scale;
+    int x = center_x - total_width / 2;
+    draw_x11_digit(number / 10, x, py, scale);
+    draw_x11_digit(number % 10, x + glyph_width + scale, py, scale);
+  } else {
+    draw_x11_digit(number, center_x - glyph_width / 2, py, scale);
+  }
+}
+
+static void render_x11(void) {
+  XSetForeground(x_display, x_gc, x11_color(COLOR_BG));
+  XFillRectangle(x_display, x_window, x_gc, 0, 0, fb_width, fb_height);
+
+  XSetForeground(x_display, x_gc, x11_color(COLOR_NET));
+  int net_x = (int)fb_width / 2 - 2;
+  for (int y = 0; y < (int)fb_height; y += 20)
+    XFillRectangle(x_display, x_window, x_gc, net_x, y, 4, 10);
+
+  XSetForeground(x_display, x_gc, x11_color(COLOR_PADDLE));
+  XFillRectangle(x_display, x_window, x_gc, 30, player_y,
+                 PADDLE_WIDTH, PADDLE_HEIGHT);
+  XFillRectangle(x_display, x_window, x_gc,
+                 (int)fb_width - 30 - PADDLE_WIDTH, ai_y,
+                 PADDLE_WIDTH, PADDLE_HEIGHT);
+
+  XSetForeground(x_display, x_gc, x11_color(COLOR_BALL));
+  XFillRectangle(x_display, x_window, x_gc, ball_x, ball_y,
+                 BALL_SIZE, BALL_SIZE);
+
+  XSetForeground(x_display, x_gc, x11_color(COLOR_SCORE));
+  draw_x11_number(player_score, (int)fb_width / 2 - 60, 20, 3);
+  draw_x11_number(ai_score, (int)fb_width / 2 + 60, 20, 3);
+  XFlush(x_display);
+}
+
 static void render(void) {
+  if (use_x11) {
+    render_x11();
+    return;
+  }
+
   clear_screen();
   draw_net();
 
@@ -371,6 +486,29 @@ static void render(void) {
 // Input — poll() to avoid blocking
 // ---------------------------------------------------------------------------
 static void handle_input(void) {
+  if (use_x11) {
+    while (XPending(x_display)) {
+      XEvent event;
+      XNextEvent(x_display, &event);
+      if (event.type == ClientMessage &&
+          (Atom)event.xclient.data.l[0] == wm_delete_window) {
+        running = 0;
+      } else if (event.type == KeyPress || event.type == KeyRelease) {
+        int pressed = event.type == KeyPress;
+        KeySym key = XLookupKeysym(&event.xkey, 0);
+        if (key == XK_w || key == XK_W || key == XK_Up) move_up = pressed;
+        if (key == XK_s || key == XK_S || key == XK_Down) move_down = pressed;
+        if (pressed && (key == XK_q || key == XK_Q || key == XK_Escape))
+          running = 0;
+      }
+    }
+    if (move_up != move_down)
+      player_y += move_down ? PADDLE_SPEED : -PADDLE_SPEED;
+    if (player_y < 0) player_y = 0;
+    if (player_y + PADDLE_HEIGHT > (int)fb_height)
+      player_y = (int)fb_height - PADDLE_HEIGHT;
+    return;
+  }
   struct pollfd pfd = { STDIN_FILENO, POLLIN, 0 };
   while (poll(&pfd, 1, 0) > 0 && (pfd.revents & POLLIN)) {
     char buf[32];
@@ -413,12 +551,12 @@ static void reset_ball(void) {
   ball_x  = (int)fb_width  / 2 - BALL_SIZE / 2;
   ball_y  = (int)fb_height / 2 - BALL_SIZE / 2;
   ball_vx = (player_score + ai_score) % 2 == 0 ? BALL_SPEED : -BALL_SPEED;
-  ball_vy = 0;
+  ball_vy = (player_score + ai_score) % 4 < 2 ? 3 : -3;
 }
 
-static void update_ball(void) {
-  ball_x += ball_vx;
-  ball_y += ball_vy;
+static void update_ball_step(int step_vx, int step_vy) {
+  ball_x += step_vx;
+  ball_y += step_vy;
 
   /* Walls */
   if (ball_y <= 0) {
@@ -433,8 +571,8 @@ static void update_ball(void) {
   int px = 30;
   if (ball_x <= px + PADDLE_WIDTH && ball_x + BALL_SIZE >= px &&
       ball_y + BALL_SIZE >= player_y && ball_y <= player_y + PADDLE_HEIGHT) {
-    ball_vx = abs(ball_vx) + 1;
-    ball_vy = ((ball_y + BALL_SIZE / 2) - player_y - PADDLE_HEIGHT / 2) / 5;
+    ball_vx = abs(ball_vx) + 2;
+    ball_vy = ((ball_y + BALL_SIZE / 2) - player_y - PADDLE_HEIGHT / 2) / 4;
     ball_x  = px + PADDLE_WIDTH;
     sound_emit(SND_PADDLE_HIT);
   }
@@ -443,15 +581,17 @@ static void update_ball(void) {
   int ax = (int)fb_width - 30 - PADDLE_WIDTH;
   if (ball_x + BALL_SIZE >= ax && ball_x <= ax + PADDLE_WIDTH &&
       ball_y + BALL_SIZE >= ai_y && ball_y <= ai_y + PADDLE_HEIGHT) {
-    ball_vx = -(abs(ball_vx) + 1);
-    ball_vy = ((ball_y + BALL_SIZE / 2) - ai_y - PADDLE_HEIGHT / 2) / 5;
+    ball_vx = -(abs(ball_vx) + 2);
+    ball_vy = ((ball_y + BALL_SIZE / 2) - ai_y - PADDLE_HEIGHT / 2) / 4;
     ball_x  = ax - BALL_SIZE;
     sound_emit(SND_PADDLE_HIT);
   }
 
   /* Speed cap */
-  if (abs(ball_vx) > 12) ball_vx = ball_vx > 0 ? 12 : -12;
-  if (abs(ball_vy) > 8)  ball_vy = ball_vy > 0 ?  8 :  -8;
+  if (abs(ball_vx) > BALL_MAX_X)
+    ball_vx = ball_vx > 0 ? BALL_MAX_X : -BALL_MAX_X;
+  if (abs(ball_vy) > BALL_MAX_Y)
+    ball_vy = ball_vy > 0 ? BALL_MAX_Y : -BALL_MAX_Y;
 
   /* Scoring */
   if (ball_x + BALL_SIZE < 0) {
@@ -465,42 +605,86 @@ static void update_ball(void) {
   }
 }
 
+static void update_ball(void) {
+  /* Split fast movement into short segments so collisions stay reliable. */
+  int distance = abs(ball_vx) > abs(ball_vy) ? abs(ball_vx) : abs(ball_vy);
+  int steps = (distance + 3) / 4;
+  if (steps < 1) steps = 1;
+
+  int old_x = ball_x, old_y = ball_y;
+  int target_x = old_x + ball_vx, target_y = old_y + ball_vy;
+  for (int i = 1; i <= steps; i++) {
+    int next_x = old_x + (target_x - old_x) * i / steps;
+    int next_y = old_y + (target_y - old_y) * i / steps;
+    int step_x = next_x - ball_x;
+    int step_y = next_y - ball_y;
+    update_ball_step(step_x, step_y);
+
+    /* A hit or score changes velocity/position; stop following the stale path. */
+    if ((ball_vx > 0) != (target_x > old_x) ||
+        (ball_vy > 0) != (target_y > old_y) ||
+        ball_x == (int)fb_width / 2 - BALL_SIZE / 2)
+      break;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Delay
 // ---------------------------------------------------------------------------
-static void delay_ms(int ms) {
-  struct timespec ts = { 0, (long)ms * 1000000L };
+static int64_t monotonic_ns(void) {
+  struct timespec ts;
+  syscall(SYS_clock_gettime, CLOCK_MONOTONIC, &ts);
+  return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+}
+
+static void sleep_until(int64_t deadline) {
+  int64_t remaining = deadline - monotonic_ns();
+  if (remaining <= 0) return;
+  struct timespec ts = { remaining / 1000000000LL, remaining % 1000000000LL };
   syscall(SYS_nanosleep, &ts, NULL);
 }
 
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
-int main(void) {
+int main(int argc, char **argv) {
   atexit(cleanup);
   signal(SIGINT,  sig_handler);
   signal(SIGTERM, sig_handler);
   signal(SIGHUP,  sig_handler);
   signal(SIGCHLD, SIG_DFL); /* don't reap sound child automatically */
 
-  if (setup_terminal() < 0) {
-    fprintf(stderr, "pong: failed to set raw terminal mode\n");
-    return 1;
+  int force_fb = 0;
+  for (int i = 1; i < argc; i++) {
+    if (strcmp(argv[i], "-fb") == 0) force_fb = 1;
+    else if (strcmp(argv[i], "-x11") == 0) force_fb = 0;
   }
-  if (setup_framebuffer() < 0) return 1;
-  setup_tty();
+  use_x11 = !force_fb && getenv("DISPLAY") && setup_x11() == 0;
+  if (!use_x11) {
+    if (setup_terminal() < 0) {
+      fprintf(stderr, "pong: failed to set raw terminal mode\n");
+      return 1;
+    }
+    if (setup_framebuffer() < 0) return 1;
+    setup_tty();
+  }
   setup_sound();
 
   player_y = (int)fb_height / 2 - PADDLE_HEIGHT / 2;
   ai_y     = (int)fb_height / 2 - PADDLE_HEIGHT / 2;
   reset_ball();
 
-  for (;;) {
+  const int64_t frame_ns = 1000000000LL / 60;
+  int64_t next_frame = monotonic_ns();
+  while (running) {
     handle_input();
     update_ai();
     update_ball();
     render();
-    delay_ms(16);
+    next_frame += frame_ns;
+    sleep_until(next_frame);
+    if (monotonic_ns() - next_frame > frame_ns * 4)
+      next_frame = monotonic_ns();
   }
   return 0;
 }

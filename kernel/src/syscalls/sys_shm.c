@@ -49,6 +49,26 @@ static uint32_t shm_next_id = 1;
 // Backing storage for phys_pages arrays (static to avoid heap dependency loop)
 static uint64_t shm_page_arrays[SHM_MAX_SEGMENTS][MAX_SHM_PAGES];
 
+/* Called with shm_lock held after the last attachment has gone away. The
+ * segment owns the initial reference returned by pmm_alloc_page(); mappings
+ * hold additional references of their own. */
+static void shm_destroy_segment(struct shm_segment *seg) {
+  if (!seg || !seg->active || seg->nattch != 0)
+    return;
+
+  for (uint32_t i = 0; i < seg->num_pages; i++) {
+    if (seg->phys_pages[i]) {
+      pmm_decref((void *)seg->phys_pages[i]);
+      seg->phys_pages[i] = 0;
+    }
+  }
+  seg->active = false;
+  seg->marked_destroy = false;
+  seg->num_pages = 0;
+  seg->size = 0;
+  seg->nattch = 0;
+}
+
 // Initialization
 
 void shm_init(void) {
@@ -363,15 +383,10 @@ int64_t sys_shmdt(uint64_t shmaddr, uint64_t a1, uint64_t a2, uint64_t a3,
 
     // If marked for destruction and no more attaches, free the segment
     if (seg->marked_destroy && seg->nattch == 0) {
-      for (uint32_t i = 0; i < seg->num_pages; i++) {
-        // Only free if refcount is 0 (all detached)
-        if (pmm_get_ref((void *)seg->phys_pages[i]) == 0) {
-          pmm_free_page((void *)seg->phys_pages[i]);
-        }
-      }
-      seg->active = false;
+      uint32_t destroyed_id = seg->shmid;
+      shm_destroy_segment(seg);
       klog_puts("[SHM] Segment destroyed (deferred): shmid=");
-      klog_uint64(seg->shmid);
+      klog_uint64(destroyed_id);
       klog_puts("\n");
     }
   }
@@ -422,12 +437,7 @@ int64_t sys_shmctl(uint64_t shmid, uint64_t cmd, uint64_t buf, uint64_t a3,
     }
     if (seg->nattch == 0) {
       // No attaches — free immediately
-      for (uint32_t i = 0; i < seg->num_pages; i++) {
-        if (pmm_get_ref((void *)seg->phys_pages[i]) == 0) {
-          pmm_free_page((void *)seg->phys_pages[i]);
-        }
-      }
-      seg->active = false;
+      shm_destroy_segment(seg);
       klog_puts("[SHM] Segment destroyed: shmid=");
       klog_uint64(shmid);
       klog_puts("\n");
