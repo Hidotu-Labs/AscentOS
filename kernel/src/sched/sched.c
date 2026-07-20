@@ -1371,18 +1371,128 @@ void sched_reap_thread(struct thread *t) {
   klog_debug_puts("[REAP] Done\n");
 }
 
-struct thread *sched_get_thread_by_tid(uint32_t tid) {
-  spinlock_acquire(&tid_lock);
+static struct thread *find_thread_by_tid_locked(uint32_t tid) {
   struct thread *curr = global_thread_list;
   while (curr) {
-    if (curr->tid == tid) {
-      spinlock_release(&tid_lock);
+    if (curr->tid == tid)
       return curr;
-    }
     curr = curr->global_next;
   }
-  spinlock_release(&tid_lock);
   return NULL;
+}
+
+struct thread *sched_get_thread_by_tid(uint32_t tid) {
+  spinlock_acquire(&tid_lock);
+  struct thread *curr = find_thread_by_tid_locked(tid);
+  spinlock_release(&tid_lock);
+  return curr;
+}
+
+bool sched_get_thread_snapshot(uint32_t tid,
+                               struct sched_thread_snapshot *snapshot) {
+  if (!snapshot)
+    return false;
+
+  spinlock_acquire(&tid_lock);
+  struct thread *t = find_thread_by_tid_locked(tid);
+  if (!t) {
+    spinlock_release(&tid_lock);
+    return false;
+  }
+
+  memset(snapshot, 0, sizeof(*snapshot));
+  snapshot->tid = t->tid;
+  snapshot->tgid = t->tgid;
+  snapshot->parent_tid = t->parent ? t->parent->tid : 0;
+  snapshot->pgid = t->pgid;
+  snapshot->state = t->state;
+  snapshot->runtime_total = t->runtime_total;
+  snapshot->uid = t->uid;
+  snapshot->gid = t->gid;
+  snapshot->euid = t->euid;
+  snapshot->egid = t->egid;
+  snapshot->suid = t->suid;
+  snapshot->sgid = t->sgid;
+  memcpy(snapshot->comm, t->comm, sizeof(snapshot->comm));
+  snapshot->comm[sizeof(snapshot->comm) - 1] = 0;
+
+  if (t->mm) {
+    if (t->mm->brk_current > t->mm->brk_base)
+      snapshot->virt_bytes = t->mm->brk_current - t->mm->brk_base;
+    uint64_t mmap_used = 0x800000000000ULL - t->mm->mmap_next_addr;
+    if ((int64_t)mmap_used > 0)
+      snapshot->virt_bytes += mmap_used;
+    snapshot->resident_bytes = snapshot->virt_bytes / 2;
+  }
+
+  spinlock_release(&tid_lock);
+  return true;
+}
+
+bool sched_get_nth_thread_tid(uint32_t index, uint32_t *tid) {
+  if (!tid)
+    return false;
+  spinlock_acquire(&tid_lock);
+  struct thread *t = global_thread_list;
+  while (t && index--)
+    t = t->global_next;
+  if (t)
+    *tid = t->tid;
+  spinlock_release(&tid_lock);
+  return t != NULL;
+}
+
+bool sched_get_nth_open_fd(uint32_t tid, uint32_t index, uint32_t *fd) {
+  if (!fd)
+    return false;
+  spinlock_acquire(&tid_lock);
+  struct thread *t = find_thread_by_tid_locked(tid);
+  if (!t || !t->files) {
+    spinlock_release(&tid_lock);
+    return false;
+  }
+
+  spinlock_acquire(&t->files->lock);
+  bool found = false;
+  for (uint32_t i = 0; i < MAX_FDS; i++) {
+    if (!t->fds[i] || t->fds[i] == (vfs_node_t *)-1)
+      continue;
+    if (index-- == 0) {
+      *fd = i;
+      found = true;
+      break;
+    }
+  }
+  spinlock_release(&t->files->lock);
+  spinlock_release(&tid_lock);
+  return found;
+}
+
+bool sched_get_fd_path_snapshot(uint32_t tid, uint32_t fd, char *path,
+                                size_t path_size) {
+  if (!path || !path_size || fd >= MAX_FDS)
+    return false;
+  spinlock_acquire(&tid_lock);
+  struct thread *t = find_thread_by_tid_locked(tid);
+  if (!t || !t->files) {
+    spinlock_release(&tid_lock);
+    return false;
+  }
+
+  spinlock_acquire(&t->files->lock);
+  vfs_node_t *node = t->fds[fd];
+  bool found = node && node != (vfs_node_t *)-1;
+  if (found) {
+    const char *value =
+        t->fd_paths[fd] && t->fd_paths[fd]->value[0]
+            ? t->fd_paths[fd]->value
+            : node->name;
+    strncpy(path, value, path_size - 1);
+    path[path_size - 1] = 0;
+  }
+  spinlock_release(&t->files->lock);
+  spinlock_release(&tid_lock);
+  return found;
 }
 
 uint16_t sched_get_thread_count(void) {
@@ -1393,6 +1503,16 @@ uint16_t sched_get_thread_count(void) {
     count++;
     curr = curr->global_next;
   }
+  spinlock_release(&tid_lock);
+  return count;
+}
+
+uint16_t sched_get_runnable_thread_count(void) {
+  spinlock_acquire(&tid_lock);
+  uint16_t count = 0;
+  for (struct thread *t = global_thread_list; t; t = t->global_next)
+    if (t->state == THREAD_RUNNING || t->state == THREAD_READY)
+      count++;
   spinlock_release(&tid_lock);
   return count;
 }

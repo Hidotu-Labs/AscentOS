@@ -28,31 +28,35 @@ dma_buffer_t *dma_alloc(size_t size, uint32_t flags) {
   dma_last_flags = flags;
   dma_last_phys = 0;
 
-  // Calculate number of pages needed
+  // The buddy allocator rounds to a power of two. Track the full physical
+  // extent so every page is mapped, scrubbed, and eventually returned.
   size_t pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+  size_t allocated_pages = 1;
+  while (allocated_pages < pages)
+    allocated_pages <<= 1;
 
   // Allocate physical memory
   void *phys = NULL;
 
   if (flags & DMA_FLAG_ANYWHERE) {
-    phys = pmm_alloc_pages(pages);
+    phys = pmm_alloc_pages(allocated_pages);
   }
 
   if (flags & DMA_FLAG_LOW) {
     // Try low memory first (1-16MB region)
-    phys = pmm_alloc_pages_range(pages, DMA_LOW_START, DMA_LOW_END);
+    phys = pmm_alloc_pages_range(allocated_pages, DMA_LOW_START, DMA_LOW_END);
   }
 
   if (!phys && (flags & DMA_FLAG_32BIT)) {
     // Try below 4GB
-    phys = pmm_alloc_pages_range(pages, DMA_LOW_START, DMA_32BIT_END);
+    phys = pmm_alloc_pages_range(allocated_pages, DMA_LOW_START, DMA_32BIT_END);
   }
 
   if (!phys && !(flags & DMA_FLAG_ANYWHERE)) {
     // Default: try low memory, then anywhere below 4GB
-    phys = pmm_alloc_pages_range(pages, DMA_LOW_START, DMA_LOW_END);
+    phys = pmm_alloc_pages_range(allocated_pages, DMA_LOW_START, DMA_LOW_END);
     if (!phys) {
-      phys = pmm_alloc_pages_range(pages, DMA_LOW_END, DMA_32BIT_END);
+      phys = pmm_alloc_pages_range(allocated_pages, DMA_LOW_END, DMA_32BIT_END);
     }
   }
 
@@ -72,15 +76,14 @@ dma_buffer_t *dma_alloc(size_t size, uint32_t flags) {
   uint64_t map_flags =
       PAGE_FLAG_PRESENT | PAGE_FLAG_RW | PAGE_FLAG_PCD | PAGE_FLAG_PWT;
 
-  for (size_t i = 0; i < pages; i++) {
+  for (size_t i = 0; i < allocated_pages; i++) {
     uint64_t page_phys = (uint64_t)phys + i * PAGE_SIZE;
     uint64_t page_virt = virt + i * PAGE_SIZE;
 
     if (!vmm_map_page(pml4, page_virt, page_phys, map_flags)) {
-      // Failed to map - free physical memory
-      // Note: we should free all pages, but pmm_free_pages expects contiguous
       dma_last_failure = "VMM page mapping";
       klog_puts("[DMA] Failed to map page\n");
+      pmm_free_pages(phys, allocated_pages);
       spinlock_release(&dma_lock);
       return NULL;
     }
@@ -99,6 +102,7 @@ dma_buffer_t *dma_alloc(size_t size, uint32_t flags) {
     // This is a leak, but better than crashing
     dma_last_failure = "heap metadata allocation";
     klog_puts("[DMA] Failed to allocate buffer structure\n");
+    pmm_free_pages(phys, allocated_pages);
     spinlock_release(&dma_lock);
     return NULL;
   }
@@ -106,10 +110,10 @@ dma_buffer_t *dma_alloc(size_t size, uint32_t flags) {
   buf->virt = (void *)virt;
   buf->phys = (uint64_t)phys;
   buf->size = size;
-  buf->pages = pages;
+  buf->pages = allocated_pages;
 
   // Zero the buffer
-  memset(buf->virt, 0, pages * PAGE_SIZE);
+  memset(buf->virt, 0, allocated_pages * PAGE_SIZE);
 
   spinlock_release(&dma_lock);
   return buf;
@@ -121,11 +125,8 @@ void dma_free(dma_buffer_t *buf) {
 
   spinlock_acquire(&dma_lock);
 
-  // Free physical pages
-  for (size_t i = 0; i < buf->pages; i++) {
-    void *page_phys = (void *)(buf->phys + i * PAGE_SIZE);
-    pmm_free_page(page_phys);
-  }
+  // buf->pages records the complete power-of-two buddy allocation.
+  pmm_free_pages((void *)buf->phys, buf->pages);
 
   // Free the structure
   extern void kfree(void *);

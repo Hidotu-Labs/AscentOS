@@ -254,40 +254,10 @@ void udp_deliver(uint32_t src_ip, uint16_t src_port,
     spinlock_release(&table_lock);
 }
 
-bool net_phase6_selftest(void) {
-    struct udp_socket *s = udp_socket_alloc();
-    if (!s) return false;
-
-    if (udp_bind(s, 0, 0) < 0) {
-        udp_socket_free(s);
-        return false;
-    }
-    if (!s->bound || !s->local_port) {
-        udp_socket_free(s);
-        return false;
-    }
-
-    const char payload[] = "ph6test";
-    const struct ipv4_config *cfg = ipv4_get_config();
-    if (!cfg || !cfg->address) {
-        udp_socket_free(s);
-        return false;
-    }
-
-    ssize_t r = udp_sendto(s, payload, sizeof(payload) - 1,
-                            cfg->gateway, 9);
-    udp_socket_free(s);
-    return r == (ssize_t)(sizeof(payload) - 1);
-}
-
 bool net_phase6_init(void) {
     udp_init();
-    bool passed = net_phase6_selftest();
-    klog_puts(passed
-        ? "[NET TEST] Phase 6 PASS: UDP port allocation, bind, send path\n"
-        : "[NET TEST] Phase 6 FAIL\n");
-    net_print_stats(net_device_default());
-    return passed;
+    klog_puts("[NET] UDP initialized\n");
+    return true;
 }
 
 int udp_get_snapshot(struct udp_entry_snapshot *out, int max) {

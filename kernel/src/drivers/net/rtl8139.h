@@ -6,11 +6,8 @@
 struct net_device;
 struct pci_device;
 bool rtl8139_phase1_init(void);
-bool rtl8139_phase1_selftest(void);
 bool rtl8139_phase2_init(void);
-bool rtl8139_phase2_selftest(void);
 bool rtl8139_phase3_init(void);
-bool rtl8139_phase3_selftest(void);
 int rtl8139_transmit(struct net_device *, const void *, size_t);
 struct net_device *rtl8139_netdev(void);
 struct pci_device *rtl8139_pci(void);

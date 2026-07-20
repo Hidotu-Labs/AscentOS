@@ -57,6 +57,7 @@ override CFLAGS += \
 
 override CPPFLAGS := \
     -I src \
+    -I src/include \
     -I limine-protocol/include \
     -isystem freestnd-c-hdrs/include \
     $(CPPFLAGS) \

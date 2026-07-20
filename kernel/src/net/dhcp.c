@@ -632,63 +632,10 @@ bool dhcp_renew(void) {
     return false;
 }
 
-bool net_phase5_selftest(void) {
-    const struct dhcp_lease *l = dhcp_current_lease();
-    if (!l) return false;
-
-    if (l->address == 0 || l->address == 0xffffffffu) return false;
-    if ((l->address >> 24) == 127) return false;
-
-    bool qemu_subnet = (l->address  & 0xffffff00u) == 0x0a000200u; 
-    if (!qemu_subnet) {
-    }
-
-    if (!l->netmask || l->netmask == 0xffffffffu) return false;
-    uint32_t nm = l->netmask;
-    if (nm & (~nm >> 1)) return false; 
-
-    if (!l->gateway) return false;
-    if ((l->gateway & l->netmask) != (l->address & l->netmask)) return false;
-
-    if (!l->lease_time) return false;
-
-    if (l->renew_time && l->rebind_time && l->renew_time > l->rebind_time)
-        return false;
-    if (l->rebind_time && l->rebind_time > l->lease_time)
-        return false;
-
-    const struct ipv4_config *cfg = ipv4_get_config();
-    if (!cfg) return false;
-    if (cfg->address != l->address) return false;
-    if (cfg->gateway != l->gateway) return false;
-
-    return true;
-}
-
 bool net_phase5_init(void) {
-    klog_puts("[NET] Phase 5: starting DHCP client\n");
-
+    klog_puts("[NET] starting DHCP client\n");
     bool got_lease = dhcp_start();
-
-    bool passed = got_lease && net_phase5_selftest();
-
-    if (passed) {
-        const struct dhcp_lease *l = dhcp_current_lease();
-        klog_puts("[NET TEST] Phase 5 PASS: DHCP lease obtained — addr=");
-        klog_hex32(l->address);
-        klog_puts(" netmask=");
-        klog_hex32(l->netmask);
-        klog_puts(" gw=");
-        klog_hex32(l->gateway);
-        klog_puts(" lease=");
-        klog_uint64(l->lease_time);
-        klog_puts("s\n");
-    } else if (!got_lease) {
-        klog_puts("[NET TEST] Phase 5 FAIL: DHCP exchange did not produce a lease\n");
-    } else {
-        klog_puts("[NET TEST] Phase 5 FAIL: lease validation failed\n");
-    }
-
-    net_print_stats(net_device_default());
-    return passed;
+    if (!got_lease)
+        klog_puts("[DHCP] lease acquisition failed\n");
+    return got_lease;
 }

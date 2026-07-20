@@ -1766,6 +1766,7 @@ static uint32_t drm_read(struct vfs_node *node, uint32_t offset,
  * drm_file here leaked every scan because no fd existed to release it.
  */
 static vfs_node_t drm_card_metadata_node;
+static vfs_node_t *drm_open_instance(vfs_node_t *metadata);
 
 static struct dirent *drm_dri_readdir(vfs_node_t *dir, uint32_t index) {
   static struct dirent entry;
@@ -1890,6 +1891,7 @@ void drm_register_vfs(void) {
   drm_card_metadata_node.mask = 0666;
   drm_card_metadata_node.inode = (226U << 8) | 0U;
   drm_card_metadata_node.device = &global_drm_dev;
+  drm_card_metadata_node.open_instance = drm_open_instance;
   drm_card_metadata_node.refcount = 1;
 
   /* Keep enumeration consistent with the dynamic per-open node factory.
@@ -1899,4 +1901,8 @@ void drm_register_vfs(void) {
   dri_dir->finddir = drm_dri_finddir;
 
   klog_puts("[DRM] Registered /dev/dri/card0 (per-client mode)\n");
+}
+static vfs_node_t *drm_open_instance(vfs_node_t *metadata) {
+  (void)metadata;
+  return drm_alloc_client_node();
 }

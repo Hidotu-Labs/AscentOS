@@ -59,5 +59,4 @@ struct tcp_tcb *tcp_accept(struct tcp_tcb *, bool);
 bool tcp_readable(const struct tcp_tcb *);
 bool tcp_writable(const struct tcp_tcb *);
 bool net_phase8_init(void);
-bool net_phase8_selftest(void);
 #endif

@@ -24,7 +24,6 @@ const struct dhcp_lease *dhcp_current_lease(void);
 
 bool dhcp_renew(void);
 
-bool net_phase5_selftest(void);
 bool net_phase5_init(void);
 
 #endif

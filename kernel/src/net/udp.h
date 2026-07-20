@@ -60,7 +60,6 @@ void udp_deliver(uint32_t src_ip, uint16_t src_port,
                  uint16_t dst_port, const uint8_t *payload, uint16_t length);
 
 bool net_phase6_init(void);
-bool net_phase6_selftest(void);
 
 /* Snapshot of one UDP socket for /proc/net/udp */
 struct udp_entry_snapshot {

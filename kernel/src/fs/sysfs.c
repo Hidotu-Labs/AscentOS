@@ -1,4 +1,5 @@
 #include "fs/sysfs.h"
+#include "fs/sysfs_pci.h"
 #include "console/klog.h"
 #include "drivers/pci/pci.h"
 #include "drivers/gpu/virtio_gpu/virtio_gpu.h"
@@ -53,6 +54,10 @@ static void u64_to_dec(uint64_t val, char *buf) {
 
 // Create a directory under parent and return the new node.
 static vfs_node_t *sysfs_mkdir(vfs_node_t *parent, const char *name) {
+  vfs_node_t *existing = parent ? vfs_finddir(parent, (char *)name) : NULL;
+  if (existing && (existing->flags & FS_TYPE_MASK) == FS_DIRECTORY)
+    return existing;
+
   vfs_node_t *dir = kmalloc(sizeof(vfs_node_t));
   if (!dir)
     return NULL;
@@ -62,6 +67,7 @@ static vfs_node_t *sysfs_mkdir(vfs_node_t *parent, const char *name) {
   dir->mask = 0555;
   ramfs_mount_on(dir);
   ramfs_mount_node(parent, dir);
+  vfs_dentry_invalidate(parent, name);
   return dir;
 }
 
@@ -81,6 +87,9 @@ static int sysfs_readlink_cb(vfs_node_t *node, char *buf, uint32_t size) {
 // Create a symlink under parent pointing to target.
 static void sysfs_symlink(vfs_node_t *parent, const char *name,
                           const char *target) {
+  if (!parent || vfs_finddir(parent, (char *)name))
+    return;
+
   vfs_node_t *sl = kmalloc(sizeof(vfs_node_t));
   if (!sl)
     return;
@@ -95,11 +104,16 @@ static void sysfs_symlink(vfs_node_t *parent, const char *name,
     strcpy(tgt, target);
   sl->ptr = (vfs_node_t *)tgt; // reuse ptr field for the string
   ramfs_mount_node(parent, sl);
+  vfs_dentry_invalidate(parent, name);
 }
 
 // Create a read-only file under parent with the given content.
 static vfs_node_t *sysfs_mkfile(vfs_node_t *parent, const char *name,
                          const char *content) {
+  vfs_node_t *existing = parent ? vfs_finddir(parent, (char *)name) : NULL;
+  if (existing)
+    return existing;
+
   vfs_node_t *f = kmalloc(sizeof(vfs_node_t));
   if (!f)
     return NULL;
@@ -122,6 +136,7 @@ static vfs_node_t *sysfs_mkfile(vfs_node_t *parent, const char *name,
   f->write = ramfs_write;
 
   ramfs_mount_node(parent, f);
+  vfs_dentry_invalidate(parent, name);
 
   uint32_t len = (uint32_t)strlen(content);
   vfs_write(f, 0, len, (uint8_t *)content);
@@ -130,96 +145,6 @@ static vfs_node_t *sysfs_mkfile(vfs_node_t *parent, const char *name,
 
 static void sysfs_replace(vfs_node_t *node,const char *text){if(!node||!text)return;node->length=0;vfs_write(node,0,(uint32_t)strlen(text),(uint8_t *)text);}
 void sysfs_gpu_update_connector(uint32_t scanout,bool connected,const char *modes){if(scanout>=VIRTIO_GPU_MAX_SCANOUTS)return;sysfs_replace(gpu_status_nodes[scanout],connected?"connected\n":"disconnected\n");sysfs_replace(gpu_enabled_nodes[scanout],connected?"enabled\n":"disabled\n");sysfs_replace(gpu_modes_nodes[scanout],connected&&modes?modes:"");sysfs_replace(gpu_dpms_nodes[scanout],connected?"On\n":"Off\n");}
-
-// PCI bus population
-
-static void sysfs_populate_pci(vfs_node_t *pci_devices_dir) {
-  uint32_t count = pci_get_device_count();
-  for (uint32_t i = 0; i < count; i++) {
-    struct pci_device *dev = pci_get_device(i);
-    if (!dev)
-      continue;
-
-    // Name: 0000:BB:SS.F
-    char devname[16];
-    devname[0] = '0';
-    devname[1] = '0';
-    devname[2] = '0';
-    devname[3] = '0';
-    devname[4] = ':';
-    char tmp[4];
-    u32_to_hex(dev->bus, tmp, 2);
-    devname[5] = tmp[0];
-    devname[6] = tmp[1];
-    devname[7] = ':';
-    u32_to_hex(dev->slot, tmp, 2);
-    devname[8] = tmp[0];
-    devname[9] = tmp[1];
-    devname[10] = '.';
-    devname[11] = '0' + (dev->func & 7);
-    devname[12] = '\0';
-
-    vfs_node_t *ddir = sysfs_mkdir(pci_devices_dir, devname);
-    if (!ddir)
-      continue;
-
-    // vendor  (e.g. "0x8086\n")
-    char vbuf[10];
-    vbuf[0] = '0';
-    vbuf[1] = 'x';
-    u32_to_hex(dev->vendor_id, vbuf + 2, 4);
-    vbuf[6] = '\n';
-    vbuf[7] = '\0';
-    sysfs_mkfile(ddir, "vendor", vbuf);
-
-    // device
-    char dbuf[10];
-    dbuf[0] = '0';
-    dbuf[1] = 'x';
-    u32_to_hex(dev->device_id, dbuf + 2, 4);
-    dbuf[6] = '\n';
-    dbuf[7] = '\0';
-    sysfs_mkfile(ddir, "device", dbuf);
-
-    // class  (24-bit: class|subclass|progif as 0xCCSSPP)
-    char cbuf[12];
-    cbuf[0] = '0';
-    cbuf[1] = 'x';
-    u32_to_hex(((uint32_t)dev->class_code << 16) |
-                   ((uint32_t)dev->subclass << 8) | (uint32_t)dev->prog_if,
-               cbuf + 2, 6);
-    cbuf[8] = '\n';
-    cbuf[9] = '\0';
-    sysfs_mkfile(ddir, "class", cbuf);
-
-    // irq
-    char ibuf[8];
-    u64_to_dec(dev->irq_line, ibuf);
-    strcat(ibuf, "\n");
-    sysfs_mkfile(ddir, "irq", ibuf);
-
-    // resource (one line per BAR: start end flags)
-    char rbuf[512];
-    rbuf[0] = '\0';
-    for (int b = 0; b < 6; b++) {
-      if (dev->bar[b]) {
-        char tmp2[12];
-        strcat(rbuf, "0x");
-        u32_to_hex(dev->bar[b], tmp2, 8);
-        strcat(rbuf, tmp2);
-        strcat(rbuf, " 0x");
-        u32_to_hex(dev->bar[b] + 0xfff, tmp2, 8);
-        strcat(rbuf, tmp2);
-        strcat(rbuf, " 0x00000200\n");
-      } else {
-        strcat(rbuf, "0x00000000 0x00000000 0x00000000\n");
-      }
-    }
-    sysfs_mkfile(ddir, "resource", rbuf);
-    // subsystem symlink
-    sysfs_symlink(ddir, "subsystem", "../../");
-  }
-}
 
 // Block class population
 
@@ -392,8 +317,6 @@ void sysfs_init(void) {
   // /sys/bus/pci/devices
   vfs_node_t *bus_dir = sysfs_mkdir(sysfs_root, "bus");
   vfs_node_t *pci_dir = sysfs_mkdir(bus_dir, "pci");
-  vfs_node_t *pci_dev_dir = sysfs_mkdir(pci_dir, "devices");
-  sysfs_populate_pci(pci_dev_dir);
 
   // /sys/class
   vfs_node_t *class_dir = sysfs_mkdir(sysfs_root, "class");
@@ -401,6 +324,7 @@ void sysfs_init(void) {
   // /sys/devices
   // Must be created before class/drm so the symlink target dirs exist
   vfs_node_t *devices_dir = sysfs_mkdir(sysfs_root, "devices");
+  sysfs_pci_init(pci_dir, devices_dir);
   vfs_node_t *system_dir = sysfs_mkdir(devices_dir, "system");
   vfs_node_t *cpu_dir = sysfs_mkdir(system_dir, "cpu");
   sysfs_populate_cpus(cpu_dir);

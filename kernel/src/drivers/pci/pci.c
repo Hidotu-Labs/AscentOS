@@ -10,6 +10,9 @@
 #include <stddef.h>
 static struct pci_device devices[PCI_MAX_DEVICES];
 static uint32_t device_count = 0;
+static struct bus_type pci_bus = {.name = "pci"};
+
+struct bus_type *pci_bus_type(void) { return &pci_bus; }
 
 // PCI Config Space Access
 
@@ -59,16 +62,6 @@ void pci_config_write16(uint8_t bus, uint8_t slot, uint8_t func,
 
 // Helpers
 
-static void print_hex8(uint8_t val) {
-  const char *hex = "0123456789ABCDEF";
-  console_putchar(hex[(val >> 4) & 0xF]);
-  console_putchar(hex[val & 0xF]);
-}
-
-static void print_hex16(uint16_t val) {
-  print_hex8((uint8_t)(val >> 8));
-  print_hex8((uint8_t)(val & 0xFF));
-}
 
 static void print_uint32(uint32_t num) {
   if (num == 0) {
@@ -84,6 +77,35 @@ static void print_uint32(uint32_t num) {
   while (i > 0) {
     console_putchar(buf[--i]);
   }
+}
+
+static uint64_t pci_probe_bar_size(uint8_t bus, uint8_t slot, uint8_t func,
+                                   uint8_t index, uint32_t raw) {
+  uint16_t reg = (uint16_t)(0x10 + index * 4);
+  bool io = (raw & 1U) != 0;
+  bool wide = !io && (((raw >> 1) & 3U) == 2U) && index < 5;
+  uint16_t command = pci_config_read16(bus, slot, func, 0x04);
+  uint32_t high = wide ? pci_config_read32(bus, slot, func, reg + 4) : 0;
+  pci_config_write16(bus, slot, func, 0x04, command & ~3U);
+  pci_config_write32(bus, slot, func, reg, 0xffffffffU);
+  if (wide)
+    pci_config_write32(bus, slot, func, reg + 4, 0xffffffffU);
+  uint32_t mask_low = pci_config_read32(bus, slot, func, reg);
+  uint32_t mask_high =
+      wide ? pci_config_read32(bus, slot, func, reg + 4) : 0;
+  pci_config_write32(bus, slot, func, reg, raw);
+  if (wide)
+    pci_config_write32(bus, slot, func, reg + 4, high);
+  pci_config_write16(bus, slot, func, 0x04, command);
+  if (io) {
+    uint32_t mask = mask_low & ~3U;
+    return mask ? (uint64_t)(~mask + 1U) : 0;
+  }
+  uint64_t mask = wide ? ((uint64_t)mask_high << 32) | (mask_low & ~0xfU)
+                       : (uint64_t)(mask_low & ~0xfU);
+  return mask ? (wide ? ~mask + 1ULL
+                      : (uint64_t)(~(uint32_t)mask + 1U))
+              : 0;
 }
 
 // Device scanning
@@ -115,37 +137,47 @@ static void pci_check_function(uint8_t bus, uint8_t slot, uint8_t func) {
   dev->irq_line = reg_irq & 0xFF;
 
   // Name the device by its PCI bus:slot.function address (BDF).
-  char dev_name[9];
-  snprintf(dev_name, sizeof(dev_name), "%02x:%02x.%x", bus, slot, func);
+  char dev_name[16];
+  snprintf(dev_name, sizeof(dev_name), "0000:%02x:%02x.%x", bus, slot, func);
 
   struct device *seg_dev = device_find_by_path("/sys/pci/seg0");
   if (!seg_dev)
     seg_dev = device_find_by_path("/sys/pci"); // Fallback
 
-  struct device *pci_node = device_create(seg_dev, dev_name);
+  struct device *pci_node = device_create_on_bus(&pci_bus, seg_dev, dev_name);
   if (pci_node) {
     pci_node->vendor_id = vendor_id;
     pci_node->device_id = device_id;
     pci_node->pci_class = dev->class_code;
     pci_node->pci_subclass = dev->subclass;
     pci_node->pci_prog_if = dev->prog_if;
-    dm_probe_device(pci_node);
+    dev->kernel_device = pci_node;
   }
 
   if ((dev->header_type & 0x7F) == 0x00) {
+    for (int i = 0; i < 6; i++)
+      dev->bar[i] = pci_config_read32(bus, slot, func, 0x10 + i * 4);
     for (int i = 0; i < 6; i++) {
-      uint32_t bar = pci_config_read32(bus, slot, func, 0x10 + i * 4);
-      dev->bar[i] = bar;
-      if (bar != 0 && bar != 0xFFFFFFFF) {
-        if (bar & 1) { // IO
-          device_add_resource(pci_node, RES_IO, "bar", bar & ~0x3, 0);
-        } else { // MEM
-          device_add_resource(pci_node, RES_MEM, "bar", bar & ~0xF, 0);
-        }
-      }
+      uint32_t bar = dev->bar[i];
+      if (!bar || bar == 0xffffffffU)
+        continue;
+      bool io = (bar & 1U) != 0;
+      bool wide = !io && (((bar >> 1) & 3U) == 2U) && i < 5;
+      uint64_t start = io ? (bar & ~3U) : (bar & ~0xfU);
+      if (wide)
+        start |= (uint64_t)dev->bar[i + 1] << 32;
+      uint64_t size = pci_probe_bar_size(bus, slot, func, (uint8_t)i, bar);
+      char name[8];
+      snprintf(name, sizeof(name), "bar%d", i);
+      device_add_resource(pci_node, io ? RES_IO : RES_MEM, name, start,
+                          size ? start + size - 1 : start);
+      if (wide)
+        i++;
     }
   }
   device_add_resource(pci_node, RES_IRQ, "irq", dev->irq_line, dev->irq_line);
+
+  dm_probe_device(pci_node);
 
   device_count++;
 }
@@ -171,6 +203,14 @@ static void pci_check_device(uint8_t bus, uint8_t slot) {
 // Public API
 
 void pci_init(void) {
+  dm_register_bus(&pci_bus);
+  struct device *sys_node = device_find_by_path("/sys");
+  struct device *pci_root = device_find_by_path("/sys/pci");
+  if (!pci_root)
+    pci_root = device_create(sys_node, "pci");
+  if (pci_root && !device_find_by_path("/sys/pci/seg0"))
+    device_create(pci_root, "seg0");
+
   pcie_init();
   device_count = 0;
   console_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET
@@ -210,10 +250,20 @@ struct pci_device *pci_find_device_by_id(uint16_t vendor_id,
   return NULL;
 }
 
+void pci_set_bus_mastering(struct pci_device *dev, bool enabled) {
+  if (!dev)
+    return;
+  uint16_t command =
+      pci_config_read16(dev->bus, dev->slot, dev->func, 0x04);
+  if (enabled)
+    command |= (1U << 2);
+  else
+    command &= ~(1U << 2);
+  pci_config_write16(dev->bus, dev->slot, dev->func, 0x04, command);
+}
+
 void pci_enable_bus_mastering(struct pci_device *dev) {
-  uint32_t cmd = pci_config_read32(dev->bus, dev->slot, dev->func, 0x04);
-  cmd |= (1 << 2); // Set Bus Master bit
-  pci_config_write32(dev->bus, dev->slot, dev->func, 0x04, cmd);
+  pci_set_bus_mastering(dev, true);
 }
 
 uint8_t pci_find_capability(struct pci_device *dev, uint8_t cap_id) {

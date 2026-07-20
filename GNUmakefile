@@ -6,6 +6,26 @@ QEMUFLAGS := -m 2G \
 	-device virtio-vga,xres=1280,yres=800 \
 	-display gtk,zoom-to-fit=off
 
+AMDGPU_RAPHAEL_FIRMWARE := \
+	firmware/amdgpu/dcn_3_1_5_dmcub.bin \
+	firmware/amdgpu/gc_10_3_6_ce.bin \
+	firmware/amdgpu/gc_10_3_6_me.bin \
+	firmware/amdgpu/gc_10_3_6_mec.bin \
+	firmware/amdgpu/gc_10_3_6_mec2.bin \
+	firmware/amdgpu/gc_10_3_6_pfp.bin \
+	firmware/amdgpu/gc_10_3_6_rlc.bin \
+	firmware/amdgpu/psp_13_0_5_ta.bin \
+	firmware/amdgpu/psp_13_0_5_toc.bin \
+	firmware/amdgpu/sdma_5_2_6.bin \
+	firmware/amdgpu/vcn_3_1_2.bin \
+	firmware/amdgpu/LICENSE.amdgpu
+
+AMDGPU_INSTALL_IMAGE ?= ./part.img
+
+.PHONY: install-amdgpu
+install-amdgpu: $(AMDGPU_RAPHAEL_FIRMWARE) scripts/install-amdgpu.sh
+	@./scripts/install-amdgpu.sh "$(AMDGPU_INSTALL_IMAGE)"
+
 
 override IMAGE_NAME := ascentos-$(ARCH)
 
@@ -13,6 +33,7 @@ ASCENTD_CONFIG_FILES := \
 	initrd/ascentd/default.target \
 	initrd/ascentd/services/system-init.service \
 	initrd/ascentd/services/console.service \
+	initrd/ascentd/services/udriver-net.service \
 	initrd/ascentd/services/wayland.service \
 	initrd/ascentd/services/x11.service
 
@@ -145,6 +166,8 @@ run-x86_64: edk2-ovmf $(IMAGE_NAME).iso disk.img
 		-audiodev pa,id=snd0 \
 		-device rtl8139,netdev=net0 \
 		-netdev user,id=net0 \
+		-device rtl8139,netdev=net1 \
+		-netdev user,id=net1 \
 		-device sb16,audiodev=snd0 \
 		-device AC97,audiodev=snd0 \
 		-device intel-hda -device hda-duplex,audiodev=snd0 \
@@ -214,6 +237,8 @@ disk.img: GNUmakefile userland/winoptions userland/icewm-menu
 disk.img: scripts/configure-accounts.sh userland/ascent-account userland/test_accounts.sh userland/ascent-login.elf
 disk.img:  userland/dns_lookup.elf
 disk.img: userland/test_clone_futex.elf
+disk.img: userland/8139too-udrv.elf
+disk.img: $(AMDGPU_RAPHAEL_FIRMWARE)
 disk.img: $(QUAKE2_BUNDLE_FILES)
 disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets/mc9.mp3 assets/train.mp3 assets/test.bmp assets/test.tar assets/room.png assets/logo.png assets/linus.gif userland/forkit.elf userland/forkit-launch.sh userland/about.elf userland/hello_glibc.elf userland/booter.elf userland/reboot.elf userland/shutdown.elf userland/apm.elf userland/test_cpp.elf  userland/kilo.elf  userland/ls.elf userland/lspci.elf userland/lsblk.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/asplay.elf userland/kria.elf userland/doom.elf userland/xrootcursor.elf  userland/jwm.elf userland/doom_x11.elf userland/gtk_test.elf userland/tglgears_fb.elf userland/tglgears_drm.elf userland/tglhello_drm.elf userland/test_mem_stress.elf userland/classicube.elf userland/terrain.png userland/texpacks/classicube.zip initrd/startx.sh initrd/startw.sh initrd/weston.ini userland/ascentd.elf $(ASCENTD_CONFIG_FILES)
 	@echo "Creating root filesystem (ext4)..."
@@ -234,6 +259,8 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 		echo "write initrd/startw.sh bin/startw.sh"; \
 		echo "rm bin/ascentd"; \
 		echo "write userland/ascentd.elf bin/ascentd"; \
+		echo "rm bin/8139too-udrv"; \
+		echo "write userland/8139too-udrv.elf bin/8139too-udrv"; \
 		echo "rm bin/ascent-login"; \
 		echo "write userland/ascent-login.elf bin/ascent-login"; \
 		echo "rm bin/xrootcursor"; \
@@ -245,6 +272,8 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 		echo "write initrd/ascentd/default.target etc/ascentd/default.target"; \
 		echo "rm etc/ascentd/services/system-init.service"; \
 		echo "write initrd/ascentd/services/system-init.service etc/ascentd/services/system-init.service"; \
+		echo "rm etc/ascentd/services/udriver-net.service"; \
+		echo "write initrd/ascentd/services/udriver-net.service etc/ascentd/services/udriver-net.service"; \
 		echo "rm etc/ascentd/services/console.service"; \
 		echo "write initrd/ascentd/services/console.service etc/ascentd/services/console.service"; \
 		echo "rm etc/ascentd/services/wayland.service"; \
@@ -412,6 +441,7 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 		./scripts/configure-accounts.sh build/alpine/rootfs; \
 		./scripts/populate-ext2-dir.sh ./part.img build/alpine/rootfs /; \
 	fi
+	@$(MAKE) --no-print-directory install-amdgpu AMDGPU_INSTALL_IMAGE=./part.img
 	@echo "Installing Quake II into disk image..."
 	@./scripts/populate-ext2-dir.sh ./part.img userland/quake2 opt/quake2
 	@{ \
@@ -651,6 +681,12 @@ test-phase6-login:
 userland/ascentd.elf: userland/ascentd.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/ascentd.c -o userland/ascentd.elf
+
+userland/8139too-udrv.elf: scripts/build-udriver-rtl8139.sh \
+		userland/linux_compat/src/ascent_compat.c \
+		userland/linux_compat/include/linux/ascent_compat.h \
+		userland/drivers/net/ethernet/realtek/8139too.c include/ascent/udriver.h $(MUSL_LIBC)
+	./scripts/build-udriver-rtl8139.sh
 
 userland/ascent-login.elf: userland/ascent-login.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \

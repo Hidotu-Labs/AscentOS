@@ -39,7 +39,9 @@ void pcie_init(void) {
     mcfg = acpi_get_mcfg();
     if (mcfg) {
         struct device *sys_node = device_find_by_path("/sys");
-        struct device *pci_root = device_create(sys_node, "pci");
+        struct device *pci_root = device_find_by_path("/sys/pci");
+        if (!pci_root)
+            pci_root = device_create(sys_node, "pci");
 
         size_t entries = (mcfg->header.length - sizeof(struct acpi_mcfg)) / sizeof(struct acpi_mcfg_entry);
         for (size_t i = 0; i < entries; i++) {
@@ -49,7 +51,9 @@ void pcie_init(void) {
             // Format: seg0, seg1...
             strcpy(seg_name, "seg0"); // Simplified
 
-            struct device *seg_dev = device_create(pci_root, seg_name);
+            struct device *seg_dev = device_find_by_path("/sys/pci/seg0");
+            if (!seg_dev)
+                seg_dev = device_create(pci_root, seg_name);
             device_add_resource(seg_dev, RES_MEM, "ecam", entry->base_address, 
                                 entry->base_address + ((entry->end_bus_number - entry->start_bus_number + 1) << 20));
             

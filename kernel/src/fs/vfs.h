@@ -55,6 +55,7 @@ typedef uint32_t (*write_type_t)(struct vfs_node *, uint32_t, uint32_t,
                                  uint8_t *);
 typedef void (*open_type_t)(struct vfs_node *);
 typedef void (*close_type_t)(struct vfs_node *);
+typedef struct vfs_node *(*open_instance_type_t)(struct vfs_node *);
 typedef int (*ioctl_type_t)(struct vfs_node *, uint32_t request, uint64_t arg);
 typedef struct dirent *(*readdir_type_t)(struct vfs_node *, uint32_t);
 typedef struct vfs_node *(*finddir_type_t)(struct vfs_node *, char *name);
@@ -117,6 +118,7 @@ typedef struct vfs_node {
   write_type_t write;
   open_type_t open;
   close_type_t close;
+  open_instance_type_t open_instance; // Optional per-open node factory
   readdir_type_t readdir;
   finddir_type_t finddir;
   create_type_t create;

@@ -16,12 +16,14 @@
 #include "drivers/audio/audio_dsp.h"
 #include "drivers/audio/hda.h"
 #include "drivers/audio/sb16.h"
+#include "drivers/gpu/amd/amdgpu/amdgpu.h"
 #include "drivers/gpu/drm/drm.h"
 #include "drivers/input/evdev.h"
 #include "drivers/input/keyboard.h"
 #include "drivers/input/mouse.h"
 #include "drivers/manager/device.h"
 #include "drivers/manager/dtb.h"
+#include "drivers/manager/udriver.h"
 #include "drivers/net/rtl8139.h"
 #include "drivers/pci/pci.h"
 #include "drivers/serial.h"
@@ -171,7 +173,6 @@ static void init_thread_entry(void) {
       net_phase6_init();
       ipv4_set_tcp_handler(tcp_input_ipv4);
       net_phase8_init();
-      net_phase10_init();
       net_phase11_init();
       sysfs_populate_network();
     }
@@ -404,6 +405,7 @@ void kmain_high_half(void) {
   shm_init();
 
   pci_init();
+  amdgpu_init();
   if (!virtio_gpu_init()) {
     klog_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET
                            " VirtIO-GPU initialization failed; keeping GOP.\n");
@@ -470,11 +472,36 @@ mount_success:
 
   extern void sysfs_init(void);
   sysfs_init();
+  if (amdgpu_device_bound()) {
+    if (!amdgpu_phase2_init()) {
+      klog_puts(KLOG_CLR_YELLOW "[ WARN ]" KLOG_CLR_RESET
+                " AMDGPU Phase 2 firmware validation unavailable; keeping GOP.\n");
+    } else if (!amdgpu_phase3_init()) {
+      klog_puts(KLOG_CLR_YELLOW "[ WARN ]" KLOG_CLR_RESET
+                " AMDGPU Phase 3 discovery/PSP model unavailable; keeping GOP.\n");
+    } else if (!amdgpu_phase4_init()) {
+      klog_puts(KLOG_CLR_YELLOW "[ WARN ]" KLOG_CLR_RESET
+                " AMDGPU Phase 4 memory model unavailable; keeping GOP.\n");
+    } else if (!amdgpu_phase5_init()) {
+      klog_puts(KLOG_CLR_YELLOW "[ WARN ]" KLOG_CLR_RESET
+                " AMDGPU Phase 5 ring model unavailable; keeping GOP.\n");
+    }
+  }
+  udriver_init();
   evdev_init();
 
   block_repopulate_devices();
   fb_register_vfs();
   drm_init();
+  if (amdgpu_device_bound()) {
+    if (!amdgpu_phase6_init()) {
+      klog_puts(KLOG_CLR_YELLOW "[ WARN ]" KLOG_CLR_RESET
+                " AMDGPU Phase 6 display model unavailable; keeping GOP.\n");
+    } else if (!amdgpu_phase7_init()) {
+      klog_puts(KLOG_CLR_YELLOW "[ WARN ]" KLOG_CLR_RESET
+                " AMDGPU Phase 7 render ABI model unavailable; Mesa remains disabled.\n");
+    }
+  }
   if (virtio_gpu_is_initialized()) {
     if (!virtio_gpu_phase4_bind_drm()) {
       klog_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET

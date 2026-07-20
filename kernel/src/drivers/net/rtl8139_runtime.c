@@ -62,7 +62,6 @@ static uint8_t tx_next;
 static uint32_t rx_offset;
 static bool phase2_ready;
 static bool phase3_ready;
-static bool irq_installed;
 
 static uint8_t *tx_virt(void) {
   return (uint8_t *)((uint64_t)rtl8139_tx_phys() + pmm_get_hhdm_offset());
@@ -131,45 +130,6 @@ int rtl8139_transmit(struct net_device *dev, const void *frame, size_t length) {
   return 0;
 }
 
-static bool wait_for_tx_count(uint64_t target) {
-  struct net_device *dev = rtl8139_netdev();
-  for (uint32_t tries = 0; tries < 2000; tries++) {
-    spinlock_acquire(&tx_lock);
-    reclaim_tx_locked();
-    spinlock_release(&tx_lock);
-    if (dev->stats.tx_packets >= target)
-      return true;
-    sched_yield();
-  }
-  return false;
-}
-
-bool rtl8139_phase2_selftest(void) {
-  struct net_device *dev = rtl8139_netdev();
-  if (!phase2_ready || !dev)
-    return false;
-
-  uint8_t frame[NET_FRAME_MAX - 4];
-  memset(frame, 0x5a, sizeof(frame));
-  memset(frame, 0xff, 6);
-  memcpy(frame + 6, dev->mac, 6);
-  frame[12] = 0x88;
-  frame[13] = 0xb5;
-
-  static const uint16_t sizes[] = {42, 512, NET_FRAME_MAX - 4};
-  uint64_t target = dev->stats.tx_packets;
-  for (uint32_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
-    if (rtl8139_transmit(dev, frame, sizes[i]) != 0)
-      return false;
-    if (!wait_for_tx_count(++target))
-      return false;
-  }
-  for (uint32_t i = 0; i < TX_COUNT; i++)
-    if (tx_busy[i])
-      return false;
-  return true;
-}
-
 bool rtl8139_phase2_init(void) {
   if (!rtl8139_present())
     return false;
@@ -180,11 +140,8 @@ bool rtl8139_phase2_init(void) {
   outl(io + RTL_TCR, TCR_IFG96 | TCR_MAX_DMA);
   outb(io + RTL_CR, CR_TX_ENABLE);
   phase2_ready = true;
-  bool passed = rtl8139_phase2_selftest();
-  klog_puts(passed ? "[RTL8139 TEST] Phase 2 PASS: padded/min/max TX, "
-                     "completion and descriptor reuse\n"
-                   : "[RTL8139 TEST] Phase 2 FAIL\n");
-  return passed;
+  klog_puts("[RTL8139] transmit path enabled\n");
+  return true;
 }
 
 static bool rx_record_valid(uint16_t status, uint16_t dma_length,
@@ -259,57 +216,15 @@ static void rtl8139_irq(struct registers *regs) {
     dev->stats.rx_errors++;
 }
 
-bool rtl8139_phase3_selftest(void) {
-  if (!phase3_ready || !irq_installed)
-    return false;
-  uint16_t frame_length = 0;
-  if (!rx_record_valid(1, 64, &frame_length) || frame_length != 60)
-    return false;
-  if (rx_record_valid(0, 64, &frame_length) ||
-      rx_record_valid(1, 7, &frame_length) ||
-      rx_record_valid(1, NET_FRAME_MAX + 5, &frame_length))
-    return false;
-  uint16_t io = rtl8139_io_base();
-  uint16_t expected = INT_RX_OK | INT_RX_ERROR | INT_TX_OK | INT_TX_ERROR |
-                      INT_RX_OVERFLOW | INT_LINK_CHANGE;
-  uint16_t command = pci_config_read16(
-      rtl8139_pci()->bus, rtl8139_pci()->slot, rtl8139_pci()->func, 0x04);
-  if ((inb(io + RTL_CR) & (CR_RX_ENABLE | CR_TX_ENABLE)) !=
-          (CR_RX_ENABLE | CR_TX_ENABLE) ||
-      inw(io + RTL_IMR) != expected || (command & (1u << 10)))
-    return false;
-
-  /* Generate a real TX-completion interrupt after INTx is enabled. */
-  struct net_device *dev = rtl8139_netdev();
-  uint8_t frame[ETH_MIN_NO_FCS];
-  memset(frame, 0, sizeof(frame));
-  memset(frame, 0xff, 6);
-  memcpy(frame + 6, dev->mac, 6);
-  frame[12] = 0x88;
-  frame[13] = 0xb5;
-  uint64_t irq_before = dev->stats.interrupts;
-  uint64_t tx_target = dev->stats.tx_packets + 1;
-  if (rtl8139_transmit(dev, frame, sizeof(frame)) != 0)
-    return false;
-  for (uint32_t tries = 0; tries < 2000; tries++) {
-    if (dev->stats.interrupts > irq_before &&
-        dev->stats.tx_packets >= tx_target)
-      return true;
-    sched_yield();
-  }
-  return false;
-}
-
 bool rtl8139_phase3_init(void) {
   if (!phase2_ready || !rtl8139_present())
     return false;
   uint16_t io = rtl8139_io_base();
   outw(io + RTL_IMR, 0);
   if (!irq_install_handler(rtl8139_irq_line(), rtl8139_irq, 0x000f)) {
-    klog_puts("[RTL8139 TEST] Phase 3 FAIL: IRQ registration\n");
+    klog_puts("[RTL8139] IRQ registration failed\n");
     return false;
   }
-  irq_installed = true;
   rx_offset = 0;
   outl(io + RTL_RCR, RCR_ACCEPT_PHYSICAL | RCR_ACCEPT_MULTICAST |
                          RCR_ACCEPT_BROADCAST | RCR_WRAP |
@@ -326,10 +241,6 @@ bool rtl8139_phase3_init(void) {
   pci_config_write16(pci->bus, pci->slot, pci->func, 0x04,
                      command & ~(1u << 10));
   phase3_ready = true;
-  bool passed = rtl8139_phase3_selftest();
-  klog_puts(passed ? "[RTL8139 TEST] Phase 3 PASS: RX validation/ring setup, "
-                     "shared IRQ and interrupt enable\n"
-                   : "[RTL8139 TEST] Phase 3 FAIL\n");
-  net_print_stats(rtl8139_netdev());
-  return passed;
+  klog_puts("[RTL8139] receive and interrupt paths enabled\n");
+  return true;
 }

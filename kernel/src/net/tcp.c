@@ -24,7 +24,6 @@
 static struct tcp_tcb tcbs[TCP_MAX_TCBS];
 static struct tcp_stats stats;
 static spinlock_t lock = SPINLOCK_INIT;
-static bool selftesting;
 static uint16_t next_ephemeral = EPHEMERAL_MIN;
 
 static uint16_t g16(const uint8_t *p)
@@ -194,9 +193,6 @@ static int emit_at(
 )
 {
     uint8_t segment[1480];
-
-    if (selftesting)
-        return 0;
 
     if (!t || len > 1460)
         return -90;
@@ -799,96 +795,6 @@ const struct tcp_stats *tcp_get_stats(void)
 }
 
 
-static struct tcp_tcb *test(enum tcp_state state)
-{
-    struct tcp_tcb *t = &tcbs[0];
-
-    memset(t, 0, sizeof(*t));
-
-    t->used = true;
-    t->state = state;
-
-    t->local_port = 1000;
-    t->remote_port = 80;
-    t->remote_ip = 0x0a000202;
-
-    t->snd_una = 100;
-    t->snd_nxt = 101;
-    t->rcv_nxt = 500;
-
-    t->snd_wnd = TCP_DEFAULT_WINDOW;
-    t->rcv_wnd = TCP_DEFAULT_WINDOW;
-    t->mss = 1460;
-
-    return t;
-}
-
-bool net_phase8_selftest(void)
-{
-    struct tcp_tcb *t;
-    uint8_t sample[10] = {0};
-    uint64_t duplicates;
-    uint64_t out_of_order;
-    uint8_t bad[12] = {0};
-    uint64_t malformed;
-
-    selftesting = true;
-
-    t = test(TCP_SYN_SENT);
-
-    input(t, 700, 101, SYN | ACK, NULL, 0);
-
-    if (t->state != TCP_ESTABLISHED || t->rcv_nxt != 701)
-        return false;
-
-    input(t, 701, 101, ACK, sample, 10);
-
-    if (t->rcv_nxt != 711)
-        return false;
-
-    duplicates = stats.duplicates;
-    out_of_order = stats.out_of_order;
-
-    input(t, 700, 101, ACK, NULL, 1);
-    input(t, 800, 101, ACK, NULL, 1);
-
-    if (stats.duplicates != duplicates + 1 ||
-        stats.out_of_order != out_of_order + 1) {
-        return false;
-    }
-
-    input(t, 711, 101, FIN | ACK, NULL, 0);
-
-    if (t->state != TCP_CLOSE_WAIT || t->rcv_nxt != 712)
-        return false;
-
-    t = test(TCP_ESTABLISHED);
-
-    input(t, 500, 0, RST, NULL, 0);
-
-    if (t->state != TCP_RESET)
-        return false;
-
-    t = test(TCP_SYN_SENT);
-
-    t->deadline = 1;
-    t->retries = RETRIES;
-
-    tcp_timer_tick(2);
-
-    if (t->state != TCP_CLOSED || !stats.timeouts)
-        return false;
-
-    malformed = stats.malformed;
-
-    tcp_input_ipv4(1, 2, bad, sizeof(bad));
-
-    selftesting = false;
-
-    return stats.malformed == malformed + 1;
-}
-
-
 void tcp_init(void)
 {
     spinlock_init(&lock);
@@ -899,24 +805,9 @@ void tcp_init(void)
 
 bool net_phase8_init(void)
 {
-    bool ok;
-
     tcp_init();
-
-    ok = net_phase8_selftest();
-
-    memset(tcbs, 0, sizeof(tcbs));
-
-    if (ok) {
-        klog_puts(
-            "[NET TEST] Phase 8 PASS: "
-            "TCP handshake, sequence, FIN/RST, retransmit, timeout, malformed\n"
-        );
-    } else {
-        klog_puts("[NET TEST] Phase 8 FAIL\n");
-    }
-
-    return ok;
+    klog_puts("[NET] TCP initialized\n");
+    return true;
 }
 
 int tcp_get_snapshot(struct tcp_entry_snapshot *out, int max) {

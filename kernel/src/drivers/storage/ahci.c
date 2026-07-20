@@ -555,6 +555,7 @@ static struct device_id ahci_ids[] = {
 
 static struct driver ahci_driver = {
     .name = "ahci",
+    .kind = DRIVER_KERNEL,
     .ids = ahci_ids,
     .id_count = 1,
     .probe = ahci_probe

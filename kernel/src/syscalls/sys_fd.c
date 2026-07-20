@@ -256,9 +256,13 @@ uint64_t sys_open_path(int dirfd, const char *path, uint64_t flags,
   if ((flags & O_TRUNC) && node->flags == FS_FILE)
     node->length = 0;
 
-  /* Lookups return persistent metadata. Only a real open gets private DRM
-   * client state. This also covers openat() and paths relative to /dev/dri. */
-  if (drm_is_card_node(node)) {
+  /* Persistent metadata may provide a fresh per-open object.  DRM was the
+   * first user of this pattern; driver capability handles use it as well. */
+  if (node->open_instance) {
+    node = node->open_instance(node);
+    if (!node)
+      return (uint64_t)-12;
+  } else if (drm_is_card_node(node)) {
     node = drm_create_client_node();
     if (!node)
       return (uint64_t)-12;

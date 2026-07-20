@@ -16,7 +16,6 @@ struct ipv4_config {
 };
 
 bool net_phase4_init(void);
-bool net_phase4_selftest(void);
 const struct ipv4_config *ipv4_get_config(void);
 
 

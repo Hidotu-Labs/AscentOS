@@ -799,11 +799,31 @@ bool process_exec_argv(const char **argv) {
 
 // ---- Core Dump System ----------------------------------------------------
 
-static void dump_vma_recursive(struct vma *v, vfs_node_t *file, uint64_t cr3) {
-  if (!v)
+#define CORE_DUMP_MAX_BYTES (4U * 1024U * 1024U)
+
+struct core_page_record {
+  uint64_t virtual_address;
+  uint32_t size;
+  uint32_t prot;
+};
+
+static bool core_append(vfs_node_t *file, uint32_t *offset, const void *data,
+                        uint32_t size) {
+  if (!file || !offset || !data || *offset > CORE_DUMP_MAX_BYTES ||
+      size > CORE_DUMP_MAX_BYTES - *offset)
+    return false;
+  if (vfs_write(file, *offset, size, (uint8_t *)data) != size)
+    return false;
+  *offset += size;
+  return true;
+}
+
+static void dump_vma_recursive(struct vma *v, vfs_node_t *file, uint64_t cr3,
+                               uint32_t *offset, bool *truncated) {
+  if (!v || *truncated)
     return;
 
-  dump_vma_recursive(v->left, file, cr3);
+  dump_vma_recursive(v->left, file, cr3, offset, truncated);
 
   // Skip device mappings or guards (PROT_NONE)
   if (v->prot != 0 && !(v->flags & MAP_SHARED)) {
@@ -811,15 +831,23 @@ static void dump_vma_recursive(struct vma *v, vfs_node_t *file, uint64_t cr3) {
     for (uint64_t addr = v->start; addr < v->end; addr += PAGE_SIZE) {
       uint64_t phys = vmm_virt_to_phys((uint64_t *)cr3, addr);
       if (phys != 0) {
-        // Write the page content to the core file.
-        // We write it at the offset corresponding to its virtual address.
-        // (Simplified core format: file offset == virtual address)
-        vfs_write(file, (uint32_t)addr, PAGE_SIZE, (uint8_t *)(phys + hhdm));
+        struct core_page_record record = {
+            .virtual_address = addr,
+            .size = PAGE_SIZE,
+            .prot = v->prot,
+        };
+        uint32_t needed = sizeof(record) + PAGE_SIZE;
+        if (*offset > CORE_DUMP_MAX_BYTES - needed ||
+            !core_append(file, offset, &record, sizeof(record)) ||
+            !core_append(file, offset, (void *)(phys + hhdm), PAGE_SIZE)) {
+          *truncated = true;
+          break;
+        }
       }
     }
   }
 
-  dump_vma_recursive(v->right, file, cr3);
+  dump_vma_recursive(v->right, file, cr3, offset, truncated);
 }
 
 void process_dump_core(struct thread *t, struct registers *regs, int sig) {
@@ -859,12 +887,17 @@ void process_dump_core(struct thread *t, struct registers *regs, int sig) {
 
   if (vfs_create(tmp_dir, &path[5], 0644) != 0) {
     klog_puts("[CORE] Failed to create core file\n");
+    vfs_close(tmp_dir);
     return;
   }
+  vfs_close(tmp_dir);
 
   vfs_node_t *file = vfs_resolve_path(path);
   if (!file)
     return;
+
+  uint32_t file_offset = 0;
+  bool truncated = false;
 
   // 1. Write Header / Metadata (Simplified)
   struct {
@@ -877,16 +910,25 @@ void process_dump_core(struct thread *t, struct registers *regs, int sig) {
   header.sig = (uint32_t)sig;
   header.tid = t->tid;
   memcpy(header.comm, t->comm, 16);
-  vfs_write(file, 0, sizeof(header), (uint8_t *)&header);
+  if (!core_append(file, &file_offset, &header, sizeof(header))) {
+    truncated = true;
+    goto out;
+  }
 
   // 2. Write Register State
-  vfs_write(file, sizeof(header), sizeof(struct registers), (uint8_t *)regs);
+  if (!core_append(file, &file_offset, regs, sizeof(struct registers))) {
+    truncated = true;
+    goto out;
+  }
 
   // 3. Write Memory Regions
-  // We use a simplified format where we write page data at its virtual address
-  // as the file offset. This makes it sparse but very easy to read.
-  dump_vma_recursive(t->mm->vmas.root, file, t->cr3);
+  // Store compact page records sequentially. Never use virtual addresses as
+  // ramfs offsets: high addresses overflow its 32-bit growth calculation.
+  dump_vma_recursive(t->mm->vmas.root, file, t->cr3, &file_offset, &truncated);
 
+out:
   vfs_close(file);
+  if (truncated)
+    klog_puts("[CORE] Dump truncated at 4 MiB\n");
   klog_puts("[CORE] Dump complete.\n");
 }

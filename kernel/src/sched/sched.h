@@ -222,6 +222,23 @@ struct thread {
   uint64_t cpu_affinity;  // Bitmask of allowed CPUs
 };
 
+/*
+ * Stable copy used by procfs. Returning a raw thread pointer after dropping
+ * tid_lock is unsafe because the reaper may free it immediately.
+ */
+struct sched_thread_snapshot {
+  uint32_t tid;
+  uint32_t tgid;
+  uint32_t parent_tid;
+  uint32_t pgid;
+  thread_state_t state;
+  uint64_t runtime_total;
+  uint64_t virt_bytes;
+  uint64_t resident_bytes;
+  uint32_t uid, gid, euid, egid, suid, sgid;
+  char comm[16];
+};
+
 bool fd_path_set(struct thread *t, int fd, const char *path);
 void fd_path_dup(struct thread *t, int dst, int src);
 void fd_path_clear(struct thread *t, int fd);
@@ -252,6 +269,12 @@ bool sched_validate_runqueues(struct cpu_info *cpu);
 void sched_print_tasks(void);
 bool sched_terminate_thread(uint32_t tid);
 struct thread *sched_get_thread_by_tid(uint32_t tid);
+bool sched_get_thread_snapshot(uint32_t tid,
+                               struct sched_thread_snapshot *snapshot);
+bool sched_get_nth_thread_tid(uint32_t index, uint32_t *tid);
+bool sched_get_nth_open_fd(uint32_t tid, uint32_t index, uint32_t *fd);
+bool sched_get_fd_path_snapshot(uint32_t tid, uint32_t fd, char *path,
+                                size_t path_size);
 
 // Reap a zombie thread (remove from runqueue, free resources)
 void sched_reap_thread(struct thread *t);
@@ -264,6 +287,7 @@ bool sched_ensure_files(struct thread *t);
 
 // Returns the total number of threads in the global thread list
 uint16_t sched_get_thread_count(void);
+uint16_t sched_get_runnable_thread_count(void);
 
 // Returns the head of the global thread list (caller must hold no locks;
 // used by procfs for read-only enumeration under tid_lock)

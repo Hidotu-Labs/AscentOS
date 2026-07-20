@@ -2,6 +2,8 @@
 #include "hal/hal.h"
 #include "console/klog.h"
 #include "drivers/pci/pci.h"
+#include "drivers/manager/device.h"
+#include "fs/sysfs_pci.h"
 #include "io/io.h"
 #include "lib/string.h"
 #include "mm/pmm.h"
@@ -37,6 +39,30 @@ struct rtl8139 {
   bool initialized;
 };
 static struct rtl8139 rtl;
+
+static int rtl8139_dm_probe(struct device *dev) {
+  return rtl.initialized && rtl.pci && rtl.pci->kernel_device == dev ? 0 : -1;
+}
+
+static void rtl8139_dm_remove(struct device *dev) {
+  (void)dev;
+}
+
+static struct device_id rtl8139_dm_ids[] = {
+    {.type = ID_PCI,
+     .pci = {.vendor = RTL_VENDOR,
+             .device = RTL_DEVICE,
+             .match_class = false}},
+};
+
+static struct driver rtl8139_dm_driver = {
+    .name = "rtl8139",
+    .ids = rtl8139_dm_ids,
+    .id_count = 1,
+    .probe = rtl8139_dm_probe,
+    .remove = rtl8139_dm_remove,
+    .kind = DRIVER_KERNEL,
+};
 
 static bool link_up(struct net_device *netdev) {
   struct rtl8139 *dev = netdev->driver_private;
@@ -84,30 +110,16 @@ static bool valid_mac(const uint8_t mac[6]) {
   return !zero && !ff && !(mac[0] & 1);
 }
 
-bool rtl8139_phase1_selftest(void) {
-  if (!rtl.initialized || net_device_default() != &rtl.netdev ||
-      !rtl.rx_phys || !rtl.tx_phys || !valid_mac(rtl.netdev.mac))
-    return false;
-  if ((uint64_t)rtl.rx_phys > UINT32_MAX ||
-      (uint64_t)rtl.tx_phys > UINT32_MAX || inw(rtl.io + RTL_IMR))
-    return false;
-  if (inb(rtl.io + RTL_CR) & (CR_RX | CR_TX))
-    return false;
-  uint16_t command = pci_config_read16(rtl.pci->bus, rtl.pci->slot,
-                                       rtl.pci->func, 0x04);
-  return (command & 0x5) == 0x5 && (command & (1u << 10));
-}
-
 bool rtl8139_phase1_init(void) {
   memset(&rtl, 0, sizeof(rtl));
   rtl.pci = pci_find_device_by_id(RTL_VENDOR, RTL_DEVICE);
   if (!rtl.pci) {
-    klog_puts("[RTL8139 TEST] Phase 1 PASS (absent-device safety)\n");
+    klog_puts("[RTL8139] no device found\n");
     return false;
   }
   uint32_t bar0 = rtl.pci->bar[0];
   if (!(bar0 & 1) || (bar0 & ~3u) > 0xffffu) {
-    klog_puts("[RTL8139 TEST] Phase 1 FAIL: invalid BAR0\n");
+    klog_puts("[RTL8139] initialization failed: invalid BAR0\n");
     return false;
   }
   rtl.io = (uint16_t)(bar0 & ~3u);
@@ -124,7 +136,7 @@ bool rtl8139_phase1_init(void) {
   while ((inb(rtl.io + RTL_CR) & CR_RESET) && --timeout)
     hal_cpu_relax();
   if (!timeout) {
-    klog_puts("[RTL8139 TEST] Phase 1 FAIL: reset timeout\n");
+    klog_puts("[RTL8139] initialization failed: reset timeout\n");
     pci_config_write16(rtl.pci->bus, rtl.pci->slot, rtl.pci->func, 0x04,
                        old_command | (1u << 10));
     return false;
@@ -133,14 +145,14 @@ bool rtl8139_phase1_init(void) {
   for (int i = 0; i < 6; i++)
     rtl.netdev.mac[i] = inb(rtl.io + RTL_IDR0 + i);
   if (!valid_mac(rtl.netdev.mac)) {
-    klog_puts("[RTL8139 TEST] Phase 1 FAIL: invalid MAC\n");
+    klog_puts("[RTL8139] initialization failed: invalid MAC\n");
     disable_hardware();
     return false;
   }
   rtl.rx_phys = pmm_alloc_pages_constrained(RX_PAGES, UINT32_MAX);
   rtl.tx_phys = pmm_alloc_pages_constrained(TX_PAGES, UINT32_MAX);
   if (!rtl.rx_phys || !rtl.tx_phys) {
-    klog_puts("[RTL8139 TEST] Phase 1 FAIL: low DMA allocation\n");
+    klog_puts("[RTL8139] initialization failed: low DMA allocation\n");
     release_dma();
     disable_hardware();
     return false;
@@ -159,18 +171,24 @@ bool rtl8139_phase1_init(void) {
   rtl.netdev.driver_private = &rtl;
   rtl.initialized = true;
   if (net_device_register(&rtl.netdev)) {
-    klog_puts("[RTL8139 TEST] Phase 1 FAIL: registration\n");
+    klog_puts("[RTL8139] initialization failed: registration\n");
     stop(&rtl.netdev);
     release_dma();
     return false;
   }
+  rtl8139_dm_driver.bus = pci_bus_type();
+  dm_register_driver(&rtl8139_dm_driver);
+  sysfs_pci_driver_registered(&rtl8139_dm_driver);
+  if (!rtl.pci->kernel_device ||
+      rtl.pci->kernel_device->driver != &rtl8139_dm_driver) {
+    klog_puts("[RTL8139] initialization failed: device-model ownership\n");
+    stop(&rtl.netdev);
+    release_dma();
+    return false;
+  }
+  sysfs_pci_device_bound(rtl.pci->kernel_device);
   klog_puts("[RTL8139] eth0 registered; RX/TX/INTx remain disabled\n");
-  bool passed = rtl8139_phase1_selftest();
-  klog_puts(passed ? "[RTL8139 TEST] Phase 1 PASS: PCI, reset, MAC, DMA, "
-                     "safe registration\n"
-                   : "[RTL8139 TEST] Phase 1 FAIL: post-init gate\n");
-  net_print_stats(&rtl.netdev);
-  return passed;
+  return true;
 }
 
 struct net_device *rtl8139_netdev(void) { return rtl.initialized ? &rtl.netdev : NULL; }

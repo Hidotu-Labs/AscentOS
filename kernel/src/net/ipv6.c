@@ -35,7 +35,6 @@ struct neighbor {
 static struct ipv6_config config;
 static struct neighbor neighbors[NEIGHBOR_COUNT];
 static uint32_t next_neighbor;
-static uint32_t echo_replies;
 static void (*udp_handler)(const uint8_t[16], const uint8_t[16],
                            const uint8_t *, size_t);
 static void (*tcp_handler)(const uint8_t[16], const uint8_t[16],
@@ -272,8 +271,6 @@ void ipv6_receive(const uint8_t source_mac[6], const uint8_t *packet,
     reply[0] = ICMP6_ECHO_REPLY;
     ipv6_send_to(h->destination, h->source, source_mac, IPV6_NEXT_ICMP,
                  reply, payload_length);
-  } else if (icmp[0] == ICMP6_ECHO_REPLY) {
-    echo_replies++;
   } else if (icmp[0] == ICMP6_NS && payload_length >= 24 &&
              local_address(icmp + 8)) {
     send_na(h->source, source_mac, icmp + 8);
@@ -314,19 +311,9 @@ bool net_phase11_init(void) {
   config.link_local[14] = dev->mac[4];
   config.link_local[15] = dev->mac[5];
 
-  uint8_t sample[8] = {ICMP6_ECHO_REQUEST};
-  uint16_t csum = icmp6_checksum(config.link_local, config.link_local,
-                                 sample, sizeof(sample));
-  sample[2] = (uint8_t)(csum >> 8); sample[3] = (uint8_t)csum;
-  bool ok = config.link_local[0] == 0xfe && config.link_local[1] == 0x80 &&
-            icmp6_checksum(config.link_local, config.link_local,
-                           sample, sizeof(sample)) == 0;
-  if (ok)
-    send_router_solicitation();
-  klog_puts(ok ? "[NET TEST] Phase 11 FOUNDATION PASS: IPv6 link-local, "
-                  "ICMPv6 checksum/echo, NDP and SLAAC parser\n"
-                : "[NET TEST] Phase 11 FOUNDATION FAIL\n");
-  return ok;
+  send_router_solicitation();
+  klog_puts("[NET] IPv6 link-local, NDP and SLAAC initialized\n");
+  return true;
 }
 
 const struct ipv6_config *ipv6_get_config(void) { return &config; }

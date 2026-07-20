@@ -412,13 +412,7 @@ uint32_t procfs_loadavg_read(vfs_node_t *node, uint32_t offset, uint32_t size,
     ncpus = 1;
   uint16_t nthreads = sched_get_thread_count();
 
-  uint32_t running = 0;
-  struct thread *t = sched_get_thread_list_head();
-  while (t) {
-    if (t->state == THREAD_RUNNING || t->state == THREAD_READY)
-      running++;
-    t = t->global_next;
-  }
+  uint32_t running = sched_get_runnable_thread_count();
   if (running == 0)
     running = 1;
 
@@ -553,13 +547,12 @@ static char thread_state_char(thread_state_t s) {
 static uint32_t procfs_pid_stat_read(vfs_node_t *node, uint32_t offset,
                                      uint32_t size, uint8_t *buffer) {
   uint32_t pid = node->impl;
-  struct thread *t = sched_get_thread_by_tid(pid);
-  if (!t)
+  struct sched_thread_snapshot t;
+  if (!sched_get_thread_snapshot(pid, &t))
     return 0;
 
   char buf[512];
-  uint32_t ppid    = t->parent ? t->parent->tid : 0;
-  uint64_t jiffies = t->runtime_total / 10;
+  uint64_t jiffies = t.runtime_total / 10;
 
   // Fields: pid (comm) state ppid pgrp session tty_nr tpgid flags
   //         minflt cminflt majflt cmajflt utime stime [37 stub zeros]
@@ -567,10 +560,10 @@ static uint32_t procfs_pid_stat_read(vfs_node_t *node, uint32_t offset,
       "%u (%s) %c %u %u 0 0 0 0 0 0 0 0 %llu 0 "
       "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
       pid,
-      t->comm[0] ? t->comm : "unknown",
-      thread_state_char(t->state),
-      ppid,
-      t->pgid,
+      t.comm[0] ? t.comm : "unknown",
+      thread_state_char(t.state),
+      t.parent_tid,
+      t.pgid,
       (unsigned long long)jiffies);
 
   node->length = (uint32_t)len;
@@ -586,8 +579,8 @@ static uint32_t procfs_pid_stat_read(vfs_node_t *node, uint32_t offset,
 static uint32_t procfs_pid_status_read(vfs_node_t *node, uint32_t offset,
                                        uint32_t size, uint8_t *buffer) {
   uint32_t pid = node->impl;
-  struct thread *t = sched_get_thread_by_tid(pid);
-  if (!t)
+  struct sched_thread_snapshot t;
+  if (!sched_get_thread_snapshot(pid, &t))
     return 0;
 
   char *buf = kmalloc(768);
@@ -596,10 +589,8 @@ static uint32_t procfs_pid_status_read(vfs_node_t *node, uint32_t offset,
 
   uint64_t virt_kb = 2048;
   uint64_t rss_kb  = 512;
-  if (t->mm) {
-    uint64_t virt_bytes = 0;
-    if (t->mm->brk_current > t->mm->brk_base)
-      virt_bytes = t->mm->brk_current - t->mm->brk_base;
+  if (t.virt_bytes) {
+    uint64_t virt_bytes = t.virt_bytes;
     if (virt_bytes < 2 * 1024 * 1024)
       virt_bytes = 2 * 1024 * 1024;
     virt_kb = virt_bytes / 1024;
@@ -619,12 +610,12 @@ static uint32_t procfs_pid_status_read(vfs_node_t *node, uint32_t offset,
       "Threads:\t1\n"
       "VmSize:\t%llu kB\n"
       "VmRSS:\t%llu kB\n",
-      t->comm[0] ? t->comm : "unknown",
-      thread_state_char(t->state),
+      t.comm[0] ? t.comm : "unknown",
+      thread_state_char(t.state),
       pid, pid,
-      t->parent ? t->parent->tid : 0,
-      t->uid, t->euid, t->suid, t->uid,
-      t->gid, t->egid, t->sgid, t->gid,
+      t.parent_tid,
+      t.uid, t.euid, t.suid, t.uid,
+      t.gid, t.egid, t.sgid, t.gid,
       (unsigned long long)virt_kb,
       (unsigned long long)rss_kb);
 
@@ -645,12 +636,12 @@ static uint32_t procfs_pid_status_read(vfs_node_t *node, uint32_t offset,
 static uint32_t procfs_pid_cmdline_read(vfs_node_t *node, uint32_t offset,
                                         uint32_t size, uint8_t *buffer) {
   uint32_t pid = node->impl;
-  struct thread *t = sched_get_thread_by_tid(pid);
-  if (!t)
+  struct sched_thread_snapshot t;
+  if (!sched_get_thread_snapshot(pid, &t))
     return 0;
 
   // Return comm as argv[0] (NUL-terminated, as Linux does)
-  const char *cmd = t->comm[0] ? t->comm : "unknown";
+  const char *cmd = t.comm[0] ? t.comm : "unknown";
   uint32_t len = (uint32_t)strlen(cmd) + 1; // include NUL
   node->length = len;
   if (offset >= len)
@@ -665,21 +656,14 @@ static uint32_t procfs_pid_cmdline_read(vfs_node_t *node, uint32_t offset,
 static uint32_t procfs_pid_statm_read(vfs_node_t *node, uint32_t offset,
                                       uint32_t size, uint8_t *buffer) {
   uint32_t pid = node->impl;
-  struct thread *t = sched_get_thread_by_tid(pid);
-  if (!t)
+  struct sched_thread_snapshot t;
+  if (!sched_get_thread_snapshot(pid, &t))
     return 0;
 
   char buf[64];
 
-  uint64_t virt_bytes = 0, res_bytes = 0;
-  if (t->mm) {
-    if (t->mm->brk_current > t->mm->brk_base)
-      virt_bytes = t->mm->brk_current - t->mm->brk_base;
-    uint64_t mmap_used = 0x800000000000ULL - t->mm->mmap_next_addr;
-    if ((int64_t)mmap_used > 0)
-      virt_bytes += mmap_used;
-    res_bytes = virt_bytes / 2;
-  }
+  uint64_t virt_bytes = t.virt_bytes;
+  uint64_t res_bytes = t.resident_bytes;
   if (virt_bytes < 2 * 1024 * 1024) virt_bytes = 2 * 1024 * 1024;
   if (res_bytes  < 512 * 1024)      res_bytes  = 512 * 1024;
 
@@ -730,15 +714,9 @@ static int procfs_pid_fd_link_readlink(vfs_node_t *node, char *buf,
   uint32_t pid = pid_fd >> 16;
   uint32_t fd = pid_fd & 0xFFFF;
 
-  struct thread *t = sched_get_thread_by_tid(pid);
-  if (!t || fd >= MAX_FDS || !t->fds[fd])
+  char path[256];
+  if (!sched_get_fd_path_snapshot(pid, fd, path, sizeof(path)))
     return -2; // ENOENT
-
-  const char *path = fd_path_value(t, (int)fd);
-  if (!path || path[0] == '\0') {
-    // Fallback if path not tracked (e.g. for some early-boot nodes)
-    path = t->fds[fd]->name;
-  }
 
   uint32_t len = (uint32_t)strlen(path);
   if (len > size)
@@ -749,15 +727,17 @@ static int procfs_pid_fd_link_readlink(vfs_node_t *node, char *buf,
 
 static vfs_node_t *procfs_pid_fd_finddir(vfs_node_t *node, char *name) {
   uint32_t pid = node->impl;
-  if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+  if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
+    vfs_open(node);
     return node;
+  }
 
   uint32_t fd = str_to_pid(name);
   if (fd == 0 && name[0] != '0')
     return NULL;
 
-  struct thread *t = sched_get_thread_by_tid(pid);
-  if (!t || fd >= MAX_FDS || !t->fds[fd])
+  char ignored[1];
+  if (!sched_get_fd_path_snapshot(pid, fd, ignored, sizeof(ignored)))
     return NULL;
 
   vfs_node_t *link = kmalloc(sizeof(vfs_node_t));
@@ -774,9 +754,6 @@ static vfs_node_t *procfs_pid_fd_finddir(vfs_node_t *node, char *name) {
 
 static struct dirent *procfs_pid_fd_readdir(vfs_node_t *node, uint32_t index) {
   uint32_t pid = node->impl;
-  struct thread *t = sched_get_thread_by_tid(pid);
-  if (!t)
-    return NULL;
 
   static struct dirent d;
   memset(&d, 0, sizeof(d));
@@ -792,20 +769,12 @@ static struct dirent *procfs_pid_fd_readdir(vfs_node_t *node, uint32_t index) {
     return &d;
   }
 
-  uint32_t fd_idx = index - 2;
-  uint32_t found_count = 0;
-  for (int i = 0; i < MAX_FDS; i++) {
-    if (t->fds[i]) {
-      if (found_count == fd_idx) {
-        snprintf(d.name, sizeof(d.name), "%u", i);
-        d.ino = (pid << 16) | i;
-        return &d;
-      }
-      found_count++;
-    }
-  }
-
-  return NULL;
+  uint32_t fd;
+  if (!sched_get_nth_open_fd(pid, index - 2, &fd))
+    return NULL;
+  snprintf(d.name, sizeof(d.name), "%u", fd);
+  d.ino = (pid << 16) | fd;
+  return &d;
 }
 
 // Synthesise a /proc/<pid>/ directory node on demand
@@ -819,6 +788,50 @@ typedef struct procfs_pid_cache_entry {
 static procfs_pid_cache_entry_t *procfs_pid_cache;
 static spinlock_t procfs_pid_cache_lock = SPINLOCK_INIT;
 
+/* Dynamic PID trees own one reference to every contained node. Unlike the
+ * normal persistent ramfs nodes, lookups need a separate caller reference. */
+static vfs_node_t *procfs_pid_ramfs_finddir(vfs_node_t *node, char *name) {
+  if (!node || !node->device)
+    return NULL;
+  if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
+    vfs_open(node);
+    return node;
+  }
+
+  ramfs_dir_t *dir = (ramfs_dir_t *)node->device;
+  for (child_node_t *child = dir->children; child; child = child->next) {
+    if (strcmp(child->node->name, name) == 0) {
+      vfs_open(child->node);
+      return child->node;
+    }
+  }
+  return NULL;
+}
+
+static void procfs_pid_dir_close(vfs_node_t *node) {
+  ramfs_dir_t *dir = (ramfs_dir_t *)node->device;
+  if (!dir)
+    return;
+
+  node->device = NULL;
+  child_node_t *child = dir->children;
+  while (child) {
+    child_node_t *next = child->next;
+    vfs_close(child->node);
+    kfree(child);
+    child = next;
+  }
+  kfree(dir);
+}
+
+static void procfs_make_pid_ramfs_ephemeral(vfs_node_t *dir) {
+  /* ramfs_mount_on() defaults to persistent nodes. The proc cache owns these
+   * instead, while open paths/FDs may keep them alive past cache removal. */
+  dir->flags &= ~FS_PERSISTENT;
+  dir->finddir = procfs_pid_ramfs_finddir;
+  dir->close = procfs_pid_dir_close;
+}
+
 static vfs_node_t *make_pid_dir(uint32_t pid) {
   vfs_node_t *dir = kmalloc(sizeof(vfs_node_t));
   if (!dir)
@@ -829,6 +842,7 @@ static vfs_node_t *make_pid_dir(uint32_t pid) {
   dir->mask = 0555;
   dir->inode = 0x10000 + pid;
   ramfs_mount_on(dir);
+  procfs_make_pid_ramfs_ephemeral(dir);
   dir->flags |= FS_DENTRY_NOCACHE;
 
   // stat
@@ -918,6 +932,7 @@ static vfs_node_t *make_pid_dir(uint32_t pid) {
     task_dir->flags = FS_DIRECTORY;
     task_dir->mask = 0555;
     ramfs_mount_on(task_dir);
+    procfs_make_pid_ramfs_ephemeral(task_dir);
     task_dir->flags |= FS_DENTRY_NOCACHE;
 
     // task/<pid>/ sub-directory
@@ -928,6 +943,7 @@ static vfs_node_t *make_pid_dir(uint32_t pid) {
       tid_dir->flags = FS_DIRECTORY;
       tid_dir->mask = 0555;
       ramfs_mount_on(tid_dir);
+      procfs_make_pid_ramfs_ephemeral(tid_dir);
       tid_dir->flags |= FS_DENTRY_NOCACHE;
 
       // task/<pid>/stat  — same content as /proc/<pid>/stat
@@ -952,43 +968,12 @@ static vfs_node_t *make_pid_dir(uint32_t pid) {
   return dir;
 }
 
-/* Compatible with ramfs.c's private directory representation. */
-typedef struct procfs_child_node {
-  vfs_node_t *node;
-  struct procfs_child_node *next;
-} procfs_child_node_t;
-
-typedef struct procfs_ramfs_dir {
-  procfs_child_node_t *children;
-} procfs_ramfs_dir_t;
-
-static void procfs_destroy_node_tree(vfs_node_t *node) {
-  if (!node)
-    return;
-
-  if ((node->flags & FS_TYPE_MASK) == FS_DIRECTORY && node->device) {
-    procfs_ramfs_dir_t *dir = (procfs_ramfs_dir_t *)node->device;
-    procfs_child_node_t *child = dir->children;
-    while (child) {
-      procfs_child_node_t *next = child->next;
-      procfs_destroy_node_tree(child->node);
-      kfree(child);
-      child = next;
-    }
-    kfree(dir);
-    node->device = NULL;
-  }
-
-  /* Callback-backed proc PID nodes never populate the generic page cache;
-   * avoid taking page-cache locks from scheduler reaper context. */
-  kfree(node);
-}
-
 static vfs_node_t *procfs_get_pid_dir(uint32_t pid) {
   spinlock_acquire(&procfs_pid_cache_lock);
   for (procfs_pid_cache_entry_t *e = procfs_pid_cache; e; e = e->next) {
     if (e->pid == pid) {
       vfs_node_t *dir = e->dir;
+      vfs_open(dir);
       spinlock_release(&procfs_pid_cache_lock);
       return dir;
     }
@@ -1001,7 +986,7 @@ static vfs_node_t *procfs_get_pid_dir(uint32_t pid) {
   procfs_pid_cache_entry_t *new_entry =
       kmalloc(sizeof(procfs_pid_cache_entry_t));
   if (!new_entry) {
-    procfs_destroy_node_tree(new_dir);
+    vfs_close(new_dir);
     return NULL;
   }
 
@@ -1010,8 +995,9 @@ static vfs_node_t *procfs_get_pid_dir(uint32_t pid) {
   for (procfs_pid_cache_entry_t *e = procfs_pid_cache; e; e = e->next) {
     if (e->pid == pid) {
       vfs_node_t *dir = e->dir;
+      vfs_open(dir);
       spinlock_release(&procfs_pid_cache_lock);
-      procfs_destroy_node_tree(new_dir);
+      vfs_close(new_dir);
       kfree(new_entry);
       return dir;
     }
@@ -1020,6 +1006,7 @@ static vfs_node_t *procfs_get_pid_dir(uint32_t pid) {
   new_entry->dir = new_dir;
   new_entry->next = procfs_pid_cache;
   procfs_pid_cache = new_entry;
+  vfs_open(new_dir); /* reference returned to the path walker */
   spinlock_release(&procfs_pid_cache_lock);
   return new_dir;
 }
@@ -1040,7 +1027,9 @@ void procfs_release_pid_dir(uint32_t pid) {
   spinlock_release(&procfs_pid_cache_lock);
 
   if (victim) {
-    procfs_destroy_node_tree(victim->dir);
+    /* Drop the cache reference. Open paths and descriptors keep the tree
+     * alive until their final vfs_close(). */
+    vfs_close(victim->dir);
     kfree(victim);
   }
 }
@@ -1115,20 +1104,12 @@ static struct dirent *procfs_root_readdir(vfs_node_t *node, uint32_t index) {
   }
 
   // PID entries
-  uint32_t pid_idx = static_idx - PROCFS_STATIC_ENTRIES;
-  struct thread *t = sched_get_thread_list_head();
-  uint32_t i = 0;
-  while (t) {
-    if (i == pid_idx) {
-      snprintf(procfs_dent.name, sizeof(procfs_dent.name), "%u", t->tid);
-      procfs_dent.ino = 0x10000 + t->tid;
-      return &procfs_dent;
-    }
-    i++;
-    t = t->global_next;
-  }
-
-  return NULL; // end of directory
+  uint32_t pid;
+  if (!sched_get_nth_thread_tid(static_idx - PROCFS_STATIC_ENTRIES, &pid))
+    return NULL;
+  snprintf(procfs_dent.name, sizeof(procfs_dent.name), "%u", pid);
+  procfs_dent.ino = 0x10000 + pid;
+  return &procfs_dent;
 }
 
 // Custom finddir for /proc
@@ -1156,12 +1137,16 @@ static vfs_node_t *procfs_root_finddir(vfs_node_t *node, char *name) {
   } ramfs_dir_t;
   ramfs_dir_t *rdir = (ramfs_dir_t *)node->device;
   if (rdir) {
-    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
+      vfs_open(node);
       return node;
+    }
     child_node_t *curr = rdir->children;
     while (curr) {
-      if (strcmp(curr->node->name, name) == 0)
+      if (strcmp(curr->node->name, name) == 0) {
+        vfs_open(curr->node);
         return curr->node;
+      }
       curr = curr->next;
     }
   }
@@ -1172,8 +1157,8 @@ static vfs_node_t *procfs_root_finddir(vfs_node_t *node, char *name) {
     return NULL;
 
   // Verify the thread actually exists
-  struct thread *t = sched_get_thread_by_tid(pid);
-  if (!t)
+  struct sched_thread_snapshot snapshot;
+  if (!sched_get_thread_snapshot(pid, &snapshot))
     return NULL;
 
   // Reuse one generated tree for the lifetime of this task. htop polls these

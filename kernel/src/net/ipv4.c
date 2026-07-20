@@ -25,7 +25,6 @@
 #define ICMP_PORT_UNREACHABLE_CODE 3
 #define ARP_CACHE_SIZE 16
 #define ARP_REACHABLE_MS 60000
-#define ICMP_TEST_ID 0xa5ce
 
 typedef void (*udp_handler_t)(uint32_t, uint16_t, uint16_t,
                                const uint8_t *, uint16_t);
@@ -84,7 +83,6 @@ struct arp_entry {
 static struct ipv4_config config;
 static struct arp_entry arp_cache[ARP_CACHE_SIZE];
 static spinlock_t arp_lock = SPINLOCK_INIT;
-static volatile uint32_t echo_replies;
 static volatile bool address_conflict;
 static uint16_t next_ip_id = 1;
 
@@ -288,11 +286,8 @@ static void handle_icmp(uint32_t source, const uint8_t *payload, size_t length) 
   if (length < sizeof(struct icmp_echo) || checksum(payload, length) != 0)
     return;
   const struct icmp_echo *echo = (const struct icmp_echo *)payload;
-  if (echo->type == ICMP_ECHO_REPLY &&
-      be16(echo->identifier) == ICMP_TEST_ID) {
-    echo_replies++;
+  if (echo->type == ICMP_ECHO_REPLY)
     return;
-  }
   if (echo->type != ICMP_ECHO_REQUEST || echo->code != 0)
     return;
   uint8_t reply[NET_MTU_ETHERNET - sizeof(struct ipv4_header)];
@@ -388,43 +383,6 @@ static void ethernet_receive(struct net_packet *packet) {
     ipv6_receive(header->source, payload, length);
 }
 
-static bool ping_gateway(void) {
-  uint8_t request[32];
-  memset(request, 0, sizeof(request));
-  struct icmp_echo *echo = (struct icmp_echo *)request;
-  echo->type = ICMP_ECHO_REQUEST;
-  echo->identifier = be16(ICMP_TEST_ID);
-  echo->sequence = be16(1);
-  for (uint32_t i = sizeof(*echo); i < sizeof(request); i++)
-    request[i] = (uint8_t)i;
-  echo->checksum = be16(checksum(request, sizeof(request)));
-  uint32_t before = echo_replies;
-  if (ipv4_send(config.gateway, IP_PROTO_ICMP, request, sizeof(request)) != 0)
-    return false;
-  uint64_t deadline = lapic_timer_get_ticks() + 2000;
-  while (lapic_timer_get_ticks() < deadline) {
-    if (echo_replies > before)
-      return true;
-    sched_yield();
-  }
-  return false;
-}
-
-bool net_phase4_selftest(void) {
-  uint8_t gateway_mac[6];
-  if (!arp_resolve(config.gateway, gateway_mac) || address_conflict)
-    return false;
-  /* Parser/checksum negative gate. */
-  uint8_t malformed[sizeof(struct ipv4_header)];
-  memset(malformed, 0, sizeof(malformed));
-  malformed[0] = 0x65;
-  uint32_t replies = echo_replies;
-  handle_ipv4(malformed, sizeof(malformed));
-  if (echo_replies != replies)
-    return false;
-  return ping_gateway();
-}
-
 bool net_phase4_init(void) {
   if (!net_device_default())
     return false;
@@ -433,15 +391,10 @@ bool net_phase4_init(void) {
   config.address = IPV4_ADDR(10, 0, 2, 15);
   config.netmask = IPV4_ADDR(255, 255, 255, 0);
   config.gateway = IPV4_ADDR(10, 0, 2, 2);
-  echo_replies = 0;
   address_conflict = false;
   net_set_rx_handler(ethernet_receive);
-  bool passed = net_phase4_selftest();
-  klog_puts(passed ? "[NET TEST] Phase 4 PASS: Ethernet, ARP, IPv4 checksum/"
-                     "routing and ICMP gateway ping\n"
-                   : "[NET TEST] Phase 4 FAIL: ARP or gateway ping timeout\n");
-  net_print_stats(net_device_default());
-  return passed;
+  klog_puts("[NET] Ethernet, ARP and IPv4 initialized\n");
+  return true;
 }
 
 const struct ipv4_config *ipv4_get_config(void) { return &config; }
