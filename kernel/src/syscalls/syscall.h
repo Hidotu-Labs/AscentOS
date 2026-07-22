@@ -68,6 +68,7 @@
 #define SYS_EXECVE 59
 #define SYS_EXIT 60
 #define SYS_WAIT4 61
+#define SYS_WAITID 247
 #define SYS_KILL 62
 #define SYS_UNAME 63
 #define SYS_SHMDT 67
@@ -149,6 +150,7 @@
 #define SYS_UTIMENSAT 235
 #define SYS_INOTIFY_INIT 253
 #define SYS_INOTIFY_ADD_WATCH 254
+#define SYS_INOTIFY_RM_WATCH 255
 #define SYS_OPENAT 257
 #define SYS_MKDIRAT 258
 #define SYS_FCHOWNAT 260

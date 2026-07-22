@@ -67,20 +67,37 @@ if [ "${ASCENT_SESSION:-}" = "xfce4" ]; then
     # Keep desktop file access local; remote GVfs backends are unnecessary for
     # the base desktop and otherwise activate more session-bus services.
     export GIO_USE_VFS=local
+    export GIO_USE_VOLUME_MONITOR=unix
+    export GTK_USE_PORTAL=0
     unset SESSION_MANAGER
     export PATH=/opt/coreutils/bin:/opt/bash/bin:/bin:/usr/local/bin:/usr/bin:/opt/tcc/bin:$PATH
     export LD_LIBRARY_PATH=/usr/lib:/lib:/usr/local/lib:${LD_LIBRARY_PATH:-}
     mkdir -p "$XDG_CONFIG_HOME/xfce4/xfconf/xfce-perchannel-xml" \
              "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$HOME/Desktop" \
+             "$HOME/Templates" "$HOME/Downloads" "$HOME/Documents" \
+             "$HOME/Pictures" "$HOME/Music" "$HOME/Videos" \
              "$XDG_CONFIG_HOME/gtk-3.0"
 
-    # Clear stale icon/thumbnail caches from previous boots. xfce4-panel
-    # resolves Icon= names at startup; if the cache contains paths from an
-    # earlier rootfs state the lookup fails and every launcher shows a gear.
+    cat > "$XDG_CONFIG_HOME/user-dirs.dirs" << 'USER_DIRS_EOF'
+XDG_DESKTOP_DIR="$HOME/Desktop"
+XDG_DOWNLOAD_DIR="$HOME/Downloads"
+XDG_TEMPLATES_DIR="$HOME/Templates"
+XDG_PUBLICSHARE_DIR="$HOME/Public"
+XDG_DOCUMENTS_DIR="$HOME/Documents"
+XDG_MUSIC_DIR="$HOME/Music"
+XDG_PICTURES_DIR="$HOME/Pictures"
+XDG_VIDEOS_DIR="$HOME/Videos"
+USER_DIRS_EOF
+
+    # Clear stale icon/thumbnail caches and single-instance IPC sockets from previous boots.
     rm -rf "$XDG_CACHE_HOME/icon-*" \
            "$XDG_CACHE_HOME/icons" \
            "$XDG_CACHE_HOME/xfce4" \
-           "$XDG_CACHE_HOME/thumbnails"
+           "$XDG_CACHE_HOME/thumbnails" \
+           "$XDG_CACHE_HOME"/*-socket* \
+           "$XDG_CACHE_HOME"/pcmanfm* \
+           "$XDG_CACHE_HOME"/Thunar* \
+           /tmp/.*-lock /tmp/*-socket*
     if [ -f /etc/xdg/gtk-3.0/gtk.css ]; then
         cp -f /etc/xdg/gtk-3.0/gtk.css \
             "$XDG_CONFIG_HOME/gtk-3.0/gtk.css"
@@ -99,6 +116,19 @@ if [ "${ASCENT_SESSION:-}" = "xfce4" ]; then
                 "$XDG_CONFIG_HOME/xfce4/xfconf/xfce-perchannel-xml/$channel.xml"
         fi
     done
+    cat > "$XDG_CONFIG_HOME/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml" << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xfwm4" version="1.0">
+  <property name="general" type="empty">
+    <property name="use_compositing" type="bool" value="true"/>
+    <property name="unredirect_overlays" type="bool" value="false"/>
+    <property name="box_move" type="bool" value="false"/>
+    <property name="box_resize" type="bool" value="false"/>
+    <property name="vblank_mode" type="string" value="off"/>
+    <property name="sync_to_vblank" type="bool" value="false"/>
+  </property>
+</channel>
+EOF
     if [ -d /etc/xdg/xfce4/panel ]; then
         cp -r /etc/xdg/xfce4/panel "$XDG_CONFIG_HOME/xfce4/panel"
     fi
@@ -139,7 +169,7 @@ if [ "${ASCENT_SESSION:-}" = "xfce4" ]; then
 
     XFWM_LOG=/tmp/xfwm4.log
     rm -f "$XFWM_LOG"
-    xfwm4 --replace --compositor=off --vblank=off >"$XFWM_LOG" 2>&1 &
+    xfwm4 --replace >"$XFWM_LOG" 2>&1 &
     XFWM_PID=$!
     sleep 0.2
     if ! kill -0 "$XFWM_PID" 2>/dev/null; then

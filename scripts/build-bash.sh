@@ -164,6 +164,7 @@ build_bash() {
 # AscentOS default bashrc
 export PS1='\033[0;32mRoot@AscentOS\033[0m:\w\$ '
 export PATH='/opt/coreutils/bin:/opt/bash/bin:/opt/tcc/bin:/'
+export NO_AT_BRIDGE=1 GTK_A11Y=none GIO_USE_VFS=local GIO_USE_VOLUME_MONITOR=unix GTK_USE_PORTAL=0 GDK_GL=disable LIBGL_DRI3_DISABLE=1
 BASHRC_EOF
 
     cd "$ROOT_DIR"

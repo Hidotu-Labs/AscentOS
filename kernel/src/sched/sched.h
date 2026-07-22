@@ -204,6 +204,10 @@ struct thread {
   uint64_t ss_size; // Size of alternate signal stack
   int ss_flags;     // SS_DISABLE, SS_ONSTACK, etc.
 
+  // Active wait queue entries registered by this thread
+  spinlock_t wait_entries_lock;
+  struct wait_queue_entry *wait_entries_head;
+
   // Embedded wait queue entry for safe blocking across context switches
   // Using stack-allocated entries is unsafe because the stack frame becomes
   // invalid when the thread is descheduled, leading to corrupted wait queues

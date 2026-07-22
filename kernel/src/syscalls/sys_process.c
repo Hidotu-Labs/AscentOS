@@ -518,6 +518,153 @@ static uint64_t sys_wait4(uint64_t pid, uint64_t wstatus_ptr, uint64_t options,
   }
 }
 
+/* ── waitid (syscall 247) ──────────────────────────────────────────────────
+ * int waitid(idtype_t idtype, id_t id, siginfo_t *infop, int options,
+ *            struct rusage *rusage);
+ *
+ * idtype values (POSIX):
+ *   P_ALL  = 0  – wait for any child
+ *   P_PID  = 1  – wait for specific pid
+ *   P_PGID = 2  – wait for any child in process group `id`
+ *
+ * We fill a minimal siginfo_t sufficient for glibc/musl to function.
+ */
+#define P_ALL  0
+#define P_PID  1
+#define P_PGID 2
+
+#define WEXITED   4
+#define WSTOPPED  2
+#define WNOWAIT   0x01000000
+
+/* siginfo_t layout – only the fields we need */
+struct k_siginfo_child {
+  int      si_signo;   /* always SIGCHLD = 17 */
+  int      si_errno;
+  int      si_code;    /* CLD_EXITED=1, CLD_KILLED=2 */
+  int      _pad0;
+  uint32_t si_pid;
+  uint32_t si_uid;
+  int      si_status;  /* exit code or signal */
+  int      _pad1;
+};
+#define CLD_EXITED 1
+#define CLD_KILLED 2
+
+static uint64_t sys_waitid(uint64_t idtype_val, uint64_t id_val,
+                           uint64_t infop_ptr, uint64_t options,
+                           uint64_t rusage, uint64_t a5) {
+  (void)rusage; (void)a5;
+
+  struct thread *current = sched_get_current();
+  if (!current)
+    return (uint64_t)-10; // ECHILD
+
+  int idtype = (int)idtype_val;
+  uint32_t id = (uint32_t)id_val;
+
+  /* At least one of WEXITED/WSTOPPED must be requested */
+  if (!(options & (WEXITED | WSTOPPED)))
+    return (uint64_t)-22; // EINVAL
+
+  while (1) {
+    bool has_matching_children = false;
+    struct thread *zombie = NULL;
+    struct thread *zombie_owner = NULL;
+    bool should_block = false;
+
+    spinlock_acquire(&tid_lock);
+
+    /* Search every thread in this process's thread group for matching children */
+    for (struct thread *owner = global_thread_list; owner;
+         owner = owner->global_next) {
+      if (owner->tgid != current->tgid)
+        continue;
+
+      for (struct thread *t = owner->children; t; t = t->sibling_next) {
+        bool matches = false;
+        switch (idtype) {
+        case P_ALL:  matches = true; break;
+        case P_PID:  matches = (t->tid == id); break;
+        case P_PGID: matches = (t->pgid == id); break;
+        default:
+          spinlock_release(&tid_lock);
+          return (uint64_t)-22; // EINVAL
+        }
+
+        if (!matches)
+          continue;
+
+        has_matching_children = true;
+
+        if (t->state == THREAD_ZOMBIE) {
+          zombie = t;
+          zombie_owner = owner;
+
+          /* Unlink from parent's children list while still holding tid_lock */
+          if (!(options & WNOWAIT)) {
+            if (zombie_owner->children == zombie) {
+              zombie_owner->children = zombie->sibling_next;
+            } else {
+              struct thread *p = zombie_owner->children;
+              while (p && p->sibling_next != zombie)
+                p = p->sibling_next;
+              if (p)
+                p->sibling_next = zombie->sibling_next;
+            }
+          }
+          break;
+        }
+      }
+      if (zombie)
+        break;
+    }
+
+    if (!zombie && has_matching_children && !(options & WNOHANG)) {
+      current->waiting_for_child = true;
+      current->state = THREAD_BLOCKED;
+      should_block = true;
+    }
+
+    spinlock_release(&tid_lock);
+
+    if (zombie) {
+      /* Fill in the siginfo_t if the caller supplied a buffer */
+      if (infop_ptr) {
+        struct k_siginfo_child *si = (struct k_siginfo_child *)infop_ptr;
+        si->si_signo  = 17; /* SIGCHLD */
+        si->si_errno  = 0;
+        si->si_code   = CLD_EXITED;
+        si->si_pid    = (uint32_t)zombie->tid;
+        si->si_uid    = (uint32_t)zombie->uid;
+        si->si_status = zombie->exit_status & 0xFF;
+        si->_pad0     = 0;
+        si->_pad1     = 0;
+      }
+
+      if (!(options & WNOWAIT)) {
+        /* Consume the zombie – wait until child is truly off-CPU first */
+        sched_queue_reap_and_wait(zombie);
+      }
+
+      return 0; /* waitid returns 0 on success, not the pid */
+    }
+
+    if (!has_matching_children)
+      return (uint64_t)-10; // ECHILD
+
+    if (options & WNOHANG) {
+      /* No zombie yet; infop is left untouched per POSIX when WNOHANG */
+      return 0;
+    }
+
+    if (should_block) {
+      sched_yield();
+      current->waiting_for_child = false;
+    }
+  }
+}
+
 // Close descriptors marked FD_CLOEXEC only after the replacement image has
 // loaded successfully. Failed execve() must leave the descriptor table intact.
 static void exec_close_cloexec(struct thread *t) {
@@ -2075,6 +2222,7 @@ void syscall_register_process(void) {
   syscall_register(SYS_GETTID, sys_gettid);
   syscall_register(SYS_GETPID, sys_getpid);
   syscall_register(SYS_WAIT4, sys_wait4);
+  syscall_register(SYS_WAITID, sys_waitid);
   syscall_register(SYS_UNAME, sys_uname);
   syscall_register(SYS_SYSINFO, sys_sysinfo);
   syscall_register(SYS_UPTIME, sys_uptime);

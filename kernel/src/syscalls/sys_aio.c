@@ -733,6 +733,54 @@ static uint64_t sys_inotify_add_watch(uint64_t fd, uint64_t pathname,
 }
 
 // ---------------------------------------------------------------------------
+// inotify_rm_watch
+// ---------------------------------------------------------------------------
+
+static uint64_t sys_inotify_rm_watch(uint64_t fd_val, uint64_t wd_val,
+                                      uint64_t a3, uint64_t a4,
+                                      uint64_t a5, uint64_t a6) {
+    (void)a3; (void)a4; (void)a5; (void)a6;
+    struct thread *t = sched_get_current();
+    if (!t) return (uint64_t)-1;
+
+    int fd = (int)fd_val;
+    if (fd < 0 || fd >= MAX_FDS || !t->fds[fd]) return (uint64_t)-9; // EBADF
+
+    vfs_node_t *node = t->fds[fd];
+    if (strcmp(node->name, "inotify") != 0) return (uint64_t)-22; // EINVAL
+
+    uint32_t instance_id = node->impl;
+    inotify_instance_t *instance = NULL;
+    for (int i = 0; i < MAX_INOTIFY_INSTANCES; i++) {
+        if (inotify_instances[i].instance_id == instance_id) {
+            instance = &inotify_instances[i]; break;
+        }
+    }
+    if (!instance) return (uint64_t)-22; // EINVAL
+
+    uint32_t target_wd = (uint32_t)wd_val;
+    int found_idx = -1;
+    for (uint32_t i = 0; i < instance->num_watches; i++) {
+        if (instance->watches[i].wd == target_wd) {
+            found_idx = (int)i;
+            break;
+        }
+    }
+    if (found_idx < 0) return (uint64_t)-22; // EINVAL
+
+    for (uint32_t i = (uint32_t)found_idx; i + 1 < instance->num_watches; i++)
+        instance->watches[i] = instance->watches[i + 1];
+    instance->num_watches--;
+
+    klog_debug_puts("[INOTIFY_RM_WATCH] Removed watch wd=");
+    klog_debug_uint64(target_wd);
+    klog_debug_puts(" in instance ");
+    klog_debug_uint64(instance_id);
+    klog_debug_puts("\n");
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
 // memfd_create
 // ---------------------------------------------------------------------------
 
@@ -847,7 +895,7 @@ static uint64_t memfd_mmap(vfs_node_t *node, uint64_t addr, uint64_t length,
 static uint64_t sys_memfd_create(uint64_t name_ptr, uint64_t flags_arg,
                                   uint64_t a2, uint64_t a3, uint64_t a4,
                                   uint64_t a5) {
-    (void)a2; (void)a3; (void)a4; (void)a5;
+    (void)flags_arg; (void)a2; (void)a3; (void)a4; (void)a5;
     struct thread *t = sched_get_current();
     if (!t) return (uint64_t)-1;
 
@@ -909,5 +957,6 @@ void syscall_register_aio(void) {
     syscall_register(SYS_INOTIFY_INIT,     sys_inotify_init);
     syscall_register(SYS_INOTIFY_INIT1,    sys_inotify_init1);
     syscall_register(SYS_INOTIFY_ADD_WATCH, sys_inotify_add_watch);
+    syscall_register(SYS_INOTIFY_RM_WATCH,  sys_inotify_rm_watch);
     syscall_register(SYS_MEMFD_CREATE,     sys_memfd_create);
 }

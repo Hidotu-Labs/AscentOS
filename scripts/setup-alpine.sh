@@ -597,6 +597,32 @@ install_apk "cmatrix" "community"
 install_apk "btop" "community" 
 
 # 4. Finalize GTK environment
+echo "[*] Setting up global GTK performance environment variables..."
+mkdir -p "${ROOTFS_DIR}/etc/profile.d"
+cat > "${ROOTFS_DIR}/etc/profile.d/gtk_ascentos.sh" << 'ENV_EOF'
+export NO_AT_BRIDGE=1
+export GTK_A11Y=none
+export GIO_USE_VFS=local
+export GIO_USE_VOLUME_MONITOR=unix
+export GTK_USE_PORTAL=0
+export GDK_GL=disable
+export LIBGL_DRI3_DISABLE=1
+ENV_EOF
+chmod +x "${ROOTFS_DIR}/etc/profile.d/gtk_ascentos.sh"
+
+cat > "${ROOTFS_DIR}/etc/environment" << 'ENV_EOF'
+NO_AT_BRIDGE=1
+GTK_A11Y=none
+GIO_USE_VFS=local
+GIO_USE_VOLUME_MONITOR=unix
+GTK_USE_PORTAL=0
+GDK_GL=disable
+LIBGL_DRI3_DISABLE=1
+ENV_EOF
+
+# Disable D-Bus activation for GVfs volume monitors to prevent 25s timeouts
+rm -f "${ROOTFS_DIR}"/usr/share/dbus-1/services/org.gtk.vfs.*VolumeMonitor.service 2>/dev/null || true
+
 echo "[*] Compiling GSettings schemas..."
 if [ -d "${ROOTFS_DIR}/usr/share/glib-2.0/schemas" ]; then
     if command -v glib-compile-schemas >/dev/null 2>&1; then
@@ -812,13 +838,35 @@ export XDG_SESSION_TYPE=x11
 export XDG_CURRENT_DESKTOP=XFCE
 export XCURSOR_THEME=Adwaita
 export XCURSOR_SIZE=24
+export GDK_GL=disable
+export LIBGL_DRI3_DISABLE=1
+export NO_AT_BRIDGE=1
+export GTK_A11Y=none
+export GIO_USE_VFS=local
+export GIO_USE_VOLUME_MONITOR=unix
+export GTK_USE_PORTAL=0
 
 # Ensure XDG dirs exist
 export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-${HOME}/.config}"
 export XDG_DATA_HOME="${XDG_DATA_HOME:-${HOME}/.local/share}"
 export XDG_CACHE_HOME="${XDG_CACHE_HOME:-${HOME}/.cache}"
 mkdir -p "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" \
+         "$HOME/Desktop" "$HOME/Templates" "$HOME/Downloads" "$HOME/Documents" \
+         "$HOME/Pictures" "$HOME/Music" "$HOME/Videos" \
          "$XDG_CONFIG_HOME/gtk-3.0"
+
+cat > "$XDG_CONFIG_HOME/user-dirs.dirs" << 'USER_DIRS_EOF'
+XDG_DESKTOP_DIR="$HOME/Desktop"
+XDG_DOWNLOAD_DIR="$HOME/Downloads"
+XDG_TEMPLATES_DIR="$HOME/Templates"
+XDG_PUBLICSHARE_DIR="$HOME/Public"
+XDG_DOCUMENTS_DIR="$HOME/Documents"
+XDG_MUSIC_DIR="$HOME/Music"
+XDG_PICTURES_DIR="$HOME/Pictures"
+XDG_VIDEOS_DIR="$HOME/Videos"
+USER_DIRS_EOF
+
+rm -rf "$XDG_CACHE_HOME"/*-socket* "$XDG_CACHE_HOME"/pcmanfm* "$XDG_CACHE_HOME"/Thunar* /tmp/.*-lock /tmp/*-socket*
 if [ -f /etc/xdg/gtk-3.0/gtk.css ]; then
     cp -f /etc/xdg/gtk-3.0/gtk.css "$XDG_CONFIG_HOME/gtk-3.0/gtk.css"
 fi
@@ -851,12 +899,15 @@ cat > "${XFCE_SESSION_DIR}/xfce4-session.xml" << 'EOF'
 </channel>
 EOF
 
-# xfwm4 compositor settings — disable compositing (no GPU acceleration)
+# xfwm4 compositor settings — enable compositing with live opaque window dragging
 cat > "${XFCE_SESSION_DIR}/xfwm4.xml" << 'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <channel name="xfwm4" version="1.0">
   <property name="general" type="empty">
-    <property name="use_compositing" type="bool" value="false"/>
+    <property name="use_compositing" type="bool" value="true"/>
+    <property name="unredirect_overlays" type="bool" value="false"/>
+    <property name="box_move" type="bool" value="false"/>
+    <property name="box_resize" type="bool" value="false"/>
     <property name="vblank_mode" type="string" value="off"/>
     <property name="sync_to_vblank" type="bool" value="false"/>
   </property>
