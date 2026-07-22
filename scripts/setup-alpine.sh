@@ -149,15 +149,6 @@ install_apk "libxmu" "main"
 install_apk "libxaw" "main"
 install_apk "libxext" "main"
 install_apk "libxkbfile" "main"
-install_apk "xeyes" "community" "edge"
-
-# Upstream xeyes enables non-rectangular SHAPE windows by default.  Use a
-# regular rectangular window so the desktop window manager can frame it.
-mkdir -p "${ROOTFS_DIR}/usr/share/X11/app-defaults"
-cp "${ROOT_DIR}/userland/XEyes" \
-   "${ROOTFS_DIR}/usr/share/X11/app-defaults/XEyes"
-cp "${ROOT_DIR}/userland/xeyes-launch.sh" "${ROOTFS_DIR}/bin/xeyes"
-chmod +x "${ROOTFS_DIR}/bin/xeyes"
 
 # Minimal GTK (GTK 2.0) and core dependencies
 echo "[*] Installing GTK 2.0 and core dependencies..."
@@ -872,7 +863,10 @@ cat > "${XFCE_SESSION_DIR}/xfwm4.xml" << 'EOF'
 </channel>
 EOF
 
-# xfce4-panel minimal layout (clock + app-menu only — avoids missing-plugin errors)
+# xfce4-panel layout — top bar (app menu + tasklist + clock) and bottom dock
+# (showdesktop, terminal, file manager, web browser, appfinder, directorymenu).
+# Each launcher has an items array so xfce4-panel can resolve the icon;
+# without it the panel falls back to a gear.
 cat > "${XFCE_SESSION_DIR}/xfce4-panel.xml" << 'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <channel name="xfce4-panel" version="1.0">
@@ -897,9 +891,12 @@ cat > "${XFCE_SESSION_DIR}/xfce4-panel.xml" << 'EOF'
       <property name="position-locked" type="bool" value="true"/>
       <property name="size" type="uint" value="48"/>
       <property name="plugin-ids" type="array">
+        <value type="int" value="7"/>
         <value type="int" value="4"/>
         <value type="int" value="5"/>
         <value type="int" value="6"/>
+        <value type="int" value="8"/>
+        <value type="int" value="9"/>
       </property>
     </property>
   </property>
@@ -907,22 +904,57 @@ cat > "${XFCE_SESSION_DIR}/xfce4-panel.xml" << 'EOF'
     <property name="plugin-1" type="string" value="applicationsmenu"/>
     <property name="plugin-2" type="string" value="tasklist"/>
     <property name="plugin-3" type="string" value="clock"/>
-    <property name="plugin-4" type="string" value="launcher"/>
-    <property name="plugin-5" type="string" value="launcher"/>
-    <property name="plugin-6" type="string" value="launcher"/>
+    <property name="plugin-4" type="string" value="launcher">
+      <property name="items" type="array">
+        <value type="string" value="xfce4-terminal.desktop"/>
+      </property>
+    </property>
+    <property name="plugin-5" type="string" value="launcher">
+      <property name="items" type="array">
+        <value type="string" value="thunar.desktop"/>
+      </property>
+    </property>
+    <property name="plugin-6" type="string" value="launcher">
+      <property name="items" type="array">
+        <value type="string" value="xfce4-web-browser.desktop"/>
+      </property>
+    </property>
+    <property name="plugin-7" type="string" value="showdesktop"/>
+    <property name="plugin-8" type="string" value="launcher">
+      <property name="items" type="array">
+        <value type="string" value="xfce4-appfinder.desktop"/>
+      </property>
+    </property>
+    <property name="plugin-9" type="string" value="directorymenu"/>
   </property>
 </channel>
 EOF
 
 XFCE_PANEL_DIR="${ROOTFS_DIR}/etc/xdg/xfce4/panel"
 mkdir -p "${XFCE_PANEL_DIR}/launcher-4" "${XFCE_PANEL_DIR}/launcher-5" \
-         "${XFCE_PANEL_DIR}/launcher-6"
+         "${XFCE_PANEL_DIR}/launcher-6" "${XFCE_PANEL_DIR}/launcher-8"
+
+# Ensure each launcher directory contains exactly one .desktop file matching
+# the plugin-ids array in xfce4-panel.xml.  Extra files cause xfce4-panel to
+# show a gear icon instead of the intended icon on subsequent boots.
+rm -f "${XFCE_PANEL_DIR}/launcher-4/"*.desktop
+rm -f "${XFCE_PANEL_DIR}/launcher-5/"*.desktop
+rm -f "${XFCE_PANEL_DIR}/launcher-6/"*.desktop
+rm -f "${XFCE_PANEL_DIR}/launcher-7/"*.desktop   # plugin-7 = showdesktop, no items
+rm -f "${XFCE_PANEL_DIR}/launcher-8/"*.desktop
+
 cp -f "${ROOTFS_DIR}/usr/share/applications/xfce4-terminal.desktop" \
       "${XFCE_PANEL_DIR}/launcher-4/"
 cp -f "${ROOTFS_DIR}/usr/share/applications/thunar.desktop" \
       "${XFCE_PANEL_DIR}/launcher-5/"
-cp -f "${ROOTFS_DIR}/usr/share/applications/xfce4-appfinder.desktop" \
+# Use the blue file-manager cabinet icon instead of the default Thunar icon
+sed -i 's/^Icon=org\.xfce\.thunar$/Icon=org.xfce.filemanager/' \
+    "${ROOTFS_DIR}/usr/share/applications/thunar.desktop" \
+    "${XFCE_PANEL_DIR}/launcher-5/thunar.desktop"
+cp -f "${ROOTFS_DIR}/usr/share/applications/xfce4-web-browser.desktop" \
       "${XFCE_PANEL_DIR}/launcher-6/"
+cp -f "${ROOTFS_DIR}/usr/share/applications/xfce4-appfinder.desktop" \
+      "${XFCE_PANEL_DIR}/launcher-8/"
 
 cat > "${XFCE_SESSION_DIR}/xfce4-desktop.xml" << EOF
 <?xml version="1.0" encoding="UTF-8"?>

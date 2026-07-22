@@ -73,6 +73,14 @@ if [ "${ASCENT_SESSION:-}" = "xfce4" ]; then
     mkdir -p "$XDG_CONFIG_HOME/xfce4/xfconf/xfce-perchannel-xml" \
              "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$HOME/Desktop" \
              "$XDG_CONFIG_HOME/gtk-3.0"
+
+    # Clear stale icon/thumbnail caches from previous boots. xfce4-panel
+    # resolves Icon= names at startup; if the cache contains paths from an
+    # earlier rootfs state the lookup fails and every launcher shows a gear.
+    rm -rf "$XDG_CACHE_HOME/icon-*" \
+           "$XDG_CACHE_HOME/icons" \
+           "$XDG_CACHE_HOME/xfce4" \
+           "$XDG_CACHE_HOME/thumbnails"
     if [ -f /etc/xdg/gtk-3.0/gtk.css ]; then
         cp -f /etc/xdg/gtk-3.0/gtk.css \
             "$XDG_CONFIG_HOME/gtk-3.0/gtk.css"
@@ -80,6 +88,10 @@ if [ "${ASCENT_SESSION:-}" = "xfce4" ]; then
 
     # Refresh the AscentOS desktop defaults. The home directory is persistent,
     # so otherwise an older one-panel/no-backdrop configuration wins.
+    # Wipe the entire xfce4 config dir to prevent stale xfconfd state/launcher
+    # caches from corrupting icon resolution on subsequent boots.
+    rm -rf "$XDG_CONFIG_HOME/xfce4"
+    mkdir -p "$XDG_CONFIG_HOME/xfce4/xfconf/xfce-perchannel-xml"
     for channel in xfwm4 xfce4-panel xfce4-desktop xsettings; do
         src="/etc/xdg/xfce4/xfconf/xfce-perchannel-xml/$channel.xml"
         if [ -f "$src" ]; then
@@ -88,7 +100,6 @@ if [ "${ASCENT_SESSION:-}" = "xfce4" ]; then
         fi
     done
     if [ -d /etc/xdg/xfce4/panel ]; then
-        rm -rf "$XDG_CONFIG_HOME/xfce4/panel"
         cp -r /etc/xdg/xfce4/panel "$XDG_CONFIG_HOME/xfce4/panel"
     fi
 
@@ -112,6 +123,11 @@ if [ "${ASCENT_SESSION:-}" = "xfce4" ]; then
 
     XFCONFD=/usr/lib/xfce4/xfconf/xfconfd
     if [ -x "$XFCONFD" ]; then
+        # Make xfconf channel files read-only so xfconfd cannot write stale
+        # state (broken icon paths, modified plugin lists) back to disk.
+        # xfconfd can still read and serve the channels; it just cannot save.
+        chmod -R a-w "$XDG_CONFIG_HOME/xfce4/xfconf/xfce-perchannel-xml" \
+            2>/dev/null || true
         "$XFCONFD" &
         XFCONFD_PID=$!
         sleep 0.1
@@ -137,6 +153,10 @@ if [ "${ASCENT_SESSION:-}" = "xfce4" ]; then
 
     xfsettingsd &
     XFSETTINGS_PID=$!
+    # Give xfsettingsd time to apply IconThemeName=Adwaita via XSETTINGS before
+    # xfce4-panel starts resolving Icon= names. Without this delay the panel
+    # reads icons before the theme is active and caches a broken lookup.
+    sleep 0.5
     xfdesktop &
     XFDESKTOP_PID=$!
     # Apply the wallpaper shortly after xfdesktop claims the root window,
