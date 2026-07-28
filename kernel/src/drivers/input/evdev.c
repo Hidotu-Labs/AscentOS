@@ -181,8 +181,8 @@ static int evdev_vfs_poll(struct vfs_node *node, int events) {
 
   spinlock_acquire(&dev->lock);
   int revents = 0;
-  if ((events & POLLIN) && dev->head != dev->tail)
-    revents |= POLLIN;
+  if ((events & (POLLIN | POLLRDNORM)) && dev->head != dev->tail)
+    revents |= (POLLIN | POLLRDNORM);
   spinlock_release(&dev->lock);
   return revents;
 }

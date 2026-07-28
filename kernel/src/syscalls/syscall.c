@@ -21,24 +21,13 @@ void syscall_register_raw(int num, syscall_raw_handler_t handler) {
   }
 }
 
+void syscall_register_aio(void);
+
 void syscall_dispatcher(struct syscall_regs *regs) {
   struct thread *t = sched_get_current();
-  if (t) {
-    /*
-   klog_puts("[SYSCALL] tid=");
-    klog_uint64(t->tid);
-    klog_puts(" rax=");
-    klog_uint64(regs->rax);
-    klog_puts(" rdi=");
-    klog_uint64(regs->rdi);
-    klog_puts("\n");
-    */
-  }
+  (void)t;
 
   if (regs->rax >= MAX_SYSCALL) {
-    klog_puts("\n[SYSCALL] Unimplemented syscall: ");
-    klog_uint64(regs->rax);
-    klog_puts("\n");
     regs->rax = (uint64_t)-38; // ENOSYS
     return;
   }
@@ -51,9 +40,6 @@ void syscall_dispatcher(struct syscall_regs *regs) {
   }
 
   if (!syscall_table[regs->rax]) {
-    klog_puts("\n[SYSCALL] Unimplemented syscall: ");
-    klog_uint64(regs->rax);
-    klog_puts("\n");
     regs->rax = (uint64_t)-38; // ENOSYS
     return;
   }
@@ -62,17 +48,6 @@ void syscall_dispatcher(struct syscall_regs *regs) {
   syscall_handler_t handler = syscall_table[syscall_num];
   regs->rax =
       handler(regs->rdi, regs->rsi, regs->rdx, regs->r10, regs->r8, regs->r9);
-
-  if ((int64_t)regs->rax < 0 && (int64_t)regs->rax != -11 &&
-      (int64_t)regs->rax != -2 &&
-      (int64_t)regs->rax != -17 && /* EEXIST is routine for mkdir */
-      (int64_t)regs->rax != -25) {
-    klog_debug_puts("[SYSCALL ERR] syscall ");
-    klog_debug_uint64(syscall_num);
-    klog_debug_puts(" returned error: ");
-    klog_debug_uint64((uint64_t)(-(int64_t)regs->rax));
-    klog_debug_puts("\n");
-  }
 
   /* Signal frame conversion copies the complete register set. Keep it off the
    * syscall hot path unless this thread can actually deliver a signal. */
@@ -93,6 +68,7 @@ void syscall_init(void) {
   syscall_register_poll();
   syscall_register_shm();
   syscall_register_futex();
+  syscall_register_aio();
 
   uint64_t efer = rdmsr(IA32_EFER);
   efer |= IA32_EFER_SCE | (1ULL << 11); 

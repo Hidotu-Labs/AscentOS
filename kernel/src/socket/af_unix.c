@@ -117,7 +117,7 @@ static int unix_poll(socket_t *sock, int events) {
   size_t head      = usk->recv_buf_head;
   size_t tail      = usk->recv_buf_tail;
   size_t size      = usk->recv_buf_size;
-  size_t available = (tail - head + size) % size;
+  size_t available = (size > 0) ? (tail - head + size) % size : 0;
   spinlock_release(&usk->recv_lock);
 
   bool has_peer = false;
@@ -176,7 +176,7 @@ static int unix_ioctl(socket_t *sock, uint32_t request, uint64_t arg) {
     size_t head      = usk->recv_buf_head;
     size_t tail      = usk->recv_buf_tail;
     size_t sz        = usk->recv_buf_size;
-    size_t available = (tail - head + sz) % sz;
+    size_t available = (sz > 0) ? (tail - head + sz) % sz : 0;
     *val = (int)available;
     spinlock_release(&usk->recv_lock);
     return 0;
@@ -289,40 +289,22 @@ int unix_create(socket_t *sock, int protocol) {
 
   INIT_LIST_HEAD(&usk->bind_node);
 
-  // Receive buffer
-  usk->recv_buf = kmalloc(sock->rcvbuf);
-  if (!usk->recv_buf) {
-    kfree(usk);
-    klog_puts("[ERR] unix_create: failed to allocate receive buffer\n");
-    return -12;
-  }
-  usk->recv_buf_size = sock->rcvbuf;
+  // Receive buffer (lazy allocation on demand)
+  usk->recv_buf = NULL;
+  usk->recv_buf_size = 0;
   usk->recv_buf_head = 0;
   usk->recv_buf_tail = 0;
   spinlock_init(&usk->recv_lock);
 
-  // Send buffer
-  usk->send_buf = kmalloc(sock->sndbuf);
-  if (!usk->send_buf) {
-    kfree(usk->recv_buf);
-    kfree(usk);
-    klog_puts("[ERR] unix_create: failed to allocate send buffer\n");
-    return -12;
-  }
-  usk->send_buf_size = sock->sndbuf;
+  // Send buffer (lazy allocation on demand)
+  usk->send_buf = NULL;
+  usk->send_buf_size = 0;
   usk->send_buf_head = 0;
   usk->send_buf_tail = 0;
   spinlock_init(&usk->send_lock);
 
   sock->sk  = usk;
   sock->ops = &unix_ops;
-
-  klog_puts("[OK] AF_UNIX socket created (type=");
-  if      (sock->type == SOCK_STREAM)    klog_puts("SOCK_STREAM");
-  else if (sock->type == SOCK_DGRAM)     klog_puts("SOCK_DGRAM");
-  else if (sock->type == SOCK_SEQPACKET) klog_puts("SOCK_SEQPACKET");
-  else                                   klog_puts("unknown");
-  klog_puts(")\n");
 
   return 0;
 }
@@ -336,8 +318,6 @@ void unix_destroy(socket_t *sock) {
   unix_sock_t *usk = (unix_sock_t *)sock->sk;
   if (!usk)
     return;
-
-  klog_puts("[OK] Destroying AF_UNIX socket\n");
 
   // Remove from bound list.  New lookups cannot find this socket after this.
   spinlock_acquire(&unix_bound_lock);

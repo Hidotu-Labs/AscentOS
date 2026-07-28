@@ -18,6 +18,13 @@ static eventpoll_t *epoll_table[EPOLL_MAX_INSTANCES];
 static int epoll_count = 0;
 static spinlock_t epoll_table_lock = SPINLOCK_INIT;
 
+/*
+ * Notifications are normally reliable. Keep a short timeout on otherwise
+ * unbounded waits as a safety net against a future producer missing a wakeup.
+ * Timer ticks are expressed in milliseconds throughout the scheduler API.
+ */
+#define EPOLL_RESCAN_INTERVAL_MS 100
+
 // Epoll Instance Table Management
 
 static int epoll_table_alloc(void) {
@@ -478,6 +485,14 @@ int epoll_wait_impl(eventpoll_t *ep, struct epoll_event *events, int maxevents,
     if (timeout_ms > 0 && timeout_ms != -1) {
       deadline_ticks = lapic_timer_get_ticks() + (uint64_t)timeout_ms;
       current->wakeup_ticks = deadline_ticks;
+    } else if (timeout_ms == -1) {
+      /*
+       * An infinite epoll wait must still recover if a producer ever fails
+       * to notify us. This is not a user-visible timeout: after waking we
+       * re-poll watched descriptors and continue waiting if none are ready.
+       */
+      current->wakeup_ticks =
+          lapic_timer_get_ticks() + EPOLL_RESCAN_INTERVAL_MS;
     } else {
       current->wakeup_ticks = 0;
     }
@@ -571,15 +586,10 @@ int epoll_alloc_fd(eventpoll_t *ep) {
   node->device = ep;
   node->wait_queue = &ep->wq;
 
-  // Set epoll VFS operations.
-  // NOTE: node->open is intentionally left NULL for the same reason as
-  // socket_alloc_fd: epoll_vfs_open calls epoll_get, but vfs_close only fires
-  // the close handler once (at node refcount 0).  Registering open would
-  // cause epoll_get on every fork without a matching epoll_put, leaking the
-  // eventpoll object after the child exits.
+  // Set epoll VFS operations
   node->read = epoll_vfs_read;
   node->write = epoll_vfs_write;
-  node->open = NULL;
+  node->open = epoll_vfs_open;
   node->close = epoll_vfs_close;
   node->poll = epoll_vfs_poll;
 
@@ -588,9 +598,9 @@ int epoll_alloc_fd(eventpoll_t *ep) {
   t->fds[fd] = node;
   t->fd_offsets[fd] = 0;
 
-  // vfs_node_init() set node->refcount = 1: the fd-table's reference.
-  // ep->refcount = 1 (from epoll_create): the VFS node's reference.
-  // The last vfs_close fires epoll_vfs_close once and destroys the instance.
+  // vfs_node_init() created the node with refcount 1; that initial node
+  // reference is the fd-table ownership. The epoll object's initial
+  // reference is transferred to the node and released by epoll_vfs_close().
 
   return fd;
 }
@@ -719,13 +729,7 @@ void epoll_notify_event(struct vfs_node *node, uint32_t events) {
   if (node->ep_watchers.next == NULL)
     return;
 
-  /* Try-acquire the lock. If it's held, we skip this notification
-     rather than risk a deadlock in IRQ context or spinning. 
-     This is acceptable because level-triggered events will be 
-     detected by the next poll/tick, and edge-triggered events 
-     can be handled by re-trying or deferred work (future work). */
-  if (!spinlock_try_acquire(&node->ep_lock))
-    return;
+  spinlock_acquire(&node->ep_lock);
   struct list_head *pos, *n;
   list_for_each_safe(pos, n, &node->ep_watchers) {
     epitem_t *epi = list_entry(pos, epitem_t, ep_node_link);

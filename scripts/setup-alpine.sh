@@ -598,7 +598,7 @@ install_apk "btop" "community"
 
 # 4. Finalize GTK environment
 echo "[*] Setting up global GTK performance environment variables..."
-mkdir -p "${ROOTFS_DIR}/etc/profile.d"
+mkdir -p "${ROOTFS_DIR}/etc/profile.d" "${ROOTFS_DIR}/etc/pulse"
 cat > "${ROOTFS_DIR}/etc/profile.d/gtk_ascentos.sh" << 'ENV_EOF'
 export NO_AT_BRIDGE=1
 export GTK_A11Y=none
@@ -607,6 +607,7 @@ export GIO_USE_VOLUME_MONITOR=unix
 export GTK_USE_PORTAL=0
 export GDK_GL=disable
 export LIBGL_DRI3_DISABLE=1
+export PULSE_SERVER=""
 ENV_EOF
 chmod +x "${ROOTFS_DIR}/etc/profile.d/gtk_ascentos.sh"
 
@@ -618,7 +619,13 @@ GIO_USE_VOLUME_MONITOR=unix
 GTK_USE_PORTAL=0
 GDK_GL=disable
 LIBGL_DRI3_DISABLE=1
+PULSE_SERVER=""
 ENV_EOF
+
+cat > "${ROOTFS_DIR}/etc/pulse/client.conf" << 'PULSE_EOF'
+autospawn = no
+disable-shm = yes
+PULSE_EOF
 
 # Disable D-Bus activation for GVfs volume monitors to prevent 25s timeouts
 rm -f "${ROOTFS_DIR}"/usr/share/dbus-1/services/org.gtk.vfs.*VolumeMonitor.service 2>/dev/null || true

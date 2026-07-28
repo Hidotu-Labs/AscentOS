@@ -1371,10 +1371,6 @@ static uint64_t sys_prctl(uint64_t option, uint64_t arg2, uint64_t arg3,
     // Copy up to 15 chars + null terminator
     strncpy(current->comm, name, 15);
     current->comm[15] = '\0';
-
-    klog_puts("[PRCTL] Set thread name to: ");
-    klog_puts(current->comm);
-    klog_puts("\n");
     return 0;
   }
   case PR_GET_NAME: {
@@ -1386,9 +1382,6 @@ static uint64_t sys_prctl(uint64_t option, uint64_t arg2, uint64_t arg3,
     return 0;
   }
   default:
-    klog_puts("[PRCTL] Unknown / Stub option: ");
-    klog_uint64(option);
-    klog_puts("\n");
     return 0; // Success stub for everything else
   }
 }

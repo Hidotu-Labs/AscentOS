@@ -541,12 +541,12 @@ static int netlink_poll(socket_t *sock, int events) {
 
   spinlock_acquire(&nsk->recv_queue.lock);
   if (!skb_queue_empty(&nsk->recv_queue)) {
-    revents |= EPOLLIN;
+    revents |= (EPOLLIN | EPOLLRDNORM);
   }
   spinlock_release(&nsk->recv_queue.lock);
 
-  if (events & EPOLLOUT) {
-    revents |= EPOLLOUT;
+  if (events & (EPOLLOUT | EPOLLWRNORM)) {
+    revents |= (EPOLLOUT | EPOLLWRNORM);
   }
 
   return revents;

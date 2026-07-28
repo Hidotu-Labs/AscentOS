@@ -1,7 +1,7 @@
 // sys_fs.c — Filesystem namespace syscalls:
 //   mkdir, mkdirat, unlink, unlinkat, rmdir, rename, symlink, readlink,
-//   link, chmod, chown, fchmod, fchmodat, fchownat, access, faccessat2,
-//   getcwd, chdir, fchdir, utimensat, futimesat, utimes, readlinkat
+//   link, chmod, chown, fchmod, fchmodat, fchmodat2, fchownat, access,
+//   faccessat2, getcwd, chdir, fchdir, utimensat, futimesat, utimes, readlinkat
 #include "sys_io_shared.h"
 #include "../console/klog.h"
 #include "../fb/framebuffer.h"
@@ -14,7 +14,8 @@
 #include "syscall.h"
 #include <stdint.h>
 
-#define AT_REMOVEDIR 0x200
+#define AT_REMOVEDIR        0x200
+#define AT_SYMLINK_NOFOLLOW 0x100  /* fchmodat2 / fstatat: do not follow symlinks */
 
 // ---------------------------------------------------------------------------
 // vfs_resolve_symlink_node — resolve WITHOUT following the final symlink
@@ -609,6 +610,44 @@ static uint64_t sys_fchmodat(uint64_t dirfd, uint64_t pathname_ptr,
     return vfs_chmod(node, (uint16_t)mode) == 0 ? 0 : (uint64_t)-1;
 }
 
+// fchmodat2 — Linux 6.6+ (syscall 452)
+// Identical to fchmodat(268) but the flags argument is officially supported.
+// AT_SYMLINK_NOFOLLOW (0x100): do not chmod a symlink's target; instead operate
+// on the symlink node itself (which on most filesystems is a no-op/EOPNOTSUPP).
+static uint64_t sys_fchmodat2(uint64_t dirfd, uint64_t pathname_ptr,
+                               uint64_t mode, uint64_t flags,
+                               uint64_t a4, uint64_t a5) {
+    (void)a4; (void)a5;
+    const char *path = (const char *)pathname_ptr;
+    if (!path) return (uint64_t)-14; // EFAULT
+    struct thread *t = sched_get_current();
+    vfs_node_t *base = fs_root;
+    if (path[0] != '/') {
+        if ((int)dirfd == AT_FDCWD) {
+            if (t && t->cwd_path[0]) {
+                base = vfs_resolve_path_at(fs_root, t->cwd_path);
+                if (!base) base = fs_root;
+            }
+        } else {
+            if (dirfd >= MAX_FDS || !t->fds[dirfd]) return (uint64_t)-9; // EBADF
+            base = t->fds[dirfd];
+        }
+    }
+    // If AT_SYMLINK_NOFOLLOW, resolve without following the final symlink component.
+    vfs_node_t *node;
+    if (flags & AT_SYMLINK_NOFOLLOW)
+        node = vfs_resolve_symlink_node(base, path);
+    else
+        node = vfs_resolve_path_at(base, path);
+    if (!node) return (uint64_t)-2; // ENOENT
+    // Symlink nodes themselves have no permission bits on most filesystems;
+    // return EOPNOTSUPP (95) when the caller requests nofollow on a symlink.
+    if ((flags & AT_SYMLINK_NOFOLLOW) && (node->flags & FS_SYMLINK))
+        return (uint64_t)-95; // EOPNOTSUPP
+    if (t && t->euid != 0 && t->fsuid != node->uid) return (uint64_t)-1; // EPERM
+    return vfs_chmod(node, (uint16_t)mode) == 0 ? 0 : (uint64_t)-1;
+}
+
 static uint64_t sys_fchownat(uint64_t dirfd, uint64_t pathname_ptr,
                               uint64_t owner, uint64_t group, uint64_t flags,
                               uint64_t a5) {
@@ -762,6 +801,7 @@ void syscall_register_fs(void) {
     syscall_register(SYS_LCHOWN,     sys_lchown);
     syscall_register(SYS_FCHMOD,     sys_fchmod);
     syscall_register(SYS_FCHMODAT,   sys_fchmodat);
+    syscall_register(SYS_FCHMODAT2,  sys_fchmodat2);
     syscall_register(SYS_FCHOWNAT,   sys_fchownat);
     syscall_register(SYS_ACCESS,     sys_access);
     syscall_register(SYS_FACCESSAT2, sys_faccessat2);

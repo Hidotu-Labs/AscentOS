@@ -1714,11 +1714,11 @@ static uint64_t drm_vfs_mmap(vfs_node_t *node, uint64_t addr, uint64_t length,
 
 static int drm_poll(struct vfs_node *node, int events) {
   struct drm_file *file = node_to_file(node);
-  int revents = 0x0004; /* POLLOUT always */
+  int revents = (0x0004 | 0x0100); /* POLLOUT | POLLWRNORM always */
   if (file) {
     spinlock_acquire(&file->lock);
     if (!list_empty(&file->event_queue))
-      revents |= 0x0001; /* POLLIN */
+      revents |= (0x0001 | 0x0040); /* POLLIN | POLLRDNORM */
     spinlock_release(&file->lock);
   }
   return revents & events;

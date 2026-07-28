@@ -46,30 +46,10 @@ static uint64_t sys_socket(uint64_t domain, uint64_t type, uint64_t protocol,
 
   // Allocate FD
   int fd = socket_alloc_fd(sock);
-  struct thread *t = sched_get_current();
   if (fd < 0) {
-    klog_puts("[SOCKET] tid=");
-    if (t)
-      klog_uint64(t->tid);
-    klog_puts(" alloc_fd failed: ");
-    klog_uint64((uint64_t)fd);
-    klog_puts("\n");
     socket_put(sock);
     return (uint64_t)fd;
   }
-
-  klog_puts("[SOCKET] tid=");
-  if (t)
-    klog_uint64(t->tid);
-  klog_puts(" domain=");
-  klog_uint64(domain);
-  klog_puts(" type=");
-  klog_uint64(type);
-  klog_puts(" protocol=");
-  klog_uint64(protocol);
-  klog_puts(" returned fd=");
-  klog_uint64((uint64_t)fd);
-  klog_puts("\n");
 
   return (uint64_t)fd;
 }

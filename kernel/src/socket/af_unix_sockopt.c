@@ -157,6 +157,10 @@ int unix_getsockopt_impl(socket_t *sock, int level, int optname,
     }
     return 0;
 
+  case 31: // SO_PEERSEC
+  case 59: // SO_PEERGROUPS
+    return -92; // ENOPROTOOPT (unsupported security context / groups)
+
   default:
     klog_puts("[WARN] unix_getsockopt: unknown optname ");
     klog_uint64(optname);
@@ -320,6 +324,10 @@ int unix_setsockopt_impl(socket_t *sock, int level, int optname,
     klog_puts(" ms\n");
     return 0;
   }
+
+  case 31: // SO_PEERSEC
+  case 59: // SO_PEERGROUPS
+    return -92; // ENOPROTOOPT
 
   default:
     klog_puts("[WARN] unix_setsockopt: unknown optname ");

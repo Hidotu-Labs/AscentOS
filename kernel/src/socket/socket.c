@@ -176,9 +176,6 @@ socket_t *socket_create(int domain, int type, int protocol) {
   // Validate domain
   if (domain != AF_UNIX && domain != AF_INET && domain != AF_INET6 &&
       domain != AF_NETLINK) {
-    klog_puts("[WARN] socket: unsupported domain ");
-    klog_uint64((uint64_t)domain);
-    klog_puts("\n");
     return NULL; // EAFNOSUPPORT
   }
 
@@ -188,14 +185,10 @@ socket_t *socket_create(int domain, int type, int protocol) {
   // Validate type
   if (base_type != SOCK_STREAM && base_type != SOCK_DGRAM &&
       base_type != SOCK_RAW && base_type != SOCK_SEQPACKET) {
-    klog_puts("[WARN] socket: unsupported type ");
-    klog_uint64((uint64_t)base_type);
-    klog_puts("\n");
     return NULL; // EPROTONOSUPPORT
   }
 
   if (domain == AF_UNIX && protocol != 0) {
-    klog_puts("[WARN] socket: invalid protocol for AF_UNIX\n");
     return NULL; // EPROTONOSUPPORT
   }
 

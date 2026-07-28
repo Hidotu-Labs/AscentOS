@@ -133,17 +133,68 @@ EOF
         cp -r /etc/xdg/xfce4/panel "$XDG_CONFIG_HOME/xfce4/panel"
     fi
 
+    # Ensure D-Bus machine-id exists to prevent GDBus / GTK startup delays
+    if [ ! -s /etc/machine-id ]; then
+        if command -v dbus-uuidgen >/dev/null 2>&1; then
+            dbus-uuidgen --ensure=/etc/machine-id 2>/dev/null || true
+        else
+            echo "10000000000000000000000000000001" > /etc/machine-id
+        fi
+    fi
+    mkdir -p /var/lib/dbus /run/dbus
+    [ -L /var/run ] || [ -d /var/run ] || mkdir -p /var/run
+    [ -e /var/run/dbus ] || ln -sf /run/dbus /var/run/dbus 2>/dev/null || true
+    [ -f /var/lib/dbus/machine-id ] || cp -f /etc/machine-id /var/lib/dbus/machine-id 2>/dev/null || true
+    if command -v dbus-daemon >/dev/null 2>&1 && [ ! -S /run/dbus/system_bus_socket ]; then
+        dbus-daemon --system --fork 2>/dev/null || true
+    fi
+
+    # The kernel's /var/run -> /run symlink resolution is not complete yet.
+    # dbus-daemon bound the system bus at /var/run, so make all GTK/GIO/XFCE
+    # clients use that real endpoint instead of retrying the absent /run path.
+    DBUS_SYSTEM_BUS_ADDRESS=unix:path=/var/run/dbus/system_bus_socket
+    export DBUS_SYSTEM_BUS_ADDRESS
+
+    # Prevent PulseAudio client library from autospawning pulseaudio and blocking cmus/GTK apps
+    mkdir -p /etc/pulse "$HOME/.config/pulse"
+    cat > /etc/pulse/client.conf << 'PULSE_EOF'
+autospawn = no
+disable-shm = yes
+PULSE_EOF
+
+    # Configure cmus default audio plugin to dummy so cmus starts instantly
+    mkdir -p "$HOME/.config/cmus"
+    if [ ! -f "$HOME/.config/cmus/rc" ]; then
+        cat > "$HOME/.config/cmus/rc" << 'CMUS_EOF'
+set output_plugin=dummy
+CMUS_EOF
+    fi
+    if [ ! -f "$HOME/.config/cmus/autosave" ]; then
+        cat > "$HOME/.config/cmus/autosave" << 'CMUS_EOF'
+set output_plugin=dummy
+CMUS_EOF
+    fi
+
     if command -v xrdb >/dev/null 2>&1; then
         xrdb -merge "$HOME/.Xresources" 2>/dev/null || true
     fi
 
     if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] &&
-       command -v dbus-launch >/dev/null 2>&1; then
-        eval "$(dbus-launch --sh-syntax --exit-with-session)" 2>/dev/null || true
-    fi
-    if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] &&
        command -v dbus-daemon >/dev/null 2>&1; then
-        DBUS_SESSION_BUS_ADDRESS=$(dbus-daemon --session --fork --print-address=1)
+        # Keep the daemon in this shell's background instead of going through
+        # dbus-launch/--fork. The latter leaves a listener that accepts the
+        # first XFCE clients but later stops servicing new GTK clients.
+        DBUS_SESSION_BUS_SOCKET=/tmp/ascent-session-bus
+        rm -f "$DBUS_SESSION_BUS_SOCKET"
+        DBUS_SESSION_BUS_ADDRESS=unix:path=$DBUS_SESSION_BUS_SOCKET
+        dbus-daemon --session --nofork \
+            --address="$DBUS_SESSION_BUS_ADDRESS" >/tmp/ascent-dbus.log 2>&1 &
+        DBUS_SESSION_BUS_PID=$!
+        sleep 0.1
+        if ! kill -0 "$DBUS_SESSION_BUS_PID" 2>/dev/null; then
+            echo "[startx] session D-Bus daemon failed to initialize"
+            exit 1
+        fi
         export DBUS_SESSION_BUS_ADDRESS
     fi
     if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
@@ -153,10 +204,8 @@ EOF
 
     XFCONFD=/usr/lib/xfce4/xfconf/xfconfd
     if [ -x "$XFCONFD" ]; then
-        # Make xfconf channel files read-only so xfconfd cannot write stale
-        # state (broken icon paths, modified plugin lists) back to disk.
-        # xfconfd can still read and serve the channels; it just cannot save.
-        chmod -R a-w "$XDG_CONFIG_HOME/xfce4/xfconf/xfce-perchannel-xml" \
+        # Ensure xfconf channel files are writable by xfconfd to prevent D-Bus timeouts
+        chmod -R u+w "$XDG_CONFIG_HOME/xfce4/xfconf/xfce-perchannel-xml" \
             2>/dev/null || true
         "$XFCONFD" &
         XFCONFD_PID=$!

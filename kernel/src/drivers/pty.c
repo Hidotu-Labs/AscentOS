@@ -223,16 +223,19 @@ uint32_t ptmx_read(struct vfs_node *node, uint32_t offset, uint32_t size,
       return 0; // EOF: No slaves left
     }
 
-    /* VTE drains the master until EAGAIN.  Sleeping on its second read would
-     * stall the UI loop before it renders bytes returned by the first read. */
     struct thread *current = sched_get_current();
-    if (current) {
+    bool is_nonblock = (node->flags & FS_NONBLOCK) != 0;
+    if (!is_nonblock && current) {
       for (int fd = 0; fd < MAX_FDS; fd++) {
         if (current->fds[fd] == node && (current->fd_flags[fd] & 0x800)) {
-          spinlock_release(&pty->lock);
-          return (uint32_t)-11; /* EAGAIN */
+          is_nonblock = true;
+          break;
         }
       }
+    }
+    if (is_nonblock) {
+      spinlock_release(&pty->lock);
+      return (uint32_t)-11; /* EAGAIN */
     }
 
     // Wait for data from slave
@@ -598,19 +601,19 @@ int ptmx_poll(struct vfs_node *node, int events) {
   spinlock_acquire(&pty->lock);
   int revents = 0;
 
-  if (events & POLLIN) {
+  if (events & (POLLIN | POLLRDNORM)) {
     // Master can read if slave has written anything
     if (!ring_empty(pty->s2m_head, pty->s2m_tail)) {
-      revents |= POLLIN;
+      revents |= (events & (POLLIN | POLLRDNORM));
     } else if (pty->slave_open_count == 0) {
       revents |= POLLHUP;
     }
   }
 
-  if (events & POLLOUT) {
+  if (events & (POLLOUT | POLLWRNORM)) {
     // Master is ready to write if master->slave buffer is not full
     if (!ring_full(pty->m2s_head, pty->m2s_tail)) {
-      revents |= POLLOUT;
+      revents |= (events & (POLLOUT | POLLWRNORM));
     }
   }
 
@@ -695,6 +698,21 @@ uint32_t pty_slave_read(struct vfs_node *node, uint32_t offset, uint32_t size,
       spinlock_release(&pty->lock);
       klog_puts("[PTY] slave_read: master closed, EOF\n");
       return 0; // EOF: Master closed
+    }
+
+    struct thread *current = sched_get_current();
+    bool is_nonblock = (node->flags & FS_NONBLOCK) != 0;
+    if (!is_nonblock && current) {
+      for (int fd = 0; fd < MAX_FDS; fd++) {
+        if (current->fds[fd] == node && (current->fd_flags[fd] & 0x800)) {
+          is_nonblock = true;
+          break;
+        }
+      }
+    }
+    if (is_nonblock) {
+      spinlock_release(&pty->lock);
+      return (uint32_t)-11; /* EAGAIN */
     }
 
     // Wait for data
@@ -789,6 +807,21 @@ uint32_t pty_slave_write(struct vfs_node *node, uint32_t offset, uint32_t size,
     uint32_t free_space = ring_free(pty->s2m_head, pty->s2m_tail);
 
     if (free_space == 0) {
+      struct thread *current = sched_get_current();
+      bool is_nonblock = (node->flags & FS_NONBLOCK) != 0;
+      if (!is_nonblock && current) {
+        for (int fd = 0; fd < MAX_FDS; fd++) {
+          if (current->fds[fd] == node && (current->fd_flags[fd] & 0x800)) {
+            is_nonblock = true;
+            break;
+          }
+        }
+      }
+      if (is_nonblock) {
+        spinlock_release(&pty->lock);
+        return total_written > 0 ? total_written : (uint32_t)-11; /* EAGAIN */
+      }
+
       // Buffer full - block until master reads
       // Wake up master in case it's waiting
       if (pty->master_waitq &&
@@ -1036,19 +1069,19 @@ int pty_slave_poll(struct vfs_node *node, int events) {
   spinlock_acquire(&pty->lock);
   int revents = 0;
 
-  if (events & POLLIN) {
+  if (events & (POLLIN | POLLRDNORM)) {
     // Slave can read if master has written anything
     if (!ring_empty(pty->m2s_head, pty->m2s_tail)) {
-      revents |= POLLIN;
+      revents |= (events & (POLLIN | POLLRDNORM));
     } else if (!pty->master_open) {
       revents |= POLLHUP;
     }
   }
 
-  if (events & POLLOUT) {
+  if (events & (POLLOUT | POLLWRNORM)) {
     // Slave is ready to write if slave->master buffer is not full
     if (!ring_full(pty->s2m_head, pty->s2m_tail)) {
-      revents |= POLLOUT;
+      revents |= (events & (POLLOUT | POLLWRNORM));
     }
   }
 

@@ -91,7 +91,6 @@ static uint64_t alloc_cpu_stack(void) {
 // Public API
 
 struct cpu_info *cpu_get_current(void) {
-  // Return the actual base address we wrote to the MSR
   return (struct cpu_info *)rdmsr(MSR_GS_BASE);
 }
 

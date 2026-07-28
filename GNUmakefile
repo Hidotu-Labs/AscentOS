@@ -214,6 +214,8 @@ disk.img: GNUmakefile userland/winoptions userland/icewm-menu
 disk.img: scripts/configure-accounts.sh userland/ascent-account userland/test_accounts.sh userland/ascent-login.elf
 disk.img:  userland/dns_lookup.elf
 disk.img: userland/test_clone_futex.elf
+disk.img: userland/test_unix_sockets.elf
+disk.img: userland/test_syscall_speed.elf
 disk.img: $(QUAKE2_BUNDLE_FILES)
 disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets/mc9.mp3 assets/train.mp3 assets/test.bmp assets/test.tar assets/room.png assets/logo.png assets/linus.gif userland/forkit.elf userland/forkit-launch.sh userland/about.elf userland/hello_glibc.elf userland/booter.elf userland/reboot.elf userland/shutdown.elf userland/apm.elf userland/test_cpp.elf  userland/kilo.elf  userland/ls.elf userland/lspci.elf userland/lsblk.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/asplay.elf userland/kria.elf userland/doom.elf userland/xrootcursor.elf  userland/jwm.elf userland/doom_x11.elf userland/gtk_test.elf userland/tglgears_fb.elf userland/tglgears_drm.elf userland/tglhello_drm.elf userland/test_mem_stress.elf userland/classicube.elf userland/terrain.png userland/texpacks/classicube.zip initrd/startx.sh initrd/startw.sh initrd/weston.ini userland/ascentd.elf $(ASCENTD_CONFIG_FILES)
 	@echo "Creating root filesystem (ext4)..."
@@ -356,6 +358,10 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 		echo "write userland/test_mem_stress.elf bin/test_mem_stress"; \
 		echo "rm bin/test_clone_futex"; \
 		echo "write userland/test_clone_futex.elf bin/test_clone_futex"; \
+		echo "rm bin/test_unix_sockets"; \
+		echo "write userland/test_unix_sockets.elf bin/test_unix_sockets"; \
+		echo "rm bin/test_syscall_speed"; \
+		echo "write userland/test_syscall_speed.elf bin/test_syscall_speed"; \
 		echo "rm bin/classicube"; \
 		echo "write userland/classicube.elf bin/classicube"; \
 		echo "mkdir texpacks"; \
@@ -793,6 +799,14 @@ userland/test_mem_stress.elf: userland/test_mem_stress.c $(MUSL_LIBC)
 userland/test_clone_futex.elf: userland/test_clone_futex.c userland/test_clone_futex_trampoline.S $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/test_clone_futex.c userland/test_clone_futex_trampoline.S -o userland/test_clone_futex.elf
+
+userland/test_unix_sockets.elf: userland/test_unix_sockets.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_unix_sockets.c -o userland/test_unix_sockets.elf
+
+userland/test_syscall_speed.elf: userland/test_syscall_speed.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_syscall_speed.c -o userland/test_syscall_speed.elf
 
 userland/panic_test.elf: userland/panic_test.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \

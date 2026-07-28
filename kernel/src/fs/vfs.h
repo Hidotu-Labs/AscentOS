@@ -24,11 +24,13 @@
 #define FS_TYPE_MASK 0x0F
 
 // Poll Events
-#define POLLIN 0x0001
-#define POLLOUT 0x0004
-#define POLLERR 0x0008
-#define POLLHUP 0x0010
-#define POLLNVAL 0x0020
+#define POLLIN     0x0001
+#define POLLRDNORM 0x0040  /* Normal data readable (same as EPOLLRDNORM) */
+#define POLLOUT    0x0004
+#define POLLWRNORM 0x0100  /* Normal data writable (same as EPOLLWRNORM) */
+#define POLLERR    0x0008
+#define POLLHUP    0x0010
+#define POLLNVAL   0x0020
 
 struct vfs_node;
 typedef struct vfs_page {

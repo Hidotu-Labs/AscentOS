@@ -515,10 +515,10 @@ static int pipe_poll(vfs_node_t *node, int events) {
     if (!ctx) return 0;
     int revents = 0;
     spinlock_acquire(&ctx->lock);
-    if (!end->writer && ctx->length > ctx->read_offset) revents |= POLLIN;
+    if (!end->writer && ctx->length > ctx->read_offset) revents |= (POLLIN | POLLRDNORM);
     if (!end->writer && !ctx->writer_open)              revents |= POLLHUP;
     if (end->writer && !ctx->reader_open)               revents |= POLLERR;
-    if (end->writer && ctx->reader_open)                revents |= POLLOUT;
+    if (end->writer && ctx->reader_open)                revents |= (POLLOUT | POLLWRNORM);
     spinlock_release(&ctx->lock);
     /* poll(2) reports POLLERR and POLLHUP regardless of the requested mask.
      * A POLLIN-only reader must wake when the final pipe writer closes. */
@@ -532,9 +532,6 @@ static void pipe_close(vfs_node_t *node) {
     spinlock_acquire(&ctx->lock);
     if (end->writer) ctx->writer_open = false;
     else             ctx->reader_open = false;
-    klog_puts("[PIPE] final endpoint close ctx=");
-    klog_hex64((uint64_t)ctx);
-    klog_puts(end->writer ? " writer\n" : " reader\n");
     wait_queue_wake_all(&ctx->wq);
     if (end->writer && ctx->read_node)
         epoll_notify_event(ctx->read_node, POLLHUP);
@@ -609,15 +606,6 @@ static uint64_t sys_pipe2(uint64_t pipefd_ptr, uint64_t flags, uint64_t a2,
     t->fd_flags[fd_read]    = t->fd_flags[fd_write]    = flags;
     pipefd[0] = fd_read;
     pipefd[1] = fd_write;
-    klog_puts("[PIPE] create ctx=");
-    klog_hex64((uint64_t)ctx);
-    klog_puts(" read_fd=");
-    klog_uint64((uint64_t)fd_read);
-    klog_puts(" write_fd=");
-    klog_uint64((uint64_t)fd_write);
-    klog_puts(" flags=");
-    klog_hex64(flags);
-    klog_puts("\n");
     return 0;
 }
 
@@ -938,8 +926,6 @@ static uint64_t sys_memfd_create(uint64_t name_ptr, uint64_t flags_arg,
     t->fd_offsets[fd] = 0;
     fd_path_set(t, fd, node_name);
 
-    klog_puts("[MEMFD_CREATE] name=\""); klog_puts(node_name);
-    klog_puts("\" fd="); klog_uint64(fd); klog_puts("\n");
     return (uint64_t)fd;
 }
 
