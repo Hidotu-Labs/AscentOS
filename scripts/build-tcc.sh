@@ -66,7 +66,7 @@ build_tcc() {
     # Runtime paths on AscentOS
     RUNTIME_TCCDIR="/opt/tcc/lib/tcc"
     # We want TCC to find glibc in standard paths and its own internal headers
-    SYS_INCLUDE_PATHS="/usr/include:/opt/tcc/lib/tcc/include"
+    SYS_INCLUDE_PATHS="/opt/tcc/lib/tcc/include:/usr/include"
     SYS_LIB_PATHS="/lib64:/usr/lib64:/usr/lib"
     # Use the glibc dynamic linker path
     DYNAMIC_LINKER="/lib64/ld-linux-x86-64.so.2"

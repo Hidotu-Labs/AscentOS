@@ -59,7 +59,6 @@ fi
 
 # ── Renderer selection ───────────────────────────────────────────────────
 export WLR_RENDERER_ALLOW_SOFTWARE=1
-export WLR_DRM_NO_ATOMIC=1
 
 renderer=pixman
 case "${ASCENT_RENDERER:-pixman}" in

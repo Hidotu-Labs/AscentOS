@@ -509,19 +509,23 @@ static uint64_t sys_read(uint64_t fd, uint64_t buf, uint64_t count, uint64_t a3,
   (void)a5;
   struct thread *t = sched_get_current();
   if (!is_user_ptr(buf)) {
-    klog_puts("[SYSCALL] read EFAULT: !is_user_ptr(buf) buf=");
-    klog_hex64(buf);
-    klog_puts(" count=");
-    klog_uint64(count);
-    klog_puts("\n");
+    if (count > 0) {  // only log non-zero reads with invalid buffers
+      klog_puts("[SYSCALL] read EFAULT: !is_user_ptr(buf) buf=");
+      klog_hex64(buf);
+      klog_puts(" count=");
+      klog_uint64(count);
+      klog_puts("\n");
+    }
     return (uint64_t)-14;
   }
   if (!vmm_is_user_addr_range_valid(buf, count)) {
-    klog_puts("[SYSCALL] read EFAULT: !vmm_is_user_addr_range_valid(buf, ");
-    klog_uint64(count);
-    klog_puts(") buf=");
-    klog_hex64(buf);
-    klog_puts("\n");
+    if (count > 0) {  // only log non-zero reads with invalid buffers
+      klog_puts("[SYSCALL] read EFAULT: !vmm_is_user_addr_range_valid(buf, ");
+      klog_uint64(count);
+      klog_puts(") buf=");
+      klog_hex64(buf);
+      klog_puts("\n");
+    }
     return (uint64_t)-14;
   }
   if (!t || fd >= MAX_FDS || !t->fds[fd])

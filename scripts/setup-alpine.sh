@@ -363,8 +363,33 @@ install_apk "nano" "main"
 echo "[*] Installing compilation tools..."
 install_apk "make" "main"
 install_apk "gcc" "main"
+# gcc runtime shared-library dependencies (cc1/lto1 link against these)
+install_apk "isl26" "main"
+install_apk "mpfr4" "main"
+install_apk "mpc1" "main"
 install_apk "musl-dev" "main"
 install_apk "binutils" "main"
+
+# Wrap the real gcc with a script that locks the sysroot to / so that
+# cc1 always resolves #include <...> against the rootfs's musl headers
+# rather than any host glibc headers that may bleed through the VFS.
+echo "[*] Installing gcc sysroot wrapper..."
+GCC_REAL="${ROOTFS_DIR}/usr/bin/gcc"
+GCC_WRAPPER="${ROOTFS_DIR}/usr/bin/gcc"
+if [ -f "${GCC_REAL}" ]; then
+    mv "${GCC_REAL}" "${ROOTFS_DIR}/usr/bin/gcc.real"
+    cat > "${GCC_WRAPPER}" << 'GCC_WRAP_EOF'
+#!/bin/sh
+# gcc wrapper — forces --sysroot=/ so the compiler always uses the musl
+# headers and libraries inside the AscentOS rootfs image, not host glibc.
+exec /usr/bin/gcc.real \
+    --sysroot=/ \
+    -isystem /usr/lib/gcc/x86_64-alpine-linux-musl/14.2.0/include \
+    -isystem /usr/include \
+    "$@"
+GCC_WRAP_EOF
+    chmod +x "${GCC_WRAPPER}"
+fi
 
 # GTK 3.0 Development headers
 echo "[*] Installing GTK 3.0 development packages..."

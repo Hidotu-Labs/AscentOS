@@ -268,8 +268,8 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 		echo "write toolchain/glibc-sysroot/lib/ld-linux-x86-64.so.2 lib64/ld-linux-x86-64.so.2"; \
 	} | debugfs -w ./part.img >/dev/null 2>&1 || true
 	@if [ -d toolchain/glibc-sysroot/usr/include ]; then \
-		echo "Installing GLIBC headers into disk image..."; \
-		./scripts/populate-ext2-dir.sh ./part.img toolchain/glibc-sysroot/usr/include usr/include; \
+		echo "Installing GLIBC headers into disk image (opt/glibc/include)..."; \
+		./scripts/populate-ext2-dir.sh ./part.img toolchain/glibc-sysroot/usr/include opt/glibc/include; \
 	fi
 	@if [ -d toolchain/glibc-sysroot/usr/lib ]; then \
 		echo "Installing GLIBC libs into /usr/lib64..."; \
@@ -320,9 +320,9 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 		echo "rm test.wav"; \
 		echo "write assets/test.wav test.wav"; \
 		echo "rm boot.wav"; \
-		echo "write userland/test.c test.c"; \
-		echo "rm test.c"; \
 		echo "write assets/boot.wav boot.wav"; \
+		echo "rm test.c"; \
+		echo "write userland/test.c test.c"; \
 		echo "rm jane.mp3"; \
 		echo "write assets/jane.mp3 jane.mp3"; \
 		echo "rm mc9.mp3"; \
@@ -457,6 +457,34 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 		debugfs -w -R "write build/tcc-glibc-install/opt/tcc/bin/tcc bin/tcc" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "rm lib64/libtcc.so" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "write build/tcc-glibc-install/opt/tcc/lib/libtcc.so lib64/libtcc.so" ./part.img >/dev/null 2>&1 || true; \
+		if [ -f toolchain/musl-sysroot/lib/libc.a ]; then \
+			echo "Installing musl static libs into TCC lib dir for static linking..."; \
+			debugfs -w -R "mkdir opt/tcc/lib/musl" ./part.img >/dev/null 2>&1 || true; \
+			debugfs -w -R "rm opt/tcc/lib/musl/libc.a" ./part.img >/dev/null 2>&1 || true; \
+			debugfs -w -R "write toolchain/musl-sysroot/lib/libc.a opt/tcc/lib/musl/libc.a" ./part.img >/dev/null 2>&1 || true; \
+			debugfs -w -R "rm opt/tcc/lib/musl/libm.a" ./part.img >/dev/null 2>&1 || true; \
+			debugfs -w -R "write toolchain/musl-sysroot/lib/libm.a opt/tcc/lib/musl/libm.a" ./part.img >/dev/null 2>&1 || true; \
+			debugfs -w -R "rm opt/tcc/lib/musl/libpthread.a" ./part.img >/dev/null 2>&1 || true; \
+			debugfs -w -R "write toolchain/musl-sysroot/lib/libpthread.a opt/tcc/lib/musl/libpthread.a" ./part.img >/dev/null 2>&1 || true; \
+			debugfs -w -R "rm opt/tcc/lib/musl/crt1.o" ./part.img >/dev/null 2>&1 || true; \
+			debugfs -w -R "write toolchain/musl-sysroot/lib/crt1.o opt/tcc/lib/musl/crt1.o" ./part.img >/dev/null 2>&1 || true; \
+			debugfs -w -R "rm opt/tcc/lib/musl/crti.o" ./part.img >/dev/null 2>&1 || true; \
+			debugfs -w -R "write toolchain/musl-sysroot/lib/crti.o opt/tcc/lib/musl/crti.o" ./part.img >/dev/null 2>&1 || true; \
+			debugfs -w -R "rm opt/tcc/lib/musl/crtn.o" ./part.img >/dev/null 2>&1 || true; \
+			debugfs -w -R "write toolchain/musl-sysroot/lib/crtn.o opt/tcc/lib/musl/crtn.o" ./part.img >/dev/null 2>&1 || true; \
+			LIBGCC_DIR=$$(find toolchain/x86_64-linux-musl/lib/gcc/x86_64-linux-musl -name "libgcc.a" -maxdepth 2 2>/dev/null | head -1 | xargs dirname 2>/dev/null); \
+			if [ -n "$$LIBGCC_DIR" ] && [ -f "$$LIBGCC_DIR/libgcc.a" ]; then \
+				echo "Installing libgcc.a and libgcc_eh.a into TCC lib dir..."; \
+				debugfs -w -R "rm opt/tcc/lib/musl/libgcc.a" ./part.img >/dev/null 2>&1 || true; \
+				debugfs -w -R "write $$LIBGCC_DIR/libgcc.a opt/tcc/lib/musl/libgcc.a" ./part.img >/dev/null 2>&1 || true; \
+				if [ -f "$$LIBGCC_DIR/libgcc_eh.a" ]; then \
+					debugfs -w -R "rm opt/tcc/lib/musl/libgcc_eh.a" ./part.img >/dev/null 2>&1 || true; \
+					debugfs -w -R "write $$LIBGCC_DIR/libgcc_eh.a opt/tcc/lib/musl/libgcc_eh.a" ./part.img >/dev/null 2>&1 || true; \
+				fi; \
+			fi; \
+			echo "Installing musl headers into TCC dir for static linking..."; \
+			./scripts/populate-ext2-dir.sh ./part.img toolchain/musl-sysroot/include opt/tcc/lib/tcc/musl-include; \
+		fi; \
 	elif [ -d toolchain/musl-sysroot/opt/tcc ]; then \
 		echo "Installing MUSL TCC into disk image..."; \
 		./scripts/populate-ext2-dir.sh ./part.img toolchain/musl-sysroot/opt/tcc opt/tcc; \
@@ -467,6 +495,10 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 		debugfs -w -R "write toolchain/musl-sysroot/lib/crtn.o crtn.o" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "write toolchain/musl-sysroot/opt/tcc/lib/tcc/libtcc1.a libtcc1.a" ./part.img >/dev/null 2>&1 || true; \
 	fi
+	@echo "Installing tcc-static wrapper..."
+	@debugfs -w -R "rm bin/tcc-static" ./part.img >/dev/null 2>&1 || true
+	@debugfs -w -R "write userland/tcc-static.sh bin/tcc-static" ./part.img >/dev/null 2>&1 || true
+	@debugfs -w -R "set_inode_field bin/tcc-static mode 0100755" ./part.img >/dev/null 2>&1 || true
 	@if [ -d toolchain/glibc-sysroot/opt/coreutils ]; then \
 		echo "Installing glibc coreutils into disk image..."; \
 		./scripts/populate-ext2-dir.sh ./part.img toolchain/glibc-sysroot/opt/coreutils opt/coreutils; \

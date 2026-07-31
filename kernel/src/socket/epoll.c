@@ -13,33 +13,25 @@
 #include "socket.h"
 #include <stdint.h>
 
-// Global Epoll Instance Table
+// Global Epoll Instance Table and Memory Pools
 static eventpoll_t *epoll_table[EPOLL_MAX_INSTANCES];
-static int epoll_count = 0;
+static eventpoll_t epoll_pool[EPOLL_MAX_INSTANCES];
+static vfs_node_t epoll_vfs_pool[EPOLL_MAX_INSTANCES];
+static uint64_t epoll_free_bitmap = ~0ULL; // 1 = free, 0 = in use
 static spinlock_t epoll_table_lock = SPINLOCK_INIT;
 
-/*
- * Notifications are normally reliable. Keep a short timeout on otherwise
- * unbounded waits as a safety net against a future producer missing a wakeup.
- * Timer ticks are expressed in milliseconds throughout the scheduler API.
- */
 #define EPOLL_RESCAN_INTERVAL_MS 100
-
-// Epoll Instance Table Management
 
 static int epoll_table_alloc(void) {
   spinlock_acquire(&epoll_table_lock);
-
-  for (int i = 0; i < EPOLL_MAX_INSTANCES; i++) {
-    if (epoll_table[i] == NULL) {
-      epoll_count++;
-      spinlock_release(&epoll_table_lock);
-      return i;
-    }
+  if (epoll_free_bitmap == 0) {
+    spinlock_release(&epoll_table_lock);
+    return -1; // Table full
   }
-
+  int idx = __builtin_ctzll(epoll_free_bitmap);
+  epoll_free_bitmap &= ~(1ULL << idx);
   spinlock_release(&epoll_table_lock);
-  return -1; // Table full
+  return idx;
 }
 
 static void epoll_table_free(int idx) {
@@ -48,7 +40,7 @@ static void epoll_table_free(int idx) {
 
   spinlock_acquire(&epoll_table_lock);
   epoll_table[idx] = NULL;
-  epoll_count--;
+  epoll_free_bitmap |= (1ULL << idx);
   spinlock_release(&epoll_table_lock);
 }
 
@@ -76,27 +68,33 @@ static void epitem_free(epitem_t *epi) {
 // Epoll Instance Creation/Destruction
 
 eventpoll_t *epoll_create(void) {
-  // Allocate epoll structure
-  eventpoll_t *ep = kmalloc(sizeof(eventpoll_t));
-  if (!ep) {
-    klog_puts("[ERR] epoll: failed to allocate eventpoll structure\n");
-    return NULL;
-  }
-
-  memset(ep, 0, sizeof(eventpoll_t));
-
-  // Allocate table slot
   int idx = epoll_table_alloc();
   if (idx < 0) {
-    kfree(ep);
     klog_puts("[ERR] epoll: epoll table full\n");
     return NULL;
   }
 
-  // Initialize
+  eventpoll_t *ep = &epoll_pool[idx];
+
+  // Fast reset: item_count and watched items only reset if previously used
+  if (ep->item_count > 0) {
+    for (int i = 0; i < EPOLL_MAX_WATCHED; i++) {
+      if (ep->items[i]) {
+        epitem_free(ep->items[i]);
+        ep->items[i] = NULL;
+      }
+    }
+    ep->item_count = 0;
+  } else {
+    // Ensure array is null-initialized
+    for (int i = 0; i < EPOLL_MAX_WATCHED; i++) {
+      ep->items[i] = NULL;
+    }
+  }
+
+  // Fast targeted field initialization
   ep->fd = -1;
   ep->vfs_node = NULL;
-  ep->item_count = 0;
   INIT_LIST_HEAD(&ep->rdllist);
   ep->rdllist_count = 0;
   wait_queue_init(&ep->wq);
@@ -115,35 +113,32 @@ void epoll_destroy(eventpoll_t *ep) {
   }
 
   // Free all watched items and release the VFS references acquired by
-  // EPOLL_CTL_ADD. Holding these references keeps watcher links valid even
-  // when userspace closes a watched fd before closing the epoll fd.
-  for (int i = 0; i < EPOLL_MAX_WATCHED; i++) {
-    epitem_t *epi = ep->items[i];
-    if (epi) {
-      if (epi->on_ready_list) {
-        list_del(&epi->rdllink);
-        epi->on_ready_list = false;
+  // EPOLL_CTL_ADD.
+  if (ep->item_count > 0) {
+    for (int i = 0; i < EPOLL_MAX_WATCHED; i++) {
+      epitem_t *epi = ep->items[i];
+      if (epi) {
+        if (epi->on_ready_list) {
+          list_del(&epi->rdllink);
+          epi->on_ready_list = false;
+        }
+        if (epi->node) {
+          spinlock_acquire(&epi->node->ep_lock);
+          list_del(&epi->ep_node_link);
+          spinlock_release(&epi->node->ep_lock);
+          vfs_close(epi->node);
+        }
+        epitem_free(epi);
+        ep->items[i] = NULL;
       }
-      if (epi->node) {
-        spinlock_acquire(&epi->node->ep_lock);
-        list_del(&epi->ep_node_link);
-        spinlock_release(&epi->node->ep_lock);
-        vfs_close(epi->node);
-      }
-      epitem_free(epi);
-      ep->items[i] = NULL;
     }
+    ep->item_count = 0;
   }
 
-  // Remove from table
-  for (int i = 0; i < EPOLL_MAX_INSTANCES; i++) {
-    if (epoll_table[i] == ep) {
-      epoll_table_free(i);
-      break;
-    }
+  int idx = (int)(ep - epoll_pool);
+  if (idx >= 0 && idx < EPOLL_MAX_INSTANCES) {
+    epoll_table_free(idx);
   }
-
-  kfree(ep);
 }
 
 void epoll_get(eventpoll_t *ep) {
@@ -574,17 +569,18 @@ int epoll_alloc_fd(eventpoll_t *ep) {
   if (fd < 0)
     return -24; // EMFILE
 
-  // Create VFS node for epoll instance
-  vfs_node_t *node = kmalloc(sizeof(vfs_node_t));
-  if (!node) {
-    return -12; // ENOMEM
-  }
+  int idx = (int)(ep - epoll_pool);
+  vfs_node_t *node = &epoll_vfs_pool[idx];
 
-  vfs_node_init(node);
-  node->flags = FS_EPOLL;
+  // Fast initialize pre-allocated VFS node
+  node->name[0] = '\0';
+  node->flags = FS_EPOLL | FS_PERSISTENT;
   node->inode = (uint32_t)(uint64_t)ep;
   node->device = ep;
   node->wait_queue = &ep->wq;
+  node->refcount = 1;
+  INIT_LIST_HEAD(&node->ep_watchers);
+  spinlock_init(&node->ep_lock);
 
   // Set epoll VFS operations
   node->read = epoll_vfs_read;
@@ -597,10 +593,6 @@ int epoll_alloc_fd(eventpoll_t *ep) {
   ep->vfs_node = node; // Store for nested epoll propagation
   t->fds[fd] = node;
   t->fd_offsets[fd] = 0;
-
-  // vfs_node_init() created the node with refcount 1; that initial node
-  // reference is the fd-table ownership. The epoll object's initial
-  // reference is transferred to the node and released by epoll_vfs_close().
 
   return fd;
 }
@@ -792,7 +784,9 @@ void epoll_notify_socket(int fd, uint32_t events) {
 
 void epoll_init(void) {
   memset(epoll_table, 0, sizeof(epoll_table));
-  epoll_count = 0;
+  memset(epoll_pool, 0, sizeof(epoll_pool));
+  memset(epoll_vfs_pool, 0, sizeof(epoll_vfs_pool));
+  epoll_free_bitmap = ~0ULL;
   spinlock_init(&epoll_table_lock);
 
   klog_puts("[OK] Epoll subsystem initialized (max instances: ");

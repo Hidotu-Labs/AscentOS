@@ -38,8 +38,23 @@ fi
 
 CMDS_FILE=$(mktemp)
 
+# Resolve debugfs binary early so the stale-file wipe below can use it.
+DEBUGFS_BIN=debugfs
+if [ -x /run/host/usr/bin/debugfs ]; then
+  DEBUGFS_BIN=/run/host/usr/bin/debugfs
+fi
+
 # Start generating commands
 echo "cd /" > "$CMDS_FILE"
+
+# Wipe the destination tree so stale files from previous builds (e.g. old
+# glibc headers left behind by a tool-chain package that was later removed)
+# are not present in the image alongside the fresh musl rootfs.
+# Use a separate one-shot invocation so a missing rm_rf command (e2fsprogs
+# < 1.44) does not abort the population; the worst case is stale files survive.
+if [ "$DST_DIR" != "/" ]; then
+    "$DEBUGFS_BIN" -w "$IMG_PATH" -R "rm_rf ${DST_DIR}" >/dev/null 2>&1 || true
+fi
 
 ensure_dir_cmds() {
   cur=""

@@ -194,7 +194,8 @@ build_sysroot() {
 		--enable-static \
 		--host="$HOST_TRIPLET" \
 		AR="$AR" \
-		RANLIB="$RANLIB"
+		RANLIB="$RANLIB" \
+		CFLAGS="-O2 -fno-PIC -fno-pie"
 
 	make -j"$JOBS"
 	make install
