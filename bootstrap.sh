@@ -3,9 +3,9 @@
 set -e
 
 # Repository URLs
-CC_RUNTIME_URL="https://codeberg.org/OSDev/cc-runtime.git"
+CC_RUNTIME_URL="https://github.com/osdev0/cc-runtime.git"
 LIMINE_PROTOCOL_URL="https://github.com/limine-bootloader/limine-protocol.git"
-FREESTND_C_HDRS_URL="https://codeberg.org/OSDev/freestnd-c-hdrs-0bsd.git"
+FREESTND_C_HDRS_URL="https://github.com/osdev0/freestnd-c-hdrs-0bsd.git"
 
 # Function to setup a dependency
 setup_dep() {

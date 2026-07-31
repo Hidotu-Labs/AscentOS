@@ -116,10 +116,12 @@ USER_DIRS_EOF
                 "$XDG_CONFIG_HOME/xfce4/xfconf/xfce-perchannel-xml/$channel.xml"
         fi
     done
+    # Minimalist XFCE setup configuration: single clean top bar, dark theme, disabled desktop icons
     cat > "$XDG_CONFIG_HOME/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml" << 'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <channel name="xfwm4" version="1.0">
   <property name="general" type="empty">
+    <property name="theme" type="string" value="Default-dark"/>
     <property name="use_compositing" type="bool" value="true"/>
     <property name="unredirect_overlays" type="bool" value="false"/>
     <property name="box_move" type="bool" value="false"/>
@@ -129,9 +131,82 @@ USER_DIRS_EOF
   </property>
 </channel>
 EOF
-    if [ -d /etc/xdg/xfce4/panel ]; then
-        cp -r /etc/xdg/xfce4/panel "$XDG_CONFIG_HOME/xfce4/panel"
-    fi
+
+    cat > "$XDG_CONFIG_HOME/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml" << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xfce4-panel" version="1.0">
+  <property name="panels" type="array">
+    <value type="int" value="1"/>
+    <property name="panel-1" type="empty">
+      <property name="position" type="string" value="p=6;x=0;y=0"/>
+      <property name="length" type="uint" value="100"/>
+      <property name="position-locked" type="bool" value="true"/>
+      <property name="size" type="uint" value="26"/>
+      <property name="plugin-ids" type="array">
+        <value type="int" value="1"/>
+        <value type="int" value="2"/>
+        <value type="int" value="3"/>
+        <value type="int" value="4"/>
+        <value type="int" value="5"/>
+      </property>
+    </property>
+  </property>
+  <property name="plugins" type="empty">
+    <property name="plugin-1" type="string" value="applicationsmenu"/>
+    <property name="plugin-2" type="string" value="tasklist">
+      <property name="flat-buttons" type="bool" value="true"/>
+      <property name="show-labels" type="bool" value="true"/>
+    </property>
+    <property name="plugin-3" type="string" value="separator">
+      <property name="expand" type="bool" value="true"/>
+      <property name="style" type="uint" value="0"/>
+    </property>
+    <property name="plugin-4" type="string" value="systray"/>
+    <property name="plugin-5" type="string" value="clock">
+      <property name="digital-format" type="string" value="%H:%M"/>
+    </property>
+  </property>
+</channel>
+EOF
+
+    cat > "$XDG_CONFIG_HOME/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml" << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xfce4-desktop" version="1.0">
+  <property name="desktop-icons" type="empty">
+    <property name="style" type="int" value="0"/>
+  </property>
+  <property name="backdrop" type="empty">
+    <property name="screen0" type="empty">
+      <property name="monitor0" type="empty">
+        <property name="workspace0" type="empty">
+          <property name="color-style" type="int" value="0"/>
+          <property name="rgba1" type="array">
+            <value type="double" value="0.12"/>
+            <value type="double" value="0.13"/>
+            <value type="double" value="0.15"/>
+            <value type="double" value="1.0"/>
+          </property>
+          <property name="image-style" type="int" value="0"/>
+        </property>
+      </property>
+    </property>
+  </property>
+</channel>
+EOF
+
+    cat > "$XDG_CONFIG_HOME/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml" << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xsettings" version="1.0">
+  <property name="Net" type="empty">
+    <property name="ThemeName" type="string" value="Adwaita-dark"/>
+    <property name="IconThemeName" type="string" value="Adwaita"/>
+  </property>
+  <property name="Gtk" type="empty">
+    <property name="CursorThemeName" type="string" value="Adwaita"/>
+    <property name="CursorThemeSize" type="int" value="24"/>
+  </property>
+</channel>
+EOF
 
     # Ensure D-Bus machine-id exists to prevent GDBus / GTK startup delays
     if [ ! -s /etc/machine-id ]; then
@@ -238,13 +313,6 @@ CMUS_EOF
     sleep 0.5
     xfdesktop &
     XFDESKTOP_PID=$!
-    # Apply the wallpaper shortly after xfdesktop claims the root window,
-    # without blocking the rest of the desktop startup.
-    if command -v feh >/dev/null 2>&1; then
-        ( sleep 0.2; feh --no-fehbg --bg-fill \
-            /usr/share/backgrounds/xfce/xfce-blue.jpg \
-            >/tmp/xfce-wallpaper.log 2>&1 ) &
-    fi
     xfce4-panel &
     XFPANEL_PID=$!
 

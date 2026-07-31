@@ -931,11 +931,12 @@ cat > "${XFCE_SESSION_DIR}/xfce4-session.xml" << 'EOF'
 </channel>
 EOF
 
-# xfwm4 compositor settings — enable compositing with live opaque window dragging
+# xfwm4 — minimal dark window decorations
 cat > "${XFCE_SESSION_DIR}/xfwm4.xml" << 'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <channel name="xfwm4" version="1.0">
   <property name="general" type="empty">
+    <property name="theme" type="string" value="Default-dark"/>
     <property name="use_compositing" type="bool" value="true"/>
     <property name="unredirect_overlays" type="bool" value="false"/>
     <property name="box_move" type="bool" value="false"/>
@@ -946,128 +947,63 @@ cat > "${XFCE_SESSION_DIR}/xfwm4.xml" << 'EOF'
 </channel>
 EOF
 
-# xfce4-panel layout — top bar (app menu + tasklist + clock) and bottom dock
-# (showdesktop, terminal, file manager, web browser, appfinder, directorymenu).
-# Each launcher has an items array so xfce4-panel can resolve the icon;
-# without it the panel falls back to a gear.
+# xfce4-panel — minimalist single top bar: app menu | tasklist | [spacer] | systray | clock
 cat > "${XFCE_SESSION_DIR}/xfce4-panel.xml" << 'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <channel name="xfce4-panel" version="1.0">
   <property name="panels" type="array">
     <value type="int" value="1"/>
-    <value type="int" value="2"/>
     <property name="panel-1" type="empty">
       <property name="position" type="string" value="p=6;x=0;y=0"/>
       <property name="length" type="uint" value="100"/>
       <property name="position-locked" type="bool" value="true"/>
-      <property name="size" type="uint" value="28"/>
+      <property name="size" type="uint" value="26"/>
       <property name="plugin-ids" type="array">
         <value type="int" value="1"/>
         <value type="int" value="2"/>
         <value type="int" value="3"/>
-      </property>
-    </property>
-    <property name="panel-2" type="empty">
-      <property name="position" type="string" value="p=10;x=640;y=770"/>
-      <property name="length" type="uint" value="24"/>
-      <property name="length-adjust" type="bool" value="true"/>
-      <property name="position-locked" type="bool" value="true"/>
-      <property name="size" type="uint" value="48"/>
-      <property name="plugin-ids" type="array">
-        <value type="int" value="7"/>
         <value type="int" value="4"/>
         <value type="int" value="5"/>
-        <value type="int" value="6"/>
-        <value type="int" value="8"/>
-        <value type="int" value="9"/>
       </property>
     </property>
   </property>
   <property name="plugins" type="empty">
     <property name="plugin-1" type="string" value="applicationsmenu"/>
-    <property name="plugin-2" type="string" value="tasklist"/>
-    <property name="plugin-3" type="string" value="clock"/>
-    <property name="plugin-4" type="string" value="launcher">
-      <property name="items" type="array">
-        <value type="string" value="xfce4-terminal.desktop"/>
-      </property>
+    <property name="plugin-2" type="string" value="tasklist">
+      <property name="flat-buttons" type="bool" value="true"/>
+      <property name="show-labels" type="bool" value="true"/>
     </property>
-    <property name="plugin-5" type="string" value="launcher">
-      <property name="items" type="array">
-        <value type="string" value="thunar.desktop"/>
-      </property>
+    <property name="plugin-3" type="string" value="separator">
+      <property name="expand" type="bool" value="true"/>
+      <property name="style" type="uint" value="0"/>
     </property>
-    <property name="plugin-6" type="string" value="launcher">
-      <property name="items" type="array">
-        <value type="string" value="xfce4-web-browser.desktop"/>
-      </property>
+    <property name="plugin-4" type="string" value="systray"/>
+    <property name="plugin-5" type="string" value="clock">
+      <property name="digital-format" type="string" value="%H:%M"/>
     </property>
-    <property name="plugin-7" type="string" value="showdesktop"/>
-    <property name="plugin-8" type="string" value="launcher">
-      <property name="items" type="array">
-        <value type="string" value="xfce4-appfinder.desktop"/>
-      </property>
-    </property>
-    <property name="plugin-9" type="string" value="directorymenu"/>
   </property>
 </channel>
 EOF
 
-XFCE_PANEL_DIR="${ROOTFS_DIR}/etc/xdg/xfce4/panel"
-mkdir -p "${XFCE_PANEL_DIR}/launcher-4" "${XFCE_PANEL_DIR}/launcher-5" \
-         "${XFCE_PANEL_DIR}/launcher-6" "${XFCE_PANEL_DIR}/launcher-8"
-
-# Ensure each launcher directory contains exactly one .desktop file matching
-# the plugin-ids array in xfce4-panel.xml.  Extra files cause xfce4-panel to
-# show a gear icon instead of the intended icon on subsequent boots.
-rm -f "${XFCE_PANEL_DIR}/launcher-4/"*.desktop
-rm -f "${XFCE_PANEL_DIR}/launcher-5/"*.desktop
-rm -f "${XFCE_PANEL_DIR}/launcher-6/"*.desktop
-rm -f "${XFCE_PANEL_DIR}/launcher-7/"*.desktop   # plugin-7 = showdesktop, no items
-rm -f "${XFCE_PANEL_DIR}/launcher-8/"*.desktop
-
-cp -f "${ROOTFS_DIR}/usr/share/applications/xfce4-terminal.desktop" \
-      "${XFCE_PANEL_DIR}/launcher-4/"
-cp -f "${ROOTFS_DIR}/usr/share/applications/thunar.desktop" \
-      "${XFCE_PANEL_DIR}/launcher-5/"
-# Use the blue file-manager cabinet icon instead of the default Thunar icon
-sed -i 's/^Icon=org\.xfce\.thunar$/Icon=org.xfce.filemanager/' \
-    "${ROOTFS_DIR}/usr/share/applications/thunar.desktop" \
-    "${XFCE_PANEL_DIR}/launcher-5/thunar.desktop"
-cp -f "${ROOTFS_DIR}/usr/share/applications/xfce4-web-browser.desktop" \
-      "${XFCE_PANEL_DIR}/launcher-6/"
-cp -f "${ROOTFS_DIR}/usr/share/applications/xfce4-appfinder.desktop" \
-      "${XFCE_PANEL_DIR}/launcher-8/"
-
-cat > "${XFCE_SESSION_DIR}/xfce4-desktop.xml" << EOF
+# xfce4-desktop — no desktop icons, solid near-black background
+cat > "${XFCE_SESSION_DIR}/xfce4-desktop.xml" << 'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <channel name="xfce4-desktop" version="1.0">
-  <!-- Keep xfdesktop&apos;s icon view active. Besides showing files from
-       ~/Desktop, this is the widget that implements click-drag rubber-band
-       selection on an otherwise empty desktop. -->
   <property name="desktop-icons" type="empty">
-    <property name="style" type="int" value="2"/>
-    <property name="icon-size" type="uint" value="48"/>
-    <property name="show-tooltips" type="bool" value="true"/>
+    <property name="style" type="int" value="0"/>
   </property>
   <property name="backdrop" type="empty">
     <property name="screen0" type="empty">
       <property name="monitor0" type="empty">
         <property name="workspace0" type="empty">
-          <property name="image-style" type="int" value="5"/>
-          <property name="last-image" type="string" value="/usr/share/backgrounds/xfce/xfce-blue.jpg"/>
-        </property>
-      </property>
-      <property name="monitorHDMI-1" type="empty">
-        <property name="workspace0" type="empty">
-          <property name="image-style" type="int" value="5"/>
-          <property name="last-image" type="string" value="/usr/share/backgrounds/xfce/xfce-blue.jpg"/>
-        </property>
-      </property>
-      <property name="monitorHDMI-A-1" type="empty">
-        <property name="workspace0" type="empty">
-          <property name="image-style" type="int" value="5"/>
-          <property name="last-image" type="string" value="/usr/share/backgrounds/xfce/xfce-blue.jpg"/>
+          <property name="color-style" type="int" value="0"/>
+          <property name="rgba1" type="array">
+            <value type="double" value="0.12"/>
+            <value type="double" value="0.13"/>
+            <value type="double" value="0.15"/>
+            <value type="double" value="1.0"/>
+          </property>
+          <property name="image-style" type="int" value="0"/>
         </property>
       </property>
     </property>
@@ -1075,12 +1011,12 @@ cat > "${XFCE_SESSION_DIR}/xfce4-desktop.xml" << EOF
 </channel>
 EOF
 
-# Pin GTK and cursor settings instead of inheriting host or Alpine defaults.
+# Pin GTK and cursor settings — dark theme for all GTK apps
 cat > "${XFCE_SESSION_DIR}/xsettings.xml" << 'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <channel name="xsettings" version="1.0">
   <property name="Net" type="empty">
-    <property name="ThemeName" type="string" value="Adwaita"/>
+    <property name="ThemeName" type="string" value="Adwaita-dark"/>
     <property name="IconThemeName" type="string" value="Adwaita"/>
   </property>
   <property name="Gtk" type="empty">
