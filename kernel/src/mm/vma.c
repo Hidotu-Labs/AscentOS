@@ -169,6 +169,7 @@ static struct vma *delete_node(struct vma *node, uint64_t start,
       node->prot = temp->prot;
       node->flags = temp->flags;
       node->offset = temp->offset;
+      node->file_size = temp->file_size;
       node->fd = temp->fd;
       node->file_node = temp->file_node;
       temp->file_node = NULL;
@@ -228,7 +229,8 @@ void vma_list_destroy(struct vma_list *list) {
 }
 
 int vma_add(struct vma_list *list, uint64_t start, uint64_t end, uint64_t prot,
-            uint64_t flags, int fd, uint64_t offset, void *file_node) {
+            uint64_t flags, int fd, uint64_t offset, void *file_node,
+            uint64_t file_size) {
   if (vma_find_overlap(list, start, end)) {
     return -1; // Overlapping regions rejected
   }
@@ -243,6 +245,7 @@ int vma_add(struct vma_list *list, uint64_t start, uint64_t end, uint64_t prot,
   new_node->prot = prot;
   new_node->flags = flags;
   new_node->offset = offset;
+  new_node->file_size = file_size;
   new_node->fd = fd;
   new_node->file_node = file_node;
   vma_file_ref(file_node);
@@ -271,6 +274,7 @@ bool vma_remove(struct vma_list *list, uint64_t start, uint64_t end) {
     uint64_t flags = v->flags;
     int fd = v->fd;
     uint64_t offset = v->offset;
+    uint64_t orig_file_size = v->file_size;
     void *vma_file_node = v->file_node;
     vma_file_ref(vma_file_node);
 
@@ -283,18 +287,30 @@ bool vma_remove(struct vma_list *list, uint64_t start, uint64_t end) {
 
     // Case 2: Unmap from middle - split into two flanking regions
     if (start > v_start && end < v_end) {
-      vma_add(list, v_start, start, prot, flags, fd, offset, vma_file_node);
-      vma_add(list, end, v_end, prot, flags, fd, offset + (end - v_start),
-              vma_file_node);
+      uint64_t len1 = start - v_start;
+      uint64_t sub1 = MIN(orig_file_size, len1);
+
+      uint64_t rel2 = end - v_start;
+      uint64_t len2 = v_end - end;
+      uint64_t sub2 = (orig_file_size > rel2) ? MIN(orig_file_size - rel2, len2) : 0;
+
+      vma_add(list, v_start, start, prot, flags, fd, offset, vma_file_node, sub1);
+      vma_add(list, end, v_end, prot, flags, fd, offset + rel2, vma_file_node, sub2);
     }
     // Case 3: Unmap from start - shrinking start boundary forward
     else if (start <= v_start && end > v_start && end < v_end) {
-      vma_add(list, end, v_end, prot, flags, fd, offset + (end - v_start),
-              vma_file_node);
+      uint64_t rel = end - v_start;
+      uint64_t len = v_end - end;
+      uint64_t sub = (orig_file_size > rel) ? MIN(orig_file_size - rel, len) : 0;
+
+      vma_add(list, end, v_end, prot, flags, fd, offset + rel, vma_file_node, sub);
     }
     // Case 4: Unmap from end - shrinking end boundary backward
     else if (end >= v_end && start > v_start && start < v_end) {
-      vma_add(list, v_start, start, prot, flags, fd, offset, vma_file_node);
+      uint64_t len = start - v_start;
+      uint64_t sub = MIN(orig_file_size, len);
+
+      vma_add(list, v_start, start, prot, flags, fd, offset, vma_file_node, sub);
     }
 
     vma_file_unref(vma_file_node);
@@ -325,9 +341,14 @@ int vma_mprotect(struct vma_list *list, uint64_t start, uint64_t end,
     uint64_t flags = v->flags;
     int fd = v->fd;
     uint64_t offset = v->offset;
+    uint64_t orig_file_size = v->file_size;
     void *vma_file_node = v->file_node;
     uint64_t original_start = v->start;
     vma_file_ref(vma_file_node);
+
+    uint64_t rel = m_start - original_start;
+    uint64_t m_len = m_end - m_start;
+    uint64_t sub_file_size = (orig_file_size > rel) ? MIN(orig_file_size - rel, m_len) : 0;
 
     // Remove the overlapping part. vma_remove handles splitting the original
     // VMA.
@@ -336,7 +357,7 @@ int vma_mprotect(struct vma_list *list, uint64_t start, uint64_t end,
     // Re-insert with new prot. The offset must be adjusted based on where
     // this segment started relative to the original VMA.
     vma_add(list, m_start, m_end, new_prot, flags, fd,
-            offset + (m_start - original_start), vma_file_node);
+            offset + rel, vma_file_node, sub_file_size);
     vma_file_unref(vma_file_node);
 
     curr = m_end;
@@ -349,17 +370,14 @@ static struct vma *vma_find_recursive(struct vma *node, uint64_t addr) {
     return NULL;
   if (addr >= node->start && addr < node->end)
     return node;
-
-  if (node->left && node->left->max_end > addr) {
-    struct vma *res = vma_find_recursive(node->left, addr);
-    if (res)
-      return res;
-  }
-
+  if (addr < node->start)
+    return vma_find_recursive(node->left, addr);
   return vma_find_recursive(node->right, addr);
 }
 
 struct vma *vma_find(struct vma_list *list, uint64_t addr) {
+  if (!list)
+    return NULL;
   return vma_find_recursive(list->root, addr);
 }
 
@@ -368,20 +386,25 @@ static struct vma *vma_find_overlap_recursive(struct vma *node, uint64_t start,
   if (!node)
     return NULL;
 
-  if (node->start < end && node->end > start)
+  if (node->left && node->left->max_end > start) {
+    struct vma *left_res = vma_find_overlap_recursive(node->left, start, end);
+    if (left_res)
+      return left_res;
+  }
+
+  if (start < node->end && end > node->start)
     return node;
 
-  if (node->left && node->left->max_end > start) {
-    struct vma *res = vma_find_overlap_recursive(node->left, start, end);
-    if (res)
-      return res;
-  }
+  if (start >= node->max_end)
+    return NULL;
 
   return vma_find_overlap_recursive(node->right, start, end);
 }
 
 struct vma *vma_find_overlap(struct vma_list *list, uint64_t start,
                              uint64_t end) {
+  if (!list)
+    return NULL;
   return vma_find_overlap_recursive(list->root, start, end);
 }
 
@@ -390,13 +413,14 @@ static struct vma *vma_find_growdown_recursive(struct vma *node, uint64_t cr2,
   if (!node)
     return NULL;
 
-  if ((node->flags & MAP_GROWSDOWN) && cr2 < node->start &&
-      cr2 >= (node->end - max_limit))
-    return node;
-
   struct vma *res = vma_find_growdown_recursive(node->left, cr2, max_limit);
   if (res)
     return res;
+
+  if ((node->flags & MAP_GROWSDOWN) && cr2 < node->start &&
+      cr2 >= node->start - max_limit) {
+    return node;
+  }
 
   return vma_find_growdown_recursive(node->right, cr2, max_limit);
 }
@@ -410,7 +434,7 @@ static void clone_recursive(struct vma_list *dst, struct vma *node) {
   if (!node)
     return;
   vma_add(dst, node->start, node->end, node->prot, node->flags, node->fd,
-          node->offset, node->file_node);
+          node->offset, node->file_node, node->file_size);
   clone_recursive(dst, node->left);
   clone_recursive(dst, node->right);
 }
@@ -527,7 +551,7 @@ void vma_merge_adjacent(struct vma_list *list) {
   // Collect merged intervals into a flat temporary list.
   // Stores all fields needed to reconstruct each VMA after the merge.
   struct vma_merged_entry {
-    uint64_t start, end, prot, flags, offset;
+    uint64_t start, end, prot, flags, offset, file_size;
     int      fd;
     void    *file_node;
   };
@@ -555,6 +579,7 @@ void vma_merge_adjacent(struct vma_list *list) {
   merged[0].prot      = arr[0]->prot;
   merged[0].flags     = arr[0]->flags;
   merged[0].offset    = arr[0]->offset;
+  merged[0].file_size = arr[0]->file_size;
   merged[0].fd        = arr[0]->fd;
   merged[0].file_node = arr[0]->file_node;
   m = 1;
@@ -585,6 +610,7 @@ void vma_merge_adjacent(struct vma_list *list) {
       merged[m].prot      = cur->prot;
       merged[m].flags     = cur->flags;
       merged[m].offset    = cur->offset;
+      merged[m].file_size = cur->file_size;
       merged[m].fd        = cur->fd;
       merged[m].file_node = cur->file_node;
       m++;
@@ -601,7 +627,7 @@ void vma_merge_adjacent(struct vma_list *list) {
               merged[i].start, merged[i].end,
               merged[i].prot,  merged[i].flags,
               merged[i].fd,    merged[i].offset,
-              merged[i].file_node);
+              merged[i].file_node, merged[i].file_size);
       vma_file_unref(merged[i].file_node);
     }
   }

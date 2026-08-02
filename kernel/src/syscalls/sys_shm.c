@@ -284,7 +284,7 @@ int64_t sys_shmat(uint64_t shmid, uint64_t shmaddr, uint64_t shmflg,
 
   if (t->mm) {
     if (vma_add(&t->mm->vmas, vaddr, vaddr + aligned_size, prot,
-                MAP_SHARED | MAP_SYSV_SHM, -1, 0, NULL) != 0) {
+                MAP_SHARED | MAP_SYSV_SHM, -1, 0, NULL, 0) != 0) {
       for (uint32_t i = 0; i < seg->num_pages; i++) {
         vmm_unmap_page(pml4, vaddr + i * PAGE_SIZE);
         pmm_decref((void *)seg->phys_pages[i]);

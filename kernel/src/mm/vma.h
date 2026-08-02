@@ -21,7 +21,8 @@ struct vma {
   uint64_t max_end; // Subtree Tracking for Interval overlap queries
   uint64_t prot;    // Protection flags (PROT_READ, PROT_WRITE, PROT_EXEC)
   uint64_t flags;   // Mapping flags (MAP_SHARED, MAP_PRIVATE, MAP_ANONYMOUS)
-  uint64_t offset;  // File offset (for file-backed mappings)
+  uint64_t offset;    // File offset (for file-backed mappings)
+  uint64_t file_size; // File size in bytes (for demand paging ELF segments)
   int fd; // File descriptor (for file-backed mappings, -1 if anonymous)
   void *file_node; // VFS node pointer (for demand paging)
 
@@ -44,7 +45,8 @@ void vma_list_destroy(struct vma_list *list);
 
 // Add a new VMA region, returns 0 on success or -1 on overlap/OOM
 int vma_add(struct vma_list *list, uint64_t start, uint64_t end, uint64_t prot,
-            uint64_t flags, int fd, uint64_t offset, void *file_node);
+            uint64_t flags, int fd, uint64_t offset, void *file_node,
+            uint64_t file_size);
 
 // Remove a VMA region by address range (auto-splits and auto-unmaps Native
 // structures) Returns true if any region was removed/split

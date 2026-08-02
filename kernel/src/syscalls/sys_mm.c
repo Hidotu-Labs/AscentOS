@@ -211,7 +211,7 @@ uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot, uint64_t flags,
       spinlock_acquire(&current_thread->mm->lock);
       int vma_idx =
           vma_add(&current_thread->mm->vmas, result, result + aligned_len, prot,
-                  flags, (int)fd, offset, node);
+                  flags, (int)fd, offset, node, 0);
       spinlock_release(&current_thread->mm->lock);
       if (vma_idx < 0) {
         return E_NOMEM;
@@ -246,7 +246,7 @@ uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot, uint64_t flags,
   if (current_thread && current_thread->mm) {
     spinlock_acquire(&current_thread->mm->lock);
     int vma_idx = vma_add(&current_thread->mm->vmas, vaddr, vaddr + aligned_len,
-                          prot, flags, -1, 0, NULL);
+                          prot, flags, -1, 0, NULL, 0);
     if (vma_idx < 0) {
       spinlock_release(&current_thread->mm->lock);
       return E_NOMEM;
@@ -294,6 +294,7 @@ uint64_t sys_munmap(uint64_t addr, uint64_t length, uint64_t a2, uint64_t a3,
   spinlock_acquire(&current->mm->lock);
   struct vma *first_vma = vma_find_overlap(&current->mm->vmas, addr, addr + aligned_len);
   bool is_shared = first_vma && (first_vma->flags & MAP_SHARED);
+  (void)is_shared;
   spinlock_release(&current->mm->lock);
 
 
@@ -354,7 +355,7 @@ static uint64_t sys_brk(uint64_t addr, uint64_t a1, uint64_t a2, uint64_t a3,
         return current->mm->brk_current; // Overlap with existing VMA
       }
       if (vma_add(&current->mm->vmas, old_end, new_end, PROT_READ | PROT_WRITE,
-                  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0, NULL) < 0) {
+                  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0, NULL, 0) < 0) {
         spinlock_release(&current->mm->lock);
         return current->mm->brk_current;
       }
@@ -411,11 +412,13 @@ static uint64_t sys_mprotect(uint64_t addr, uint64_t len, uint64_t prot,
     if (phys == 0)
       continue;
 
-    uint64_t new_flags = build_page_flags(prot);
     vmm_unmap_page(pml4, va);
-    if (!vmm_map_page(pml4, va, PAGE_ALIGN_DOWN(phys), new_flags)) {
-      spinlock_release(&current->mm->lock);
-      return E_NOMEM;
+    if (prot != PROT_NONE) {
+      uint64_t new_flags = build_page_flags(prot);
+      if (!vmm_map_page(pml4, va, PAGE_ALIGN_DOWN(phys), new_flags)) {
+        spinlock_release(&current->mm->lock);
+        return E_NOMEM;
+      }
     }
   }
 
@@ -526,7 +529,7 @@ static uint64_t sys_mremap(uint64_t old_addr, uint64_t old_size,
       vma_remove(&current->mm->vmas, old_addr, old_addr + aligned_old);
       int add_ret =
           vma_add(&current->mm->vmas, old_addr, old_addr + aligned_new, prot,
-                  vma_flags, vma_fd, vma_offset, vma_file);
+                  vma_flags, vma_fd, vma_offset, vma_file, 0);
       vfs_close(vma_file);
       if (add_ret < 0) {
         spinlock_release(&current->mm->lock);
@@ -555,7 +558,7 @@ static uint64_t sys_mremap(uint64_t old_addr, uint64_t old_size,
     // Extend the VMA to cover the new range.
     vma_remove(&current->mm->vmas, old_addr, old_addr + aligned_old);
     vma_add(&current->mm->vmas, old_addr, old_addr + aligned_new, prot,
-            vma_flags, -1, 0, NULL);
+            vma_flags, -1, 0, NULL, 0);
     spinlock_release(&current->mm->lock);
     return old_addr;
   }
@@ -591,7 +594,7 @@ static uint64_t sys_mremap(uint64_t old_addr, uint64_t old_size,
     vma_remove(&current->mm->vmas, old_addr, old_addr + aligned_old);
     int add_ret =
         vma_add(&current->mm->vmas, new_addr, new_addr + aligned_new, prot,
-                vma_flags, vma_fd, vma_offset, vma_file);
+                vma_flags, vma_fd, vma_offset, vma_file, 0);
     vfs_close(vma_file);
     if (add_ret < 0) {
       spinlock_release(&current->mm->lock);
@@ -638,7 +641,7 @@ static uint64_t sys_mremap(uint64_t old_addr, uint64_t old_size,
 
   // Register new VMA.
   vma_add(&current->mm->vmas, new_addr, new_addr + aligned_new, prot, vma_flags,
-          -1, 0, NULL);
+          -1, 0, NULL, 0);
 
   current->mm->mmap_next_addr =
       MAX(current->mm->mmap_next_addr, new_addr + aligned_new);

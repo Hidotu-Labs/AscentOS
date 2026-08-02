@@ -136,9 +136,9 @@ static uint64_t elf_page_flags(uint32_t p_flags) {
   return flags;
 }
 
-static bool elf_apply_segment_permissions(uint64_t *pml4, uint64_t start_page,
-                                          uint64_t end_page,
-                                          uint32_t p_flags) {
+static bool __attribute__((unused))
+elf_apply_segment_permissions(uint64_t *pml4, uint64_t start_page,
+                               uint64_t end_page, uint32_t p_flags) {
   uint64_t final_flags = elf_page_flags(p_flags);
 
   for (uint64_t page = start_page; page < end_page; page += PAGE_SIZE) {
@@ -158,6 +158,7 @@ static bool do_elf_load(const char *path, uint64_t *pml4,
                         uint64_t requested_base, bool is_interp,
                         elf_info_t *out_info, char *interp_path,
                         size_t interp_max_len) {
+  (void)pml4;
   struct thread *current_thread = sched_get_current();
   vfs_node_t *file = vfs_resolve_path(path);
   if (!file) {
@@ -171,16 +172,19 @@ static bool do_elf_load(const char *path, uint64_t *pml4,
   Elf64_Ehdr ehdr;
   if (vfs_read(file, 0, sizeof(Elf64_Ehdr), (uint8_t *)&ehdr) !=
       sizeof(Elf64_Ehdr)) {
+    vfs_close(file);
     return false;
   }
 
   if (ehdr.e_ident[0] != 0x7f || ehdr.e_ident[1] != 'E' ||
       ehdr.e_ident[2] != 'L' || ehdr.e_ident[3] != 'F' ||
       ehdr.e_ident[4] != 2) {
+    vfs_close(file);
     return false;
   }
   if (ehdr.e_type != ET_EXEC && ehdr.e_type != ET_DYN) {
     klog_puts("[PROC] ELF load failed: unsupported ELF type\n");
+    vfs_close(file);
     return false;
   }
 
@@ -190,8 +194,6 @@ static bool do_elf_load(const char *path, uint64_t *pml4,
   }
 
   uint64_t phdr_vaddr = 0;
-  uint64_t hhdm = pmm_get_hhdm_offset();
-
   for (uint16_t i = 0; i < ehdr.e_phnum; i++) {
     Elf64_Phdr phdr;
     uint32_t offset = ehdr.e_phoff + (i * ehdr.e_phentsize);
@@ -227,8 +229,8 @@ static bool do_elf_load(const char *path, uint64_t *pml4,
       continue;
 
     uint64_t vaddr = load_base + phdr.p_vaddr;
-    uint64_t filesz = phdr.p_filesz;
     uint64_t memsz = phdr.p_memsz;
+    uint64_t filesz = phdr.p_filesz;
     uint32_t file_offset = phdr.p_offset;
 
     // Track uppermost loaded address for the main program brk base.
@@ -243,20 +245,10 @@ static bool do_elf_load(const char *path, uint64_t *pml4,
     if (memsz > 0) {
       uint64_t start_page = vaddr & ~(PAGE_SIZE - 1);
       uint64_t end_page = (vaddr + memsz + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+      uint64_t vma_offset = file_offset - (vaddr - start_page);
+      uint64_t vma_file_size = (vaddr - start_page) + filesz;
 
-      for (uint64_t page = start_page; page < end_page; page += PAGE_SIZE) {
-        if (vmm_virt_to_phys(pml4, page) == 0) {
-          void *phys = pmm_alloc();
-          if (!phys)
-            return false;
-          vmm_map_page(pml4, page, (uint64_t)phys,
-                       PAGE_FLAG_USER | PAGE_FLAG_RW | PAGE_FLAG_PRESENT);
-          uint64_t kernel_virt = (uint64_t)phys + hhdm;
-          memset((void *)kernel_virt, 0, PAGE_SIZE);
-        }
-      }
-
-      // Register segment in VMA list. This is critical for syscall validation.
+      // Register segment in VMA list for lazy demand paging via page fault.
       if (current_thread && current_thread->mm) {
         uint64_t prot = 0;
         if (phdr.p_flags & PF_R)
@@ -267,35 +259,19 @@ static bool do_elf_load(const char *path, uint64_t *pml4,
           prot |= 0x4;
 
         vma_add(&current_thread->mm->vmas, start_page, end_page, prot,
-                MAP_PRIVATE, -1, 0, NULL);
-      }
+                MAP_PRIVATE, -1, vma_offset, file, vma_file_size);
 
-      if (filesz > 0) {
-        vfs_read(file, file_offset, filesz, (uint8_t *)vaddr);
-      }
-
-      if (memsz > filesz) {
-        uint64_t bss_start = vaddr + filesz;
-        uint64_t bss_end = vaddr + memsz;
-
-        for (uint64_t addr = bss_start; addr < bss_end;) {
-          uint64_t page_base = addr & ~(PAGE_SIZE - 1);
-          uint64_t page_off = addr - page_base;
-          uint64_t chunk = PAGE_SIZE - page_off;
-          if (chunk > bss_end - addr)
-            chunk = bss_end - addr;
-
-          uint64_t phys = vmm_virt_to_phys(pml4, page_base);
-          if (phys) {
-            memset((void *)(phys + hhdm + page_off), 0, chunk);
+        // Pre-read PT_LOAD file segment into VFS page cache in bulk to eliminate page faults
+        if (filesz > 0 && file) {
+          uint32_t start_off = file_offset & ~(PAGE_SIZE - 1);
+          uint32_t end_off = (file_offset + filesz + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+          for (uint32_t poff = start_off; poff < end_off; poff += PAGE_SIZE) {
+            vfs_page_t *p = vfs_cache_get_or_create(file, poff);
+            if (p)
+              vfs_cache_put(file, p);
           }
-          addr += chunk;
         }
       }
-
-      if (!elf_apply_segment_permissions(pml4, start_page, end_page,
-                                         phdr.p_flags))
-        return false;
     }
   }
 
@@ -312,6 +288,7 @@ static bool do_elf_load(const char *path, uint64_t *pml4,
     }
   }
 
+  vfs_close(file);
   return true;
 }
 
@@ -322,41 +299,42 @@ bool elf_load(const char *path, uint64_t *pml4, elf_info_t *out_info) {
     current_thread->mm->brk_current = 0;
   }
 
-  char interp_path[256];
-  memset(interp_path, 0, sizeof(interp_path));
+  char interp_path[256] = {0};
+  elf_info_t main_info = {0};
 
-  if (!do_elf_load(path, pml4, 0, false, out_info, interp_path,
+  if (!do_elf_load(path, pml4, 0, false, &main_info, interp_path,
                    sizeof(interp_path))) {
     return false;
   }
 
   if (interp_path[0] != '\0') {
-    klog_puts("[PROC] PT_INTERP found: ");
-    klog_puts(interp_path);
-    klog_puts("\n");
-    if (!do_elf_load(interp_path, pml4, ELF_INTERP_BASE, true, out_info, NULL,
-                     0)) {
-      klog_puts("[PROC] Failed to load interpreter\n");
+    elf_info_t interp_info = {0};
+    if (!do_elf_load(interp_path, pml4, ELF_INTERP_BASE, true, &interp_info,
+                     NULL, 0)) {
       return false;
+    }
+    if (out_info) {
+      *out_info = main_info;
+      out_info->interp_base = interp_info.interp_base;
+      out_info->interp_entry = interp_info.interp_entry;
+    }
+  } else {
+    if (out_info) {
+      *out_info = main_info;
     }
   }
 
-  // User stack: [stack_top - stack_size, stack_top); stack_top is unmapped
-  // (guard).
+  // Pre-allocate user stack page and map it
   uint64_t stack_top = ASCENTOS_USER_STACK_TOP;
-  uint64_t stack_size = 4 * PAGE_SIZE; // 16 KB stack initially mapped
+  uint64_t stack_size = 4 * PAGE_SIZE;
   uint64_t stack_bottom = stack_top - stack_size;
 
   for (uint64_t page = stack_bottom; page < stack_top; page += PAGE_SIZE) {
     void *phys = pmm_alloc();
     if (!phys)
       return false;
-    if (!vmm_map_page(pml4, page, (uint64_t)phys,
-                      PAGE_FLAG_USER | PAGE_FLAG_RW | PAGE_FLAG_PRESENT)) {
-      klog_puts("[PROC] Exec failed: vmm_map_page stack failed\n");
-      return false;
-    }
-    // Deep zero the stack page
+    vmm_map_page(pml4, page, (uint64_t)phys,
+                 PAGE_FLAG_USER | PAGE_FLAG_RW | PAGE_FLAG_PRESENT);
     uint64_t kernel_virt = (uint64_t)phys + pmm_get_hhdm_offset();
     memset((void *)kernel_virt, 0, PAGE_SIZE);
   }
@@ -364,12 +342,18 @@ bool elf_load(const char *path, uint64_t *pml4, elf_info_t *out_info) {
   // Page-align the brk base upward and set current brk.
   if (current_thread && current_thread->mm) {
     vma_add(&current_thread->mm->vmas, stack_bottom, stack_top, 0x3,
-            0x22 | MAP_GROWSDOWN, -1, 0, NULL);
+            0x22 | MAP_GROWSDOWN, -1, 0, NULL, 0);
 
     current_thread->mm->brk_base =
         (current_thread->mm->brk_base + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
     current_thread->mm->brk_current = current_thread->mm->brk_base;
     mm_reset_mmap_state(current_thread);
+  }
+
+  // Pre-fault the entry point code page so context switching into userland does not immediately trigger a page fault
+  if (out_info && out_info->entry) {
+    uint64_t entry_addr = out_info->interp_entry ? out_info->interp_entry : out_info->entry;
+    vmm_handle_page_fault(entry_addr, 0x4, NULL);
   }
 
   return true;

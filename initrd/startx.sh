@@ -237,17 +237,21 @@ autospawn = no
 disable-shm = yes
 PULSE_EOF
 
-    # Configure cmus default audio plugin to dummy so cmus starts instantly
+    # Configure cmus default audio plugin to oss
     mkdir -p "$HOME/.config/cmus"
     if [ ! -f "$HOME/.config/cmus/rc" ]; then
         cat > "$HOME/.config/cmus/rc" << 'CMUS_EOF'
-set output_plugin=dummy
+set output_plugin=oss
 CMUS_EOF
+    else
+        sed -i 's/set output_plugin=dummy/set output_plugin=oss/g;s/set output_plugin=alsa/set output_plugin=oss/g' "$HOME/.config/cmus/rc" 2>/dev/null || true
     fi
     if [ ! -f "$HOME/.config/cmus/autosave" ]; then
         cat > "$HOME/.config/cmus/autosave" << 'CMUS_EOF'
-set output_plugin=dummy
+set output_plugin=oss
 CMUS_EOF
+    else
+        sed -i 's/set output_plugin=dummy/set output_plugin=oss/g;s/set output_plugin=alsa/set output_plugin=oss/g' "$HOME/.config/cmus/autosave" 2>/dev/null || true
     fi
 
     if command -v xrdb >/dev/null 2>&1; then

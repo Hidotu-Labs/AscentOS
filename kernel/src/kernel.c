@@ -46,6 +46,7 @@
 #include "fs/ext2.h"
 #include "fs/ext4.h"
 #include "fs/fat32.h"
+#include "fs/precache.h"
 #include "fs/procfs.h"
 #include "fs/ramfs.h"
 #include "fs/random.h"
@@ -177,6 +178,11 @@ static void init_thread_entry(void) {
     }
   }
   klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " Init thread started\n");
+
+  // Pre-populate the VFS page cache with the dynamic linker and hot shared
+  // libraries so that every subsequent execve() hits warm cache.
+  precache_hot_files();
+
   // Clear console only once when userland starts
   console_clear();
   klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET

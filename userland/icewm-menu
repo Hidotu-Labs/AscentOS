@@ -10,7 +10,8 @@ menu "Internet" applications-internet {
 }
 menu "Accessories" applications-accessories {
     prog "Text Editor" accessories-text-editor mousepad
-    prog "Calculator" accessories-calculator xcalc
+    prog "GNOME Calculator" accessories-calculator gnome-calculator
+    prog "XCalc" accessories-calculator xcalc
     prog "Clock" clock xclock
 }
 menu "System" applications-system {

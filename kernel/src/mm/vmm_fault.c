@@ -179,12 +179,12 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
 
       vma_remove(&current->mm->vmas, old_start, old_end);
       if (vma_add(&current->mm->vmas, new_start, old_end, prot, flags, fd,
-                  offset, NULL) != 0) {
+                  offset, NULL, 0) != 0) {
         klog_puts("[VMM] Stack expansion failed (overlap?) for CR2=");
         klog_hex64(cr2);
         klog_puts("\n");
         vma_add(&current->mm->vmas, old_start, old_end, prot, flags, fd, offset,
-                NULL);
+                NULL, 0);
         vma = NULL;
       } else {
         vma = vma_find(&current->mm->vmas, cr2);
@@ -206,6 +206,7 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
   uint64_t vma_flags = 0;
   int vma_fd = -1;
   uint64_t vma_offset = 0;
+  uint64_t vma_file_size = 0;
   uint64_t vma_start = 0;
   uint64_t vma_end = 0;
   void *vma_file_node = NULL;
@@ -215,6 +216,7 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
     vma_fd = vma->fd;
     (void)vma_fd; // captured for future use (e.g. close-on-exec logic)
     vma_offset = vma->offset;
+    vma_file_size = vma->file_size;
     vma_start = vma->start;
     vma_end = vma->end;
     vma_file_node = vma->file_node;
@@ -313,80 +315,107 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
   }
 
   void *frame = NULL;
-  bool frame_from_cache = false;
-  vfs_page_t *cached_hold = NULL;
-
   vfs_node_t *node = (vfs_node_t *)vma_file_node;
   if (node && (node->flags & FS_TYPE_MASK) == FS_FILE) {
-    // ---- File-backed demand paging with clustered read-ahead ---------------
     uint64_t page_offset = (cr2 & ~0xFFFULL) - vma_start;
-    uint32_t file_offset = (uint32_t)(vma_offset + page_offset);
+    uint64_t eff_file_size = (vma_file_size > 0) ? vma_file_size : (vma_end - vma_start);
 
-    // 1. Try page cache first.
-    vfs_page_t *cached = vfs_cache_get_or_create(node, file_offset);
-    if (cached) {
-      frame = (void *)cached->frame_phys;
-      frame_from_cache = true;
-      cached_hold = cached;
-    } else {
-      // 2. Cache miss: read a 64 KB cluster to maximise disk throughput.
-      uint32_t cluster_base = file_offset & ~0xFFFFU; // 64 KB aligned
-      uint32_t cluster_size = 64 * 1024;
-      if (cluster_base + cluster_size > node->length)
-        cluster_size =
-            (node->length > cluster_base) ? (node->length - cluster_base) : 0;
-
-      for (uint32_t off = 0; off < cluster_size; off += 4096) {
-        uint32_t cur_off = cluster_base + off;
-        vfs_page_t *read_ahead = vfs_cache_get_or_create(node, cur_off);
-        if (!read_ahead)
-          break;
-        vfs_cache_put(node, read_ahead);
-      }
-
-      cached = vfs_cache_get_or_create(node, file_offset);
-      if (cached) {
-        frame = (void *)cached->frame_phys;
-        frame_from_cache = true;
-        cached_hold = cached;
-      }
-    }
-
-    if (!frame) {
-      // Past EOF or OOM — map a zero page.
+    if (page_offset >= eff_file_size) {
+      // 1. Pure BSS page (past eff_file_size) — allocate zero-filled page
       frame = pmm_alloc_page();
       if (!frame)
         return -1;
       memset(PHYS_TO_VIRT((uint64_t)frame), 0, 4096);
-    }
+    } else if ((vma_flags & MAP_PRIVATE) && (vma_prot & PROT_WRITE)) {
+      // 2. Private Writable file mapping (e.g. ELF .data / .got / partial BSS)
+      //    Must allocate a private page so user writes never mutate shared page cache.
+      frame = pmm_alloc_page();
+      if (!frame)
+        return -1;
+      void *priv_virt = PHYS_TO_VIRT((uint64_t)frame);
+      memset(priv_virt, 0, 4096);
 
-    // 3. Proactive cluster mapping — map any already-cached pages in the
-    //    same 64 KB window to avoid redundant faults for the same library.
-    uint64_t cluster_vstart = cr2 & ~0xFFFFULL;
-    uint64_t pt_flags = dp_build_flags(vma_prot);
-    if ((vma_flags & MAP_PRIVATE) && (pt_flags & PAGE_FLAG_RW)) {
-      pt_flags &= ~PAGE_FLAG_RW;
-      pt_flags |= PAGE_FLAG_COW;
-    }
+      uint32_t valid_bytes = 4096;
+      if (page_offset + 4096 > eff_file_size)
+        valid_bytes = (uint32_t)(eff_file_size - page_offset);
 
-    for (int ci = 0; ci < 16; ci++) {
-      uint64_t vpage = cluster_vstart + (uint64_t)(ci * 4096);
-      if (vpage == (cr2 & ~0xFFFULL))
-        continue; // handled below
-      if (vpage < vma_start || vpage >= vma_end)
-        continue;
-      if (vmm_virt_to_phys((uint64_t *)target_cr3, vpage) != 0)
-        continue;
+      uint32_t file_offset = (uint32_t)(vma_offset + page_offset);
+      vfs_page_t *cached = vfs_cache_lookup(node, file_offset);
+      if (!cached) {
+        // Clustered 64 KB read-ahead into VFS page cache
+        uint32_t cluster_base = file_offset & ~0xFFFFU;
+        uint32_t cluster_end = cluster_base + 64 * 1024;
+        if (cluster_end > node->length)
+          cluster_end = node->length;
 
-      uint32_t foff = (uint32_t)(vma_offset + (vpage - vma_start));
-      vfs_page_t *p = vfs_cache_lookup(node, foff);
-      if (p) {
-        pmm_incref((void *)p->frame_phys);
-        if (!vmm_map_page((uint64_t *)target_cr3, vpage, p->frame_phys,
-                          pt_flags)) {
-          pmm_decref((void *)p->frame_phys);
+        for (uint32_t off = cluster_base; off < cluster_end; off += 4096) {
+          vfs_page_t *p = vfs_cache_get_or_create(node, off);
+          if (p)
+            vfs_cache_put(node, p);
         }
-        vfs_cache_put(node, p);
+        cached = vfs_cache_get_or_create(node, file_offset);
+      } else {
+        cached = vfs_cache_get_or_create(node, file_offset);
+      }
+
+      if (cached && cached->frame_phys) {
+        memcpy(priv_virt, PHYS_TO_VIRT(cached->frame_phys), valid_bytes);
+        vfs_cache_put(node, cached);
+      }
+    } else {
+      // 3. Shared or Read-Only file mapping (e.g. ELF .text / .rodata)
+      //    Use shared VFS page-cache frame directly.
+      uint32_t file_offset = (uint32_t)(vma_offset + page_offset);
+      vfs_page_t *cached = vfs_cache_lookup(node, file_offset);
+      if (!cached) {
+        // Clustered 64 KB read-ahead into VFS page cache
+        uint32_t cluster_base = file_offset & ~0xFFFFU;
+        uint32_t cluster_end = cluster_base + 64 * 1024;
+        if (cluster_end > node->length)
+          cluster_end = node->length;
+
+        for (uint32_t off = cluster_base; off < cluster_end; off += 4096) {
+          vfs_page_t *p = vfs_cache_get_or_create(node, off);
+          if (p)
+            vfs_cache_put(node, p);
+        }
+        cached = vfs_cache_get_or_create(node, file_offset);
+      } else {
+        cached = vfs_cache_get_or_create(node, file_offset);
+      }
+
+      if (cached && cached->frame_phys) {
+        frame = (void *)cached->frame_phys;
+        pmm_incref(frame);
+        vfs_cache_put(node, cached);
+      } else {
+        frame = pmm_alloc_page();
+        if (!frame)
+          return -1;
+        memset(PHYS_TO_VIRT((uint64_t)frame), 0, 4096);
+      }
+
+      // Proactive cluster mapping: map adjacent cached pages in the 64 KB window to avoid redundant faults
+      uint64_t cluster_vstart = cr2 & ~0xFFFFULL;
+      uint64_t pt_flags = dp_build_flags(vma_prot);
+      for (int ci = 0; ci < 16; ci++) {
+        uint64_t vpage = cluster_vstart + (uint64_t)(ci * 4096);
+        if (vpage == (cr2 & ~0xFFFULL))
+          continue;
+        if (vpage < vma_start || vpage >= vma_end)
+          continue;
+        if (vmm_virt_to_phys((uint64_t *)target_cr3, vpage) != 0)
+          continue;
+
+        uint32_t foff = (uint32_t)(vma_offset + (vpage - vma_start));
+        vfs_page_t *p = vfs_cache_lookup(node, foff);
+        if (p && p->frame_phys) {
+          pmm_incref((void *)p->frame_phys);
+          if (!vmm_map_page((uint64_t *)target_cr3, vpage, p->frame_phys, pt_flags)) {
+            pmm_decref((void *)p->frame_phys);
+          }
+          vfs_cache_put(node, p);
+        }
       }
     }
 
@@ -407,16 +436,6 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
   // ---- Map the faulting page ----------------------------------------------
 
   uint64_t flags = dp_build_flags(vma_prot);
-  if (node && (vma_flags & MAP_PRIVATE) && (flags & PAGE_FLAG_RW)) {
-    flags &= ~PAGE_FLAG_RW;
-    flags |= PAGE_FLAG_COW;
-  }
-
-  if (frame_from_cache) {
-    pmm_incref(frame);
-    vfs_cache_put(node, cached_hold);
-  }
-
   if (!vmm_map_page((uint64_t *)target_cr3, cr2 & ~0xFFFULL, (uint64_t)frame,
                     flags)) {
     pmm_free_page(frame);
@@ -507,12 +526,6 @@ bool vmm_is_user_addr_range_writable(uint64_t addr, size_t size) {
   if (!current || !current->mm)
     return false;
 
-  uint64_t cr3 = current->cr3;
-  if (cr3 == 0) {
-    __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
-    cr3 &= PAGE_MASK;
-  }
-
   uint64_t start_page = addr & ~0xFFFULL;
   uint64_t end_page = (addr + size + 0xFFF) & ~0xFFFULL;
 
@@ -529,15 +542,7 @@ bool vmm_is_user_addr_range_writable(uint64_t addr, size_t size) {
       return false;
     }
 
-    uint64_t next = v->end < end_page ? v->end : end_page;
-    for (uint64_t p = page; p < next; p += PAGE_SIZE) {
-      if (vmm_virt_to_phys((uint64_t *)cr3, p) == 0) {
-        spinlock_release(&current->mm->lock);
-        return false;
-      }
-    }
-
-    page = next;
+    page = v->end < end_page ? v->end : end_page;
   }
 
   spinlock_release(&current->mm->lock);
