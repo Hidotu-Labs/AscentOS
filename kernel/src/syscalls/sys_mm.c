@@ -412,13 +412,18 @@ static uint64_t sys_mprotect(uint64_t addr, uint64_t len, uint64_t prot,
     if (phys == 0)
       continue;
 
-    vmm_unmap_page(pml4, va);
-    if (prot != PROT_NONE) {
-      uint64_t new_flags = build_page_flags(prot);
-      if (!vmm_map_page(pml4, va, PAGE_ALIGN_DOWN(phys), new_flags)) {
-        spinlock_release(&current->mm->lock);
-        return E_NOMEM;
-      }
+    uint64_t new_flags = build_page_flags(prot);
+    if (prot == PROT_NONE) {
+      // Keep the PTE present so teardown_range / vmm_virt_to_phys can still
+      // find this physical frame at munmap time. Without a present PTE the
+      // frame becomes unreachable and is never freed (3200 kB leak).
+      // Omitting PAGE_FLAG_USER means any ring-3 access will #PF, which is
+      // the correct PROT_NONE semantics on x86-64.
+      new_flags = PAGE_FLAG_PRESENT | PAGE_FLAG_NX;
+    }
+    if (!vmm_map_page(pml4, va, PAGE_ALIGN_DOWN(phys), new_flags)) {
+      spinlock_release(&current->mm->lock);
+      return E_NOMEM;
     }
   }
 
