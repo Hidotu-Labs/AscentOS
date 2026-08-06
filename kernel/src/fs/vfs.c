@@ -53,7 +53,7 @@ static vfs_mount_entry_t *vfs_mount_list = NULL;
 
 /* Bounded 4-way dentry cache. Positive entries own a child reference;
  * positive and negative entries both own a parent reference. */
-#define VFS_DENTRY_CACHE_SIZE 4096
+#define VFS_DENTRY_CACHE_SIZE 16384
 #define VFS_DENTRY_WAYS 4
 #define VFS_DENTRY_BUCKETS (VFS_DENTRY_CACHE_SIZE / VFS_DENTRY_WAYS)
 

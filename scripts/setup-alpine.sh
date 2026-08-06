@@ -250,6 +250,80 @@ install_apk "libucontext" "main"
 install_apk "libucontext-dev" "main"
 install_apk "jansson" "main"
 
+# VLC Media Player and audio/video codec dependencies
+echo "[*] Installing VLC Media Player..."
+install_apk "vlc-libs" "community"
+install_apk "vlc" "community"
+install_apk "vlc-qt" "community"
+install_apk "ffmpeg-libs" "community"
+install_apk "ffmpeg4-libavcodec" "community"
+install_apk "ffmpeg4-libavformat" "community"
+install_apk "ffmpeg4-libavutil" "community"
+install_apk "ffmpeg4-libswscale" "community"
+install_apk "ffmpeg4-libpostproc" "community"
+install_apk "ffmpeg4-libswresample" "community"
+install_apk "libxkbcommon-x11" "main"
+install_apk "libpcre2-16" "main"
+install_apk "lua5.2-libs" "main"
+install_apk "libmad" "community"
+install_apk "libsndfile" "main"
+install_apk "libogg" "main"
+install_apk "libvorbis" "main"
+install_apk "libflac" "main"
+install_apk "opus" "main"
+install_apk "taglib" "community"
+install_apk "alsa-lib" "main"
+install_apk "qt5-qtbase" "community"
+install_apk "qt5-qtbase-x11" "community"
+install_apk "qt5-qtx11extras" "community"
+install_apk "qt5-qtsvg" "community"
+install_apk "qt5-qtbase-dev" "community"
+install_apk "xcb-util-keysyms" "community"
+install_apk "xcb-util-wm" "community"
+install_apk "xcb-util-image" "community"
+install_apk "xcb-util-cursor" "community"
+install_apk "xcb-util-renderutil" "community"
+install_apk "dbus" "main"
+install_apk "dbus-x11" "main"
+
+# Configure D-Bus machine-id for VLC & DBus clients
+mkdir -p "${ROOTFS_DIR}/var/lib/dbus" "${ROOTFS_DIR}/etc"
+if [ ! -f "${ROOTFS_DIR}/etc/machine-id" ]; then
+    echo "b08040a9e7114fea9634b7f94da7e722" > "${ROOTFS_DIR}/etc/machine-id"
+fi
+ln -sf /etc/machine-id "${ROOTFS_DIR}/var/lib/dbus/machine-id"
+
+# Patch VLC to allow execution as root user
+if [ -f "${ROOTFS_DIR}/usr/bin/vlc" ] && [ ! -f "${ROOTFS_DIR}/usr/bin/vlc.bin" ]; then
+    sed -i 's/geteuid/getppid/g' "${ROOTFS_DIR}/usr/bin/vlc" 2>/dev/null || true
+    mv "${ROOTFS_DIR}/usr/bin/vlc" "${ROOTFS_DIR}/usr/bin/vlc.bin"
+fi
+cat <<'EOF' > "${ROOTFS_DIR}/usr/bin/vlc"
+#!/bin/sh
+export DISPLAY=${DISPLAY:-:0}
+export QT_QPA_PLATFORM=xcb
+if [ -f /lib/libgcompat.so.0 ]; then
+    export LD_PRELOAD=/lib/libgcompat.so.0:${LD_PRELOAD}
+fi
+if [ "$1" = "-I" ] || [ "$1" = "--intf" ]; then
+    exec /usr/bin/vlc.bin --no-dbus "$@"
+else
+    exec /usr/bin/vlc.bin -I qt --no-dbus "$@"
+fi
+EOF
+chmod +x "${ROOTFS_DIR}/usr/bin/vlc"
+if [ -f "${ROOTFS_DIR}/usr/lib/libvlccore.so.9.0.1" ]; then
+    sed -i 's/geteuid/getppid/g' "${ROOTFS_DIR}/usr/lib/libvlccore.so.9.0.1" 2>/dev/null || true
+fi
+
+# Generate VLC plugin cache
+if [ -x "${ROOTFS_DIR}/usr/lib/vlc/vlc-cache-gen" ]; then
+    echo "[*] Generating VLC plugin cache..."
+    if command -v qemu-x86_64 >/dev/null 2>&1 && [ -f "${ROOTFS_DIR}/lib/ld-musl-x86_64.so.1" ]; then
+        LD_PRELOAD="${ROOTFS_DIR}/lib/libgcompat.so.0" qemu-x86_64 "${ROOTFS_DIR}/lib/ld-musl-x86_64.so.1" --library-path "${ROOTFS_DIR}/lib:${ROOTFS_DIR}/usr/lib" "${ROOTFS_DIR}/usr/lib/vlc/vlc-cache-gen" "${ROOTFS_DIR}/usr/lib/vlc/plugins" 2>/dev/null || true
+    fi
+fi
+
 # Keep musl's runtime linker search path explicit inside AscentOS.
 # Some early userspace paths only reliably resolve shared objects from /lib.
 mkdir -p "${ROOTFS_DIR}/etc" "${ROOTFS_DIR}/lib"

@@ -114,6 +114,27 @@ GTK3_LDFLAGS := \
 	-Wl,-rpath,/usr/lib \
 	-Wl,-rpath-link,$(ALPINE_SYSROOT)/usr/lib:$(ALPINE_SYSROOT)/lib
 
+# Qt5 test - include/lib flags
+QT5_INCLUDES := \
+	-I$(ALPINE_SYSROOT)/usr/include/qt5 \
+	-I$(ALPINE_SYSROOT)/usr/include/qt5/QtCore \
+	-I$(ALPINE_SYSROOT)/usr/include/qt5/QtGui \
+	-I$(ALPINE_SYSROOT)/usr/include/qt5/QtWidgets \
+	-I$(ALPINE_SYSROOT)/usr/include/qt5/QtOpenGL \
+	-I$(ALPINE_SYSROOT)/usr/include/qt5/QtPrintSupport
+QT5_LIBS := \
+	-L$(ALPINE_SYSROOT)/usr/lib -L$(ALPINE_SYSROOT)/lib \
+	-lQt5Widgets -lQt5Gui -lQt5Core \
+	-lGL -lX11 -lXext -lxcb \
+	-ldl -lm -lz
+QT5_CXXFLAGS := -fPIC -DQT_WIDGETS_LIB -DQT_GUI_LIB -DQT_CORE_LIB -DQT_NO_DEBUG
+QT5_LDFLAGS := \
+	-static-libgcc \
+	-Wl,--allow-shlib-undefined \
+	-Wl,-dynamic-linker,/lib/ld-musl-x86_64.so.1 \
+	-Wl,-rpath,/usr/lib \
+	-Wl,-rpath-link,$(ALPINE_SYSROOT)/usr/lib:$(ALPINE_SYSROOT)/lib
+
 .PHONY: all
 all: $(IMAGE_NAME).iso
 
@@ -217,7 +238,7 @@ disk.img: userland/test_clone_futex.elf
 disk.img: userland/test_unix_sockets.elf
 disk.img: userland/test_syscall_speed.elf
 disk.img: $(QUAKE2_BUNDLE_FILES)
-disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets/mc9.mp3 assets/train.mp3 assets/test.bmp assets/test.tar assets/room.png assets/logo.png assets/linus.gif userland/forkit.elf userland/forkit-launch.sh userland/about.elf userland/hello_glibc.elf userland/booter.elf userland/reboot.elf userland/shutdown.elf userland/apm.elf userland/test_cpp.elf  userland/kilo.elf  userland/ls.elf userland/lspci.elf userland/lsblk.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/asplay.elf userland/kria.elf userland/doom.elf userland/xrootcursor.elf  userland/jwm.elf userland/doom_x11.elf userland/gtk_test.elf userland/tglgears_fb.elf userland/tglgears_drm.elf userland/tglhello_drm.elf userland/test_mem_stress.elf userland/classicube.elf userland/terrain.png userland/texpacks/classicube.zip initrd/startx.sh initrd/startw.sh initrd/weston.ini userland/ascentd.elf $(ASCENTD_CONFIG_FILES)
+disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets/mc9.mp3 assets/train.mp3 assets/test.bmp assets/test.tar assets/room.png assets/logo.png assets/linus.gif userland/forkit.elf userland/forkit-launch.sh userland/about.elf userland/hello_glibc.elf userland/booter.elf userland/reboot.elf userland/shutdown.elf userland/apm.elf userland/test_cpp.elf  userland/kilo.elf  userland/ls.elf userland/lspci.elf userland/lsblk.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/asplay.elf userland/kria.elf userland/doom.elf userland/xrootcursor.elf  userland/jwm.elf userland/doom_x11.elf userland/gtk_test.elf userland/qt5_test.elf userland/tglgears_fb.elf userland/tglgears_drm.elf userland/tglhello_drm.elf userland/test_mem_stress.elf userland/classicube.elf userland/terrain.png userland/texpacks/classicube.zip initrd/startx.sh initrd/startw.sh initrd/weston.ini userland/ascentd.elf $(ASCENTD_CONFIG_FILES)
 	@echo "Creating root filesystem (ext4)..."
 	rm -f ./part.img
 	dd if=/dev/zero of=./part.img bs=1M count=2047
@@ -578,6 +599,11 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 		debugfs -w -R "rm bin/doom_x11" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "write userland/doom_x11.elf bin/doom_x11" ./part.img >/dev/null 2>&1 || true; \
 	fi
+	@if [ -f userland/qt5_test.elf ]; then \
+		echo "Installing qt5_test into disk image..."; \
+		debugfs -w -R "rm bin/qt5_test" ./part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write userland/qt5_test.elf bin/qt5_test" ./part.img >/dev/null 2>&1 || true; \
+	fi
 
 	@echo "Fixing executable modes for directly injected launchers..."
 	@{ \
@@ -819,6 +845,25 @@ userland/gtk3_test.elf: userland/gtk3_test.c scripts/setup-alpine.sh
 		$(GTK3_INCLUDES) \
 		$(GTK3_LIBS) \
 		$(GTK3_LDFLAGS)
+
+userland/qt5_test.elf: userland/qt5_test.cpp scripts/setup-alpine.sh
+	@if [ ! -d "$(ALPINE_SYSROOT)" ]; then \
+		echo "Error: Alpine rootfs not found. Run scripts/setup-alpine.sh first."; \
+		exit 1; \
+	fi
+	@if [ ! -d "$(ALPINE_SYSROOT)/usr/include/qt5" ]; then \
+		echo "Error: Qt5 dev headers not found. Re-run scripts/setup-alpine.sh to install qt5-qtbase-dev."; \
+		exit 1; \
+	fi
+	@echo "[*] Compiling userland/qt5_test.cpp (Qt5) ..."
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" \
+		$(MUSL_TOOLCHAIN_BIN)/x86_64-linux-musl-g++ -O2 -std=c++14 \
+		userland/qt5_test.cpp \
+		-o userland/qt5_test.elf \
+		$(QT5_CXXFLAGS) \
+		$(QT5_INCLUDES) \
+		$(QT5_LIBS) \
+		$(QT5_LDFLAGS)
 
 userland/tglgears_fb.elf: userland/tglgears_fb.c $(MUSL_LIBC) scripts/build-tinygl.sh
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \

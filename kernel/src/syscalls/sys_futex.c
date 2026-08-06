@@ -22,8 +22,34 @@
 #define FUTEX_WAIT_PRIVATE 128 // FUTEX_WAIT | FUTEX_PRIVATE_FLAG
 #define FUTEX_WAKE_PRIVATE 129 // FUTEX_WAKE | FUTEX_PRIVATE_FLAG
 #define FUTEX_PRIVATE_FLAG 128
-#define FUTEX_REQUEUE 3
-#define FUTEX_CMD_MASK 127
+#define FUTEX_REQUEUE      3
+#define FUTEX_WAKE_OP      5
+#define FUTEX_CMD_MASK     127
+
+// FUTEX_WAKE_OP encoded field widths (val3 argument)
+#define FUTEX_OP_OP_SHIFT    28
+#define FUTEX_OP_CMP_SHIFT   24
+#define FUTEX_OP_OPARG_SHIFT 12
+#define FUTEX_OP_OP_MASK     0xf
+#define FUTEX_OP_CMP_MASK    0xf
+#define FUTEX_OP_OPARG_MASK  0xfff
+#define FUTEX_OP_CMPARG_MASK 0xfff
+
+// Encoded op codes (FUTEX_OP_*)
+#define FUTEX_OP_SET        0  // *uaddr2 = oparg
+#define FUTEX_OP_ADD        1  // *uaddr2 += oparg
+#define FUTEX_OP_OR         2  // *uaddr2 |= oparg
+#define FUTEX_OP_ANDN       3  // *uaddr2 &= ~oparg
+#define FUTEX_OP_XOR        4  // *uaddr2 ^= oparg
+#define FUTEX_OP_ARG_SHIFT  8  // oparg = 1 << oparg (bit in op field)
+
+// Encoded cmp codes (FUTEX_OP_CMP_*)
+#define FUTEX_OP_CMP_EQ     0
+#define FUTEX_OP_CMP_NE     1
+#define FUTEX_OP_CMP_LT     2
+#define FUTEX_OP_CMP_LE     3
+#define FUTEX_OP_CMP_GT     4
+#define FUTEX_OP_CMP_GE     5
 
 // Error codes
 #define EFAULT 14
@@ -341,6 +367,80 @@ static uint64_t futex_requeue(uint32_t *uaddr1, uint32_t val, uint32_t val2,
   return (uint64_t)total_woken;
 }
 
+// FUTEX_WAKE_OP
+// Atomically applies an encoded operation to *uaddr2, wakes up to val threads
+// on uaddr, then conditionally wakes up to val2 threads on uaddr2 depending on
+// whether the old value of *uaddr2 satisfies a comparison.
+// val3 encodes: op[31:28] | cmp[27:24] | oparg[23:12] | cmparg[11:0]
+static uint64_t futex_wake_op(uint32_t *uaddr, uint32_t val,
+                              uint32_t val2, uint32_t *uaddr2,
+                              uint32_t val3, bool private) {
+  // Decode val3
+  uint32_t op_code  = (val3 >> FUTEX_OP_OP_SHIFT)   & FUTEX_OP_OP_MASK;
+  uint32_t cmp_code = (val3 >> FUTEX_OP_CMP_SHIFT)  & FUTEX_OP_CMP_MASK;
+  uint32_t oparg    = (val3 >> FUTEX_OP_OPARG_SHIFT) & FUTEX_OP_OPARG_MASK;
+  uint32_t cmparg   =  val3                          & FUTEX_OP_CMPARG_MASK;
+
+  // FUTEX_OP_ARG_SHIFT: oparg is a shift count rather than a literal value
+  if (op_code & FUTEX_OP_ARG_SHIFT) {
+    op_code &= ~FUTEX_OP_ARG_SHIFT;
+    if (oparg >= 32)
+      return (uint64_t)(-(int64_t)EINVAL);
+    oparg = 1u << oparg;
+  }
+
+  // Validate uaddr2
+  uint64_t vaddr2 = (uint64_t)uaddr2;
+  if ((vaddr2 & (sizeof(uint32_t) - 1)) != 0)
+    return (uint64_t)(-(int64_t)EINVAL);
+  if (!vmm_is_user_addr_range_valid(vaddr2, sizeof(uint32_t)))
+    return (uint64_t)(-(int64_t)EFAULT);
+
+  // Atomically apply the operation to *uaddr2 and capture the old value
+  uint32_t old_val;
+  switch (op_code) {
+  case FUTEX_OP_SET:
+    old_val = __atomic_exchange_n(uaddr2, oparg, __ATOMIC_SEQ_CST);
+    break;
+  case FUTEX_OP_ADD:
+    old_val = __atomic_fetch_add(uaddr2, oparg, __ATOMIC_SEQ_CST);
+    break;
+  case FUTEX_OP_OR:
+    old_val = __atomic_fetch_or(uaddr2, oparg, __ATOMIC_SEQ_CST);
+    break;
+  case FUTEX_OP_ANDN:
+    old_val = __atomic_fetch_and(uaddr2, ~oparg, __ATOMIC_SEQ_CST);
+    break;
+  case FUTEX_OP_XOR:
+    old_val = __atomic_fetch_xor(uaddr2, oparg, __ATOMIC_SEQ_CST);
+    break;
+  default:
+    return (uint64_t)(-(int64_t)EINVAL);
+  }
+
+  // Wake up to val threads waiting on uaddr (always)
+  uint64_t woken = futex_wake(uaddr, val, private);
+
+  // Evaluate the comparison against old_val
+  bool cmp_result;
+  switch (cmp_code) {
+  case FUTEX_OP_CMP_EQ: cmp_result = (old_val == cmparg); break;
+  case FUTEX_OP_CMP_NE: cmp_result = (old_val != cmparg); break;
+  case FUTEX_OP_CMP_LT: cmp_result = (old_val <  cmparg); break;
+  case FUTEX_OP_CMP_LE: cmp_result = (old_val <= cmparg); break;
+  case FUTEX_OP_CMP_GT: cmp_result = (old_val >  cmparg); break;
+  case FUTEX_OP_CMP_GE: cmp_result = (old_val >= cmparg); break;
+  default:
+    return (uint64_t)(-(int64_t)EINVAL);
+  }
+
+  // Conditionally wake up to val2 threads waiting on uaddr2
+  if (cmp_result)
+    woken += futex_wake(uaddr2, val2, private);
+
+  return woken;
+}
+
 // sys_futex dispatcher
 static uint64_t sys_futex(uint64_t uaddr_val, uint64_t op_val, uint64_t val_arg,
                           uint64_t timeout_ptr, uint64_t uaddr2_val,
@@ -365,6 +465,10 @@ static uint64_t sys_futex(uint64_t uaddr_val, uint64_t op_val, uint64_t val_arg,
   case FUTEX_REQUEUE:
     return futex_requeue(uaddr, val, (uint32_t)timeout_ptr,
                          (uint32_t *)uaddr2_val, private);
+
+  case FUTEX_WAKE_OP:
+    return futex_wake_op(uaddr, val, (uint32_t)timeout_ptr,
+                         (uint32_t *)uaddr2_val, (uint32_t)val3, private);
 
   default:
     klog_puts("[FUTEX] Unsupported op: ");

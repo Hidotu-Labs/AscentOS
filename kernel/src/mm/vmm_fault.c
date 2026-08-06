@@ -342,9 +342,9 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
       uint32_t file_offset = (uint32_t)(vma_offset + page_offset);
       vfs_page_t *cached = vfs_cache_lookup(node, file_offset);
       if (!cached) {
-        // Clustered 64 KB read-ahead into VFS page cache
-        uint32_t cluster_base = file_offset & ~0xFFFFU;
-        uint32_t cluster_end = cluster_base + 64 * 1024;
+        // Clustered 128 KB read-ahead into VFS page cache (32 pages)
+        uint32_t cluster_base = file_offset & ~0x1FFFFU;
+        uint32_t cluster_end = cluster_base + 128 * 1024;
         if (cluster_end > node->length)
           cluster_end = node->length;
 

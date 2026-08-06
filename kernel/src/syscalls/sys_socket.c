@@ -179,9 +179,9 @@ static uint64_t sys_connect(uint64_t sockfd, uint64_t addr_ptr,
   klog_uint64(addrlen);
   klog_puts("\n");
 
-  // Validate address pointer
-  if (!is_user_ptr(addr_ptr)) {
-    klog_puts("[CONNECT] EFAULT: invalid addr_ptr\n");
+  // Validate address pointer and range
+  if (!is_user_ptr(addr_ptr) || !vmm_is_user_addr_range_valid(addr_ptr, addrlen)) {
+    klog_puts("[CONNECT] EFAULT: invalid addr_ptr range\n");
     return (uint64_t)-14; // EFAULT
   }
 
@@ -192,14 +192,22 @@ static uint64_t sys_connect(uint64_t sockfd, uint64_t addr_ptr,
     return (uint64_t)-9; // EBADF
   }
 
+  // Copy sockaddr safely into kernel stack buffer before reading fields
+  uint8_t kaddr_buf[128];
+  if (addrlen > sizeof(kaddr_buf))
+    return (uint64_t)-22; // EINVAL
+
+  memcpy(kaddr_buf, (void *)addr_ptr, addrlen);
+  struct sockaddr *kaddr = (struct sockaddr *)kaddr_buf;
+
   klog_puts("[CONNECT] family=");
-  klog_uint64(addr->sa_family);
+  klog_uint64(kaddr->sa_family);
   klog_puts(" domain=");
   klog_uint64(sock->domain);
   klog_puts(" path=");
   // For AF_UNIX, print the path
-  if (addr->sa_family == 1 && addrlen > 2) {
-    struct sockaddr_un *sun = (struct sockaddr_un *)addr;
+  if (kaddr->sa_family == 1 && addrlen > 2) {
+    struct sockaddr_un *sun = (struct sockaddr_un *)kaddr;
     if (sun->sun_path[0] == '\0') {
       // Abstract socket - print @ followed by the name
       klog_puts("@");
@@ -210,7 +218,7 @@ static uint64_t sys_connect(uint64_t sockfd, uint64_t addr_ptr,
   }
   klog_puts("\n");
 
-  int ret = socket_connect(sock, addr, (int)addrlen);
+  int ret = socket_connect(sock, kaddr, (int)addrlen);
   klog_puts("[CONNECT] returned ");
   klog_uint64((uint64_t)ret);
   klog_puts("\n");
