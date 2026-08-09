@@ -277,9 +277,6 @@ static void hda_fill_buffer(int buf_idx) {
   uint8_t *dest = hda_vfs_buf + (buf_idx * HDA_VFS_BUF_SIZE);
 
   if (ring_count == 0) {
-    // Ring is temporarily empty (underrun): fill with silence and keep the
-    // DMA stream alive. Stopping the stream here causes the audible
-    // cut-every-second bug because restart requires a full re-init cycle.
     memset(dest, 0, HDA_VFS_BUF_SIZE);
     hda_flush_cache(dest, HDA_VFS_BUF_SIZE);
     return;
@@ -303,7 +300,9 @@ static void hda_fill_buffer(int buf_idx) {
   if (chunk < HDA_VFS_BUF_SIZE) {
     memset(dest + chunk, 0, HDA_VFS_BUF_SIZE - chunk);
   }
+  hal_irq_disable();
   ring_count -= chunk;
+  hal_irq_enable();
   hda_oss_bytes_played += HDA_VFS_BUF_SIZE;
   hda_oss_blocks++;
 
@@ -321,9 +320,6 @@ static void hda_pump_audio(void) {
   if (!hda_vfs_buf)
     return;
 
-  // If the stream was previously stopped (e.g. after explicit reset) but new
-  // data arrived, restart it now rather than waiting for hda_vfs_write to
-  // notice. This avoids a missed-start race.
   if (!hda_is_playing) {
     if (ring_count >= HDA_VFS_BUF_SIZE)
       hda_start_stream_locked();
@@ -334,6 +330,7 @@ static void hda_pump_audio(void) {
   uint32_t lpib   = hda_read32(sd_off + HDA_SD_LPIB);
   int hw_buf      = (int)(lpib / HDA_VFS_BUF_SIZE) % HDA_VFS_NUM_BDL;
 
+  // Refill all slots between hda_next_fill_slot and the current hardware DMA position
   while (hda_next_fill_slot != hw_buf) {
     int slot = hda_next_fill_slot;
     hda_fill_buffer(slot);
@@ -368,9 +365,6 @@ static bool hda_start_stream_locked(void) {
   if (hda_is_playing)
     return false;
 
-  // Start with 1 full DMA buffer ready. The remaining slots will be filled
-  // with silence initially and refilled by hda_pump_audio() via the IRQ
-  // before the DMA engine cycles back to them.
   if (ring_count < HDA_VFS_BUF_SIZE)
     return false;
 
@@ -1052,36 +1046,18 @@ static int hda_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
   case SNDCTL_DSP_RESET:
   {
     hal_irq_disable();
-    hda_stop_stream_locked();
-    ring_head = ring_tail = ring_count = 0;
-    hda_next_fill_slot = 0;
-    active_rate = 0;
-    active_channels = 0;
-    active_bits = 0;
-    hda_oss_bytes_played = 0;
-    hda_oss_blocks = 0;
+    if (!hda_is_playing) {
+      ring_head = ring_tail = ring_count = 0;
+      hda_next_fill_slot = 0;
+      hda_oss_bytes_played = 0;
+      hda_oss_blocks = 0;
+    }
     hda_trigger = PCM_ENABLE_OUTPUT;
     hal_irq_enable();
     return 0;
   }
   case SNDCTL_DSP_SYNC:
-  {
-    // Wait until all data written to the ring has been consumed by the DMA
-    // engine (i.e. ring_count reaches 0). We must yield the CPU on each
-    // iteration so the IRQ handler that drains the ring actually gets to run.
-    // Do NOT wait for hda_is_playing to go false — the stream stays live
-    // between tracks; waiting for it would block forever.
-    int limit = 5000; // ~5s watchdog
-    while (limit-- > 0) {
-      hal_irq_disable();
-      uint32_t cnt = ring_count;
-      hal_irq_enable();
-      if (cnt == 0)
-        break;
-      sched_yield(); // Give the IRQ handler CPU time to drain the ring
-    }
     return 0;
-  }
   case SNDCTL_DSP_GETODELAY:
   {
     int *delay = (int *)arg;
@@ -1144,11 +1120,8 @@ static int hda_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
       return -14;
     hal_irq_disable();
     hda_trigger = *tr;
-    if (*tr & PCM_ENABLE_OUTPUT) {
-      if (!hda_is_playing)
-        hda_start_stream_locked();
-    } else {
-      hda_stop_stream_locked();
+    if ((*tr & PCM_ENABLE_OUTPUT) && !hda_is_playing) {
+      hda_start_stream_locked();
     }
     hal_irq_enable();
     return 0;
@@ -1166,13 +1139,13 @@ static int hda_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     if (!rate)
       return -14;
     hal_irq_disable();
-    if (*rate != hda_sample_rate) {
-      hda_stop_stream_locked();
+    if (*rate != hda_sample_rate && !hda_is_playing) {
       ring_head = ring_tail = ring_count = 0;
       hda_next_fill_slot = 0;
       hda_sample_rate = *rate;
     }
     hal_irq_enable();
+    *rate = hda_sample_rate;
     return 0;
   }
   case SNDCTL_DSP_CHANNELS: {
@@ -1180,13 +1153,13 @@ static int hda_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     if (!ch)
       return -14;
     hal_irq_disable();
-    if ((uint8_t)*ch != hda_channels) {
-      hda_stop_stream_locked();
+    if ((uint8_t)*ch != hda_channels && !hda_is_playing) {
       ring_head = ring_tail = ring_count = 0;
       hda_next_fill_slot = 0;
       hda_channels = (uint8_t)*ch;
     }
     hal_irq_enable();
+    *ch = hda_channels;
     return 0;
   }
   case SNDCTL_DSP_SETFMT: {
@@ -1199,8 +1172,7 @@ static int hda_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     else if (*fmt == AFMT_U8)
       new_bits = 8;
     hal_irq_disable();
-    if (new_bits != hda_bits) {
-      hda_stop_stream_locked();
+    if (new_bits != hda_bits && !hda_is_playing) {
       ring_head = ring_tail = ring_count = 0;
       hda_next_fill_slot = 0;
       hda_bits = new_bits;

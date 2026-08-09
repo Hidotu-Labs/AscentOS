@@ -259,16 +259,20 @@ PULSE_EOF
     if [ ! -f "$HOME/.config/cmus/rc" ]; then
         cat > "$HOME/.config/cmus/rc" << 'CMUS_EOF'
 set output_plugin=oss
+set dsp.device=/dev/dsp
 CMUS_EOF
     else
         sed -i 's/set output_plugin=dummy/set output_plugin=oss/g;s/set output_plugin=alsa/set output_plugin=oss/g' "$HOME/.config/cmus/rc" 2>/dev/null || true
+        grep -q "dsp.device" "$HOME/.config/cmus/rc" || echo "set dsp.device=/dev/dsp" >> "$HOME/.config/cmus/rc"
     fi
     if [ ! -f "$HOME/.config/cmus/autosave" ]; then
         cat > "$HOME/.config/cmus/autosave" << 'CMUS_EOF'
 set output_plugin=oss
+set dsp.device=/dev/dsp
 CMUS_EOF
     else
         sed -i 's/set output_plugin=dummy/set output_plugin=oss/g;s/set output_plugin=alsa/set output_plugin=oss/g' "$HOME/.config/cmus/autosave" 2>/dev/null || true
+        grep -q "dsp.device" "$HOME/.config/cmus/autosave" || echo "set dsp.device=/dev/dsp" >> "$HOME/.config/cmus/autosave"
     fi
 
     if command -v xrdb >/dev/null 2>&1; then
