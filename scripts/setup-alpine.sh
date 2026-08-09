@@ -292,6 +292,20 @@ install_apk "ffmpeg4-libavutil" "community"
 install_apk "ffmpeg4-libswscale" "community"
 install_apk "ffmpeg4-libpostproc" "community"
 install_apk "ffmpeg4-libswresample" "community"
+# libavcodec.so (used by VLC's avcodec plugin) links these at load time; without
+# them the plugin fails to dlopen and VLC falls back to libmad for MP3.
+install_apk "libvpx" "community"
+install_apk "lame-libs" "main"
+install_apk "libtheora" "main"
+install_apk "x264-libs" "community"
+install_apk "x265-libs" "community"
+install_apk "xvidcore" "community"
+# Runtime deps of libavformat/libavcodec (VLC avcodec plugin dlopens these).
+install_apk "libsrt" "community"
+install_apk "libssh" "community"
+install_apk "soxr" "community"
+install_apk "libvdpau" "main"
+install_apk "numactl" "main"
 install_apk "libxkbcommon-x11" "main"
 install_apk "libpcre2-16" "main"
 install_apk "lua5.2-libs" "main"
@@ -303,6 +317,7 @@ install_apk "libflac" "main"
 install_apk "opus" "main"
 install_apk "taglib" "community"
 install_apk "alsa-lib" "main"
+install_apk "alsa-plugins" "community"
 install_apk "qt5-qtbase" "community"
 install_apk "qt5-qtbase-x11" "community"
 install_apk "qt5-qtx11extras" "community"
@@ -323,34 +338,106 @@ if [ ! -f "${ROOTFS_DIR}/etc/machine-id" ]; then
 fi
 ln -sf /etc/machine-id "${ROOTFS_DIR}/var/lib/dbus/machine-id"
 
-# Patch VLC to allow execution as root user
+# Allow VLC execution as root. LD_PRELOAD UID spoofing breaks D-Bus EXTERNAL auth
+# (libdbus sends fake uid 1000 while the kernel reports uid 0), so patch the one
+# geteuid()==0 early-exit in vlc.bin instead.
 if [ -f "${ROOTFS_DIR}/usr/bin/vlc" ] && [ ! -f "${ROOTFS_DIR}/usr/bin/vlc.bin" ]; then
-    sed -i 's/geteuid/getppid/g' "${ROOTFS_DIR}/usr/bin/vlc" 2>/dev/null || true
     mv "${ROOTFS_DIR}/usr/bin/vlc" "${ROOTFS_DIR}/usr/bin/vlc.bin"
 fi
+rm -f "${ROOTFS_DIR}/lib/libvlc_root_fix.so"
+if [ -f "${ROOTFS_DIR}/usr/bin/vlc.bin" ]; then
+    python3 - <<PY
+from pathlib import Path
+path = Path("${ROOTFS_DIR}/usr/bin/vlc.bin")
+data = bytearray(path.read_bytes())
+
+WANT   = bytes.fromhex("0f842f010000")  # je +0x12f  (root-guard branch)
+NOP6   = b"\x90" * 6
+HINT   = 0x109c                         # known offset for current Alpine VLC
+
+# 1. Check if already patched at the hint offset – nothing to do.
+if data[HINT:HINT + 6] == NOP6:
+    print("[OK] vlc.bin root guard already patched, skipping")
+    raise SystemExit(0)
+
+# 2. Try the known offset first.
+if data[HINT:HINT + 6] == WANT:
+    off = HINT
+else:
+    # 3. Scan the binary for the je pattern (handles VLC version changes).
+    off = data.find(WANT)
+    if off == -1:
+        raise SystemExit(
+            f"vlc.bin root guard: pattern not found and offset 0x{HINT:x} "
+            f"has unexpected bytes: {data[HINT:HINT + 6].hex()}"
+        )
+    print(f"[~] vlc.bin root guard found at 0x{off:x} (hint was 0x{HINT:x})")
+
+data[off:off + 6] = NOP6
+path.write_bytes(data)
+print(f"[OK] patched vlc.bin root guard at 0x{off:x}")
+PY
+fi
+
 cat <<'EOF' > "${ROOTFS_DIR}/usr/bin/vlc"
 #!/bin/sh
 export DISPLAY=${DISPLAY:-:0}
 export QT_QPA_PLATFORM=xcb
+export NO_AT_BRIDGE=1
+export PULSE_SERVER=
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/tmp/runtime-ascent}
+mkdir -p "$XDG_RUNTIME_DIR"
+chmod 700 "$XDG_RUNTIME_DIR"
+
+# Reuse the session bus started by initrd/startx.sh; never spawn a second daemon
+# when the socket already exists (that race produced two VLC windows).
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && [ -S /tmp/ascent-session-bus ]; then
+    export DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/ascent-session-bus
+fi
+
 if [ -f /lib/libgcompat.so.0 ]; then
-    export LD_PRELOAD=/lib/libgcompat.so.0:${LD_PRELOAD}
+    export LD_PRELOAD="/lib/libgcompat.so.0${LD_PRELOAD:+:${LD_PRELOAD}}"
 fi
-if [ "$1" = "-I" ] || [ "$1" = "--intf" ]; then
-    exec /usr/bin/vlc.bin --no-dbus "$@"
-else
-    exec /usr/bin/vlc.bin -I qt --no-dbus "$@"
-fi
+
+# Do not pass "-I qt": vlc.bin already auto-selects Qt when DISPLAY is set, and
+# an explicit "-I qt" duplicates the Qt interface (two windows + privacy dialogs).
+# libmad MP3 decoding fails on AscentOS (bad main_data_begin); use ffmpeg avcodec.
+exec /usr/bin/vlc.bin --one-instance --no-qt-privacy-ask --aout=oss \
+    --oss-audio-dev /dev/dsp --codec=avcodec --clock-synchro=0 "$@"
 EOF
 chmod +x "${ROOTFS_DIR}/usr/bin/vlc"
-if [ -f "${ROOTFS_DIR}/usr/lib/libvlccore.so.9.0.1" ]; then
-    sed -i 's/geteuid/getppid/g' "${ROOTFS_DIR}/usr/lib/libvlccore.so.9.0.1" 2>/dev/null || true
-fi
+
+# Ensure /etc/asound.conf is completely removed as ALSA routing cut off audio
+rm -f "${ROOTFS_DIR}/etc/asound.conf"
+
+# Seed VLC defaults: OSS output, no duplicate Qt/privacy prompts.
+mkdir -p "${ROOTFS_DIR}/etc/vlc" "${ROOTFS_DIR}/root/.config/vlc"
+cat > "${ROOTFS_DIR}/etc/vlc/vlcrc" <<'VLCRC_EOF'
+[audio]
+aout=oss
+
+[oss]
+oss-audio-dev=/dev/dsp
+
+[qt]
+qt-privacy-ask=0
+
+[codec]
+codec=avcodec
+
+[clock]
+clock-synchro=0
+VLCRC_EOF
+cp "${ROOTFS_DIR}/etc/vlc/vlcrc" "${ROOTFS_DIR}/root/.config/vlc/vlcrc"
+
+# libmad fails MP3 decode on AscentOS; libavcodec handles MP3 reliably.
+rm -f "${ROOTFS_DIR}/usr/lib/vlc/plugins/audio_filter/libmad_plugin.so"
 
 # Generate VLC plugin cache
 if [ -x "${ROOTFS_DIR}/usr/lib/vlc/vlc-cache-gen" ]; then
     echo "[*] Generating VLC plugin cache..."
     if command -v qemu-x86_64 >/dev/null 2>&1 && [ -f "${ROOTFS_DIR}/lib/ld-musl-x86_64.so.1" ]; then
-        LD_PRELOAD="${ROOTFS_DIR}/lib/libgcompat.so.0" qemu-x86_64 "${ROOTFS_DIR}/lib/ld-musl-x86_64.so.1" --library-path "${ROOTFS_DIR}/lib:${ROOTFS_DIR}/usr/lib" "${ROOTFS_DIR}/usr/lib/vlc/vlc-cache-gen" "${ROOTFS_DIR}/usr/lib/vlc/plugins" 2>/dev/null || true
+        qemu-x86_64 -L "${ROOTFS_DIR}" "${ROOTFS_DIR}/lib/ld-musl-x86_64.so.1" --library-path "${ROOTFS_DIR}/lib:${ROOTFS_DIR}/usr/lib" "${ROOTFS_DIR}/usr/lib/vlc/vlc-cache-gen" "${ROOTFS_DIR}/usr/lib/vlc/plugins" 2>/dev/null || true
     fi
 fi
 

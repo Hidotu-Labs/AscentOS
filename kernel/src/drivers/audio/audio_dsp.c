@@ -81,6 +81,16 @@ static int dsp_vfs_ioctl(struct vfs_node *node, uint32_t request,
   return audio->ioctl(audio, request, arg);
 }
 
+// Dispatch poll to active audio device
+static int dsp_vfs_poll(struct vfs_node *node, int events) {
+  (void)node;
+  vfs_node_t *audio = get_active_audio_node();
+  if (!audio || !audio->poll) {
+    return (events & (POLLOUT | POLLWRNORM));
+  }
+  return audio->poll(audio, events);
+}
+
 // Register /dev/dsp as a dispatcher that routes to available audio hardware
 void audio_dsp_register_vfs(void) {
   // First detect which devices are available
@@ -103,6 +113,7 @@ void audio_dsp_register_vfs(void) {
   node->length = 0;
   node->write = dsp_vfs_write;
   node->ioctl = dsp_vfs_ioctl;
+  node->poll = dsp_vfs_poll;
 
   // Register in internal device registry
   fb_register_device_node("dsp", node);

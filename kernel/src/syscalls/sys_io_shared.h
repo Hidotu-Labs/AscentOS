@@ -170,14 +170,33 @@ struct vt_stat {
   unsigned short v_state;
 };
 
-// OSS /dev/dsp ioctls
+// OSS /dev/dsp ioctls (numbers match musl sys/soundcard.h on x86_64)
 #define SNDCTL_DSP_RESET 0x00005000
+#define SNDCTL_DSP_SYNC 0x00005001
 #define SNDCTL_DSP_SPEED 0xC0045002
 #define SNDCTL_DSP_STEREO 0xC0045003
 #define SNDCTL_DSP_SETFMT 0xC0045005
 #define SNDCTL_DSP_CHANNELS 0xC0045006
+#define SNDCTL_DSP_SETFRAGMENT 0xC004500A
+#define SNDCTL_DSP_GETFMTS 0x8004500B
+#define SNDCTL_DSP_SETTRIGGER 0x40045010
+#define SNDCTL_DSP_GETTRIGGER 0x80045010
+#define SNDCTL_DSP_GETIPTR 0x800C5011
+#define SNDCTL_DSP_GETOPTR 0x800C5012
+#define SNDCTL_DSP_GETOSPACE 0x8010500C
+#define SNDCTL_DSP_GETCAPS 0x8004500F
 #define AFMT_U8 0x00000008
 #define AFMT_S16_LE 0x00000010
+#define PCM_ENABLE_OUTPUT 0x00000002
+#define PCM_ENABLE_INPUT 0x00000001
+#define DSP_CAP_TRIGGER 0x00001000
+#define DSP_CAP_OUTPUT 0x00000002
+
+struct oss_count_info {
+  int bytes;
+  int blocks;
+  int ptr;
+};
 
 // ---------------------------------------------------------------------------
 // inotify

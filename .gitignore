@@ -3,6 +3,7 @@
 /limine/
 /toolchain/
 /edk2-ovmf/
+/AetherDE/
 
 *.d
 *.elf

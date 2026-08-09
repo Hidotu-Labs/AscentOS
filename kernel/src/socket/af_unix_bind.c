@@ -90,9 +90,15 @@ static int unix_bind_fs(unix_sock_t *usk, struct sockaddr_un *sun, int addrlen) 
   vfs_chown(usk->parent->node, current_thread->fsuid,
             current_thread->fsgid);
 
+  memset(&usk->addr, 0, sizeof(usk->addr));
   memcpy(&usk->addr, sun, addrlen);
   usk->addr_len = addrlen;
   usk->is_abstract = false;
+  if (addrlen >= (int)offsetof(struct sockaddr_un, sun_path)) {
+    int path_end = addrlen - (int)offsetof(struct sockaddr_un, sun_path);
+    if (path_end >= 0 && path_end < (int)sizeof(usk->addr.sun_path))
+      usk->addr.sun_path[path_end] = '\0';
+  }
 
   spinlock_acquire(&unix_bound_lock);
   list_add(&usk->bind_node, &unix_bound_list);

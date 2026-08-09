@@ -148,7 +148,24 @@ static uint64_t sys_bind(uint64_t sockfd, uint64_t addr_ptr, uint64_t addrlen,
   }
   klog_puts("\n");
 
-  int ret = socket_bind(sock, addr, (int)addrlen);
+  uint8_t kaddr_buf[128];
+  if (addrlen > sizeof(kaddr_buf))
+    return (uint64_t)-22; // EINVAL
+
+  if (!vmm_is_user_addr_range_valid(addr_ptr, addrlen))
+    return (uint64_t)-14; // EFAULT
+
+  memset(kaddr_buf, 0, sizeof(kaddr_buf));
+  memcpy(kaddr_buf, (void *)addr_ptr, addrlen);
+  struct sockaddr *kaddr = (struct sockaddr *)kaddr_buf;
+  if (kaddr->sa_family == AF_UNIX && addrlen >= (int)offsetof(struct sockaddr_un, sun_path)) {
+    struct sockaddr_un *sun = (struct sockaddr_un *)kaddr;
+    int path_end = (int)addrlen - (int)offsetof(struct sockaddr_un, sun_path);
+    if (path_end >= 0 && path_end < (int)sizeof(sun->sun_path))
+      sun->sun_path[path_end] = '\0';
+  }
+
+  int ret = socket_bind(sock, kaddr, (int)addrlen);
   klog_puts("[BIND] returned ");
   klog_uint64((uint64_t)ret);
   klog_puts("\n");
@@ -197,8 +214,15 @@ static uint64_t sys_connect(uint64_t sockfd, uint64_t addr_ptr,
   if (addrlen > sizeof(kaddr_buf))
     return (uint64_t)-22; // EINVAL
 
+  memset(kaddr_buf, 0, sizeof(kaddr_buf));
   memcpy(kaddr_buf, (void *)addr_ptr, addrlen);
   struct sockaddr *kaddr = (struct sockaddr *)kaddr_buf;
+  if (kaddr->sa_family == AF_UNIX && addrlen >= (int)offsetof(struct sockaddr_un, sun_path)) {
+    struct sockaddr_un *sun = (struct sockaddr_un *)kaddr;
+    int path_end = (int)addrlen - (int)offsetof(struct sockaddr_un, sun_path);
+    if (path_end >= 0 && path_end < (int)sizeof(sun->sun_path))
+      sun->sun_path[path_end] = '\0';
+  }
 
   klog_puts("[CONNECT] family=");
   klog_uint64(kaddr->sa_family);

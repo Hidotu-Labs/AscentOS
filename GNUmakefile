@@ -85,6 +85,7 @@ GTK2_LDFLAGS := \
 
 # GTK3 test - include/lib flags
 GTK3_INCLUDES := \
+	-I$(ALPINE_SYSROOT)/usr/include \
 	-I$(ALPINE_SYSROOT)/usr/include/gtk-3.0 \
 	-I$(ALPINE_SYSROOT)/usr/include/glib-2.0 \
 	-I$(ALPINE_SYSROOT)/usr/lib/glib-2.0/include \
@@ -230,6 +231,156 @@ run-fat32: edk2-ovmf $(IMAGE_NAME).iso fat32_test.img
 		-device usb-mouse,bus=xhci.0 \
 		$(QEMUFLAGS)
 
+AetherDE/x11-wm/AetherWM: AetherDE/x11-wm/main.c AetherDE/x11-wm/render.c AetherDE/x11-wm/input.c AetherDE/x11-wm/frames.c AetherDE/x11-wm/wm.h scripts/setup-alpine.sh
+	@if [ ! -d "$(ALPINE_SYSROOT)" ]; then \
+		echo "Error: Alpine rootfs not found. Run scripts/setup-alpine.sh first."; \
+		exit 1; \
+	fi
+	@echo "[*] Compiling AetherDE X11 Window Manager..."
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" \
+		$(MUSL_CC) -O2 -Wall -Wextra -march=x86-64 -mtune=generic \
+		-I$(ALPINE_SYSROOT)/usr/include \
+		-I$(ALPINE_SYSROOT)/usr/include/cairo \
+		-I$(ALPINE_SYSROOT)/usr/include/pango-1.0 \
+		-I$(ALPINE_SYSROOT)/usr/include/glib-2.0 \
+		-I$(ALPINE_SYSROOT)/usr/lib/glib-2.0/include \
+		-I$(ALPINE_SYSROOT)/usr/include/harfbuzz \
+		-I$(ALPINE_SYSROOT)/usr/include/pixman-1 \
+		-I$(ALPINE_SYSROOT)/usr/include/freetype2 \
+		-I$(ALPINE_SYSROOT)/usr/include/libpng16 \
+		AetherDE/x11-wm/main.c \
+		AetherDE/x11-wm/render.c \
+		AetherDE/x11-wm/input.c \
+		AetherDE/x11-wm/frames.c \
+		-o AetherDE/x11-wm/AetherWM \
+		-L$(ALPINE_SYSROOT)/usr/lib -L$(ALPINE_SYSROOT)/lib \
+		-lX11 \
+		-lcairo \
+		-lpangocairo-1.0 -lpango-1.0 \
+		-lgobject-2.0 -lglib-2.0 \
+		-lfontconfig -lfreetype -lpng16 -lz -lm \
+		-Wl,-dynamic-linker,/lib/ld-musl-x86_64.so.1 \
+		-Wl,-rpath,/usr/lib \
+		-Wl,-rpath-link,$(ALPINE_SYSROOT)/usr/lib:$(ALPINE_SYSROOT)/lib
+
+
+AetherDE/aether-dock/aether-dock: AetherDE/aether-dock/main.c AetherDE/aether-dock/dock.c AetherDE/aether-dock/render_dock.c AetherDE/aether-dock/dock.h scripts/setup-alpine.sh
+	@if [ ! -d "$(ALPINE_SYSROOT)" ]; then \
+		echo "Error: Alpine rootfs not found. Run scripts/setup-alpine.sh first."; \
+		exit 1; \
+	fi
+	@echo "[*] Compiling AetherDE Dock..."
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" \
+		$(MUSL_CC) -O2 -Wall -Wextra -march=x86-64 -mtune=generic \
+		-I$(ALPINE_SYSROOT)/usr/include \
+		-I$(ALPINE_SYSROOT)/usr/include/gtk-3.0 \
+		-I$(ALPINE_SYSROOT)/usr/include/gdk-pixbuf-2.0 \
+		-I$(ALPINE_SYSROOT)/usr/include/atk-1.0 \
+		-I$(ALPINE_SYSROOT)/usr/include/at-spi2-atk/2.0 \
+		-I$(ALPINE_SYSROOT)/usr/include/at-spi-2.0 \
+		-I$(ALPINE_SYSROOT)/usr/include/dbus-1.0 \
+		-I$(ALPINE_SYSROOT)/usr/lib/dbus-1.0/include \
+		-I$(ALPINE_SYSROOT)/usr/include/epoxy \
+		-I$(ALPINE_SYSROOT)/usr/include/cairo \
+		-I$(ALPINE_SYSROOT)/usr/include/pango-1.0 \
+		-I$(ALPINE_SYSROOT)/usr/include/glib-2.0 \
+		-I$(ALPINE_SYSROOT)/usr/lib/glib-2.0/include \
+		-I$(ALPINE_SYSROOT)/usr/include/harfbuzz \
+		-I$(ALPINE_SYSROOT)/usr/include/pixman-1 \
+		-I$(ALPINE_SYSROOT)/usr/include/freetype2 \
+		-I$(ALPINE_SYSROOT)/usr/include/libpng16 \
+		AetherDE/aether-dock/main.c \
+		AetherDE/aether-dock/dock.c \
+		AetherDE/aether-dock/render_dock.c \
+		-o AetherDE/aether-dock/aether-dock \
+		-L$(ALPINE_SYSROOT)/usr/lib -L$(ALPINE_SYSROOT)/lib \
+		-lgtk-3 -lgdk-3 \
+		-lgdk_pixbuf-2.0 \
+		-latk-1.0 \
+		-lcairo-gobject -lcairo \
+		-lepoxy \
+		-lpangocairo-1.0 -lpango-1.0 \
+		-lgio-2.0 -lgobject-2.0 -lglib-2.0 \
+		-lX11 -lXext -lXrender -lXi -lXcursor -lXfixes \
+		-lXrandr -lXinerama -lXcomposite -lXdamage \
+		-lfontconfig -lfreetype -lpng16 -lz -lm \
+		-Wl,-dynamic-linker,/lib/ld-musl-x86_64.so.1 \
+		-Wl,-rpath,/usr/lib \
+		-Wl,-rpath-link,$(ALPINE_SYSROOT)/usr/lib:$(ALPINE_SYSROOT)/lib
+
+
+AetherDE/aether-panel/aether-panel: AetherDE/aether-panel/panel.c scripts/setup-alpine.sh
+	@if [ ! -d "$(ALPINE_SYSROOT)" ]; then \
+		echo "Error: Alpine rootfs not found. Run scripts/setup-alpine.sh first."; \
+		exit 1; \
+	fi
+	@echo "[*] Compiling AetherDE Panel..."
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" \
+		$(MUSL_CC) -O2 -Wall -Wextra \
+		-Wno-format-truncation -Wno-stringop-truncation \
+		-march=x86-64 -mtune=generic \
+		-I$(ALPINE_SYSROOT)/usr/include \
+		-I$(ALPINE_SYSROOT)/usr/include/cairo \
+		-I$(ALPINE_SYSROOT)/usr/include/pango-1.0 \
+		-I$(ALPINE_SYSROOT)/usr/include/glib-2.0 \
+		-I$(ALPINE_SYSROOT)/usr/lib/glib-2.0/include \
+		-I$(ALPINE_SYSROOT)/usr/include/harfbuzz \
+		-I$(ALPINE_SYSROOT)/usr/include/pixman-1 \
+		-I$(ALPINE_SYSROOT)/usr/include/freetype2 \
+		-I$(ALPINE_SYSROOT)/usr/include/libpng16 \
+		AetherDE/aether-panel/panel.c \
+		-o AetherDE/aether-panel/aether-panel \
+		-L$(ALPINE_SYSROOT)/usr/lib -L$(ALPINE_SYSROOT)/lib \
+		-lcairo \
+		-lpangocairo-1.0 -lpango-1.0 \
+		-lgobject-2.0 -lglib-2.0 \
+		-lX11 \
+		-lfontconfig -lfreetype -lpng16 -lz -lm \
+		-Wl,-dynamic-linker,/lib/ld-musl-x86_64.so.1 \
+		-Wl,-rpath,/usr/lib \
+		-Wl,-rpath-link,$(ALPINE_SYSROOT)/usr/lib:$(ALPINE_SYSROOT)/lib
+
+
+AetherDE/wayland-compositor/aether-compositor: AetherDE/wayland-compositor/main.c AetherDE/wayland-compositor/render.c AetherDE/wayland-compositor/input.c AetherDE/wayland-compositor/pixel_server.c AetherDE/wayland-compositor/protocols.c AetherDE/wayland-compositor/xdg-shell-protocol.c scripts/setup-alpine.sh
+	@if [ ! -d "$(ALPINE_SYSROOT)" ]; then \
+		echo "Error: Alpine rootfs not found. Run scripts/setup-alpine.sh first."; \
+		exit 1; \
+	fi
+	@echo "[*] Compiling AetherDE/wayland-compositor modular source files..."
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" \
+		$(MUSL_CC) -O2 -Wall -march=x86-64 -mtune=generic \
+		-I$(ALPINE_SYSROOT)/usr/include \
+		-I$(ALPINE_SYSROOT)/usr/include/cairo \
+		-I$(ALPINE_SYSROOT)/usr/include/pixman-1 \
+		AetherDE/wayland-compositor/main.c \
+		AetherDE/wayland-compositor/render.c \
+		AetherDE/wayland-compositor/input.c \
+		AetherDE/wayland-compositor/pixel_server.c \
+		AetherDE/wayland-compositor/protocols.c \
+		AetherDE/wayland-compositor/xdg-shell-protocol.c \
+		-L$(ALPINE_SYSROOT)/usr/lib \
+		-Wl,-dynamic-linker,/lib/ld-musl-x86_64.so.1 \
+		-Wl,-rpath,/usr/lib \
+		-Wl,-rpath-link,$(ALPINE_SYSROOT)/usr/lib \
+		-lwayland-server -lcairo -lpixman-1 -lfontconfig -lfreetype -lpng16 -lz -lm \
+		-o AetherDE/wayland-compositor/aether-compositor
+
+
+AetherDE/demo-client/aether-window: AetherDE/demo-client/main.c scripts/setup-alpine.sh
+	@if [ ! -d "$(ALPINE_SYSROOT)" ]; then \
+		echo "Error: Alpine rootfs not found. Run scripts/setup-alpine.sh first."; \
+		exit 1; \
+	fi
+	@echo "[*] Compiling AetherDE GTK3 Wayland Window Client..."
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" \
+		$(MUSL_CC) -O2 -Wall -march=x86-64 -mtune=generic \
+		AetherDE/demo-client/main.c \
+		-o AetherDE/demo-client/aether-window \
+		$(GTK3_INCLUDES) \
+		$(GTK3_LIBS) \
+		$(GTK3_LDFLAGS)
+
+
 # Create a 64MB ext2 disk image with sample files for testing
 disk.img: GNUmakefile userland/winoptions userland/icewm-menu
 disk.img: scripts/configure-accounts.sh userland/ascent-account userland/test_accounts.sh userland/ascent-login.elf
@@ -238,7 +389,7 @@ disk.img: userland/test_clone_futex.elf
 disk.img: userland/test_unix_sockets.elf
 disk.img: userland/test_syscall_speed.elf
 disk.img: $(QUAKE2_BUNDLE_FILES)
-disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets/mc9.mp3 assets/train.mp3 assets/test.bmp assets/test.tar assets/room.png assets/logo.png assets/linus.gif userland/forkit.elf userland/forkit-launch.sh userland/about.elf userland/hello_glibc.elf userland/booter.elf userland/reboot.elf userland/shutdown.elf userland/apm.elf userland/test_cpp.elf  userland/kilo.elf  userland/ls.elf userland/lspci.elf userland/lsblk.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/asplay.elf userland/kria.elf userland/doom.elf userland/xrootcursor.elf  userland/jwm.elf userland/doom_x11.elf userland/gtk_test.elf userland/qt5_test.elf userland/tglgears_fb.elf userland/tglgears_drm.elf userland/tglhello_drm.elf userland/test_mem_stress.elf userland/classicube.elf userland/terrain.png userland/texpacks/classicube.zip initrd/startx.sh initrd/startw.sh initrd/weston.ini userland/ascentd.elf $(ASCENTD_CONFIG_FILES)
+disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets/mc9.mp3 assets/train.mp3 assets/test.bmp assets/test.tar assets/room.png assets/logo.png assets/linus.gif assets/video.mp4 userland/forkit.elf userland/forkit-launch.sh userland/about.elf userland/hello_glibc.elf userland/booter.elf userland/reboot.elf userland/shutdown.elf userland/apm.elf userland/test_cpp.elf  userland/kilo.elf  userland/ls.elf userland/lspci.elf userland/lsblk.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/asplay.elf userland/kria.elf userland/doom.elf userland/xrootcursor.elf  userland/jwm.elf userland/doom_x11.elf userland/gtk_test.elf userland/qt5_test.elf userland/tglgears_fb.elf userland/tglgears_drm.elf userland/tglhello_drm.elf userland/test_mem_stress.elf userland/classicube.elf userland/terrain.png userland/texpacks/classicube.zip initrd/startx.sh initrd/startw.sh initrd/weston.ini AetherDE/x11-wm/AetherWM AetherDE/aether-dock/aether-dock AetherDE/aether-panel/aether-panel AetherDE/wayland-compositor/aether-compositor AetherDE/demo-client/aether-window AetherDE/scripts/sax11.sh AetherDE/scripts/sawayland.sh userland/ascentd.elf $(ASCENTD_CONFIG_FILES)
 	@echo "Creating root filesystem (ext4)..."
 	rm -f ./part.img
 	dd if=/dev/zero of=./part.img bs=1M count=2047
@@ -255,6 +406,20 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 		echo "write initrd/startx.sh bin/startx.sh"; \
 		echo "rm bin/startw.sh"; \
 		echo "write initrd/startw.sh bin/startw.sh"; \
+		echo "rm bin/sax11.sh"; \
+		echo "write AetherDE/scripts/sax11.sh bin/sax11.sh"; \
+		echo "rm bin/sawayland.sh"; \
+		echo "write AetherDE/scripts/sawayland.sh bin/sawayland.sh"; \
+		echo "rm bin/AetherWM"; \
+		echo "write AetherDE/x11-wm/AetherWM bin/AetherWM"; \
+		echo "rm bin/aether-dock"; \
+		echo "write AetherDE/aether-dock/aether-dock bin/aether-dock"; \
+		echo "rm bin/aether-panel"; \
+		echo "write AetherDE/aether-panel/aether-panel bin/aether-panel"; \
+		echo "rm bin/aether-compositor"; \
+		echo "write AetherDE/wayland-compositor/aether-compositor bin/aether-compositor"; \
+		echo "rm bin/aether-window"; \
+		echo "write AetherDE/demo-client/aether-window bin/aether-window"; \
 		echo "rm bin/ascentd"; \
 		echo "write userland/ascentd.elf bin/ascentd"; \
 		echo "rm bin/ascent-login"; \
@@ -288,6 +453,10 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 		echo "rm lib64/ld-linux-x86-64.so.2"; \
 		echo "write toolchain/glibc-sysroot/lib/ld-linux-x86-64.so.2 lib64/ld-linux-x86-64.so.2"; \
 	} | debugfs -w ./part.img >/dev/null 2>&1 || true
+	@if [ -d AetherDE ]; then \
+		echo "Installing AetherDE into disk image (/AetherDE)..."; \
+		./scripts/populate-ext2-dir.sh ./part.img AetherDE AetherDE; \
+	fi
 	@if [ -d toolchain/glibc-sysroot/usr/include ]; then \
 		echo "Installing GLIBC headers into disk image (opt/glibc/include)..."; \
 		./scripts/populate-ext2-dir.sh ./part.img toolchain/glibc-sysroot/usr/include opt/glibc/include; \
@@ -359,6 +528,8 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 		echo "write assets/logo.png assets/logo.png"; \
 		echo "rm assets/linus.gif"; \
 		echo "write assets/linus.gif assets/linus.gif"; \
+		echo "rm assets/video.mp4"; \
+		echo "write assets/video.mp4 assets/video.mp4"; \
 		echo "rm test.krx"; \
 		echo "write userland/kria-lang/test.krx test.krx"; \
 		echo "rm hello.krx"; \
@@ -609,6 +780,13 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 	@{ \
 		echo "rm bin/ls"; \
 		echo "symlink bin/ls /opt/coreutils/bin/ls"; \
+		echo "set_inode_field bin/sax11.sh mode 0100755"; \
+		echo "set_inode_field bin/sawayland.sh mode 0100755"; \
+		echo "set_inode_field bin/AetherWM mode 0100755"; \
+		echo "set_inode_field bin/aether-dock mode 0100755"; \
+		echo "set_inode_field bin/aether-panel mode 0100755"; \
+		echo "set_inode_field bin/aether-compositor mode 0100755"; \
+		echo "set_inode_field bin/aether-window mode 0100755"; \
 		echo "set_inode_field bin/forkit mode 0100755"; \
 		echo "set_inode_field bin/test_cred mode 0100755"; \
 		echo "set_inode_field bin/test_accounts mode 0100755"; \

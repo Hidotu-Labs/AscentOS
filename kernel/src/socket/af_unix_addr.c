@@ -12,6 +12,33 @@ spinlock_t       unix_bound_lock;
 
 // ── Lookup ────────────────────────────────────────────────────────────────────
 
+static size_t unix_fs_path_len(const struct sockaddr_un *addr, int addrlen) {
+  if (addrlen <= (int)offsetof(struct sockaddr_un, sun_path))
+    return 0;
+
+  size_t len = (size_t)(addrlen - offsetof(struct sockaddr_un, sun_path));
+  if (len > sizeof(addr->sun_path))
+    len = sizeof(addr->sun_path);
+
+  // Linux callers may omit the trailing NUL from addrlen; ignore a final NUL.
+  if (len > 0 && addr->sun_path[len - 1] == '\0')
+    len--;
+
+  return len;
+}
+
+static bool unix_fs_paths_equal(const struct sockaddr_un *a, int alen,
+                                const struct sockaddr_un *b, int blen) {
+  size_t a_len = unix_fs_path_len(a, alen);
+  size_t b_len = unix_fs_path_len(b, blen);
+
+  if (a_len != b_len)
+    return false;
+  if (a_len == 0)
+    return true;
+  return memcmp(a->sun_path, b->sun_path, a_len) == 0;
+}
+
 unix_sock_t *unix_find_socket_by_addr(struct sockaddr_un *addr, int addrlen) {
   struct list_head *pos;
 
@@ -32,12 +59,9 @@ unix_sock_t *unix_find_socket_by_addr(struct sockaddr_un *addr, int addrlen) {
         spinlock_release(&unix_bound_lock);
         return usk;
       }
-    } else {
-      // Filesystem socket: compare path strings
-      if (strcmp(usk->addr.sun_path, addr->sun_path) == 0) {
-        spinlock_release(&unix_bound_lock);
-        return usk;
-      }
+    } else if (unix_fs_paths_equal(&usk->addr, usk->addr_len, addr, addrlen)) {
+      spinlock_release(&unix_bound_lock);
+      return usk;
     }
   }
 
@@ -62,7 +86,7 @@ unix_sock_t *unix_find_socket_by_addr_ref(struct sockaddr_un *addr, int addrlen)
           memcmp(usk->addr.sun_path, addr->sun_path,
                  addrlen - offsetof(struct sockaddr_un, sun_path)) == 0)
         match = true;
-    } else if (strcmp(usk->addr.sun_path, addr->sun_path) == 0) {
+    } else if (unix_fs_paths_equal(&usk->addr, usk->addr_len, addr, addrlen)) {
       match = true;
     }
 

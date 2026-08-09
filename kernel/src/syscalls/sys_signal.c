@@ -1,4 +1,5 @@
 // Signal Syscalls: rt_sigaction, rt_sigprocmask
+#include "../apic/lapic_timer.h"
 #include "../console/klog.h"
 #include "../fs/vfs.h"
 #include "../lib/string.h"
@@ -168,12 +169,116 @@ static uint64_t sys_rt_sigaction(uint64_t signum, uint64_t act_ptr,
     struct k_sigaction *new = (struct k_sigaction *)act_ptr;
     if (signum == SIGKILL || signum == SIGSTOP)
       return (uint64_t)-22;
-    current->signal_handlers[idx] = *new;
+    extern struct thread *global_thread_list;
+    for (struct thread *t = global_thread_list; t; t = t->global_next) {
+      if (t->tgid == current->tgid) {
+        t->signal_handlers[idx] = *new;
+      }
+    }
   }
   return 0;
 }
 
 // rt_sigprocmask: Set or get signal mask
+static int sigtimedwait_dequeue(struct thread *t, uint64_t mask,
+                                struct kernel_siginfo *info) {
+  uint64_t pending = t->pending_signals & mask;
+  if (!pending)
+    return 0;
+
+  for (int i = 0; i < 64; i++) {
+    if (!(pending & (1ULL << i)))
+      continue;
+    int sig = i + 1;
+    t->pending_signals &= ~(1ULL << i);
+    if (info) {
+      memset(info, 0, sizeof(*info));
+      info->si_signo = sig;
+      info->si_code = 128; /* SI_KERNEL */
+    }
+    return sig;
+  }
+  return 0;
+}
+
+// rt_sigtimedwait: used by musl sigwait(); VLC main thread blocks here.
+static uint64_t sys_rt_sigtimedwait(uint64_t set_ptr, uint64_t info_ptr,
+                                    uint64_t timeout_ptr, uint64_t sigsetsize,
+                                    uint64_t a4, uint64_t a5) {
+  (void)a4;
+  (void)a5;
+
+  if (sigsetsize != 8)
+    return (uint64_t)-22; // EINVAL
+  if (!set_ptr || !vmm_is_user_addr_range_valid(set_ptr, 8))
+    return (uint64_t)-14; // EFAULT
+
+  struct thread *current = sched_get_current();
+  if (!current)
+    return (uint64_t)-1;
+
+  uint64_t mask = *(uint64_t *)set_ptr;
+  mask &= ~((1ULL << (SIGKILL - 1)) | (1ULL << (SIGSTOP - 1)));
+
+  // Linux rejects sets containing signals that are not blocked in the waiter.
+  if (mask & ~current->signal_mask)
+    return (uint64_t)-22; // EINVAL
+
+  uint64_t deadline = 0;
+  bool have_deadline = false;
+  if (timeout_ptr) {
+    if (!vmm_is_user_addr_range_valid(timeout_ptr, 16))
+      return (uint64_t)-14; // EFAULT
+    uint64_t sec = ((uint64_t *)timeout_ptr)[0];
+    uint64_t nsec = ((uint64_t *)timeout_ptr)[1];
+    if (nsec >= 1000000000ULL)
+      return (uint64_t)-22; // EINVAL
+    if (sec == 0 && nsec == 0) {
+      struct kernel_siginfo info;
+      int sig = sigtimedwait_dequeue(current, mask, &info);
+      if (!sig)
+        return (uint64_t)-11; // EAGAIN
+      if (info_ptr) {
+        if (!vmm_is_user_addr_range_writable(info_ptr,
+                                             sizeof(struct kernel_siginfo)))
+          return (uint64_t)-14;
+        memcpy((void *)info_ptr, &info, sizeof(info));
+      }
+      return (uint64_t)sig;
+    }
+    uint64_t ms = sec * 1000 + nsec / 1000000;
+    if (nsec % 1000000ULL)
+      ms++;
+    if (ms == 0)
+      ms = 1;
+    deadline = lapic_timer_get_ticks() + ms;
+    have_deadline = true;
+  }
+
+  for (;;) {
+    struct kernel_siginfo info;
+    int sig = sigtimedwait_dequeue(current, mask, &info);
+    if (sig) {
+      if (info_ptr) {
+        if (!vmm_is_user_addr_range_writable(info_ptr,
+                                             sizeof(struct kernel_siginfo)))
+          return (uint64_t)-14;
+        memcpy((void *)info_ptr, &info, sizeof(info));
+      }
+      return (uint64_t)sig;
+    }
+
+    if (have_deadline && lapic_timer_get_ticks() >= deadline)
+      return (uint64_t)-11; // EAGAIN
+
+    current->state = THREAD_BLOCKED;
+    current->wakeup_ticks = have_deadline ? deadline : 0;
+    sched_yield();
+    current->state = THREAD_RUNNING;
+    current->wakeup_ticks = 0;
+  }
+}
+
 static uint64_t sys_rt_sigprocmask(uint64_t how, uint64_t set_ptr,
                                    uint64_t oldset_ptr, uint64_t sigsetsize,
                                    uint64_t a4, uint64_t a5) {
@@ -282,7 +387,7 @@ void signal_deliver(struct registers *regs) {
     // We don't have a full STOP/CONT implementation yet, so we ignore these
     // rather than terminating the process. This lets bash open job control
     // without being killed when it reads from the controlling terminal.
-    if (sig == 21 || sig == 22)
+    if (sig == 21 || sig == 22 || sig == 32 || sig == 33)
       return;
     klog_puts("[SIGNAL] Default action (terminate) for sig ");
     klog_uint64(sig);
@@ -831,6 +936,7 @@ static uint64_t sys_tkill(uint64_t tid, uint64_t sig, uint64_t a2, uint64_t a3,
 void syscall_register_signal(void) {
   syscall_register(SYS_RT_SIGACTION, sys_rt_sigaction);
   syscall_register(SYS_RT_SIGPROCMASK, sys_rt_sigprocmask);
+  syscall_register(SYS_RT_SIGTIMEDWAIT, sys_rt_sigtimedwait);
   syscall_register_raw(SYS_RT_SIGRETURN, sys_rt_sigreturn);
   syscall_register(SYS_SIGALTSTACK, sys_sigaltstack);
   syscall_register(SYS_TKILL, sys_tkill);

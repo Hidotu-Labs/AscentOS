@@ -171,7 +171,8 @@ static int futex_get_key(uint32_t *uaddr, bool private,
 // Returns -EAGAIN if *uaddr != val at time of check.
 // Returns -ETIMEDOUT if timeout expired.
 static uint64_t futex_wait(uint32_t *uaddr, uint32_t val,
-                           const uint64_t *timeout_ts, bool private) {
+                           const uint64_t *timeout_ts, bool private,
+                           bool is_abs) {
   struct futex_key key;
   int error = futex_get_key(uaddr, private, &key);
   if (error)
@@ -212,13 +213,29 @@ static uint64_t futex_wait(uint32_t *uaddr, uint32_t val,
   if (timeout_ts) {
     uint64_t sec = timeout_ts[0];
     uint64_t nsec = timeout_ts[1];
-    uint64_t timeout_ms = sec * 1000 + nsec / 1000000;
-    if (timeout_ms == 0 && nsec > 0)
+    uint64_t target_ms = sec * 1000 + nsec / 1000000;
+    uint64_t now_ms = lapic_timer_get_ticks();
+    uint64_t timeout_ms = 0;
+    if (is_abs) {
+      if (target_ms > now_ms)
+        timeout_ms = target_ms - now_ms;
+      else
+        timeout_ms = 0;
+    } else {
+      timeout_ms = target_ms;
+    }
+
+    if (timeout_ms == 0 && nsec > 0 && !is_abs)
       timeout_ms = 1; // Minimum 1ms granularity
+
     if (timeout_ms > 0) {
-      // wakeup_ticks is checked by the scheduler's tick handler
-      waiter.thread->wakeup_ticks =
-          lapic_timer_get_ticks() + timeout_ms; // 1 tick ≈ 1ms at 1000 Hz
+      waiter.thread->wakeup_ticks = now_ms + timeout_ms;
+    } else if (is_abs && target_ms <= now_ms) {
+      // Immediate timeout!
+      waiter.thread->state = THREAD_RUNNING;
+      futex_hash[bucket].head = waiter.next;
+      spinlock_release(&futex_hash[bucket].lock);
+      return (uint64_t)(-(int64_t)ETIMEDOUT);
     }
   }
 
@@ -232,11 +249,13 @@ static uint64_t futex_wait(uint32_t *uaddr, uint32_t val,
   uint32_t final_bucket = futex_hash_key(waiter.key);
   spinlock_acquire(&futex_hash[final_bucket].lock);
 
+  bool was_woken = true;
   // Remove waiter from the list (may already have been removed by wake)
   struct futex_waiter **pp = &futex_hash[final_bucket].head;
   while (*pp) {
     if (*pp == &waiter) {
       *pp = waiter.next;
+      was_woken = false; // We were still in the list, so we were NOT woken by FUTEX_WAKE!
       break;
     }
     pp = &(*pp)->next;
@@ -244,25 +263,12 @@ static uint64_t futex_wait(uint32_t *uaddr, uint32_t val,
 
   spinlock_release(&futex_hash[final_bucket].lock);
 
-  // Determine return value: if we timed out the state would have been
-  // set back to READY by the scheduler's timeout logic, but wakeup_ticks
-  // would have been cleared.  If we were explicitly woken by FUTEX_WAKE
-  // the wakeup_ticks was also cleared.
-  // Heuristic: if wakeup_ticks was set and now it is 0 but we aren't at the
-  // end of the timeout, it might be a wake.
-  // Actually, a simpler way is to check the state or a flag.
-  // For now, if timeout_ts was provided and we returned, let's just return 0
-  // as musl usually handles spurious wakeups.
-  // But a 1:1 linux futex should return -110 on timeout.
+  // Check if we timed out: if a timeout was set, and we removed ourselves from the
+  // list (meaning futex_wake didn't wake us up), return -ETIMEDOUT.
+  if (timeout_ts && !was_woken) {
+    return (uint64_t)(-(int64_t)ETIMEDOUT);
+  }
 
-  // If the thread was woken by the timer, the scheduler sets wakeup_ticks to 0.
-  // But it also sets it to 0 on FUTEX_WAKE.
-  // Let's check if the thread was woken by a timeout.
-  // In AscentOS, the scheduler tick handler does:
-  // if (t->wakeup_ticks && current_ticks >= t->wakeup_ticks) { t->state =
-  // READY; t->wakeup_ticks = 0; }
-
-  // We can't easily tell here unless we saved the deadline.
   return 0;
 }
 
@@ -456,7 +462,8 @@ static uint64_t sys_futex(uint64_t uaddr_val, uint64_t op_val, uint64_t val_arg,
   case FUTEX_WAIT: {
     const uint64_t *timeout =
         timeout_ptr ? (const uint64_t *)timeout_ptr : NULL;
-    return futex_wait(uaddr, val, timeout, private);
+    bool is_abs = (op_val & 256) != 0; // FUTEX_CLOCK_REALTIME = 256
+    return futex_wait(uaddr, val, timeout, private, is_abs);
   }
 
   case FUTEX_WAKE:

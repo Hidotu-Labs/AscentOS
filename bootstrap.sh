@@ -6,6 +6,7 @@ set -e
 CC_RUNTIME_URL="https://github.com/osdev0/cc-runtime.git"
 LIMINE_PROTOCOL_URL="https://github.com/limine-bootloader/limine-protocol.git"
 FREESTND_C_HDRS_URL="https://github.com/osdev0/freestnd-c-hdrs-0bsd.git"
+AETHERDE_URL="https://github.com/Hidotu-Labs/AetherDE.git"
 
 # Function to setup a dependency
 setup_dep() {
@@ -28,6 +29,7 @@ mkdir -p kernel
 setup_dep "kernel/cc-runtime" "$CC_RUNTIME_URL"
 setup_dep "kernel/limine-protocol" "$LIMINE_PROTOCOL_URL"
 setup_dep "kernel/freestnd-c-hdrs" "$FREESTND_C_HDRS_URL"
+setup_dep "AetherDE" "$AETHERDE_URL"
 
 echo "--- Setting up glibc toolchain ---"
 chmod +x scripts/glibc-toolchain.sh

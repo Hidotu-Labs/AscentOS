@@ -26,6 +26,7 @@ static uint8_t ac97_bits = 16;
 #define SNDCTL_DSP_STEREO 0xC0045003
 #define SNDCTL_DSP_SETFMT 0xC0045005
 #define SNDCTL_DSP_CHANNELS 0xC0045006
+#define SNDCTL_DSP_GETODELAY 0x80044D1D
 #define AFMT_U8 0x00000008
 #define AFMT_S16_LE 0x00000010
 
@@ -398,9 +399,34 @@ int ac97_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     *fmt = (ac97_bits == 8) ? AFMT_U8 : AFMT_S16_LE;
     return 0;
   }
+  case SNDCTL_DSP_GETODELAY: {
+    int *delay = (int *)arg;
+    if (!delay)
+      return -14;
+    hal_irq_disable();
+    *delay = (int)ring_count;
+    hal_irq_enable();
+    return 0;
+  }
   default:
     return -25; // ENOTTY
   }
+}
+
+static int ac97_vfs_poll(struct vfs_node *node, int events) {
+  (void)node;
+  if (!ac97_present)
+    return 0;
+
+  int revents = 0;
+  hal_irq_disable();
+  uint32_t cnt = ring_count;
+  hal_irq_enable();
+
+  if ((events & (POLLOUT | POLLWRNORM)) && cnt < AC97_RING_SIZE) {
+    revents |= (events & (POLLOUT | POLLWRNORM));
+  }
+  return revents;
 }
 
 void ac97_register_vfs(void) {
@@ -418,6 +444,7 @@ void ac97_register_vfs(void) {
   node->length = 0;
   node->write = ac97_vfs_write;
   node->ioctl = ac97_ioctl;
+  node->poll = ac97_vfs_poll;
 
   // Register as /dev/ac97 only - audio_dsp dispatcher handles /dev/dsp
   fb_register_device_node("ac97", node);

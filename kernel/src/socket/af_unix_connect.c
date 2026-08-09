@@ -79,6 +79,7 @@ int unix_connect_impl(socket_t *sock, struct sockaddr *addr, int addrlen) {
   }
 
   unix_sock_t *server_usk = (unix_sock_t *)server_sock->sk;
+  server_usk->passcred = dusk->passcred;
 
   usk->peer        = server_usk;
   server_usk->peer = usk;
@@ -122,9 +123,10 @@ int unix_connect_impl(socket_t *sock, struct sockaddr *addr, int addrlen) {
   dusk->accept_queue_len++;
 
   // Notify listener
-  if (dusk->is_abstract) {
+  if (dusk->is_abstract || !listener_sock->node) {
     epoll_notify_socket(listener_sock->fd, POLLIN);
-  } else if (listener_sock->node) {
+  }
+  if (listener_sock->node) {
     epoll_notify_event(listener_sock->node, POLLIN);
   }
   wait_queue_wake_all(dusk->wait);

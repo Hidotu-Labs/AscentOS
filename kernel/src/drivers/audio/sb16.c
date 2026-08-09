@@ -20,6 +20,7 @@
 #define SNDCTL_DSP_STEREO 0xC0045003
 #define SNDCTL_DSP_SETFMT 0xC0045005
 #define SNDCTL_DSP_CHANNELS 0xC0045006
+#define SNDCTL_DSP_GETODELAY 0x80044D1D
 #define AFMT_U8 0x00000008
 #define AFMT_S16_LE 0x00000010
 
@@ -448,6 +449,22 @@ static uint32_t dsp_vfs_write(struct vfs_node *node, uint32_t offset,
   return written;
 }
 
+static int sb16_vfs_poll(struct vfs_node *node, int events) {
+  (void)node;
+  if (!sb16_present)
+    return 0;
+
+  int revents = 0;
+  hal_irq_disable();
+  uint32_t cnt = ring_count;
+  hal_irq_enable();
+
+  if ((events & (POLLOUT | POLLWRNORM)) && cnt < SB16_RING_SIZE) {
+    revents |= (events & (POLLOUT | POLLWRNORM));
+  }
+  return revents;
+}
+
 // VFS registration
 
 void sb16_register_vfs(void) {
@@ -465,6 +482,7 @@ void sb16_register_vfs(void) {
   node->length = 0;
   node->write = dsp_vfs_write;
   node->ioctl = sb16_ioctl;
+  node->poll = sb16_vfs_poll;
 
   // Register as /dev/sb16 only - audio_dsp dispatcher handles /dev/dsp
   fb_register_device_node("sb16", node);

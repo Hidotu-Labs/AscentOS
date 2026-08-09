@@ -48,6 +48,45 @@ if [ "$ready" != 1 ]; then
     exit 1
 fi
 
+# D-Bus is required by VLC/Qt and many GTK apps. Bootstrap it once for every
+# desktop session (IceWM and XFCE), not only the XFCE code path.
+if [ ! -s /etc/machine-id ]; then
+    if command -v dbus-uuidgen >/dev/null 2>&1; then
+        dbus-uuidgen --ensure=/etc/machine-id 2>/dev/null || true
+    else
+        echo "10000000000000000000000000000001" > /etc/machine-id
+    fi
+fi
+mkdir -p /var/lib/dbus /run/dbus
+[ -L /var/run ] || [ -d /var/run ] || mkdir -p /var/run
+[ -e /var/run/dbus ] || ln -sf /run/dbus /var/run/dbus 2>/dev/null || true
+[ -f /var/lib/dbus/machine-id ] || cp -f /etc/machine-id /var/lib/dbus/machine-id 2>/dev/null || true
+if command -v dbus-daemon >/dev/null 2>&1 && [ ! -S /run/dbus/system_bus_socket ]; then
+    dbus-daemon --system --fork 2>/dev/null || true
+fi
+DBUS_SYSTEM_BUS_ADDRESS=unix:path=/var/run/dbus/system_bus_socket
+export DBUS_SYSTEM_BUS_ADDRESS
+
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] &&
+   command -v dbus-daemon >/dev/null 2>&1; then
+    DBUS_SESSION_BUS_SOCKET=/tmp/ascent-session-bus
+    rm -f "$DBUS_SESSION_BUS_SOCKET"
+    DBUS_SESSION_BUS_ADDRESS=unix:path=$DBUS_SESSION_BUS_SOCKET
+    dbus-daemon --session --nofork \
+        --address="$DBUS_SESSION_BUS_ADDRESS" >/tmp/ascent-dbus.log 2>&1 &
+    DBUS_SESSION_BUS_PID=$!
+    sleep 0.1
+    if ! kill -0 "$DBUS_SESSION_BUS_PID" 2>/dev/null; then
+        echo "[startx] session D-Bus daemon failed to initialize"
+        exit 1
+    fi
+    export DBUS_SESSION_BUS_ADDRESS
+fi
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+    echo "[startx] unable to start D-Bus session bus"
+    exit 1
+fi
+
 # ── XFCE4 session ────────────────────────────────────────────────────────
 if [ "${ASCENT_SESSION:-}" = "xfce4" ]; then
     echo "[startx] Starting XFCE4 component session..."
@@ -208,28 +247,6 @@ EOF
 </channel>
 EOF
 
-    # Ensure D-Bus machine-id exists to prevent GDBus / GTK startup delays
-    if [ ! -s /etc/machine-id ]; then
-        if command -v dbus-uuidgen >/dev/null 2>&1; then
-            dbus-uuidgen --ensure=/etc/machine-id 2>/dev/null || true
-        else
-            echo "10000000000000000000000000000001" > /etc/machine-id
-        fi
-    fi
-    mkdir -p /var/lib/dbus /run/dbus
-    [ -L /var/run ] || [ -d /var/run ] || mkdir -p /var/run
-    [ -e /var/run/dbus ] || ln -sf /run/dbus /var/run/dbus 2>/dev/null || true
-    [ -f /var/lib/dbus/machine-id ] || cp -f /etc/machine-id /var/lib/dbus/machine-id 2>/dev/null || true
-    if command -v dbus-daemon >/dev/null 2>&1 && [ ! -S /run/dbus/system_bus_socket ]; then
-        dbus-daemon --system --fork 2>/dev/null || true
-    fi
-
-    # The kernel's /var/run -> /run symlink resolution is not complete yet.
-    # dbus-daemon bound the system bus at /var/run, so make all GTK/GIO/XFCE
-    # clients use that real endpoint instead of retrying the absent /run path.
-    DBUS_SYSTEM_BUS_ADDRESS=unix:path=/var/run/dbus/system_bus_socket
-    export DBUS_SYSTEM_BUS_ADDRESS
-
     # Prevent PulseAudio client library from autospawning pulseaudio and blocking cmus/GTK apps
     mkdir -p /etc/pulse "$HOME/.config/pulse"
     cat > /etc/pulse/client.conf << 'PULSE_EOF'
@@ -256,29 +273,6 @@ CMUS_EOF
 
     if command -v xrdb >/dev/null 2>&1; then
         xrdb -merge "$HOME/.Xresources" 2>/dev/null || true
-    fi
-
-    if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] &&
-       command -v dbus-daemon >/dev/null 2>&1; then
-        # Keep the daemon in this shell's background instead of going through
-        # dbus-launch/--fork. The latter leaves a listener that accepts the
-        # first XFCE clients but later stops servicing new GTK clients.
-        DBUS_SESSION_BUS_SOCKET=/tmp/ascent-session-bus
-        rm -f "$DBUS_SESSION_BUS_SOCKET"
-        DBUS_SESSION_BUS_ADDRESS=unix:path=$DBUS_SESSION_BUS_SOCKET
-        dbus-daemon --session --nofork \
-            --address="$DBUS_SESSION_BUS_ADDRESS" >/tmp/ascent-dbus.log 2>&1 &
-        DBUS_SESSION_BUS_PID=$!
-        sleep 0.1
-        if ! kill -0 "$DBUS_SESSION_BUS_PID" 2>/dev/null; then
-            echo "[startx] session D-Bus daemon failed to initialize"
-            exit 1
-        fi
-        export DBUS_SESSION_BUS_ADDRESS
-    fi
-    if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
-        echo "[startx] unable to start D-Bus session bus"
-        exit 1
     fi
 
     XFCONFD=/usr/lib/xfce4/xfconf/xfconfd
@@ -333,6 +327,11 @@ CMUS_EOF
 fi
 
 # ── Default: IceWM session (original behaviour) ───────────────────────────
+
+export NO_AT_BRIDGE=1
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-ascent}"
+mkdir -p "$XDG_RUNTIME_DIR"
+chmod 700 "$XDG_RUNTIME_DIR"
 
 # IceWM configuration setup
 : "${HOME:=/}"
