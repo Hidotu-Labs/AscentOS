@@ -305,6 +305,14 @@ void kmain(void) {
   klog_puts("     Active CR3 Page Map hooked.\n");
   heap_init();
 
+  /* ── LinuxKPI Phase 1a stress test ── */
+  extern void linuxkpi_test_1a(void);
+  linuxkpi_test_1a();
+
+  /* ── LinuxKPI Phase 1b stress test ── */
+  extern void linuxkpi_test_1b(void);
+  linuxkpi_test_1b();
+
   slab_cache_init();
 
   extern kmem_cache_t *vma_cache;

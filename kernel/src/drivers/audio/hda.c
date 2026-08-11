@@ -416,6 +416,12 @@ static bool hda_start_stream_locked(void) {
   hda_write16(sd_off + HDA_SD_FMT, hw_fmt);
 
   // Update codec widgets
+  // Re-enable IRQs for verb round-trips: each hda_send_verb_immediate can
+  // busy-wait up to 10000 iterations.  With 5 verbs and IRQs disabled the
+  // whole time, we can block audio IOCs for ~50ms — long enough to drain the
+  // pre-filled DMA buffers and cause a cutoff.  The DMA engine is not yet
+  // running (RUN bit not set), so re-enabling here is safe.
+  hal_irq_enable();
   hda_send_verb_immediate(hda_codec_addr, hda_dac_node, HDA_VERB_SET_FORMAT,
                           hw_fmt);
   hda_send_verb_immediate(hda_codec_addr, hda_dac_node, HDA_VERB_SET_STREAM_ID,
@@ -427,6 +433,7 @@ static bool hda_start_stream_locked(void) {
                           0xC0);
   hda_send_verb_immediate(hda_codec_addr, hda_pin_node, HDA_VERB_SET_AMP_MUTE,
                           0xB000 | 0x7F);
+  hal_irq_disable();
 
   // Enable interrupt for this stream in INTCTL
   hda_write32(HDA_INTCTL, hda_read32(HDA_INTCTL) | (1 << iss));
