@@ -24,12 +24,19 @@ QUAKE2_BUNDLE_FILES := \
 	userland/quake2/baseq2/pak0.pak \
 	userland/quake2/baseq2/autoexec.cfg
 
+QUAKE2_STAMP := build/quake2/.built
+
 # The Quake II script produces the engine, renderer, game library, config, and
-# demo data as one bundle. A grouped target ensures parallel userland builds
-# invoke the script only once when any part of that bundle needs rebuilding.
-$(QUAKE2_BUNDLE_FILES) &: scripts/build-quake2.sh \
+# demo data as one bundle. A stamp file tracks whether the build is current so
+# editing the build script or evdev header doesn't re-trigger a full rebuild
+# unless the outputs are actually missing.
+$(QUAKE2_BUNDLE_FILES): $(QUAKE2_STAMP)
+
+$(QUAKE2_STAMP): scripts/build-quake2.sh \
 		scripts/quake2-sdl2-config.in scripts/quake2-avoryos-evdev.h
 	./scripts/build-quake2.sh
+	@mkdir -p $(dir $(QUAKE2_STAMP))
+	@touch $(QUAKE2_STAMP)
 
 HOST_CC := cc
 HOST_CFLAGS := -g -O2 -pipe

@@ -63,7 +63,7 @@ patch_source() {
         echo "Error: could not apply the AscentOS root-session patch to $main_c" >&2
         exit 1
     fi
-    cp "$ROOT_DIR/scripts/quake2-ascentos-evdev.h" "$SOURCE_DIR/src/client/input/ascentos_evdev.h"
+    cp "$ROOT_DIR/scripts/quake2-avoryos-evdev.h" "$SOURCE_DIR/src/client/input/ascentos_evdev.h"
     if ! grep -q 'ASCENTOS_EVDEV_KEYBOARD' "$input_c"; then
         sed -i '/#include "\.\.\/header\/client.h"/a\
 \
