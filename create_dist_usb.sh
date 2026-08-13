@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-# Distribution ISO Generator for AscentOS
+# Distribution ISO Generator for AvoryOS
 # Produces a self-contained bootable hybrid ISO (BIOS + UEFI).
 # disk.img is shrunk and embedded as a Limine module; the kernel's ramdisk
 # driver picks it up and mounts it as root — no separate drive needed.
@@ -9,7 +9,7 @@ set -e
 # Usage: ./create_dist_usb.sh [output.iso]
 
 ARCH="x86_64"
-OUT="${1:-ascentos-dist.iso}"
+OUT="${1:-avoryos-dist.iso}"
 ISO_ROOT="iso_root_dist"
 TMPPART=""
 
@@ -37,7 +37,7 @@ done
 # The ext4 partition inside disk.img typically occupies ~900MB of a 2GB image.
 # We extract the partition, run resize2fs -M to shrink it to minimum, then
 # reassemble with the original MBR so the kernel can still read the MBR layout.
-TMPPART=$(mktemp /tmp/ascentos-part-XXXXXX.img)
+TMPPART=$(mktemp /tmp/avoryos-part-XXXXXX.img)
 SHRUNK_DISK="${ISO_ROOT}/disk.img"   # written directly into the ISO root
 
 echo "[INFO] Extracting partition from disk.img..."
@@ -89,7 +89,7 @@ cp -v limine/BOOTX64.EFI             "$ISO_ROOT/EFI/BOOT/"
 cp -v limine/BOOTIA32.EFI            "$ISO_ROOT/EFI/BOOT/" 2>/dev/null || true
 
 echo "[INFO] Limine config for dist ISO:"
-grep -A5 "^/AscentOS" "$ISO_ROOT/boot/limine/limine.conf"
+grep -A5 "^/AvoryOS" "$ISO_ROOT/boot/limine/limine.conf"
 
 # ── Generate the ISO ─────────────────────────────────────────────────────────
 echo "[INFO] Running xorriso..."

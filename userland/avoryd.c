@@ -11,8 +11,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#define ASCENTD_DEFAULT_DIR "/etc/ascentd"
-#define ASCENTD_DEFAULT_LOG "/tmp/ascentd.log"
+#define AVORYD_DEFAULT_DIR "/etc/avoryd"
+#define AVORYD_DEFAULT_LOG "/tmp/avoryd.log"
 #define MAX_LINE 512
 #define MAX_ARGS 32
 #define MAX_SERVICES 64
@@ -32,7 +32,7 @@ typedef struct {
   bool respawn;
 } service_t;
 
-static const char *ascentd_dir;
+static const char *avoryd_dir;
 static char service_dir[256];
 static char target_path[256];
 static const char *log_path;
@@ -40,7 +40,7 @@ static const char *log_path;
 static void log_msg(const char *fmt, ...) {
   va_list ap;
 
-  printf("[AscentD] ");
+  printf("[AvoryD] ");
   va_start(ap, fmt);
   vprintf(fmt, ap);
   va_end(ap);
@@ -51,7 +51,7 @@ static void log_msg(const char *fmt, ...) {
   if (!log)
     return;
 
-  fprintf(log, "[AscentD] ");
+  fprintf(log, "[AvoryD] ");
   va_start(ap, fmt);
   vfprintf(log, fmt, ap);
   va_end(ap);
@@ -207,7 +207,7 @@ static int builtin_runtime_dirs(void) {
 }
 
 static void exec_command(const service_t *svc) {
-  if (streq(svc->command, "ascentd:runtime-dirs"))
+  if (streq(svc->command, "avoryd:runtime-dirs"))
     _exit(builtin_runtime_dirs());
 
   char command[sizeof(svc->command)];
@@ -229,7 +229,7 @@ static void exec_command(const service_t *svc) {
     execv("/bin/sh", script_argv);
   }
 
-  perror("ascentd exec");
+  perror("avoryd exec");
   _exit(127);
 }
 
@@ -249,7 +249,7 @@ static int wait_for(pid_t pid) {
 
 static void write_pid_file(const char *service_name, pid_t pid) {
   char path[128];
-  snprintf(path, sizeof(path), "/tmp/ascentd-%s.pid", service_name);
+  snprintf(path, sizeof(path), "/tmp/avoryd-%s.pid", service_name);
 
   FILE *file = fopen(path, "w");
   if (!file)
@@ -325,13 +325,13 @@ static int start_service(const char *service_name, bool allow_disabled) {
 }
 
 static void usage(void) {
-  puts("AscentD service manager");
-  puts("usage: ascentd [boot|help|list|start SERVICE|status SERVICE]");
+  puts("AvoryD service manager");
+  puts("usage: avoryd [boot|help|list|start SERVICE|status SERVICE]");
   puts("examples:");
-  puts("  ascentd list");
-  puts("  ascentd start wayland");
-  puts("  ascentd start wayland.service");
-  puts("  ascentd status wayland");
+  puts("  avoryd list");
+  puts("  avoryd start wayland");
+  puts("  avoryd start wayland.service");
+  puts("  avoryd status wayland");
 }
 
 static void list_services(void) {
@@ -360,7 +360,7 @@ static void status_service(const char *service_name) {
   normalize_service_name(service_name, normalized_name, sizeof(normalized_name));
 
   char path[128];
-  snprintf(path, sizeof(path), "/tmp/ascentd-%s.pid", normalized_name);
+  snprintf(path, sizeof(path), "/tmp/avoryd-%s.pid", normalized_name);
 
   FILE *file = fopen(path, "r");
   if (!file) {
@@ -424,7 +424,7 @@ static int boot_target(void) {
          "/opt/tcc/bin",
          1);
 
-  log_msg("AscentD boot starting");
+  log_msg("AvoryD boot starting");
 
   char services[MAX_SERVICES][64];
   int count = load_target(services, MAX_SERVICES);
@@ -438,25 +438,25 @@ static int boot_target(void) {
 }
 
 int main(int argc, char **argv) {
-  ascentd_dir = getenv("ASCENTD_DIR");
-  if (!ascentd_dir)
-    ascentd_dir = ASCENTD_DEFAULT_DIR;
+  avoryd_dir = getenv("AVORYD_DIR");
+  if (!avoryd_dir)
+    avoryd_dir = AVORYD_DEFAULT_DIR;
 
-  const char *service_dir_env = getenv("ASCENTD_SERVICE_DIR");
+  const char *service_dir_env = getenv("AVORYD_SERVICE_DIR");
   if (service_dir_env)
     snprintf(service_dir, sizeof(service_dir), "%s", service_dir_env);
   else
-    snprintf(service_dir, sizeof(service_dir), "%s/services", ascentd_dir);
+    snprintf(service_dir, sizeof(service_dir), "%s/services", avoryd_dir);
 
-  const char *target_env = getenv("ASCENTD_TARGET");
+  const char *target_env = getenv("AVORYD_TARGET");
   if (target_env)
     snprintf(target_path, sizeof(target_path), "%s", target_env);
   else
-    snprintf(target_path, sizeof(target_path), "%s/default.target", ascentd_dir);
+    snprintf(target_path, sizeof(target_path), "%s/default.target", avoryd_dir);
 
-  log_path = getenv("ASCENTD_LOG");
+  log_path = getenv("AVORYD_LOG");
   if (!log_path)
-    log_path = ASCENTD_DEFAULT_LOG;
+    log_path = AVORYD_DEFAULT_LOG;
 
   const char *cmd = argc > 1 ? argv[1] : "boot";
   if (streq(cmd, "boot"))

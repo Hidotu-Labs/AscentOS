@@ -7,14 +7,14 @@ QEMUFLAGS := -m 2G \
 	-display gtk,zoom-to-fit=off
 
 
-override IMAGE_NAME := ascentos-$(ARCH)
+override IMAGE_NAME := avoryos-$(ARCH)
 
-ASCENTD_CONFIG_FILES := \
-	initrd/ascentd/default.target \
-	initrd/ascentd/services/system-init.service \
-	initrd/ascentd/services/console.service \
-	initrd/ascentd/services/wayland.service \
-	initrd/ascentd/services/x11.service
+AVORYD_CONFIG_FILES := \
+	initrd/avoryd/default.target \
+	initrd/avoryd/services/system-init.service \
+	initrd/avoryd/services/console.service \
+	initrd/avoryd/services/wayland.service \
+	initrd/avoryd/services/x11.service
 
 QUAKE2_BUNDLE_FILES := \
 	userland/quake2-launch.sh \
@@ -28,7 +28,7 @@ QUAKE2_BUNDLE_FILES := \
 # demo data as one bundle. A grouped target ensures parallel userland builds
 # invoke the script only once when any part of that bundle needs rebuilding.
 $(QUAKE2_BUNDLE_FILES) &: scripts/build-quake2.sh \
-		scripts/quake2-sdl2-config.in scripts/quake2-ascentos-evdev.h
+		scripts/quake2-sdl2-config.in scripts/quake2-avoryos-evdev.h
 	./scripts/build-quake2.sh
 
 HOST_CC := cc
@@ -143,17 +143,17 @@ all: $(IMAGE_NAME).iso
 run: run-$(ARCH)
 
 .PHONY: run-dist
-run-dist: edk2-ovmf ascentos-dist.iso
+run-dist: edk2-ovmf avoryos-dist.iso
 	qemu-system-$(ARCH) \
 		-M q35 \
 		-drive if=pflash,unit=0,format=raw,file=edk2-ovmf/ovmf-code-$(ARCH).fd,readonly=on \
-		-cdrom ascentos-dist.iso \
+		-cdrom avoryos-dist.iso \
 		-m 2G \
 		-serial stdio \
 		$(QEMUFLAGS)
 
-ascentos-dist.iso: limine/limine kernel disk.img limine.conf create_dist_usb.sh
-	./create_dist_usb.sh ascentos-dist.iso
+avoryos-dist.iso: limine/limine kernel disk.img limine.conf create_dist_usb.sh
+	./create_dist_usb.sh avoryos-dist.iso
 
 .PHONY: run-x86_64
 run-x86_64: edk2-ovmf $(IMAGE_NAME).iso disk.img
@@ -383,13 +383,13 @@ AetherDE/demo-client/aether-window: AetherDE/demo-client/main.c scripts/setup-al
 
 # Create a 64MB ext2 disk image with sample files for testing
 disk.img: GNUmakefile userland/winoptions userland/icewm-menu
-disk.img: scripts/configure-accounts.sh userland/ascent-account userland/test_accounts.sh userland/ascent-login.elf
+disk.img: scripts/configure-accounts.sh userland/avory-account userland/test_accounts.sh userland/avory-login.elf
 disk.img:  userland/dns_lookup.elf
 disk.img: userland/test_clone_futex.elf
 disk.img: userland/test_unix_sockets.elf
 disk.img: userland/test_syscall_speed.elf
 disk.img: $(QUAKE2_BUNDLE_FILES)
-disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets/mc9.mp3 assets/train.mp3 assets/test.bmp assets/test.tar assets/room.png assets/logo.png assets/linus.gif assets/video.mp4 userland/forkit.elf userland/forkit-launch.sh userland/about.elf userland/hello_glibc.elf userland/booter.elf userland/reboot.elf userland/shutdown.elf userland/apm.elf userland/test_cpp.elf  userland/kilo.elf  userland/ls.elf userland/lspci.elf userland/lsblk.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/asplay.elf userland/kria.elf userland/doom.elf userland/xrootcursor.elf  userland/jwm.elf userland/doom_x11.elf userland/gtk_test.elf userland/qt5_test.elf userland/tglgears_fb.elf userland/tglgears_drm.elf userland/tglhello_drm.elf userland/test_mem_stress.elf userland/classicube.elf userland/terrain.png userland/texpacks/classicube.zip initrd/startx.sh initrd/startw.sh initrd/weston.ini AetherDE/x11-wm/AetherWM AetherDE/aether-dock/aether-dock AetherDE/aether-panel/aether-panel AetherDE/wayland-compositor/aether-compositor AetherDE/demo-client/aether-window AetherDE/scripts/sax11.sh AetherDE/scripts/sawayland.sh userland/ascentd.elf $(ASCENTD_CONFIG_FILES)
+disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets/mc9.mp3 assets/train.mp3 assets/test.bmp assets/test.tar assets/room.png assets/logo.png assets/linus.gif assets/video.mp4 userland/forkit.elf userland/forkit-launch.sh userland/about.elf userland/hello_glibc.elf userland/booter.elf userland/reboot.elf userland/shutdown.elf userland/apm.elf userland/test_cpp.elf  userland/kilo.elf  userland/ls.elf userland/lspci.elf userland/lsblk.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/asplay.elf userland/kria.elf userland/doom.elf userland/xrootcursor.elf  userland/jwm.elf userland/doom_x11.elf userland/gtk_test.elf userland/qt5_test.elf userland/tglgears_fb.elf userland/tglgears_drm.elf userland/tglhello_drm.elf userland/test_mem_stress.elf userland/classicube.elf userland/terrain.png userland/texpacks/classicube.zip initrd/startx.sh initrd/startw.sh initrd/weston.ini AetherDE/x11-wm/AetherWM AetherDE/aether-dock/aether-dock AetherDE/aether-panel/aether-panel AetherDE/wayland-compositor/aether-compositor AetherDE/demo-client/aether-window AetherDE/scripts/sax11.sh AetherDE/scripts/sawayland.sh userland/avoryd.elf $(AVORYD_CONFIG_FILES)
 	@echo "Creating root filesystem (ext4)..."
 	rm -f ./part.img
 	dd if=/dev/zero of=./part.img bs=1M count=2047
@@ -420,25 +420,28 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 		echo "write AetherDE/wayland-compositor/aether-compositor bin/aether-compositor"; \
 		echo "rm bin/aether-window"; \
 		echo "write AetherDE/demo-client/aether-window bin/aether-window"; \
-		echo "rm bin/ascentd"; \
-		echo "write userland/ascentd.elf bin/ascentd"; \
-		echo "rm bin/ascent-login"; \
-		echo "write userland/ascent-login.elf bin/ascent-login"; \
+		echo "rm bin/avoryd"; \
+		echo "write userland/avoryd.elf bin/avoryd"; \
+		echo "rm bin/avory-login"; \
+		echo "write userland/avory-login.elf bin/avory-login"; \
 		echo "rm bin/xrootcursor"; \
 		echo "write userland/xrootcursor.elf bin/xrootcursor"; \
 		echo "mkdir etc"; \
-		echo "mkdir etc/ascentd"; \
-		echo "mkdir etc/ascentd/services"; \
-		echo "rm etc/ascentd/default.target"; \
-		echo "write initrd/ascentd/default.target etc/ascentd/default.target"; \
-		echo "rm etc/ascentd/services/system-init.service"; \
-		echo "write initrd/ascentd/services/system-init.service etc/ascentd/services/system-init.service"; \
-		echo "rm etc/ascentd/services/console.service"; \
-		echo "write initrd/ascentd/services/console.service etc/ascentd/services/console.service"; \
-		echo "rm etc/ascentd/services/wayland.service"; \
-		echo "write initrd/ascentd/services/wayland.service etc/ascentd/services/wayland.service"; \
-		echo "rm etc/ascentd/services/x11.service"; \
-		echo "write initrd/ascentd/services/x11.service etc/ascentd/services/x11.service"; \
+		echo "mkdir etc/apm"; \
+		echo "mkdir etc/apm/cache"; \
+		echo "mkdir etc/apm/installed"; \
+		echo "mkdir etc/avoryd"; \
+		echo "mkdir etc/avoryd/services"; \
+		echo "rm etc/avoryd/default.target"; \
+		echo "write initrd/avoryd/default.target etc/avoryd/default.target"; \
+		echo "rm etc/avoryd/services/system-init.service"; \
+		echo "write initrd/avoryd/services/system-init.service etc/avoryd/services/system-init.service"; \
+		echo "rm etc/avoryd/services/console.service"; \
+		echo "write initrd/avoryd/services/console.service etc/avoryd/services/console.service"; \
+		echo "rm etc/avoryd/services/wayland.service"; \
+		echo "write initrd/avoryd/services/wayland.service etc/avoryd/services/wayland.service"; \
+		echo "rm etc/avoryd/services/x11.service"; \
+		echo "write initrd/avoryd/services/x11.service etc/avoryd/services/x11.service"; \
 		echo "rm etc/weston.ini"; \
 		echo "write initrd/weston.ini etc/weston.ini"; \
 		echo "rm lib/libc.so"; \
@@ -573,7 +576,7 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 	debugfs -w -R "rm options.txt" ./part.img >/dev/null 2>&1 || true
 	debugfs -w -R "write /tmp/classicube_options.txt options.txt" ./part.img >/dev/null 2>&1 || true
 	rm -f /tmp/classicube_options.txt
-	rm -f /tmp/ascentos_hello.txt /tmp/ascentos_readme.txt
+	rm -f /tmp/avoryos_hello.txt /tmp/avoryos_readme.txt
 	@echo "Installing Forkit assets (fonts + test pages) into disk image..."
 	@{ \
 		echo "cd /"; \
@@ -706,7 +709,7 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 		debugfs -w -R "write toolchain/glibc-sysroot/opt/bash/bin/bash bin/bash" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "rm bin/sh" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "write toolchain/glibc-sysroot/opt/bash/bin/bash bin/sh" ./part.img >/dev/null 2>&1 || true; \
-		echo "PS1='\033[0;32mRoot@AscentOS\033[0m:\w\\$$ '" > /tmp/bashrc; \
+		echo "PS1='\033[0;32mRoot@AvoryOS\033[0m:\w\\$$ '" > /tmp/bashrc; \
 		echo "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/opt/coreutils/bin:/usr/bin:/sbin:/bin:/opt/bash/bin:/opt/tcc/bin" >> /tmp/bashrc; \
 		echo "HOME=/" >> /tmp/bashrc; \
 		echo "TERM=xterm-256color" >> /tmp/bashrc; \
@@ -728,12 +731,12 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 		debugfs -w -R "mkdir etc/ssl/certs" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "rm etc/ssl/certs/ca-certificates.crt" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "write build/alpine/rootfs/etc/ssl/certs/ca-certificates.crt etc/ssl/certs/ca-certificates.crt" ./part.img >/dev/null 2>&1 || true; \
-		echo "NAME=\"AscentOS\"" > /tmp/os-release; \
-		echo "ID=ascentos" >> /tmp/os-release; \
+		echo "NAME=\"AvoryOS\"" > /tmp/os-release; \
+		echo "ID=avoryos" >> /tmp/os-release; \
 		echo "VERSION=\"2.0.0 Beta\"" >> /tmp/os-release; \
 		echo "VERSION_ID=2.0.0-beta" >> /tmp/os-release; \
-		echo "PRETTY_NAME=\"AscentOS 2.0.0 Beta x86_64\"" >> /tmp/os-release; \
-		echo "HOME_URL=\"https://github.com/AscentOS\"" >> /tmp/os-release; \
+		echo "PRETTY_NAME=\"AvoryOS 2.0.0 Beta x86_64\"" >> /tmp/os-release; \
+		echo "HOME_URL=\"https://github.com/Hidotu-Labs/AvoryOS\"" >> /tmp/os-release; \
 		debugfs -w -R "rm etc/os-release" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "write /tmp/os-release etc/os-release" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "rm usr/lib/os-release" ./part.img >/dev/null 2>&1 || true; \
@@ -790,8 +793,8 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 		echo "set_inode_field bin/forkit mode 0100755"; \
 		echo "set_inode_field bin/test_cred mode 0100755"; \
 		echo "set_inode_field bin/test_accounts mode 0100755"; \
-		echo "set_inode_field home/ascent uid 1000"; \
-		echo "set_inode_field home/ascent gid 1000"; \
+		echo "set_inode_field home/avory uid 1000"; \
+		echo "set_inode_field home/avory gid 1000"; \
 	} | debugfs -w ./part.img >/dev/null 2>&1 || true
 	@echo "Creating partitioned disk image (MBR)..."
 	dd if=/dev/zero of=disk.img bs=1M count=2048
@@ -852,7 +855,7 @@ clean:
 	rm -f $(IMAGE_NAME).iso
 
 .PHONY: clean-all
-clean-all: clean-musl clean-doom clean-coreutils clean-tar
+clean-all: clean-musl clean-doom clean-coreutils clean-tar clean-apm
 	$(MAKE) -C kernel clean
 	rm -rf iso_root $(IMAGE_NAME).iso $(IMAGE_NAME).hdd build/alpine
 
@@ -866,8 +869,12 @@ clean-coreutils:
 clean-musl:
 	rm -rf build/musl-1.2.5 build/musl-cross-make
 	rm -rf toolchain/musl-sysroot toolchain/x86_64-linux-musl
-	rm -f userland/hello.elf userland/ascentd.elf  userland/kilo.elf userland/kilo.c  userland/asplay.elf userland/kria.elf userland/ls.elf userland/readelf.elf userland/poll_test.elf
+	rm -f userland/hello.elf userland/avoryd.elf  userland/kilo.elf userland/kilo.c  userland/asplay.elf userland/kria.elf userland/ls.elf userland/readelf.elf userland/poll_test.elf
 	rm -rf userland/kria-lang/target
+
+.PHONY: clean-apm
+clean-apm:
+	rm -f userland/apm.elf
 
 .PHONY: clean-disk
 clean-disk:
@@ -891,13 +898,13 @@ musl-toolchain: $(MUSL_LIBC)
 test-phase6-login:
 	./scripts/test-phase6-login.sh
 
-userland/ascentd.elf: userland/ascentd.c $(MUSL_LIBC)
+userland/avoryd.elf: userland/avoryd.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
-		userland/ascentd.c -o userland/ascentd.elf
+		userland/avoryd.c -o userland/avoryd.elf
 
-userland/ascent-login.elf: userland/ascent-login.c $(MUSL_LIBC)
+userland/avory-login.elf: userland/avory-login.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
-		userland/ascent-login.c -lcrypt -o userland/ascent-login.elf
+		userland/avory-login.c -lcrypt -o userland/avory-login.elf
 
 userland/hello_glibc.elf: userland/hello_glibc.c
 	$(GLIBC_CC) $(GLIBC_USER_CFLAGS) \
@@ -956,9 +963,16 @@ userland/shutdown.elf: userland/shutdown.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/shutdown.c -o userland/shutdown.elf
 
+# APM package manager
+# apm.c uses zlib to parse the concatenated gzip members in Alpine APK v2.
+APM_CFLAGS := $(MUSL_USER_CFLAGS)
+APM_LIBS := -lz
+
 userland/apm.elf: userland/apm.c $(MUSL_LIBC)
-	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
-		userland/apm.c -o userland/apm.elf
+	@echo "[*] Building APM package manager..."
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(APM_CFLAGS) \
+		userland/apm.c -o userland/apm.elf \
+		$(APM_LIBS)
 
 userland/dns_lookup.elf: userland/dns_lookup.c userland/dns_resolver.c userland/dns_resolver.h $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
@@ -988,13 +1002,13 @@ doomgeneric:
 	git clone https://github.com/ozkl/doomgeneric.git --depth=1
 
 userland/doom.elf: doomgeneric $(MUSL_LIBC)
-	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MAKE) -C userland -f Makefile.ascentos \
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MAKE) -C userland -f Makefile.avoryos \
 		MUSL_CC="$(MUSL_CC)" \
 		MUSL_SYSROOT="$(MUSL_SYSROOT)"
 
 .PHONY: clean-doom
 clean-doom:
-	$(MAKE) -C userland -f Makefile.ascentos clean
+	$(MAKE) -C userland -f Makefile.avoryos clean
 
 userland/gtk_test.elf: userland/gtk_test.c scripts/setup-alpine.sh
 	@if [ ! -d "$(ALPINE_SYSROOT)" ]; then \

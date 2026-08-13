@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/setup-alpine.sh - Downloads and installs Alpine Linux rootfs into AscentOS disk image
+# scripts/setup-alpine.sh - Downloads and installs Alpine Linux rootfs into AvoryOS disk image
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -32,7 +32,7 @@ install_apk() {
     local PKG_NAME=$1
     local REPO=$2
     local BRANCH=${3:-"v3.21"}
-    local PKG_MARKER="${ROOTFS_DIR}/etc/ascentos-pkg/${BRANCH}-${REPO}-${PKG_NAME}"
+    local PKG_MARKER="${ROOTFS_DIR}/etc/avoryos-pkg/${BRANCH}-${REPO}-${PKG_NAME}"
     
     if [ -f "${PKG_MARKER}" ]; then
         echo "[*] Package ${PKG_NAME} already installed, skipping."
@@ -67,7 +67,7 @@ install_apk() {
     tar --ignore-zeros -xzf "${BUILD_DIR}/${APK_FILENAME}" -C "${ROOTFS_DIR}" --warning=no-unknown-keyword 2>/dev/null || true
     
     # Mark as installed
-    mkdir -p "${ROOTFS_DIR}/etc/ascentos-pkg"
+    mkdir -p "${ROOTFS_DIR}/etc/avoryos-pkg"
     touch "${PKG_MARKER}"
 }
 
@@ -385,14 +385,14 @@ export DISPLAY=${DISPLAY:-:0}
 export QT_QPA_PLATFORM=xcb
 export NO_AT_BRIDGE=1
 export PULSE_SERVER=
-export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/tmp/runtime-ascent}
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/tmp/runtime-avory}
 mkdir -p "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR"
 
 # Reuse the session bus started by initrd/startx.sh; never spawn a second daemon
 # when the socket already exists (that race produced two VLC windows).
-if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && [ -S /tmp/ascent-session-bus ]; then
-    export DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/ascent-session-bus
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && [ -S /tmp/avory-session-bus ]; then
+    export DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/avory-session-bus
 fi
 
 if [ -f /lib/libgcompat.so.0 ]; then
@@ -401,13 +401,13 @@ fi
 
 # Do not pass "-I qt": vlc.bin already auto-selects Qt when DISPLAY is set, and
 # an explicit "-I qt" duplicates the Qt interface (two windows + privacy dialogs).
-# libmad MP3 decoding fails on AscentOS (bad main_data_begin); use ffmpeg avcodec.
+# libmad MP3 decoding fails on AvoryOS (bad main_data_begin); use ffmpeg avcodec.
 exec /usr/bin/vlc.bin --one-instance --no-qt-privacy-ask --aout=alsa \
     --codec=avcodec --clock-synchro=0 "$@"
 EOF
 chmod +x "${ROOTFS_DIR}/usr/bin/vlc"
 
-# Route ALSA clients (VLC) to AscentOS OSS /dev/dsp via alsa-plugins pcm_oss.
+# Route ALSA clients (VLC) to AvoryOS OSS /dev/dsp via alsa-plugins pcm_oss.
 mkdir -p "${ROOTFS_DIR}/etc"
 cat > "${ROOTFS_DIR}/etc/asound.conf" <<'ASOUND_EOF'
 pcm.oss_hw {
@@ -446,7 +446,7 @@ clock-synchro=0
 VLCRC_EOF
 cp "${ROOTFS_DIR}/etc/vlc/vlcrc" "${ROOTFS_DIR}/root/.config/vlc/vlcrc"
 
-# libmad fails MP3 decode on AscentOS; libavcodec handles MP3 reliably.
+# libmad fails MP3 decode on AvoryOS; libavcodec handles MP3 reliably.
 rm -f "${ROOTFS_DIR}/usr/lib/vlc/plugins/audio_filter/libmad_plugin.so"
 
 # Generate VLC plugin cache
@@ -457,7 +457,7 @@ if [ -x "${ROOTFS_DIR}/usr/lib/vlc/vlc-cache-gen" ]; then
     fi
 fi
 
-# Keep musl's runtime linker search path explicit inside AscentOS.
+# Keep musl's runtime linker search path explicit inside AvoryOS.
 # Some early userspace paths only reliably resolve shared objects from /lib.
 mkdir -p "${ROOTFS_DIR}/etc" "${ROOTFS_DIR}/lib"
 cat > "${ROOTFS_DIR}/etc/ld-musl-x86_64.path" <<'EOF'
@@ -603,7 +603,7 @@ if [ -f "${GCC_REAL}" ]; then
     cat > "${GCC_WRAPPER}" << 'GCC_WRAP_EOF'
 #!/bin/sh
 # gcc wrapper — forces --sysroot=/ so the compiler always uses the musl
-# headers and libraries inside the AscentOS rootfs image, not host glibc.
+# headers and libraries inside the AvoryOS rootfs image, not host glibc.
 exec /usr/bin/gcc.real \
     --sysroot=/ \
     -isystem /usr/lib/gcc/x86_64-alpine-linux-musl/14.2.0/include \
@@ -789,7 +789,7 @@ install_apk "libwebpdemux" "main"
 install_apk "webkit2gtk-4.1" "community"
 install_apk "badwolf" "community"
 
-# AscentOS does not yet provide the namespaces, seccomp, or pidfd syscalls used
+# AvoryOS does not yet provide the namespaces, seccomp, or pidfd syscalls used
 # by WebKitGTK's bubblewrap sandbox. Its DRM stack also lacks the DRI2/DRI3
 # authentication needed by WebKit accelerated compositing. Keep the packaged
 # binary intact and install a compatibility launcher at the conventional path.
@@ -846,7 +846,7 @@ install_apk "btop" "community"
 # 4. Finalize GTK environment
 echo "[*] Setting up global GTK performance environment variables..."
 mkdir -p "${ROOTFS_DIR}/etc/profile.d" "${ROOTFS_DIR}/etc/pulse"
-cat > "${ROOTFS_DIR}/etc/profile.d/gtk_ascentos.sh" << 'ENV_EOF'
+cat > "${ROOTFS_DIR}/etc/profile.d/gtk_avoryos.sh" << 'ENV_EOF'
 export NO_AT_BRIDGE=1
 export GTK_A11Y=none
 export GIO_USE_VFS=local
@@ -856,7 +856,7 @@ export GDK_GL=disable
 export LIBGL_DRI3_DISABLE=1
 export PULSE_SERVER=""
 ENV_EOF
-chmod +x "${ROOTFS_DIR}/etc/profile.d/gtk_ascentos.sh"
+chmod +x "${ROOTFS_DIR}/etc/profile.d/gtk_avoryos.sh"
 
 cat > "${ROOTFS_DIR}/etc/environment" << 'ENV_EOF'
 NO_AT_BRIDGE=1
@@ -939,7 +939,7 @@ mkdir -p "${XORG_CONF_DIR}"
 rm -f "${ROOTFS_DIR}/usr/share/X11/xorg.conf.d/40-libinput.conf"
 cat > "${XORG_CONF_DIR}/10-modesetting.conf" <<EOF
 Section "ServerLayout"
-    Identifier  "AscentLayout"
+    Identifier  "AvoryLayout"
     Screen      0 "Screen0" 0 0
     InputDevice "Keyboard0" "CoreKeyboard"
     InputDevice "Mouse0" "CorePointer"
@@ -982,7 +982,7 @@ exec openbox-session
 EOF
 chmod +x "${ROOTFS_DIR}/etc/skel/.xinitrc"
 
-# Root's home is / on AscentOS.
+# Root's home is / on AvoryOS.
 cp "${ROOTFS_DIR}/etc/skel/.xinitrc" "${ROOTFS_DIR}/.xinitrc"
 
 # Minimal Openbox rc.xml (no dbus dependency, clean keybinds)
@@ -1031,7 +1031,7 @@ EOF
 cat > "${ROOTFS_DIR}/etc/xdg/openbox/menu.xml" << 'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <openbox_menu xmlns="http://openbox.org/3.4/menu">
-  <menu id="root-menu" label="AscentOS">
+  <menu id="root-menu" label="AvoryOS">
     <item label="Terminal (st)">
       <action name="Execute"><execute>st</execute></action>
     </item>
@@ -1249,7 +1249,7 @@ cat > "${XFCE_SESSION_DIR}/xsettings.xml" << 'EOF'
 EOF
 
 # Xfdesktop normally uses a translucent rubber band. Keep an opaque fallback
-# for AscentOS&apos;s non-composited X11 path, where alpha fills may disappear.
+# for AvoryOS&apos;s non-composited X11 path, where alpha fills may disappear.
 mkdir -p "${ROOTFS_DIR}/etc/xdg/gtk-3.0"
 cat > "${ROOTFS_DIR}/etc/xdg/gtk-3.0/gtk.css" << 'EOF'
 XfdesktopIconView .rubberband,
@@ -1265,27 +1265,27 @@ EOF
 # Alpine/Xfce copyright and license text intact.
 XFCE_ABOUT="${ROOTFS_DIR}/usr/bin/xfce4-about"
 if [ -f "${XFCE_ABOUT}" ]; then
-    perl -0pi -e "s/Alpine Linux\x00/AscentOS\x00\x00\x00\x00\x00/g" "${XFCE_ABOUT}"
+    perl -0pi -e "s/Alpine Linux\x00/AvoryOS\x00\x00\x00\x00\x00/g" "${XFCE_ABOUT}"
 fi
 
 # 3d. Brand the assembled system while retaining accurate userland attribution.
-echo "[*] Writing AscentOS operating-system identity..."
-mkdir -p "${ROOTFS_DIR}/etc" "${ROOTFS_DIR}/usr/lib" "${ROOTFS_DIR}/usr/share/doc/ascentos"
+echo "[*] Writing AvoryOS operating-system identity..."
+mkdir -p "${ROOTFS_DIR}/etc" "${ROOTFS_DIR}/usr/lib" "${ROOTFS_DIR}/usr/share/doc/avoryos"
 rm -f "${ROOTFS_DIR}/etc/os-release" "${ROOTFS_DIR}/usr/lib/os-release"
 cat > "${ROOTFS_DIR}/usr/lib/os-release" <<'EOF'
-NAME="AscentOS"
-ID=ascentos
+NAME="AvoryOS"
+ID=avoryos
 VERSION="2.0.0 Beta"
 VERSION_ID="2.0.0-beta"
-PRETTY_NAME="AscentOS 2.0.0 Beta x86_64"
-HOME_URL="https://github.com/AscentOS"
-SUPPORT_URL="https://github.com/AscentOS"
-BUG_REPORT_URL="https://github.com/AscentOS"
+PRETTY_NAME="AvoryOS 2.0.0 Beta x86_64"
+HOME_URL="https://github.com/Hidotu-Labs/AvoryOS"
+SUPPORT_URL="https://github.com/Hidotu-Labs/AvoryOS"
+BUG_REPORT_URL="https://github.com/Hidotu-Labs/AvoryOS"
 EOF
 ln -s ../usr/lib/os-release "${ROOTFS_DIR}/etc/os-release"
-cat > "${ROOTFS_DIR}/usr/share/doc/ascentos/ALPINE-USERLAND" <<'EOF'
-AscentOS includes a userland assembled from Alpine Linux packages.
-Alpine Linux is an independent project and does not produce or endorse AscentOS.
+cat > "${ROOTFS_DIR}/usr/share/doc/avoryos/ALPINE-USERLAND" <<'EOF'
+AvoryOS includes a userland assembled from Alpine Linux packages.
+Alpine Linux is an independent project and does not produce or endorse AvoryOS.
 The copyright notices and license terms shipped with each package continue to apply.
 See /usr/share/licenses and the corresponding package metadata where available.
 EOF

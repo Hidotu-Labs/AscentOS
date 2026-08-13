@@ -1,4 +1,3 @@
-# Static IceWM menu for AscentOS. No includeprog: opening stays instant.
 prog "Terminal" utilities-terminal st
 prog "XFCE Terminal" utilities-terminal xfce4-terminal
 prog "File Manager (Thunar)" system-file-manager thunar
@@ -28,8 +27,8 @@ menu "Multimedia" applications-multimedia {
     prog "cmus" multimedia-player st -e cmus
     prog "Audio Player" multimedia-player st -e /bin/asplay /assets/test.wav
 }
-menu "AscentOS" applications-system {
-    prog "About AscentOS" help-about /bin/about
+menu "AvoryOS" applications-system {
+    prog "About AvoryOS" help-about /bin/about
     prog "Reboot" system-reboot /bin/reboot
     prog "Shut Down" system-shutdown /bin/shutdown
 }

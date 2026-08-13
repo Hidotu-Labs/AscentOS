@@ -1,402 +1,1095 @@
 #define _GNU_SOURCE
+
+/*
+ * APM - small Alpine APK package manager for Linux and AscentOS.
+ *
+ * Design goals:
+ *   - no dependency on apk-tools
+ *   - use only POSIX libc + curl/gzip/tar utilities
+ *   - never extract directly into / while parsing an APK
+ *   - unpack into a staging directory first
+ *   - overwrite existing files deliberately
+ *   - ignore Alpine package metadata that an OS may not support
+ *   - keep an installed-file manifest for safe removal
+ */
+
+#include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <unistd.h>
 
-void usage(void) {
-    printf("Ascent Package Manager (apm) - AUR Client\n");
-    printf("Usage: apm <command> [argument]\n\n");
-    printf("Commands:\n");
-    printf("  search <keyword>   Search for packages on AUR\n");
-    printf("  info <package>     Show package details\n");
-    printf("  install <package>  Download, compile, and install package\n");
-    printf("  list               List installed packages\n");
-    printf("  remove <package>   Uninstall package (remove marker)\n");
-    printf("  help               Show this help message\n");
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
+
+#define APM_ROOT      "/etc/apm"
+#define APM_CACHE     APM_ROOT "/cache"
+#define APM_INSTALLED APM_ROOT "/installed"
+#define APM_TMP       "/tmp/apm"
+#define ALPINE_CDN    "https://dl-cdn.alpinelinux.org/alpine"
+#define ALPINE_ARCH   "x86_64"
+#define DEFAULT_BRANCH "v3.21"
+
+struct repo {
+    const char *branch;
+    const char *name;
+};
+
+static const struct repo repos[] = {
+    {"v3.21", "main"},
+    {"v3.21", "community"},
+    {"edge", "main"},
+    {"edge", "community"},
+    {"edge", "testing"},
+    {NULL, NULL}
+};
+
+typedef struct {
+    char name[256];
+    char version[256];
+    char arch[64];
+    char desc[1024];
+    char url[1024];
+    char license[128];
+    char deps[2048];
+    char size[64];
+    char isize[64];
+    char branch[64];
+    char repo[64];
+} Package;
+
+typedef int (*package_cb)(const Package *, void *);
+
+static int command(const char *cmd)
+{
+    int rc = system(cmd);
+    if (rc == -1)
+        return -1;
+    return rc;
 }
 
-char *json_get_value(const char *json, const char *key, char *buf, int max_len) {
-    char key_pattern[128];
-    snprintf(key_pattern, sizeof(key_pattern), "\"%s\":", key);
-    const char *p = strstr(json, key_pattern);
-    if (!p) return NULL;
-    p += strlen(key_pattern);
-    
-    // Skip whitespace
-    while (*p == ' ' || *p == '\t') p++;
-    
-    if (*p == '"') {
-        p++; // skip leading double quote
-        int index = 0;
-        while (*p && *p != '"' && index < max_len - 1) {
-            if (*p == '\\' && *(p+1) == '/') {
-                buf[index++] = '/';
-                p += 2;
-            } else if (*p == '\\' && *(p+1) == '"') {
-                buf[index++] = '"';
-                p += 2;
+static int command_ok(const char *cmd)
+{
+    return command(cmd) == 0;
+}
+
+static int mkdir_one(const char *path, mode_t mode)
+{
+    struct stat st;
+    if (stat(path, &st) == 0)
+        return S_ISDIR(st.st_mode) ? 0 : -1;
+    if (mkdir(path, mode) == 0)
+        return 0;
+    return errno == EEXIST ? 0 : -1;
+}
+
+static int mkdir_p(const char *path, mode_t mode)
+{
+    char tmp[PATH_MAX];
+    size_t n;
+
+    if (!path || !*path)
+        return -1;
+
+    n = strlen(path);
+    if (n >= sizeof(tmp))
+        return -1;
+
+    memcpy(tmp, path, n + 1);
+
+    if (tmp[0] == '/') {
+        char *p = tmp + 1;
+        while (*p) {
+            if (*p == '/') {
+                *p = '\0';
+                if (mkdir_one(tmp, mode) < 0)
+                    return -1;
+                *p = '/';
+            }
+            p++;
+        }
+    } else {
+        char *p = tmp;
+        while (*p) {
+            if (*p == '/') {
+                *p = '\0';
+                if (*tmp && mkdir_one(tmp, mode) < 0)
+                    return -1;
+                *p = '/';
+            }
+            p++;
+        }
+    }
+
+    return mkdir_one(tmp, mode);
+}
+
+static int file_exists(const char *path)
+{
+    struct stat st;
+    return stat(path, &st) == 0;
+}
+
+static int read_all(const char *path, unsigned char **out, size_t *out_len)
+{
+    int fd;
+    unsigned char *buf = NULL;
+    size_t cap = 65536, len = 0;
+
+    fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return -1;
+
+    buf = malloc(cap);
+    if (!buf) {
+        close(fd);
+        return -1;
+    }
+
+    for (;;) {
+        if (len == cap) {
+            size_t newcap = cap * 2;
+            unsigned char *nb;
+            if (newcap < cap) {
+                free(buf);
+                close(fd);
+                return -1;
+            }
+            nb = realloc(buf, newcap);
+            if (!nb) {
+                free(buf);
+                close(fd);
+                return -1;
+            }
+            buf = nb;
+            cap = newcap;
+        }
+
+        ssize_t n = read(fd, buf + len, cap - len);
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            free(buf);
+            close(fd);
+            return -1;
+        }
+        if (n == 0)
+            break;
+        len += (size_t)n;
+    }
+
+    close(fd);
+    *out = buf;
+    *out_len = len;
+    return 0;
+}
+
+static int write_all_fd(int fd, const unsigned char *buf, size_t len)
+{
+    size_t off = 0;
+    while (off < len) {
+        size_t chunk = len - off;
+        if (chunk > 65536)
+            chunk = 65536;
+        ssize_t n = write(fd, buf + off, chunk);
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            return -1;
+        }
+        if (n == 0)
+            return -1;
+        off += (size_t)n;
+    }
+    return 0;
+}
+
+static int write_slice(const char *path, const unsigned char *buf,
+                       size_t off, size_t len)
+{
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0)
+        return -1;
+    int rc = write_all_fd(fd, buf + off, len);
+    if (close(fd) < 0 && rc == 0)
+        rc = -1;
+    return rc;
+}
+
+static void index_path(const char *branch, const char *repo,
+                       char *out, size_t out_sz)
+{
+    snprintf(out, out_sz, "%s/index-%s-%s", APM_CACHE, branch, repo);
+}
+
+static int fetch_index(const char *branch, const char *repo)
+{
+    char url[PATH_MAX], archive[PATH_MAX], staging[PATH_MAX];
+    char cmd[PATH_MAX * 2];
+
+    snprintf(url, sizeof(url), "%s/%s/%s/%s/APKINDEX.tar.gz",
+             ALPINE_CDN, branch, repo, ALPINE_ARCH);
+    snprintf(archive, sizeof(archive), "%s/index-%s-%s.tar.gz",
+             APM_TMP, branch, repo);
+    snprintf(staging, sizeof(staging), "%s/index-%s-%s", APM_TMP, branch, repo);
+
+    if (!command_ok("mkdir -p /etc/apm/cache /tmp/apm")) {
+        printf("[apm] cannot create cache directories: %s\n", strerror(errno));
+        fflush(stdout);
+        return -1;
+    }
+
+    /* Retry the download up to 3 times — first HTTPS connection can fail
+     * transiently while the TCP/TLS stack warms up on AscentOS. */
+    int download_ok = 0;
+    for (int attempt = 1; attempt <= 3; attempt++) {
+        snprintf(cmd, sizeof(cmd),
+                 "curl -fL --show-error --retry 2 '%s' -o '%s'",
+                 url, archive);
+        if (command_ok(cmd)) {
+            download_ok = 1;
+            break;
+        }
+        printf("[apm] download attempt %d/3 failed for %s/%s\n",
+               attempt, branch, repo);
+        fflush(stdout);
+        unlink(archive);
+    }
+    if (!download_ok) {
+        printf("[apm] all download attempts failed for %s/%s\n", branch, repo);
+        fflush(stdout);
+        return -1;
+    }
+
+    /* Run rm, mkdir-p, and tar as separate steps so failures are visible. */
+    snprintf(cmd, sizeof(cmd), "rm -rf '%s'", staging);
+    if (!command_ok(cmd)) {
+        /* Non-fatal: directory may not exist yet */
+    }
+
+    snprintf(cmd, sizeof(cmd), "mkdir -p '%s'", staging);
+    if (!command_ok(cmd)) {
+        printf("[apm] cannot create staging dir for %s/%s\n", branch, repo);
+        fflush(stdout);
+        unlink(archive);
+        return -1;
+    }
+
+    snprintf(cmd, sizeof(cmd),
+             "tar -xzf '%s' -C '%s' --no-same-owner --no-same-permissions --touch",
+             archive, staging);
+    if (!command_ok(cmd)) {
+        printf("[apm] failed to extract APKINDEX for %s/%s\n", branch, repo);
+        fflush(stdout);
+        unlink(archive);
+        return -1;
+    }
+
+    char source[PATH_MAX], destination[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/APKINDEX", staging);
+    index_path(branch, repo, destination, sizeof(destination));
+
+    if (!file_exists(source)) {
+        printf("[apm] APKINDEX missing after extraction for %s/%s\n", branch, repo);
+        fflush(stdout);
+        unlink(archive);
+        return -1;
+    }
+
+    int in = open(source, O_RDONLY);
+    int out = open(destination, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (in < 0 || out < 0) {
+        printf("[apm] cannot open index files for %s/%s: %s\n",
+               branch, repo, strerror(errno));
+        fflush(stdout);
+        if (in >= 0) close(in);
+        if (out >= 0) close(out);
+        unlink(archive);
+        return -1;
+    }
+
+    unsigned char buf[65536];
+    for (;;) {
+        ssize_t n = read(in, buf, sizeof(buf));
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            close(in); close(out); unlink(archive); return -1;
+        }
+        if (n == 0) break;
+        if (write_all_fd(out, buf, (size_t)n) < 0) {
+            close(in); close(out); unlink(archive); return -1;
+        }
+    }
+    close(in);
+    close(out);
+    unlink(archive);
+
+    printf("[apm] updated %s/%s\n", branch, repo);
+    return 0;
+}
+
+static void package_init(Package *p, const char *branch, const char *repo)
+{
+    memset(p, 0, sizeof(*p));
+    snprintf(p->branch, sizeof(p->branch), "%s", branch);
+    snprintf(p->repo, sizeof(p->repo), "%s", repo);
+}
+
+static void field_copy(char *dst, size_t dst_sz, const char *value, size_t len)
+{
+    while (len > 0 && (value[len - 1] == '\r' || value[len - 1] == '\n'))
+        len--;
+    if (len >= dst_sz)
+        len = dst_sz - 1;
+    memcpy(dst, value, len);
+    dst[len] = '\0';
+}
+
+static int parse_record(const char *record, size_t len, const char *branch,
+                        const char *repo, Package *p)
+{
+    package_init(p, branch, repo);
+
+    size_t pos = 0;
+    while (pos < len) {
+        size_t end = pos;
+        while (end < len && record[end] != '\n') end++;
+
+        if (end >= pos + 2 && record[pos + 1] == ':') {
+            char tag = record[pos];
+            const char *value = record + pos + 2;
+            size_t vlen = end - (pos + 2);
+
+            switch (tag) {
+            case 'P': field_copy(p->name, sizeof(p->name), value, vlen); break;
+            case 'V': field_copy(p->version, sizeof(p->version), value, vlen); break;
+            case 'A': field_copy(p->arch, sizeof(p->arch), value, vlen); break;
+            case 'T': field_copy(p->desc, sizeof(p->desc), value, vlen); break;
+            case 'U': field_copy(p->url, sizeof(p->url), value, vlen); break;
+            case 'L': field_copy(p->license, sizeof(p->license), value, vlen); break;
+            case 'D': field_copy(p->deps, sizeof(p->deps), value, vlen); break;
+            case 'S': field_copy(p->size, sizeof(p->size), value, vlen); break;
+            case 'I': field_copy(p->isize, sizeof(p->isize), value, vlen); break;
+            default: break;
+            }
+        }
+
+        pos = end < len ? end + 1 : end;
+    }
+
+    return p->name[0] != '\0';
+}
+
+static int foreach_index(const char *branch, const char *repo,
+                         package_cb cb, void *ctx)
+{
+    char path[PATH_MAX];
+    unsigned char *buf = NULL;
+    size_t len = 0;
+
+    index_path(branch, repo, path, sizeof(path));
+    if (read_all(path, &buf, &len) < 0) {
+        printf("[apm debug] read_all failed for %s\n", path);
+        fflush(stdout);
+        return 0;
+    }
+    printf("[apm debug] index %s/%s read %zu bytes\n", branch, repo, len);
+    fflush(stdout);
+
+    size_t start = 0;
+    size_t record_count = 0;
+    while (start < len) {
+        /* Skip leading whitespace/newlines */
+        while (start < len && (buf[start] == '\n' || buf[start] == '\r'))
+            start++;
+        if (start >= len) break;
+
+        /* Find end of record (blank line: \n\n or \n\r\n) */
+        size_t end = start;
+        while (end < len) {
+            if (buf[end] == '\n') {
+                size_t next = end + 1;
+                if (next < len && buf[next] == '\r') next++;
+                if (next < len && buf[next] == '\n') {
+                    break;
+                }
+            }
+            end++;
+        }
+
+        size_t record_len = end - start;
+        if (record_len) {
+            Package p;
+            if (parse_record((const char *)buf + start, record_len,
+                             branch, repo, &p)) {
+                record_count++;
+                if (cb(&p, ctx)) {
+                    free(buf);
+                    return 1;
+                }
+            }
+        }
+
+        /* Advance start past the blank line separator */
+        start = end;
+        while (start < len && (buf[start] == '\n' || buf[start] == '\r'))
+            start++;
+    }
+    printf("[apm debug] %s/%s parsed %zu records\n", branch, repo, record_count);
+    fflush(stdout);
+
+    free(buf);
+    return 0;
+}
+
+struct lookup {
+    const char *name;
+    Package pkg;
+    int found;
+};
+
+static int lookup_cb(const Package *p, void *arg)
+{
+    struct lookup *l = arg;
+    if (strcmp(p->name, l->name) != 0)
+        return 0;
+    l->pkg = *p;
+    l->found = 1;
+    return 1;
+}
+
+static int find_package(const char *name, Package *out)
+{
+    struct lookup l;
+    memset(&l, 0, sizeof(l));
+    l.name = name;
+
+    for (int i = 0; repos[i].branch; ++i) {
+        if (foreach_index(repos[i].branch, repos[i].name, lookup_cb, &l)) {
+            *out = l.pkg;
+            return 0;
+        }
+    }
+    printf("[apm debug] searched all repos for '%s', not found\n", name);
+    fflush(stdout);
+    return -1;
+}
+
+static int install_path_safe(const char *name)
+{
+    /* Package names are never used as filesystem paths except for metadata. */
+    if (!name || !*name)
+        return 0;
+    for (const char *p = name; *p; ++p) {
+        if (!(('a' <= *p && *p <= 'z') ||
+              ('A' <= *p && *p <= 'Z') ||
+              ('0' <= *p && *p <= '9') ||
+              *p == '+' || *p == '.' || *p == '-' || *p == '_'))
+            return 0;
+    }
+    return 1;
+}
+
+static int extract_data_stream(const char *apk, const char *tar_path)
+{
+    unsigned char *buf = NULL;
+    size_t len = 0;
+    if (read_all(apk, &buf, &len) < 0) {
+        fprintf(stderr, "[apm] cannot read APK\n");
+        return -1;
+    }
+
+    /* Alpine APK data is the final gzip member.  Test gzip candidates from
+       the end, and validate the decompressed result as a tar archive. */
+    int found = 0;
+    for (size_t i = len; i >= 2; --i) {
+        size_t off = i - 2;
+        if (buf[off] != 0x1f || buf[off + 1] != 0x8b)
+            continue;
+
+        char gz_path[PATH_MAX];
+        snprintf(gz_path, sizeof(gz_path), "%s.candidate.gz", tar_path);
+        if (write_slice(gz_path, buf, off, len - off) < 0)
+            continue;
+
+        char cmd[PATH_MAX * 2];
+        snprintf(cmd, sizeof(cmd), "gzip -dc '%s' > '%s' 2>/dev/null",
+                 gz_path, tar_path);
+        if (!command_ok(cmd)) {
+            unlink(gz_path);
+            unlink(tar_path);
+            continue;
+        }
+
+        /* Validate without extracting. */
+        snprintf(cmd, sizeof(cmd), "tar -tf '%s' >/dev/null 2>&1", tar_path);
+        if (command_ok(cmd)) {
+            unlink(gz_path);
+            found = 1;
+            break;
+        }
+
+        unlink(gz_path);
+        unlink(tar_path);
+    }
+
+    free(buf);
+    return found ? 0 : -1;
+}
+
+static int path_is_safe_tar_name(const char *name)
+{
+    if (!name || !*name)
+        return 0;
+
+    while (*name == '/')
+        name++;
+
+    if (!*name)
+        return 1;
+
+    char part[PATH_MAX];
+    size_t n = strlen(name);
+    if (n >= sizeof(part))
+        return 0;
+    memcpy(part, name, n + 1);
+
+    char *s = part;
+    while (*s) {
+        char *slash = strchr(s, '/');
+        if (slash) *slash = '\0';
+        if (strcmp(s, "..") == 0)
+            return 0;
+        if (slash) {
+            s = slash + 1;
+            while (*s == '/') s++;
+        } else break;
+    }
+    return 1;
+}
+
+static int build_manifest(const char *tar_path, const char *manifest)
+{
+    char listing[PATH_MAX];
+    snprintf(listing, sizeof(listing), "%s.list", tar_path);
+
+    char cmd[PATH_MAX * 2];
+    snprintf(cmd, sizeof(cmd), "tar -tf '%s' > '%s'", tar_path, listing);
+    if (!command_ok(cmd)) {
+        unlink(listing);
+        return -1;
+    }
+
+    FILE *in = fopen(listing, "r");
+    FILE *out = fopen(manifest, "w");
+    if (!in || !out) {
+        if (in) fclose(in);
+        if (out) fclose(out);
+        unlink(listing);
+        return -1;
+    }
+
+    char line[PATH_MAX];
+    while (fgets(line, sizeof(line), in)) {
+        line[strcspn(line, "\r\n")] = '\0';
+        if (!line[0] || !path_is_safe_tar_name(line)) {
+            fclose(in); fclose(out); unlink(listing); return -1;
+        }
+        if (strcmp(line, ".PKGINFO") == 0 ||
+            strncmp(line, ".INSTALL", 8) == 0 ||
+            strncmp(line, ".pre", 4) == 0 ||
+            strncmp(line, ".post", 5) == 0 ||
+            strncmp(line, ".trigger", 8) == 0)
+            continue;
+
+        if (line[0] == '/')
+            fprintf(out, "%s\n", line);
+        else
+            fprintf(out, "/%s\n", line);
+    }
+
+    fclose(in);
+    fclose(out);
+    unlink(listing);
+    return 0;
+}
+
+static int install_tar(const char *tar_path, const char *root)
+{
+    char cmd[PATH_MAX * 3];
+
+    /*
+     * Important: --overwrite prevents O_EXCL-style failures when a package
+     * replaces a file already present on the target OS.  We intentionally do
+     * not restore Alpine's uid/gid/mode timestamps; those are host-OS policy.
+     * --touch avoids utime/utimensat failures on minimal kernels/VFSes.
+     */
+    snprintf(cmd, sizeof(cmd),
+             "tar -xf '%s' -C '%s' --overwrite --no-same-owner "
+             "--no-same-permissions --touch "
+             "--exclude=.PKGINFO --exclude=.INSTALL "
+             "--exclude=.pre-install --exclude=.post-install "
+             "--exclude=.pre-deinstall --exclude=.post-deinstall "
+             "--exclude=.pre-upgrade --exclude=.post-upgrade "
+             "--exclude=.trigger",
+             tar_path, root);
+
+    return command_ok(cmd) ? 0 : -1;
+}
+
+static int write_metadata(const char *name, const Package *p,
+                          const char *manifest)
+{
+    char dir[PATH_MAX], meta[PATH_MAX];
+    snprintf(dir, sizeof(dir), "%s/%s", APM_INSTALLED, name);
+    snprintf(meta, sizeof(meta), "%s/info", dir);
+
+    if (mkdir_p(dir, 0755) < 0)
+        return -1;
+
+    FILE *f = fopen(meta, "w");
+    if (!f)
+        return -1;
+
+    fprintf(f, "NAME=%s\nVERSION=%s\nARCH=%s\nREPO=%s/%s\n",
+            p->name, p->version, p->arch, p->branch, p->repo);
+    fprintf(f, "APK=%s-%s.apk\n", p->name, p->version);
+    fprintf(f, "MANIFEST=%s/files\n", dir);
+    fclose(f);
+
+    char dst[PATH_MAX];
+    snprintf(dst, sizeof(dst), "%s/files", dir);
+    int in = open(manifest, O_RDONLY);
+    int out = open(dst, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (in < 0 || out < 0) {
+        if (in >= 0) close(in);
+        if (out >= 0) close(out);
+        return -1;
+    }
+
+    unsigned char buf[8192];
+    for (;;) {
+        ssize_t n = read(in, buf, sizeof(buf));
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            close(in); close(out); return -1;
+        }
+        if (n == 0) break;
+        if (write_all_fd(out, buf, (size_t)n) < 0) {
+            close(in); close(out); return -1;
+        }
+    }
+    close(in);
+    close(out);
+    return 0;
+}
+
+static int dependency_name(const char *token, char *out, size_t out_sz)
+{
+    size_t n = 0;
+    while (token[n] && token[n] != '<' && token[n] != '>' &&
+           token[n] != '=' && token[n] != '~') n++;
+    if (n == 0 || n >= out_sz) return -1;
+    memcpy(out, token, n);
+    out[n] = '\0';
+    return 0;
+}
+
+static int dependency_cb(const Package *p, void *arg)
+{
+    const char *wanted = arg;
+    return strcmp(p->name, wanted) == 0;
+}
+
+static int package_exists_in_indexes(const char *name)
+{
+    for (int i = 0; repos[i].branch; ++i)
+        if (foreach_index(repos[i].branch, repos[i].name, dependency_cb, (void *)name))
+            return 1;
+    return 0;
+}
+
+static int install_one(const char *name, int depth);
+
+static int install_dependencies(const Package *p, int depth)
+{
+    if (!p->deps[0]) return 0;
+    if (depth > 32) {
+        fprintf(stderr, "[apm] dependency depth exceeded while installing %s\n", p->name);
+        return -1;
+    }
+
+    char deps[sizeof(p->deps)];
+    snprintf(deps, sizeof(deps), "%s", p->deps);
+    char *save = NULL;
+    for (char *tok = strtok_r(deps, " \t", &save); tok; tok = strtok_r(NULL, " \t", &save)) {
+        if (strncmp(tok, "so:", 3) == 0 || strncmp(tok, "cmd:", 4) == 0)
+            continue;
+        char dep[256];
+        if (dependency_name(tok, dep, sizeof(dep)) < 0)
+            continue;
+        if (!package_exists_in_indexes(dep))
+            continue;
+        if (install_one(dep, depth + 1) != 0)
+            return -1;
+    }
+    return 0;
+}
+
+static int install_one(const char *name, int depth)
+{
+    if (!install_path_safe(name)) {
+        fprintf(stderr, "[apm] invalid package name\n");
+        return 1;
+    }
+
+    if (mkdir_p(APM_INSTALLED, 0755) < 0 || mkdir_p(APM_TMP, 0755) < 0) {
+        fprintf(stderr, "[apm] cannot create APM directories: %s\n", strerror(errno));
+        return 1;
+    }
+
+    char installed_dir[PATH_MAX];
+    snprintf(installed_dir, sizeof(installed_dir), "%s/%s", APM_INSTALLED, name);
+    if (file_exists(installed_dir)) {
+        printf("[apm] %s is already installed\n", name);
+        return 0;
+    }
+
+    Package p;
+    if (find_package(name, &p) < 0) {
+        fprintf(stderr, "[apm] package '%s' not found; run 'apm update' first\n", name);
+        return 1;
+    }
+
+    if (install_dependencies(&p, depth) < 0)
+        return 1;
+
+    char apk[PATH_MAX], tar_path[PATH_MAX], stage[PATH_MAX], manifest[PATH_MAX];
+    snprintf(apk, sizeof(apk), "%s/%s-%s.apk", APM_TMP, p.name, p.version);
+    snprintf(tar_path, sizeof(tar_path), "%s/%s-%s.tar", APM_TMP, p.name, p.version);
+    snprintf(stage, sizeof(stage), "%s/stage-%s-%ld", APM_TMP, name, (long)getpid());
+    snprintf(manifest, sizeof(manifest), "%s/%s-%s.manifest", APM_TMP, p.name, p.version);
+
+    char url[PATH_MAX], cmd[PATH_MAX * 2];
+    snprintf(url, sizeof(url), "%s/%s/%s/%s/%s-%s.apk",
+             ALPINE_CDN, p.branch, p.repo, ALPINE_ARCH, p.name, p.version);
+
+    printf("[apm] downloading %s\n", url);
+    snprintf(cmd, sizeof(cmd), "curl -fL --progress-bar '%s' -o '%s'", url, apk);
+    if (!command_ok(cmd)) {
+        fprintf(stderr, "[apm] download failed\n");
+        unlink(apk);
+        return 1;
+    }
+
+    printf("[apm] unpacking %s\n", p.name);
+    if (extract_data_stream(apk, tar_path) < 0) {
+        fprintf(stderr, "[apm] could not locate a valid APK data tar stream\n");
+        unlink(apk); unlink(tar_path);
+        return 1;
+    }
+
+    if (mkdir_p(stage, 0755) < 0) {
+        fprintf(stderr, "[apm] cannot create staging directory: %s\n", strerror(errno));
+        unlink(apk); unlink(tar_path); return 1;
+    }
+
+    /* Validate every archive member before touching the target filesystem. */
+    if (build_manifest(tar_path, manifest) < 0) {
+        fprintf(stderr, "[apm] unsafe or unreadable tar archive\n");
+        command("rm -rf '/tmp/apm/stage-invalid'");
+        unlink(apk); unlink(tar_path); unlink(manifest);
+        return 1;
+    }
+
+    printf("[apm] extracting to staging directory\n");
+    if (install_tar(tar_path, stage) < 0) {
+        fprintf(stderr, "[apm] extraction failed\n");
+        snprintf(cmd, sizeof(cmd), "rm -rf '%s'", stage);
+        command(cmd);
+        unlink(apk); unlink(tar_path); unlink(manifest);
+        return 1;
+    }
+
+    /* Build final directories before moving files into /. */
+    FILE *mf = fopen(manifest, "r");
+    if (!mf) {
+        fprintf(stderr, "[apm] cannot read manifest\n");
+        snprintf(cmd, sizeof(cmd), "rm -rf '%s'", stage); command(cmd);
+        unlink(apk); unlink(tar_path); return 1;
+    }
+
+    char line[PATH_MAX];
+    while (fgets(line, sizeof(line), mf)) {
+        line[strcspn(line, "\r\n")] = '\0';
+        if (!line[0]) continue;
+
+        char source[PATH_MAX], target[PATH_MAX];
+        const char *relative = line[0] == '/' ? line + 1 : line;
+        snprintf(source, sizeof(source), "%s/%s", stage, relative);
+        snprintf(target, sizeof(target), "/%s", relative);
+
+        struct stat st;
+        if (lstat(source, &st) < 0)
+            continue;
+
+        if (S_ISDIR(st.st_mode)) {
+            /* Directories are merged, never replaced. */
+            if (mkdir_p(target, 0755) < 0) {
+                fprintf(stderr, "[apm] cannot create %s: %s\n", target, strerror(errno));
+                fclose(mf);
+                goto fail;
+            }
+            continue;
+        }
+
+        char parent[PATH_MAX];
+        snprintf(parent, sizeof(parent), "%s", target);
+        char *slash = strrchr(parent, '/');
+        if (slash && slash != parent) {
+            *slash = '\0';
+            if (mkdir_p(parent, 0755) < 0) {
+                fprintf(stderr, "[apm] cannot create parent %s\n", parent);
+                fclose(mf);
+                goto fail;
+            }
+        }
+
+        /* Replace existing file/symlink. Never use rename() across filesystems. */
+        if (unlink(target) < 0 && errno != ENOENT && !S_ISDIR(st.st_mode)) {
+            fprintf(stderr, "[apm] cannot replace %s: %s\n", target, strerror(errno));
+            fclose(mf);
+            goto fail;
+        }
+
+        if (rename(source, target) < 0) {
+            /* rename can fail across filesystems (EXDEV); fall back per type. */
+            if (S_ISREG(st.st_mode)) {
+                int in = open(source, O_RDONLY);
+                int out = open(target, O_WRONLY | O_CREAT | O_TRUNC, 0755);
+                if (in < 0 || out < 0) {
+                    if (in >= 0) close(in);
+                    if (out >= 0) close(out);
+                    fprintf(stderr, "[apm] cannot install %s: %s\n", target, strerror(errno));
+                    fclose(mf);
+                    goto fail;
+                }
+                unsigned char copybuf[65536];
+                for (;;) {
+                    ssize_t n = read(in, copybuf, sizeof(copybuf));
+                    if (n < 0) {
+                        if (errno == EINTR) continue;
+                        close(in); close(out); fclose(mf); goto fail;
+                    }
+                    if (n == 0) break;
+                    if (write_all_fd(out, copybuf, (size_t)n) < 0) {
+                        close(in); close(out); fclose(mf); goto fail;
+                    }
+                }
+                close(in); close(out); unlink(source);
+            } else if (S_ISLNK(st.st_mode)) {
+                /* Cross-filesystem symlink: recreate at target path. */
+                char lnkbuf[PATH_MAX];
+                ssize_t llen = readlink(source, lnkbuf, sizeof(lnkbuf) - 1);
+                if (llen < 0) {
+                    fprintf(stderr, "[apm] cannot read symlink %s: %s\n",
+                            source, strerror(errno));
+                    fclose(mf);
+                    goto fail;
+                }
+                lnkbuf[llen] = '\0';
+                unlink(target); /* remove any leftover */
+                if (symlink(lnkbuf, target) < 0) {
+                    fprintf(stderr, "[apm] cannot create symlink %s -> %s: %s\n",
+                            target, lnkbuf, strerror(errno));
+                    fclose(mf);
+                    goto fail;
+                }
+                unlink(source);
             } else {
-                buf[index++] = *p++;
+                fprintf(stderr, "[apm] cannot install %s: %s\n", target, strerror(errno));
+                fclose(mf);
+                goto fail;
             }
         }
-        buf[index] = '\0';
-    } else {
-        // Value is a number or null/true/false
-        int index = 0;
-        while (*p && *p != ',' && *p != '}' && *p != ']' && index < max_len - 1) {
-            buf[index++] = *p++;
+    }
+    fclose(mf);
+
+    if (write_metadata(name, &p, manifest) < 0) {
+        fprintf(stderr, "[apm] package installed but metadata could not be written\n");
+        goto fail_cleanup;
+    }
+
+    snprintf(cmd, sizeof(cmd), "rm -rf '%s'", stage); command(cmd);
+    unlink(apk); unlink(tar_path); unlink(manifest);
+    printf("[apm] installed %s-%s\n", p.name, p.version);
+    return 0;
+
+fail:
+    /* Do not attempt an unsafe rollback here; files already moved remain valid. */
+    fprintf(stderr, "[apm] installation stopped; package may be partially installed\n");
+fail_cleanup:
+    snprintf(cmd, sizeof(cmd), "rm -rf '%s'", stage); command(cmd);
+    unlink(apk); unlink(tar_path); unlink(manifest);
+    return 1;
+}
+
+static int cmd_install(const char *name)
+{
+    return install_one(name, 0);
+}
+
+static int search_cb(const Package *p, void *arg)
+{
+    const char *needle = arg;
+    if (strstr(p->name, needle) || strstr(p->desc, needle)) {
+        printf("%-30s %-16s %s/%s\n", p->name, p->version, p->branch, p->repo);
+    }
+    return 0;
+}
+
+static int info_cb(const Package *p, void *arg)
+{
+    const char *name = arg;
+    if (strcmp(p->name, name) != 0)
+        return 0;
+    printf("Name: %s\nVersion: %s\nArch: %s\nRepo: %s/%s\nDescription: %s\n",
+           p->name, p->version, p->arch, p->branch, p->repo, p->desc);
+    printf("Size: %s\nInstalled size: %s\n", p->size, p->isize);
+    if (p->deps[0]) printf("Depends: %s\n", p->deps);
+    if (p->url[0]) printf("URL: %s\n", p->url);
+    return 1;
+}
+
+static int cmd_update(void)
+{
+    int failed = 0;
+    for (int i = 0; repos[i].branch; ++i) {
+        if (fetch_index(repos[i].branch, repos[i].name) < 0) {
+            printf("[apm] WARNING: failed to update %s/%s\n",
+                   repos[i].branch, repos[i].name);
+            failed = 1;
         }
-        buf[index] = '\0';
     }
-    return buf;
+    if (failed)
+        printf("[apm] update completed with errors\n");
+    else
+        printf("[apm] all indexes updated successfully\n");
+    return failed;
 }
 
-char *next_object(char **cursor) {
-    char *p = *cursor;
-    while (*p && *p != '{') {
-        if (*p == ']') return NULL;
-        p++;
-    }
-    if (!*p) return NULL;
-    
-    char *start = p;
-    int brace_count = 0;
-    while (*p) {
-        if (*p == '{') brace_count++;
-        else if (*p == '}') {
-            brace_count--;
-            if (brace_count == 0) {
-                char *end = p + 1;
-                *cursor = end;
-                int len = end - start;
-                char *obj = malloc(len + 1);
-                memcpy(obj, start, len);
-                obj[len] = '\0';
-                return obj;
-            }
-        }
-        p++;
-    }
-    return NULL;
+static int cmd_search(const char *needle)
+{
+    for (int i = 0; repos[i].branch; ++i)
+        foreach_index(repos[i].branch, repos[i].name, search_cb, (void *)needle);
+    return 0;
 }
 
-void search_package(const char *keyword) {
-    char cmd[512];
-    snprintf(cmd, sizeof(cmd), "curl -sL \"https://aur.archlinux.org/rpc/?v=5&type=search&arg=%s\" -o /tmp/apm_search.json", keyword);
-    int status = system(cmd);
-    if (status != 0) {
-        fprintf(stderr, "Error: curl query failed.\n");
-        return;
+static int cmd_info(const char *name)
+{
+    for (int i = 0; repos[i].branch; ++i)
+        if (foreach_index(repos[i].branch, repos[i].name, info_cb, (void *)name))
+            return 0;
+    fprintf(stderr, "[apm] package '%s' not found\n", name);
+    return 1;
+}
+
+static int cmd_list(void)
+{
+    if (!file_exists(APM_INSTALLED)) {
+        printf("[apm] no packages installed\n");
+        return 0;
     }
-    
-    FILE *f = fopen("/tmp/apm_search.json", "r");
+
+    char cmd[PATH_MAX];
+    snprintf(cmd, sizeof(cmd), "find '%s' -mindepth 1 -maxdepth 1 -type d -printf '%%f\\n' 2>/dev/null", APM_INSTALLED);
+    command(cmd);
+    return 0;
+}
+
+static int cmd_remove(const char *name)
+{
+    if (!install_path_safe(name))
+        return 1;
+
+    char dir[PATH_MAX], manifest[PATH_MAX];
+    snprintf(dir, sizeof(dir), "%s/%s", APM_INSTALLED, name);
+    snprintf(manifest, sizeof(manifest), "%s/files", dir);
+
+    FILE *f = fopen(manifest, "r");
     if (!f) {
-        fprintf(stderr, "Error: failed to open search result.\n");
-        return;
+        fprintf(stderr, "[apm] package '%s' is not installed\n", name);
+        return 1;
     }
-    fseek(f, 0, SEEK_END);
-    long size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    
-    char *json = malloc(size + 1);
-    int read_bytes = fread(json, 1, size, f);
-    json[read_bytes] = '\0';
+
+    /* Remove deepest paths first. */
+    char cmd[PATH_MAX * 2];
+    snprintf(cmd, sizeof(cmd), "sort -r '%s' > '%s.sorted'", manifest, manifest);
+    if (!command_ok(cmd)) {
+        fclose(f);
+        return 1;
+    }
     fclose(f);
-    
-    char *array_ptr = strstr(json, "\"results\":[");
-    if (!array_ptr) {
-        printf("No results found.\n");
-        free(json);
-        return;
-    }
-    array_ptr += 11;
-    
-    printf("%-24s %-12s %s\n", "NAME", "VERSION", "DESCRIPTION");
-    printf("--------------------------------------------------------------------------------\n");
-    char *obj;
-    int count = 0;
-    while ((obj = next_object(&array_ptr)) != NULL) {
-        char name[128] = {0};
-        char version[64] = {0};
-        char desc[512] = {0};
-        
-        json_get_value(obj, "Name", name, sizeof(name));
-        json_get_value(obj, "Version", version, sizeof(version));
-        json_get_value(obj, "Description", desc, sizeof(desc));
-        
-        if (strlen(name) > 0) {
-            printf("%-24s %-12s %s\n", name, version, desc);
-            count++;
-        }
-        free(obj);
-    }
-    if (count == 0) {
-        printf("No packages found matching query.\n");
-    }
-    free(json);
-}
 
-void info_package(const char *pkgname) {
-    char cmd[512];
-    snprintf(cmd, sizeof(cmd), "curl -sL \"https://aur.archlinux.org/rpc/?v=5&type=info&arg=%s\" -o /tmp/apm_info.json", pkgname);
-    int status = system(cmd);
-    if (status != 0) {
-        fprintf(stderr, "Error: curl query failed.\n");
-        return;
+    char sorted[PATH_MAX];
+    snprintf(sorted, sizeof(sorted), "%s.sorted", manifest);
+    f = fopen(sorted, "r");
+    if (!f) return 1;
+
+    char line[PATH_MAX];
+    while (fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\r\n")] = '\0';
+        if (!line[0] || !path_is_safe_tar_name(line)) continue;
+        if (strcmp(line, "/") == 0) continue;
+        unlink(line);
     }
-    
-    FILE *f = fopen("/tmp/apm_info.json", "r");
-    if (!f) {
-        fprintf(stderr, "Error: failed to open info result.\n");
-        return;
-    }
-    fseek(f, 0, SEEK_END);
-    long size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    
-    char *json = malloc(size + 1);
-    int read_bytes = fread(json, 1, size, f);
-    json[read_bytes] = '\0';
     fclose(f);
-    
-    char *array_ptr = strstr(json, "\"results\":[");
-    if (!array_ptr) {
-        printf("Package not found.\n");
-        free(json);
-        return;
-    }
-    array_ptr += 11;
-    
-    char *obj = next_object(&array_ptr);
-    if (!obj) {
-        printf("Package '%s' not found.\n", pkgname);
-        free(json);
-        return;
-    }
-    
-    char name[128] = {0};
-    char version[64] = {0};
-    char desc[512] = {0};
-    char url[256] = {0};
-    char maintainer[128] = {0};
-    char popularity[32] = {0};
-    
-    json_get_value(obj, "Name", name, sizeof(name));
-    json_get_value(obj, "Version", version, sizeof(version));
-    json_get_value(obj, "Description", desc, sizeof(desc));
-    json_get_value(obj, "URL", url, sizeof(url));
-    json_get_value(obj, "Maintainer", maintainer, sizeof(maintainer));
-    json_get_value(obj, "Popularity", popularity, sizeof(popularity));
-    
-    printf("Package     : %s\n", name);
-    printf("Version     : %s\n", version);
-    printf("Description : %s\n", desc);
-    printf("URL         : %s\n", url);
-    printf("Maintainer  : %s\n", maintainer);
-    printf("Popularity  : %s\n", popularity);
-    
-    free(obj);
-    free(json);
+    unlink(sorted);
+
+    snprintf(cmd, sizeof(cmd), "rm -rf '%s'", dir);
+    command(cmd);
+    printf("[apm] removed %s\n", name);
+    return 0;
 }
 
-void install_package(const char *pkgname) {
-    char cmd[1024];
-    snprintf(cmd, sizeof(cmd), "curl -sL \"https://aur.archlinux.org/rpc/?v=5&type=info&arg=%s\" -o /tmp/apm_info.json", pkgname);
-    int status = system(cmd);
-    if (status != 0) {
-        fprintf(stderr, "Error: failed to fetch package info.\n");
-        return;
-    }
-    
-    FILE *f = fopen("/tmp/apm_info.json", "r");
-    if (!f) {
-        fprintf(stderr, "Error: failed to open package info.\n");
-        return;
-    }
-    fseek(f, 0, SEEK_END);
-    long size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    
-    char *json = malloc(size + 1);
-    int read_bytes = fread(json, 1, size, f);
-    json[read_bytes] = '\0';
-    fclose(f);
-    
-    char *array_ptr = strstr(json, "\"results\":[");
-    if (!array_ptr) {
-        fprintf(stderr, "Error: invalid response from AUR.\n");
-        free(json);
-        return;
-    }
-    array_ptr += 11;
-    char *obj = next_object(&array_ptr);
-    if (!obj) {
-        fprintf(stderr, "Error: package '%s' not found on AUR.\n", pkgname);
-        free(json);
-        return;
-    }
-    
-    char urlpath[256] = {0};
-    json_get_value(obj, "URLPath", urlpath, sizeof(urlpath));
-    
-    if (strlen(urlpath) == 0) {
-        fprintf(stderr, "Error: package snapshot URL invalid.\n");
-        free(obj);
-        free(json);
-        return;
-    }
-    
-    free(obj);
-    free(json);
-    
-    char download_url[512];
-    snprintf(download_url, sizeof(download_url), "https://aur.archlinux.org%s", urlpath);
-    
-    printf("Downloading package snapshot from AUR...\n");
-    snprintf(cmd, sizeof(cmd), "curl -sL \"%s\" -o /tmp/%s.tar.gz", download_url, pkgname);
-    status = system(cmd);
-    if (status != 0) {
-        fprintf(stderr, "Error: download failed.\n");
-        return;
-    }
-    
-    printf("Extracting snapshot...\n");
-    snprintf(cmd, sizeof(cmd), "mkdir -p /tmp && tar -xzf /tmp/%s.tar.gz -C /tmp/", pkgname);
-    status = system(cmd);
-    if (status != 0) {
-        fprintf(stderr, "Error: extraction failed.\n");
-        return;
-    }
-    
-    char script_path[256];
-    snprintf(script_path, sizeof(script_path), "/tmp/apm_build_%s.sh", pkgname);
-    FILE *sf = fopen(script_path, "w");
-    if (!sf) {
-        fprintf(stderr, "Error: failed to create build script.\n");
-        return;
-    }
-    
-    /* POSIX/ash-compatible build script - no bash-isms */
-    fprintf(sf, "#!/bin/sh\n");
-    fprintf(sf, "set -e\n");
-    fprintf(sf, "PKGBUILD_DIR=/tmp/%s\n", pkgname);
-    fprintf(sf, "cd \"$PKGBUILD_DIR\"\n");
-    fprintf(sf, "[ -f PKGBUILD ] || { echo 'No PKGBUILD found!'; exit 1; }\n");
-    /* Use '.' (dot) which is POSIX sh equivalent of bash 'source' */
-    fprintf(sf, ". ./PKGBUILD\n");
-    fprintf(sf, "echo \"Building AUR Package: $pkgname version $pkgver\"\n");
-    /* Parse sources from .SRCINFO (plain key=value, no bash arrays needed) */
-    fprintf(sf, "if [ -f .SRCINFO ]; then\n");
-    fprintf(sf, "  grep '^ *source *=' .SRCINFO | while IFS= read -r _srcline; do\n");
-    fprintf(sf, "    _val=$(echo \"$_srcline\" | sed 's/^ *source *= *//')\n");
-    fprintf(sf, "    _url=$(echo \"$_val\" | sed 's/^[^:]*:://')\n");
-    fprintf(sf, "    case \"$_url\" in\n");
-    fprintf(sf, "      http://*|https://*)\n");
-    fprintf(sf, "        _fname=$(echo \"$_val\" | sed 's/::.*//')\n");
-    fprintf(sf, "        case \"$_fname\" in http://*|https://*) _fname=$(basename \"$_url\") ;; esac\n");
-    fprintf(sf, "        echo \"Downloading: $_url\"\n");
-    fprintf(sf, "        curl -L \"$_url\" -o \"$_fname\"\n");
-    fprintf(sf, "        ;;\n");
-    fprintf(sf, "    esac\n");
-    fprintf(sf, "  done\n");
-    fprintf(sf, "fi\n");
-    /* Extract any archives */
-    fprintf(sf, "for f in *.tar.gz *.tgz; do [ -f \"$f\" ] && tar -xzf \"$f\"; done\n");
-    fprintf(sf, "for f in *.tar.xz *.txz; do [ -f \"$f\" ] && tar -xJf \"$f\"; done\n");
-    fprintf(sf, "for f in *.zip; do [ -f \"$f\" ] && unzip \"$f\"; done\n");
-    /* srcdir points to the build dir; PKGBUILD build() functions cd into $srcdir/pkgname-pkgver */
-    fprintf(sf, "srcdir=\"$PKGBUILD_DIR\"\n");
-    fprintf(sf, "export srcdir\n");
-    /* Call prepare/build/package if they are defined as shell functions */
-    fprintf(sf, "if type prepare 2>/dev/null | grep -q 'function\\|()'; then\n");
-    fprintf(sf, "  echo \"Running prepare()...\"; prepare\n");
-    fprintf(sf, "fi\n");
-    fprintf(sf, "if type build 2>/dev/null | grep -q 'function\\|()'; then\n");
-    fprintf(sf, "  echo \"Running build()...\"; build\n");
-    fprintf(sf, "fi\n");
-    fprintf(sf, "pkgdir=\"/tmp/%s/pkg\"\n", pkgname);
-    fprintf(sf, "export pkgdir\n");
-    fprintf(sf, "mkdir -p \"$pkgdir\"\n");
-    fprintf(sf, "if type package 2>/dev/null | grep -q 'function\\|()'; then\n");
-    fprintf(sf, "  echo \"Running package()...\"; package\n");
-    fprintf(sf, "fi\n");
-    fprintf(sf, "if [ -d \"$pkgdir\" ] && ls \"$pkgdir\" | grep -q .; then\n");
-    fprintf(sf, "  echo \"Installing compiled files to system root...\"; cp -rv \"$pkgdir\"/* /\n");
-    fprintf(sf, "else\n");
-    fprintf(sf, "  echo \"Warning: pkgdir empty, nothing to install.\"; fi\n");
-    fclose(sf);
-
-    /* Execute via /bin/sh directly - do not rely on execute bit or PATH lookup */
-    printf("Starting build/install process for %s...\n", pkgname);
-    snprintf(cmd, sizeof(cmd), "/bin/sh %s", script_path);
-    status = system(cmd);
-    if (status == 0) {
-        printf("\nPackage '%s' successfully compiled and installed!\n", pkgname);
-        snprintf(cmd, sizeof(cmd), "mkdir -p /etc/apm/installed && touch /etc/apm/installed/%s", pkgname);
-        system(cmd);
-    } else {
-        fprintf(stderr, "Error: package build/installation failed.\n");
-    }
+static void usage(void)
+{
+    puts("APM - Alpine package manager for AscentOS/Linux");
+    puts("Usage: apm <command> [package]");
+    puts("");
+    puts("  update             update Alpine indexes");
+    puts("  search <name>      search packages");
+    puts("  info <name>        show package information");
+    puts("  install <name>     download and install package");
+    puts("  remove <name>      remove installed package files");
+    puts("  list               list installed packages");
 }
 
-void list_packages(void) {
-    printf("Installed packages:\n");
-    system("ls -1 /etc/apm/installed/ 2>/dev/null || echo '(none)'");
-}
-
-void remove_package(const char *pkgname) {
-    char path[256];
-    snprintf(path, sizeof(path), "/etc/apm/installed/%s", pkgname);
-    if (unlink(path) == 0) {
-        printf("Uninstalled %s (removed tracking marker). Note: built files remain on disk.\n", pkgname);
-    } else {
-        printf("Package '%s' is not installed or could not be removed.\n", pkgname);
-    }
-}
-
-int main(int argc, char **argv) {
+int main(int argc, char **argv)
+{
     if (argc < 2) {
         usage();
         return 1;
     }
-    
-    const char *cmd = argv[1];
-    if (strcmp(cmd, "search") == 0) {
-        if (argc < 3) {
-            fprintf(stderr, "Error: please specify search query.\n");
-            return 1;
-        }
-        search_package(argv[2]);
-    } else if (strcmp(cmd, "info") == 0) {
-        if (argc < 3) {
-            fprintf(stderr, "Error: please specify package name.\n");
-            return 1;
-        }
-        info_package(argv[2]);
-    } else if (strcmp(cmd, "install") == 0) {
-        if (argc < 3) {
-            fprintf(stderr, "Error: please specify package name.\n");
-            return 1;
-        }
-        install_package(argv[2]);
-    } else if (strcmp(cmd, "list") == 0) {
-        list_packages();
-    } else if (strcmp(cmd, "remove") == 0) {
-        if (argc < 3) {
-            fprintf(stderr, "Error: please specify package name.\n");
-            return 1;
-        }
-        remove_package(argv[2]);
-    } else if (strcmp(cmd, "help") == 0 || strcmp(cmd, "--help") == 0 || strcmp(cmd, "-h") == 0) {
-        usage();
-    } else {
-        fprintf(stderr, "Error: unknown command '%s'\n", cmd);
-        usage();
-        return 1;
-    }
-    
-    return 0;
+
+    if (strcmp(argv[1], "update") == 0)
+        return cmd_update();
+    if (strcmp(argv[1], "search") == 0 && argc >= 3)
+        return cmd_search(argv[2]);
+    if (strcmp(argv[1], "info") == 0 && argc >= 3)
+        return cmd_info(argv[2]);
+    if (strcmp(argv[1], "install") == 0 && argc >= 3)
+        return cmd_install(argv[2]);
+    if (strcmp(argv[1], "remove") == 0 && argc >= 3)
+        return cmd_remove(argv[2]);
+    if (strcmp(argv[1], "list") == 0)
+        return cmd_list();
+
+    usage();
+    return 1;
 }

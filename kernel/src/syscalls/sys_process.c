@@ -429,6 +429,10 @@ static uint64_t sys_wait4(uint64_t pid, uint64_t wstatus_ptr, uint64_t options,
     bool should_block = false;
 
     spinlock_acquire(&tid_lock);
+    /* Clear the flag now that we hold the lock and are about to rescan.
+     * This prevents a spurious re-block if a wakeup arrived between our
+     * last sched_yield() return and this spinlock_acquire(). */
+    current->waiting_for_child = false;
     struct thread *owner = (options & __WNOTHREAD) ? current : global_thread_list;
     while (owner) {
       if (owner->tgid != current->tgid) {
@@ -478,7 +482,10 @@ static uint64_t sys_wait4(uint64_t pid, uint64_t wstatus_ptr, uint64_t options,
         break;
       owner = owner->global_next;
     }
-    /* Publish BLOCKED while child exit is excluded from publishing ZOMBIE. */
+    /* Publish BLOCKED while child exit is excluded from publishing ZOMBIE.
+     * Keep waiting_for_child set until we re-check under the lock so we
+     * cannot miss a wakeup that fires between sched_yield() returning and
+     * the next spinlock_acquire at the top of the loop. */
     if (!zombie && has_matching_children && !(options & WNOHANG)) {
       current->waiting_for_child = true;
       current->state = THREAD_BLOCKED;
@@ -498,22 +505,30 @@ static uint64_t sys_wait4(uint64_t pid, uint64_t wstatus_ptr, uint64_t options,
       // process_do_exit(), so direct reaping here would free a live stack.
       sched_queue_reap_and_wait(zombie);
 
+      current->waiting_for_child = false;
       return (uint64_t)reaped_pid;
     }
 
     if (!has_matching_children) {
+      current->waiting_for_child = false;
       return (uint64_t)-10; // ECHILD
     }
 
     // WNOHANG: return 0 immediately if no zombie found
     if (options & WNOHANG) {
+      current->waiting_for_child = false;
       return 0;
     }
 
     // Block and wait for a child to exit.
+    // Note: waiting_for_child stays true across sched_yield() so that a
+    // wakeup arriving while we are off-CPU is not lost.  It is cleared only
+    // at the top of the next iteration once we hold tid_lock again and can
+    // safely inspect the child list.
     if (should_block) {
       sched_yield();
-      current->waiting_for_child = false;
+      /* waiting_for_child is cleared at the top of the next loop iteration
+       * after we reacquire tid_lock and rescan — do NOT clear it here. */
     }
   }
 }
@@ -574,6 +589,9 @@ static uint64_t sys_waitid(uint64_t idtype_val, uint64_t id_val,
     bool should_block = false;
 
     spinlock_acquire(&tid_lock);
+    /* Clear here under the lock so a wakeup between yield-return and this
+     * acquire is not missed — same pattern as sys_wait4. */
+    current->waiting_for_child = false;
 
     /* Search every thread in this process's thread group for matching children */
     for (struct thread *owner = global_thread_list; owner;
@@ -647,20 +665,25 @@ static uint64_t sys_waitid(uint64_t idtype_val, uint64_t id_val,
         sched_queue_reap_and_wait(zombie);
       }
 
+      current->waiting_for_child = false;
       return 0; /* waitid returns 0 on success, not the pid */
     }
 
-    if (!has_matching_children)
+    if (!has_matching_children) {
+      current->waiting_for_child = false;
       return (uint64_t)-10; // ECHILD
+    }
 
     if (options & WNOHANG) {
       /* No zombie yet; infop is left untouched per POSIX when WNOHANG */
+      current->waiting_for_child = false;
       return 0;
     }
 
     if (should_block) {
       sched_yield();
-      current->waiting_for_child = false;
+      /* waiting_for_child stays set — cleared at top of next iteration
+       * after we reacquire tid_lock, same as sys_wait4. */
     }
   }
 }
@@ -692,6 +715,9 @@ static void exec_close_cloexec(struct thread *t) {
 }
 
 // sys_execve
+#define TSC_PROBES_ENABLE
+#include "../lib/tsc.h"
+
 static uint64_t sys_execve(struct syscall_regs *regs) {
   const char **user_argv = (const char **)regs->rsi;
   const char **user_envp = (const char **)regs->rdx;
@@ -722,6 +748,7 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
   uint32_t exec_gid = exec_node->gid;
   vfs_close(exec_node);
 
+  TSC_BEGIN(execve_arg_copy);
   int argc = 0;
   if (user_argv)
     while (user_argv[argc])
@@ -745,8 +772,11 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
     memcpy(k_envp[i], user_envp[i], len + 1);
   }
   k_envp[envc] = NULL;
+  TSC_END(execve_arg_copy);
 
+  TSC_BEGIN(execve_pml4_create);
   uint64_t *new_pml4 = vmm_create_pml4();
+  TSC_END(execve_pml4_create);
   if (!new_pml4) {
     kfree(path);
     for (int i = 0; i < argc; i++)
@@ -804,8 +834,10 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
   mm_reset_mmap_state(current);
 
   elf_info_t elf_info = {0};
+  tsc_probe_reset();
+  TSC_BEGIN(execve_elf_load);
   if (!elf_load(path, new_pml4, &elf_info)) {
-    // Revert CR3
+    TSC_END(execve_elf_load);
     current->cr3 = old_cr3;
     __asm__ volatile("mov %0, %%cr3" ::"r"(current->cr3) : "memory");
     if (shared_mm) {
@@ -838,6 +870,9 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
     // vmm_destroy_pml4 or similar, but for now we focus on the reported leak.
     return (uint64_t)-8; // ENOEXEC
   }
+
+  TSC_END(execve_elf_load);
+  tsc_probe_dump();
 
   exec_close_cloexec(current);
 
@@ -1321,7 +1356,7 @@ static uint64_t sys_uname(uint64_t buf_ptr, uint64_t a1, uint64_t a2,
     return (uint64_t)-14; // EFAULT
 
   strcpy(buf->sysname, "Ascension");
-  strcpy(buf->nodename, "AscentOS");
+  strcpy(buf->nodename, "AvoryOS");
   strcpy(buf->release, "2.0.0 Beta");
 
   // Dynamic date/time from RTC

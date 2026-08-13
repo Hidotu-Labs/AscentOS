@@ -1,5 +1,5 @@
 /*
- * Small RTL8139 userspace port for AscentOS.
+ * Small RTL8139 userspace port for AvoryOS.
  *
  * The file deliberately follows Linux's pci_driver/net_device organization.
  * It uses the Phase 6 compatibility subset instead of Linux kernel internals;

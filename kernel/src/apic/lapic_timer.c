@@ -5,6 +5,7 @@
 #include "../console/console.h"
 #include "../console/klog.h"
 #include "../cpu/tsc.h"
+#include "../lib/tsc.h"
 #include "../drivers/usb/xhci.h"
 #include "../io/io.h"
 #include "../sched/sched.h"

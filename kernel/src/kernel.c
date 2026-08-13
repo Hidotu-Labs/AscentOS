@@ -189,9 +189,9 @@ static void init_thread_entry(void) {
                            " Console cleared, starting session...\n");
 
   while (1) {
-    // Start AscentD as the main userspace session. Fall back to bash if the
+    // Start AvoryD as the main userspace session. Fall back to bash if the
     // root filesystem does not provide it yet.
-    const char *sh_argv[] = {"/bin/ascentd", NULL};
+    const char *sh_argv[] = {"/bin/avoryd", NULL};
 
     struct thread *current = sched_get_current();
     if (current) {
@@ -234,7 +234,7 @@ void kmain(void) {
   klog_set_screen_logging(true);
 
   klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET
-                           " AscentOS Kernel Booting...\n");
+                           " AvoryOS Kernel Booting...\n");
   klog_puts("     HAL architecture: ");
   klog_puts(hal_arch_name());
   klog_puts("\n");

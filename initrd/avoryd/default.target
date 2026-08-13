@@ -1,4 +1,4 @@
-# AscentD default boot target.
+# AvoryD default boot target.
 #
 # Keep the console last: it is a foreground service and becomes the main
 # interactive session.

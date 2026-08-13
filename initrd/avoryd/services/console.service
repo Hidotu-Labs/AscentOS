@@ -2,4 +2,4 @@ NAME=console
 DESCRIPTION="interactive multi-user login"
 TYPE=foreground
 RESPAWN=yes
-COMMAND=/bin/ascent-login
+COMMAND=/bin/avory-login

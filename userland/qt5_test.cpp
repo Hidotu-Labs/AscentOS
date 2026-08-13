@@ -1,13 +1,3 @@
-/*
- * AscentOS Qt5 System Dashboard
- * A test Qt5 application for AscentOS demonstrating:
- *   - QMainWindow with menus and status bar
- *   - Animated custom widget (sine wave)
- *   - Live uptime label updated by a QTimer
- *   - QPushButton interactions
- *   - QTabWidget with multiple pages
- */
-
 #include <QApplication>
 #include <QMainWindow>
 #include <QWidget>

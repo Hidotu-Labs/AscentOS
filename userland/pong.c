@@ -386,7 +386,7 @@ static void draw_net(void) {
 }
 
 static unsigned long x11_color(uint32_t argb) {
-  /* AscentOS Xorg uses the standard 24-bit TrueColor visual. */
+  /* AvoryOS Xorg uses the standard 24-bit TrueColor visual. */
   return (unsigned long)(argb & 0x00ffffffU);
 }
 

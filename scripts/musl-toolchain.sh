@@ -1,5 +1,5 @@
 #!/bin/sh
-# AscentOS: bootstrap x86_64-linux-musl (musl-cross-make) if needed, then install
+# AvoryOS: bootstrap x86_64-linux-musl (musl-cross-make) if needed, then install
 # musl 1.2.5 into a static sysroot under toolchain/musl-sysroot.
 #
 # Environment (optional):
@@ -203,7 +203,7 @@ build_sysroot() {
 	# Create stub linux/vt.h for programs that need it (e.g., nano)
 	mkdir -p "$PREFIX/include/linux"
 	cat > "$PREFIX/include/linux/vt.h" << 'VT_H_EOF'
-/* Stub linux/vt.h for AscentOS */
+/* Stub linux/vt.h for AvoryOS */
 #ifndef _LINUX_VT_H
 #define _LINUX_VT_H
 

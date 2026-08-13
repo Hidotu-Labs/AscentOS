@@ -1,4 +1,5 @@
 #include "tsc.h"
+#include "../lib/tsc.h"
 #include "hal/hal.h"
 #include "../io/io.h"
 #include "../console/klog.h"
@@ -9,8 +10,6 @@
 #define CALIBRATION_MS 50
 
 static uint64_t tsc_freq_khz = 0;
-
-uint64_t rdtsc(void) { return hal_cpu_cycle_count(); }
 
 static void pit_calibration_sleep_ms(uint32_t ms) {
     uint32_t divisor = (PIT_BASE_FREQ * ms) / 1000;
@@ -43,6 +42,10 @@ void tsc_init(void) {
 
     uint64_t tsc_elapsed = tsc_end - tsc_start;
     tsc_freq_khz = tsc_elapsed / CALIBRATION_MS;
+
+    /* Feed the calibrated MHz into the probe library so tsc_cycles_to_ns()
+     * works correctly throughout the rest of boot. */
+    tsc_set_mhz(tsc_freq_khz / 1000);
 
     klog_puts("     TSC Frequency: ");
     klog_uint64(tsc_freq_khz / 1000);

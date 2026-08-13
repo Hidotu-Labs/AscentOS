@@ -63,7 +63,7 @@ int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     for (;;) {
         char username[64];
-        puts("\nAscentOS login");
+        puts("\nAvoryOS login");
         fputs("login: ", stdout);
         if (!fgets(username, sizeof(username), stdin)) {
             clearerr(stdin);

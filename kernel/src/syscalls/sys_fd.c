@@ -253,8 +253,10 @@ uint64_t sys_open_path(int dirfd, const char *path, uint64_t flags,
   else if ((flags & O_ACCMODE) == O_RDWR) requested = 6;
   if (requested && !vfs_access(node, requested)) return (uint64_t)-13;
 
-  if ((flags & O_TRUNC) && node->flags == FS_FILE)
+  if ((flags & O_TRUNC) && (node->flags & FS_TYPE_MASK) == FS_FILE) {
+    vfs_truncate(node, 0);
     node->length = 0;
+  }
 
   /* Persistent metadata may provide a fresh per-open object.  DRM was the
    * first user of this pattern; driver capability handles use it as well. */

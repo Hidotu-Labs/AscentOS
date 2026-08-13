@@ -4,11 +4,6 @@
 #include <sys/utsname.h>
 #include <time.h>
 
-/*
- * AscentOS "About" Application
- * A premium, modern system information utility.
- */
-
 typedef struct {
   GtkWidget *window;
   GtkWidget *uptime_label;
@@ -55,7 +50,6 @@ static gboolean on_draw_logo(GtkWidget *widget, cairo_t *cr, gpointer data) {
   int w = gtk_widget_get_allocated_width(widget);
   int h = gtk_widget_get_allocated_height(widget);
 
-  // Draw a stylized "A" for AscentOS
   cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
   cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
 
@@ -90,7 +84,7 @@ int main(int argc, char *argv[]) {
   gtk_init(&argc, &argv);
 
   GtkWidget *window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
-  gtk_window_set_title(GTK_WINDOW(window), "About AscentOS");
+  gtk_window_set_title(GTK_WINDOW(window), "About AvoryOS");
   gtk_window_set_default_size(GTK_WINDOW(window), 450, 600);
   gtk_window_set_resizable(GTK_WINDOW(window), TRUE);
   gtk_window_set_position(GTK_WINDOW(window), GTK_WIN_POS_CENTER);
@@ -131,7 +125,7 @@ int main(int argc, char *argv[]) {
   // Title
   GtkWidget *title_label = gtk_label_new(NULL);
   gtk_label_set_markup(GTK_LABEL(title_label),
-                       "<span size='xx-large' weight='bold'>Ascent</span><span "
+                       "<span size='xx-large' weight='bold'>Avory</span><span "
                        "size='xx-large'>OS</span>");
   gtk_box_pack_start(GTK_BOX(main_vbox), title_label, FALSE, FALSE, 0);
 
@@ -191,14 +185,14 @@ int main(int argc, char *argv[]) {
   GtkWidget *credits_label = gtk_label_new(NULL);
   gtk_label_set_markup(GTK_LABEL(credits_label),
                        "<span size='small'>Inspired by modern OS design\nBuilt "
-                       "for the <b>AscentOS</b> community</span>");
+                       "for the <b>AvoryOS</b> community</span>");
   gtk_label_set_justify(GTK_LABEL(credits_label), GTK_JUSTIFY_CENTER);
   gtk_widget_set_opacity(credits_label, 0.7);
   gtk_box_pack_start(GTK_BOX(main_vbox), credits_label, FALSE, FALSE, 10);
 
   GtkWidget *desc_label = gtk_label_new(NULL);
     gtk_label_set_markup(GTK_LABEL(desc_label), 
-        "<span size='medium' style='italic'>\"AscentOS is a hobby operating system "
+        "<span size='medium' style='italic'>\"AvoryOS is a hobby operating system "
         "that dedicates to become a daily usable OS for everyone \"</span>");
     gtk_label_set_line_wrap(GTK_LABEL(desc_label), TRUE);
     gtk_label_set_max_width_chars(GTK_LABEL(desc_label), 50);
