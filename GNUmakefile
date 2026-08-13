@@ -34,9 +34,9 @@ $(QUAKE2_BUNDLE_FILES): $(QUAKE2_STAMP)
 
 $(QUAKE2_STAMP): scripts/build-quake2.sh \
 		scripts/quake2-sdl2-config.in scripts/quake2-avoryos-evdev.h
-	./scripts/build-quake2.sh
-	@mkdir -p $(dir $(QUAKE2_STAMP))
-	@touch $(QUAKE2_STAMP)
+	./scripts/build-quake2.sh && \
+		mkdir -p $(dir $(QUAKE2_STAMP)) && \
+		touch $(QUAKE2_STAMP)
 
 HOST_CC := cc
 HOST_CFLAGS := -g -O2 -pipe
