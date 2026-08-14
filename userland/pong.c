@@ -13,9 +13,11 @@
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
+#ifdef HAVE_X11
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/keysym.h>
+#endif
 
 // ---------------------------------------------------------------------------
 // Linux framebuffer ioctls
@@ -105,14 +107,15 @@ static uint32_t fb_width  = 0;
 static uint32_t fb_height = 0;
 static uint32_t fb_pitch  = 0;
 static int use_x11 = 0;
+#ifdef HAVE_X11
 static Display *x_display = NULL;
 static Window x_window;
 static GC x_gc;
 static Atom wm_delete_window;
 static int move_up = 0;
 static int move_down = 0;
+#endif
 static int running = 1;
-
 static struct termios orig_termios;
 
 // Sound: write end of pipe to child, read end in child
@@ -139,11 +142,13 @@ static void cleanup(void) {
   if (snd_pipe[0] >= 0) { close(snd_pipe[0]); snd_pipe[0] = -1; }
   if (snd_pid > 0) { kill(snd_pid, SIGTERM); waitpid(snd_pid, NULL, 0); snd_pid = -1; }
 
+#ifdef HAVE_X11
   if (x_display) {
     if (x_gc) XFreeGC(x_display, x_gc);
     if (x_window) XDestroyWindow(x_display, x_window);
     XCloseDisplay(x_display); x_display = NULL;
   }
+#endif
   if (fb_mem)     { free(fb_mem);  fb_mem  = NULL; }
   if (fb_fd >= 0) { close(fb_fd);  fb_fd   = -1;   }
   if (tty_fd >= 0){ close(tty_fd); tty_fd  = -1;   }
@@ -269,6 +274,7 @@ static int setup_framebuffer(void) {
   return 0;
 }
 
+#ifdef HAVE_X11
 static int setup_x11(void) {
   x_display = XOpenDisplay(NULL);
   if (!x_display) return -1;
@@ -298,6 +304,7 @@ static int setup_x11(void) {
   XFlush(x_display);
   return 0;
 }
+#endif /* HAVE_X11 — setup_x11 */
 
 static int setup_tty(void) {
   tty_fd = open("/dev/tty0", O_RDWR);
@@ -385,6 +392,7 @@ static void draw_net(void) {
     fill_rect(net_x - 2, y, 4, 10, COLOR_NET);
 }
 
+#ifdef HAVE_X11
 static unsigned long x11_color(uint32_t argb) {
   /* AvoryOS Xorg uses the standard 24-bit TrueColor visual. */
   return (unsigned long)(argb & 0x00ffffffU);
@@ -447,12 +455,15 @@ static void render_x11(void) {
   draw_x11_number(ai_score, (int)fb_width / 2 + 60, 20, 3);
   XFlush(x_display);
 }
+#endif /* HAVE_X11 */
 
 static void render(void) {
+#ifdef HAVE_X11
   if (use_x11) {
     render_x11();
     return;
   }
+#endif
 
   clear_screen();
   draw_net();
@@ -486,6 +497,7 @@ static void render(void) {
 // Input — poll() to avoid blocking
 // ---------------------------------------------------------------------------
 static void handle_input(void) {
+#ifdef HAVE_X11
   if (use_x11) {
     while (XPending(x_display)) {
       XEvent event;
@@ -509,6 +521,7 @@ static void handle_input(void) {
       player_y = (int)fb_height - PADDLE_HEIGHT;
     return;
   }
+#endif
   struct pollfd pfd = { STDIN_FILENO, POLLIN, 0 };
   while (poll(&pfd, 1, 0) > 0 && (pfd.revents & POLLIN)) {
     char buf[32];
@@ -654,12 +667,19 @@ int main(int argc, char **argv) {
   signal(SIGHUP,  sig_handler);
   signal(SIGCHLD, SIG_DFL); /* don't reap sound child automatically */
 
-  int force_fb = 0;
-  for (int i = 1; i < argc; i++) {
-    if (strcmp(argv[i], "-fb") == 0) force_fb = 1;
-    else if (strcmp(argv[i], "-x11") == 0) force_fb = 0;
+  use_x11 = 0;
+#ifdef HAVE_X11
+  {
+    int force_fb = 0;
+    for (int i = 1; i < argc; i++) {
+      if (strcmp(argv[i], "-fb") == 0) force_fb = 1;
+      else if (strcmp(argv[i], "-x11") == 0) force_fb = 0;
+    }
+    use_x11 = !force_fb && getenv("DISPLAY") && setup_x11() == 0;
   }
-  use_x11 = !force_fb && getenv("DISPLAY") && setup_x11() == 0;
+#else
+  (void)argc; (void)argv;
+#endif
   if (!use_x11) {
     if (setup_terminal() < 0) {
       fprintf(stderr, "pong: failed to set raw terminal mode\n");

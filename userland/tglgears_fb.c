@@ -12,8 +12,10 @@
 #include <tinygl/GL/gl.h>
 #include <tinygl/zbuffer.h>
 
+#ifdef HAVE_X11
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
+#endif
 
 #ifndef M_PI
 #define M_PI 3.14159265
@@ -248,12 +250,17 @@ void initScene() {
 int main(int argc, char **argv) {
   // Never seize the physical framebuffer merely because X connection failed.
   // Bare-metal rendering must be explicitly requested with -fb.
-  int use_x11 = 1;
+  int use_x11 = 0;
+#ifdef HAVE_X11
+  use_x11 = 1;
+#endif
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "-fb") == 0)
       use_x11 = 0;
+#ifdef HAVE_X11
     if (strcmp(argv[i], "-x11") == 0)
       use_x11 = 1;
+#endif
   }
 
   uint32_t width = 0, height = 0;
@@ -261,6 +268,7 @@ int main(int argc, char **argv) {
   uint32_t *fb = NULL;
   uint32_t line_length = 0;
 
+#ifdef HAVE_X11
   Display *dpy = NULL;
   Window win = 0;
   GC gc = 0;
@@ -294,6 +302,9 @@ int main(int argc, char **argv) {
                      ZPixmap, 0, (char *)fb, width, height, 32, 0);
     printf("Starting TinyGL X11 renderer (%ux%u)...\n", width, height);
   } else {
+#else
+  {
+#endif
     fd = open("/dev/fb0", O_RDWR);
     if (fd < 0) {
       perror("open /dev/fb0 failed");
@@ -354,6 +365,7 @@ int main(int argc, char **argv) {
 
   // Loop forever rendering
   while (1) {
+#ifdef HAVE_X11
     if (use_x11) {
       while (XPending(dpy)) {
         XEvent event;
@@ -404,6 +416,7 @@ int main(int argc, char **argv) {
         }
       }
     }
+#endif /* HAVE_X11 */
 
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     draw();
@@ -412,8 +425,10 @@ int main(int argc, char **argv) {
     ZB_copyFrameBuffer(frameBuffer, fb, line_length);
 
     if (use_x11) {
+#ifdef HAVE_X11
       XPutImage(dpy, win, gc, img, 0, 0, 0, 0, width, height);
       XSync(dpy, False);
+#endif
     }
 
     frames++;
@@ -426,17 +441,23 @@ int main(int argc, char **argv) {
       start_time = current_time;
     }
   }
+#ifdef HAVE_X11
 end_loop:
+#endif
 
   ZB_close(frameBuffer);
   glClose();
 
+#ifdef HAVE_X11
   if (use_x11) {
     XDestroyImage(img);
     XCloseDisplay(dpy);
   } else {
     close(fd);
   }
+#else
+  close(fd);
+#endif
 
   return 0;
 }

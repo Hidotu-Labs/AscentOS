@@ -168,6 +168,7 @@ static int read_at(int fd, void *buf, size_t count, off_t offset) {
 
 static void print_hex16(uint64_t v) { printf("0x%016lx", v); }
 static void print_hex8(uint64_t v)  { printf("0x%08lx",   v); }
+__attribute__((unused))
 static void print_hex4(uint32_t v)  { printf("0x%04x",    v); }
 
 static const char *elf_type_str(uint16_t t) {
@@ -412,7 +413,7 @@ static void print_program_headers(int fd, const Elf64_Ehdr *h) {
 
 // ── Section: Symbol Table ────────────────────────────────────────────────────
 
-static void print_symbols_from_section(int fd, const Elf64_Ehdr *h,
+static void print_symbols_from_section(int fd, const Elf64_Ehdr *h __attribute__((unused)),
                                         Elf64_Shdr *shdrs,
                                         int symidx, const char *sec_label) {
   Elf64_Shdr *ssym  = &shdrs[symidx];

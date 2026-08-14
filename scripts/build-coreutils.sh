@@ -98,7 +98,7 @@ build_coreutils() {
 
     export CC AR RANLIB STRIP
 
-    echo "Configuring Coreutils for AscentOS ..."
+    echo "Configuring Coreutils for AvoryOS ..."
 
     # Cross-compile cache variables to avoid configure test failures
     export gl_cv_func_getcwd_path_max=yes
@@ -130,7 +130,7 @@ build_coreutils() {
     # Patch config.h to report "Ascent" instead of "GNU/Linux" in uname -o
     if [ -f lib/config.h ]; then
         echo "Patching lib/config.h for OS name ..."
-        sed -i 's/HOST_OPERATING_SYSTEM "GNU\/Linux"/HOST_OPERATING_SYSTEM "Ascent"/' lib/config.h
+        sed -i 's/HOST_OPERATING_SYSTEM "GNU\/Linux"/HOST_OPERATING_SYSTEM "Avory"/' lib/config.h
     fi
 
     echo "Building Coreutils (this may take a while) ..."

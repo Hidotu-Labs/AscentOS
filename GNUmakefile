@@ -948,7 +948,7 @@ userland/readelf.elf: userland/readelf.c $(MUSL_LIBC)
 userland/pong.elf: userland/pong.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/pong.c -o userland/pong.elf \
-		-lX11 -lxcb -lXau -lXdmcp -lmd -lm
+		-lm
 
 userland/raycast.elf: userland/raycast.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
@@ -971,15 +971,11 @@ userland/shutdown.elf: userland/shutdown.c $(MUSL_LIBC)
 		userland/shutdown.c -o userland/shutdown.elf
 
 # APM package manager
-# apm.c uses zlib to parse the concatenated gzip members in Alpine APK v2.
-APM_CFLAGS := $(MUSL_USER_CFLAGS)
-APM_LIBS := -lz
-
+# apm.c shells out to gzip/tar for APK extraction — no zlib C API is used.
 userland/apm.elf: userland/apm.c $(MUSL_LIBC)
 	@echo "[*] Building APM package manager..."
-	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(APM_CFLAGS) \
-		userland/apm.c -o userland/apm.elf \
-		$(APM_LIBS)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/apm.c -o userland/apm.elf
 
 userland/dns_lookup.elf: userland/dns_lookup.c userland/dns_resolver.c userland/dns_resolver.h $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
@@ -1066,7 +1062,7 @@ userland/qt5_test.elf: userland/qt5_test.cpp scripts/setup-alpine.sh
 
 userland/tglgears_fb.elf: userland/tglgears_fb.c $(MUSL_LIBC) scripts/build-tinygl.sh
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
-		userland/tglgears_fb.c -I$(MUSL_SYSROOT)/opt/tinygl/include -L$(MUSL_SYSROOT)/opt/tinygl/lib -lTinyGL -L$(MUSL_SYSROOT)/lib -lX11 -lxcb -lXau -lXdmcp -lm -o userland/tglgears_fb.elf
+		userland/tglgears_fb.c -I$(MUSL_SYSROOT)/opt/tinygl/include -L$(MUSL_SYSROOT)/opt/tinygl/lib -lTinyGL -L$(MUSL_SYSROOT)/lib -lm -o userland/tglgears_fb.elf
 
 userland/test_mem_stress.elf: userland/test_mem_stress.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
