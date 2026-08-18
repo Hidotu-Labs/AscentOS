@@ -714,6 +714,10 @@ bool process_exec_argv(const char **argv) {
   klog_uint64(elf_info.entry);
   klog_puts(")\n");
 
+  // Map vsyscall page so HotSpot JVM (and glibc) can access gettimeofday,
+  // time, and getcpu at the canonical Linux vsyscall address.
+  vmm_map_vsyscall_page(pml4);
+
   // Store the basename of the executable as the thread's comm name
   {
     struct thread *ct = sched_get_current();

@@ -458,6 +458,79 @@ void vmm_map_signal_trampoline(uint64_t *pml4) {
                PAGE_FLAG_USER);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// vsyscall page — mapped at 0xFFFFFFFFFF600000 in every user process.
+// Linux maps this fixed page so glibc/JVM can call gettimeofday, time, and
+// getcpu without a full syscall.  HotSpot specifically hard-codes a read/call
+// to 0xFFFFFFFFFF600800 (getcpu) to determine the CPU number for TLAB
+// allocation.  Without this mapping the JVM crashes with SIGSEGV.
+// ─────────────────────────────────────────────────────────────────────────────
+#define VSYSCALL_BASE 0xFFFFFFFFFF600000ULL
+
+static uint64_t vsyscall_page_phys = 0;
+
+void vmm_init_vsyscall_page(void) {
+  if (vsyscall_page_phys != 0)
+    return; // already done
+
+  void *page = pmm_alloc_page();
+  if (!page)
+    return;
+
+  uint8_t *v = (uint8_t *)PHYS_TO_VIRT(page);
+  // Fill entire page with 0xCC (int3) as a safe default
+  for (int i = 0; i < 4096; i++)
+    v[i] = 0xCC;
+
+  // ── gettimeofday stub at offset 0x000 (syscall NR 96) ──
+  // mov rax, 96; syscall; ret
+  uint8_t gtod[] = {0x48,0xC7,0xC0,0x60,0x00,0x00,0x00, 0x0F,0x05, 0xC3};
+  for (size_t i = 0; i < sizeof(gtod); i++)
+    v[0x000 + i] = gtod[i];
+
+  // ── time stub at offset 0x400 (syscall NR 201) ──
+  // mov rax, 201; syscall; ret
+  uint8_t t[] = {0x48,0xC7,0xC0,0xC9,0x00,0x00,0x00, 0x0F,0x05, 0xC3};
+  for (size_t i = 0; i < sizeof(t); i++)
+    v[0x400 + i] = t[i];
+
+  // ── getcpu stub at offset 0x800 ──
+  // getcpu(unsigned *cpu, unsigned *node, void *unused)
+  // Always returns CPU 0, node 0.  HotSpot uses this to pick a TLAB shard.
+  //   xor  eax, eax          ; return 0
+  //   test rdi, rdi          ; if (cpu != NULL)
+  //   jz   skip_cpu          ;
+  //   mov  dword [rdi], 0    ;   *cpu = 0
+  // skip_cpu:
+  //   test rsi, rsi          ; if (node != NULL)
+  //   jz   skip_node         ;
+  //   mov  dword [rsi], 0    ;   *node = 0
+  // skip_node:
+  //   ret
+  uint8_t gc[] = {
+    0x31, 0xC0,                         // xor eax, eax
+    0x48, 0x85, 0xFF,                   // test rdi, rdi
+    0x74, 0x06,                         // jz  +6  (skip_cpu → land at test rsi)
+    0xC7, 0x07, 0x00, 0x00, 0x00, 0x00,// mov dword [rdi], 0
+    0x48, 0x85, 0xF6,                   // test rsi, rsi
+    0x74, 0x06,                         // jz  +6  (skip_node → land at ret)
+    0xC7, 0x06, 0x00, 0x00, 0x00, 0x00,// mov dword [rsi], 0
+    0xC3,                               // ret
+  };
+  for (size_t i = 0; i < sizeof(gc); i++)
+    v[0x800 + i] = gc[i];
+
+  vsyscall_page_phys = (uint64_t)page;
+}
+
+void vmm_map_vsyscall_page(uint64_t *pml4) {
+  if (vsyscall_page_phys == 0)
+    return;
+  // Map as user-accessible, readable, executable (no RW, no NX)
+  vmm_map_page(pml4, VSYSCALL_BASE, vsyscall_page_phys, PAGE_FLAG_USER);
+}
+
+
 bool vmm_is_user_addr_range_valid(uint64_t addr, size_t size) {
   if (addr > USER_SPACE_LIMIT || (addr + size) > 0x800000000000ULL) {
     klog_puts("[VMM] Range validation failed: out of bounds\n");

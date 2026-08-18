@@ -302,6 +302,7 @@ void kmain(void) {
   klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET
                            " Initializing Virtual Memory Manager (VMM)...\n");
   vmm_init();
+  vmm_init_vsyscall_page();
   klog_puts("     Active CR3 Page Map hooked.\n");
   heap_init();
 

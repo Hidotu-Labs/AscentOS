@@ -223,6 +223,7 @@ struct thread {
       runtime_total; // Total CPU time consumed (in LAPIC ticks, 1 tick = 1ms)
   uint64_t runtime_burst; // CPU time used in current quantum (for MLFQ)
   char comm[16];          // Executable name (basename, max 15 chars + NUL)
+  char exe_path[256];     // Full path of the current executable (for /proc/self/exe)
   uint64_t cpu_affinity;  // Bitmask of allowed CPUs
 };
 

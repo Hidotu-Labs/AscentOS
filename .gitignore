@@ -4,7 +4,7 @@
 /toolchain/
 /edk2-ovmf/
 /AetherDE/
-
+/assets/minecraft.jar
 *.d
 *.elf
 *.o

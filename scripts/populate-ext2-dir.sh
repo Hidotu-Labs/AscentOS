@@ -95,6 +95,7 @@ ensure_dir_cmds "$DST_DIR"
       target=$(readlink "$file_path")
       echo "symlink $DST_DIR/$rel_path $target" >> "$CMDS_FILE"
     else
+      echo "rm $DST_DIR/$rel_path" >> "$CMDS_FILE"
       echo "write $SRC_DIR/$rel_path $DST_DIR/$rel_path" >> "$CMDS_FILE"
       mode=$(stat -c %a "$file_path")
       echo "set_inode_field $DST_DIR/$rel_path mode 0100$mode" >> "$CMDS_FILE"

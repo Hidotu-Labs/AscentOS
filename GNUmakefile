@@ -169,7 +169,7 @@ run-x86_64: edk2-ovmf $(IMAGE_NAME).iso disk.img
 		-drive if=pflash,unit=0,format=raw,file=edk2-ovmf/ovmf-code-$(ARCH).fd,readonly=on \
 		-cdrom $(IMAGE_NAME).iso \
 		-drive file=disk.img,format=raw,if=ide \
-		-smp 4 \
+		-cpu host -enable-kvm \
 		-serial stdio \
 		-audiodev pa,id=snd0 \
 		-device rtl8139,netdev=net0 \

@@ -427,7 +427,8 @@ static uint64_t sys_readlink(uint64_t pathname_ptr, uint64_t buf_ptr,
     if (bufsiz == 0)   return (uint64_t)-22;
 
     if (strcmp(path, "/proc/self/exe") == 0) {
-        const char *exe_path = "/init";
+        struct thread *ct = sched_get_current();
+        const char *exe_path = (ct && ct->exe_path[0]) ? ct->exe_path : "/init";
         size_t len = strlen(exe_path);
         if (len > bufsiz) len = bufsiz;
         memcpy(buf, exe_path, len);

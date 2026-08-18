@@ -918,6 +918,13 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
     current->comm[ci] = '\0';
   }
 
+  // Store the full executable path for /proc/self/exe
+  strncpy(current->exe_path, path, sizeof(current->exe_path) - 1);
+  current->exe_path[sizeof(current->exe_path) - 1] = '\0';
+
+  // Map the vsyscall page into the new address space
+  vmm_map_vsyscall_page((uint64_t *)current->cr3);
+
   // Free the old address space (from fork) now that the new one is loaded.
   // We've already switched CR3, so this is safe.
   // We only free it if it was NOT shared (i.e. not a vfork/thread exec).
