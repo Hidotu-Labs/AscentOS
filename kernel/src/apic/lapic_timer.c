@@ -27,6 +27,18 @@ static uint64_t monotonic_ms(void) {
     return (rdtsc() - boot_tsc) / khz;
 }
 
+static uint64_t monotonic_ns(void) {
+    uint64_t khz = tsc_get_freq_khz();
+    if (khz == 0) return 0;
+    uint64_t elapsed = rdtsc() - boot_tsc;
+    /* Split into whole milliseconds + remainder to avoid overflow.
+     * khz = cycles/ms, so elapsed/khz = ms, remainder < khz.
+     * rem * 1,000,000 fits in uint64 since rem < ~4M (typ. CPU freq). */
+    uint64_t ms  = elapsed / khz;
+    uint64_t rem = elapsed % khz;
+    return ms * 1000000ULL + rem * 1000000ULL / khz;
+}
+
 static uint32_t deadline_to_initial_count(uint64_t deadline_ms) {
     uint64_t now = monotonic_ms();
     uint64_t delay_ms = deadline_ms > now ? deadline_ms - now : 1;
@@ -162,6 +174,10 @@ uint64_t lapic_timer_get_ticks(void) {
 
 uint64_t lapic_timer_get_ms(void) {
     return monotonic_ms();
+}
+
+uint64_t lapic_timer_get_ns(void) {
+    return monotonic_ns();
 }
 
 void lapic_timer_arm_at(uint64_t deadline_ms) {

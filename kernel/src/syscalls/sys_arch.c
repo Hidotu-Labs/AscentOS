@@ -119,9 +119,9 @@ static uint64_t sys_clock_gettime(uint64_t clk_id, uint64_t tp_ptr, uint64_t a2,
   if (!tp_ptr)
     return (uint64_t)-14; // EFAULT
 
-  uint64_t ms = lapic_timer_get_ms();
-  uint64_t sec = ms / 1000;
-  uint64_t nsec = (ms % 1000) * 1000000ULL;
+  uint64_t ns = lapic_timer_get_ns();
+  uint64_t sec = ns / 1000000000ULL;
+  uint64_t nsec = ns % 1000000000ULL;
 
   switch (clk_id) {
   case 0: // CLOCK_REALTIME
@@ -157,27 +157,27 @@ static uint64_t sys_clock_getres(uint64_t clk_id, uint64_t tp_ptr, uint64_t a2,
   if (!tp_ptr)
     return (uint64_t)-14; // EFAULT
 
-  // LAPIC timer has 1ms resolution
+  // TSC-based clock has ~1ns resolution
   ((uint64_t *)tp_ptr)[0] = 0;
-  ((uint64_t *)tp_ptr)[1] = 1000000ULL;
+  ((uint64_t *)tp_ptr)[1] = 1;
 
   return 0;
 }
 
-static uint64_t clock_now_ms(uint64_t clk_id) {
-  uint64_t mono_ms = lapic_timer_get_ms();
+static uint64_t clock_now_ns(uint64_t clk_id) {
+  uint64_t mono_ns = lapic_timer_get_ns();
 
   switch (clk_id) {
   case 0:  // CLOCK_REALTIME
   case 4:  // CLOCK_REALTIME_COARSE
-    return rtc_get_boot_timestamp() * 1000ULL + mono_ms;
+    return rtc_get_boot_timestamp() * 1000000000ULL + mono_ns;
   case 1:  // CLOCK_MONOTONIC
   case 6:  // CLOCK_MONOTONIC_COARSE
   case 7:  // CLOCK_BOOTTIME
   case 11: // CLOCK_TAI
   case 2:  // CLOCK_PROCESS_CPUTIME_ID
   case 3:  // CLOCK_THREAD_CPUTIME_ID
-    return mono_ms;
+    return mono_ns;
   default:
     return UINT64_MAX;
   }
@@ -240,8 +240,8 @@ static uint64_t sys_clock_nanosleep(uint64_t clk_id, uint64_t flags,
   if (!(flags & 1ULL))
     return sleep_for_timespec(req_ptr);
 
-  uint64_t now_ms = clock_now_ms(clk_id);
-  if (now_ms == UINT64_MAX)
+  uint64_t now_ns = clock_now_ns(clk_id);
+  if (now_ns == UINT64_MAX)
     return (uint64_t)-22; // EINVAL
 
   uint64_t *req = (uint64_t *)req_ptr;
@@ -250,13 +250,12 @@ static uint64_t sys_clock_nanosleep(uint64_t clk_id, uint64_t flags,
   if (nsec >= 1000000000ULL)
     return (uint64_t)-22; // EINVAL
 
-  uint64_t target_ms = sec * 1000ULL + nsec / 1000000ULL;
-  if (target_ms <= now_ms)
+  uint64_t target_ns = sec * 1000000000ULL + nsec;
+  if (target_ns <= now_ns)
     return 0;
 
-  uint64_t sleep_ms = target_ms - now_ms;
-  if (nsec % 1000000ULL)
-    sleep_ms++;
+  /* Convert remaining ns to ms for the scheduler (round up). */
+  uint64_t sleep_ms = (target_ns - now_ns + 999999ULL) / 1000000ULL;
 
   struct thread *current = sched_get_current();
   if (current) {
@@ -281,9 +280,9 @@ static uint64_t sys_gettimeofday(uint64_t tv_ptr, uint64_t tz_ptr, uint64_t a2,
   if (!tv_ptr)
     return 0; // Linux allows NULL tv
 
-  uint64_t ms = lapic_timer_get_ms();
-  uint64_t sec = ms / 1000;
-  uint64_t usec = (ms % 1000) * 1000ULL;
+  uint64_t ns = lapic_timer_get_ns();
+  uint64_t sec = ns / 1000000000ULL;
+  uint64_t usec = (ns % 1000000000ULL) / 1000ULL;
 
   uint64_t *tv = (uint64_t *)tv_ptr;
   tv[0] = rtc_get_boot_timestamp() + sec; // tv_sec

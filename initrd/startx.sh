@@ -156,6 +156,12 @@ fi
 # ── Default: IceWM Session ────────────────────────────────────────────────
 echo "[startx] Starting IceWM session..."
 export NO_AT_BRIDGE=1
+export GTK_A11Y=none
+export GIO_USE_VFS=local
+export GIO_USE_VOLUME_MONITOR=unix
+export GTK_USE_PORTAL=0
+export GDK_GL=disable
+export LIBGL_DRI3_DISABLE=1
 mkdir -p "${HOME}/.icewm"
 if [ -d /etc/icewm ]; then
     cp -n /etc/icewm/* "${HOME}/.icewm/" 2>/dev/null || true

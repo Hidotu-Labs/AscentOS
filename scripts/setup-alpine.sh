@@ -409,28 +409,6 @@ exec /usr/bin/vlc.bin --one-instance --no-qt-privacy-ask --aout=alsa \
 EOF
 chmod +x "${ROOTFS_DIR}/usr/bin/vlc"
 
-# Route ALSA clients (VLC) to AvoryOS OSS /dev/dsp via alsa-plugins pcm_oss.
-mkdir -p "${ROOTFS_DIR}/etc"
-cat > "${ROOTFS_DIR}/etc/asound.conf" <<'ASOUND_EOF'
-pcm.oss_hw {
-    type oss
-    device "/dev/dsp"
-}
-
-pcm.!default {
-    type plug
-    slave.pcm {
-        type oss
-        device "/dev/dsp"
-    }
-}
-
-ctl.!default {
-    type oss
-    device "/dev/dsp"
-}
-ASOUND_EOF
-
 # Seed VLC defaults: ALSA output, no duplicate Qt/privacy prompts.
 mkdir -p "${ROOTFS_DIR}/etc/vlc" "${ROOTFS_DIR}/root/.config/vlc"
 cat > "${ROOTFS_DIR}/etc/vlc/vlcrc" <<'VLCRC_EOF'

@@ -50,6 +50,7 @@
 #include "fs/procfs.h"
 #include "fs/ramfs.h"
 #include "fs/random.h"
+#include "fs/tmpfs.h"
 #include "fs/vfs.h"
 #include "hal/hal.h"
 #include "io/io.h"
@@ -319,6 +320,9 @@ void kmain(void) {
   extern kmem_cache_t *vma_cache;
   vma_cache = kmem_cache_create("vma", sizeof(struct vma), 8, NULL, NULL);
 
+  extern void tmpfs_test(void);
+  tmpfs_test();
+
   dma_alloc_init();
   sb16_reserve_dma();
   console_init(fb);
@@ -479,7 +483,7 @@ mount_success:
   klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET
                            " Root filesystem mounted successfully.\n");
   ramfs_mount_at("/dev");
-  ramfs_mount_at("/tmp");
+  tmpfs_mount_at("/tmp");
   ramfs_mount_at("/run");
   fault_init();
 

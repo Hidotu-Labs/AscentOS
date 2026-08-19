@@ -26,6 +26,9 @@ uint64_t lapic_timer_get_ticks(void);
 // Returns uptime in milliseconds.
 uint64_t lapic_timer_get_ms(void);
 
+// Returns uptime in nanoseconds (TSC-based, no rounding).
+uint64_t lapic_timer_get_ns(void);
+
 // Program the current CPU's one-shot timer with an absolute deadline.
 void lapic_timer_arm_at(uint64_t deadline_ms);
 void lapic_timer_rearm_if_earlier(uint64_t deadline_ms);
