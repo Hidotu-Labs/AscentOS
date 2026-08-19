@@ -1262,12 +1262,13 @@ XfdesktopIconView rubberband {
 }
 EOF
 
-# 3c. Alpine compiles its vendor name into xfce4-about rather than reading it
-# from os-release. Replace only that NUL-terminated distributor field; keep
-# Alpine/Xfce copyright and license text intact.
-XFCE_ABOUT="${ROOTFS_DIR}/usr/bin/xfce4-about"
-if [ -f "${XFCE_ABOUT}" ]; then
-    perl -0pi -e "s/Alpine Linux\x00/AvoryOS\x00\x00\x00\x00\x00/g" "${XFCE_ABOUT}"
+# 3c. Do not patch xfce4-about in place.  Even a one-byte change in an ELF
+# executable invalidates its section offsets; branding belongs in os-release
+# and desktop metadata, not in a compiled third-party binary.
+XFCE_ABOUT_DESKTOP="${ROOTFS_DIR}/usr/share/applications/xfce4-about.desktop"
+if [ -f "${XFCE_ABOUT_DESKTOP}" ]; then
+    sed -i 's/^Name=About Xfce$/Name=About AvoryOS/' "${XFCE_ABOUT_DESKTOP}"
+    sed -i 's/^Comment=Information about the Xfce Desktop Environment$/Comment=Information about the AvoryOS desktop environment/' "${XFCE_ABOUT_DESKTOP}"
 fi
 
 # 3d. Brand the assembled system while retaining accurate userland attribution.

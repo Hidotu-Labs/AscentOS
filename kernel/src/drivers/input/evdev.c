@@ -421,9 +421,43 @@ static int evdev_vfs_ioctl(struct vfs_node *node, uint32_t request,
     return 0;
   }
 
-  klog_puts("[EVDEV] unknown ioctl 0x");
-  klog_hex32(request);
-  klog_puts("\n");
+  // FIONREAD (0x541B) — how many bytes are readable without blocking.
+  // Return the number of complete input_event structs in the queue.
+  if (request == 0x541B) {
+    int *count = (int *)arg;
+    if (!count)
+      return -14;
+    spinlock_acquire(&dev->lock);
+    uint32_t avail = (dev->tail - dev->head + EVDEV_RING_SIZE) % EVDEV_RING_SIZE;
+    *count = (int)(avail * sizeof(struct input_event));
+    spinlock_release(&dev->lock);
+    return 0;
+  }
+
+  // Silently reject TTY/serial/VT ioctls that programs probe on every fd.
+  // These are always invalid on an evdev node; returning ENOTTY (-25) is
+  // correct and the caller is expected to handle it gracefully.
+  // Ranges:
+  //   0x5400–0x54FF  TIOC* / termios ioctls  (e.g. TIOCGETD=0x540B, TCGETS=0x5401)
+  //   0x5600–0x56FF  TIOCLINUX family
+  //   0x4B00–0x4BFF  KIOCSOUND / keyboard console ioctls (KDGKBTYPE etc.)
+  //   0x5900–0x59FF  HDIO (hard disk — opened on wrong fd)
+  //   0x0000–0x00FF  old tty ioctl range
+  uint8_t ioctl_type = (request >> 8) & 0xFF;
+  if (ioctl_type == 0x54 || ioctl_type == 0x56 || ioctl_type == 0x4B ||
+      ioctl_type == 0x59 || (request & 0xFFFFFF00) == 0) {
+    // Known-harmless: don't log, just return ENOTTY so the caller can handle it
+    return -25; // ENOTTY
+  }
+
+  // Only log ioctls that are in the EVIOC range (0x45xx) but unhandled —
+  // those represent missing evdev feature coverage worth knowing about.
+  if (((request & 0xFF) >= 0x00 && (request & 0xFF00) == 0x4500) ||
+      ((request >> 8 & 0xFF) == 0x45)) {
+    klog_puts("[EVDEV] unknown ioctl 0x");
+    klog_hex32(request);
+    klog_puts("\n");
+  }
   return -25; // ENOTTY
 }
 

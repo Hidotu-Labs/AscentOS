@@ -63,7 +63,17 @@ mkdir -p /var/lib/dbus /run/dbus /var/run
 [ -f /var/lib/dbus/machine-id ] || cp -f /etc/machine-id /var/lib/dbus/machine-id 2>/dev/null || true
 
 if command -v dbus-daemon >/dev/null 2>&1 && [ ! -S /run/dbus/system_bus_socket ]; then
-    dbus-daemon --system --fork 2>/dev/null || true
+    rm -f /tmp/ascent-system-dbus.log
+    dbus-daemon --system --nofork >/tmp/ascent-system-dbus.log 2>&1 &
+    SYSTEM_DBUS_PID=$!
+    # The bus can bind its socket and then abort during initialization.  Give
+    # it a moment so a failed launch is visible before XFCE depends on it.
+    sleep 0.1
+    if [ ! -S /run/dbus/system_bus_socket ] ||
+       ! kill -0 "$SYSTEM_DBUS_PID" 2>/dev/null; then
+        echo "[startx] Warning: system D-Bus did not stay running."
+        [ -s /tmp/ascent-system-dbus.log ] && cat /tmp/ascent-system-dbus.log
+    fi
 fi
 export DBUS_SYSTEM_BUS_ADDRESS=unix:path=/var/run/dbus/system_bus_socket
 
@@ -73,6 +83,18 @@ if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && command -v dbus-daemon >/dev/null 2
     DBUS_SESSION_BUS_ADDRESS="unix:path=${DBUS_SESSION_BUS_SOCKET}"
     dbus-daemon --session --nofork --address="$DBUS_SESSION_BUS_ADDRESS" >/tmp/ascent-dbus.log 2>&1 &
     export DBUS_SESSION_BUS_ADDRESS
+
+    # xfce4-session talks to xfconfd over the session bus during its first
+    # few milliseconds.  Do not race that connection with daemon startup.
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        [ -S "$DBUS_SESSION_BUS_SOCKET" ] && break
+        sleep 0.1
+    done
+    if [ ! -S "$DBUS_SESSION_BUS_SOCKET" ]; then
+        echo "[startx] Error: session D-Bus failed to create its socket."
+        [ -s /tmp/ascent-dbus.log ] && cat /tmp/ascent-dbus.log
+        exit 1
+    fi
 fi
 
 # ── XFCE4 Session ─────────────────────────────────────────────────────────
@@ -80,6 +102,12 @@ if [ "${ASCENT_SESSION:-}" = "xfce4" ]; then
     echo "[startx] Starting XFCE4 session..."
     export XDG_SESSION_TYPE=x11
     export XDG_CURRENT_DESKTOP=XFCE
+    export XDG_SESSION_DESKTOP=xfce
+    export DESKTOP_SESSION=xfce
+    # Never inherit a partial XDG search path from the boot shell.  XFCE
+    # resolves its failsafe session and xfconf defaults from /etc/xdg.
+    export XDG_CONFIG_DIRS=/etc/xdg
+    export XDG_DATA_DIRS=/usr/local/share:/usr/share
     export XDG_CONFIG_HOME="${HOME}/.config"
     export XDG_DATA_HOME="${HOME}/.local/share"
     export XDG_CACHE_HOME="${HOME}/.cache"
@@ -88,25 +116,41 @@ if [ "${ASCENT_SESSION:-}" = "xfce4" ]; then
     export NO_AT_BRIDGE=1
     export GTK_A11Y=none
     export GIO_USE_VFS=local
+    export GIO_USE_VOLUME_MONITOR=unix
     export GTK_USE_PORTAL=0
     unset SESSION_MANAGER
 
-    mkdir -p "${XDG_CONFIG_HOME}" "${XDG_DATA_HOME}" "${XDG_CACHE_HOME}" "${HOME}/Desktop"
+    mkdir -p "${XDG_CONFIG_HOME}/xfce4/xfconf/xfce-perchannel-xml" \
+             "${XDG_DATA_HOME}" "${XDG_CACHE_HOME}" "${HOME}/Desktop" \
+             "${HOME}/Templates" "${HOME}/Downloads" "${HOME}/Documents" \
+             "${HOME}/Pictures" "${HOME}/Music" "${HOME}/Videos"
 
-    if [ -x /usr/bin/startxfce4 ]; then
-        exec /usr/bin/startxfce4
+    # Run the known-good component session directly.  startxfce4 delegates to
+    # xfce4-session, whose failsafe-session discovery depends on service
+    # activation that is not yet reliable on AvoryOS.
+    XFCONFD=/usr/lib/xfce4/xfconf/xfconfd
+    if [ -x "$XFCONFD" ]; then
+        "$XFCONFD" &
+        XFCONFD_PID=$!
+        sleep 0.1
     fi
 
-    # Fallback manual XFCE component startup
-    [ -x /usr/lib/xfce4/xfconf/xfconfd ] && /usr/lib/xfce4/xfconf/xfconfd &
-    xfwm4 --replace &
+    xfwm4 --replace >/tmp/xfwm4.log 2>&1 &
     XFWM_PID=$!
+    sleep 0.2
     xfsettingsd &
+    XFSETTINGS_PID=$!
+    sleep 0.5
     xfdesktop &
+    XFDESKTOP_PID=$!
     xfce4-panel &
+    XFPANEL_PID=$!
 
     wait "$XFWM_PID"
-    exit 0
+    status=$?
+    kill "$XFSETTINGS_PID" "$XFDESKTOP_PID" "$XFPANEL_PID" \
+         "${XFCONFD_PID:-}" 2>/dev/null || true
+    exit "$status"
 fi
 
 # ── Default: IceWM Session ────────────────────────────────────────────────

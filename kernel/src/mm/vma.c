@@ -588,16 +588,20 @@ void vma_merge_adjacent(struct vma_list *list) {
     struct vma *cur              = arr[i];
     struct vma_merged_entry *prev = &merged[m - 1];
 
-    // Only merge anonymous (fd == -1) adjacent regions with identical prot
-    // and flags.  File-backed VMAs are never merged — their file_node and
-    // offset fields are non-trivial and must be preserved exactly.
+    // Only merge truly anonymous adjacent regions with identical prot and
+    // flags.  ELF PT_LOAD VMAs deliberately use fd == -1 because they are
+    // backed directly by a vfs_node rather than a process descriptor, so fd
+    // alone cannot distinguish them from anonymous mappings.  Merging two
+    // such file-backed VMAs loses the second region's offset/file_size; after
+    // a RELRO mprotect this makes the dynamic loader see zero-filled init
+    // arrays and can lead to an indirect call through address zero.
     // Additionally, we avoid merging GROWSDOWN VMAs (stack) to preserve their 
     // identity for the fault handler's growth logic.
     bool can_merge = (prev->end   == cur->start) &&
                      (prev->prot  == cur->prot)   &&
                      (prev->flags == cur->flags)   &&
-                     (prev->fd    == -1)            &&
-                     (cur->fd     == -1)           &&
+                     (prev->file_node == NULL)      &&
+                     (cur->file_node  == NULL)      &&
                      !((prev->flags | cur->flags) &
                        (MAP_GROWSDOWN | MAP_SYSV_SHM));
 

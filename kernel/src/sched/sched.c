@@ -886,6 +886,16 @@ void sched_yield(void) {
     spinlock_release(&cpu->queue_lock);
   }
 
+  /*
+   * switch_context() returns on the incoming thread's kernel stack, which
+   * means the outgoing stack is no longer live.  Clear the handoff hazard
+   * published before the switch so reapers can eventually reclaim exited
+   * children.  Leaving this pointer set made sched_thread_off_cpu() regard
+   * every previously switched-out child as permanently on-CPU, causing
+   * wait4() to spin forever in sched_queue_reap_and_wait().
+   */
+  __atomic_store_n(&cpu->switching_from, NULL, __ATOMIC_RELEASE);
+
   // Only enable here if we are returning normally
   hal_irq_enable();
 }

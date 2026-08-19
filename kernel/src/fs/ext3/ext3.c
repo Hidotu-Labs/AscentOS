@@ -166,6 +166,16 @@ int ext3_journal_block(ext2_mount_t *mnt, uint32_t block_nr, const void *data) {
   }
   spinlock_release(&mnt->cache_lock);
 
+  /*
+   * The transaction's cache is direct-mapped and is only an acceleration,
+   * not a complete write-set.  A collision used to make a later allocator
+   * reread the pre-transaction bitmap and hand out an extent-tree block a
+   * second time.  Keep the home block coherent immediately; the journal
+   * record is still written first and is replayable on recovery.
+   */
+  if (ext2_write_block(mnt, block_nr, data) != 0)
+    return -1;
+
   trans->blocks_in_trans++;
   return 0;
 }

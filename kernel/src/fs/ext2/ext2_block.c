@@ -36,6 +36,9 @@ int ext2_read_block(ext2_mount_t *mnt, uint32_t block_num, void *buffer) {
      * Keep and return the newer cached version instead of restoring stale data. */
     memcpy(buffer, mnt->cache[idx].data, mnt->block_size);
   } else {
+    /* This is a direct-mapped cache.  An occupied slot belonging to another
+     * block must be replaced; retaining it makes later writes to that block
+     * invisible to the cache and can return stale extent metadata. */
     if (!mnt->cache[idx].data)
       mnt->cache[idx].data = kmalloc(mnt->block_size);
     if (mnt->cache[idx].data) {
@@ -54,11 +57,12 @@ int ext2_write_block(ext2_mount_t *mnt, uint32_t block_num,
     return -1;
 
   spinlock_acquire(&mnt->cache_lock);
-  for (int i = 0; i < 32; i++) {
-    if (mnt->cache[i].data && mnt->cache[i].num == block_num) {
-      memcpy(mnt->cache[i].data, buffer, mnt->block_size);
-      break;
-    }
+  int idx = block_num % 32;
+  if (!mnt->cache[idx].data)
+    mnt->cache[idx].data = kmalloc(mnt->block_size);
+  if (mnt->cache[idx].data) {
+    mnt->cache[idx].num = block_num;
+    memcpy(mnt->cache[idx].data, buffer, mnt->block_size);
   }
   spinlock_release(&mnt->cache_lock);
 

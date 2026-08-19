@@ -168,6 +168,21 @@ static uint64_t sys_pidfd_open(uint64_t pid, uint64_t flags, uint64_t a2,
 void process_do_exit(uint64_t status) __attribute__((noreturn));
 void process_do_exit(uint64_t status) {
   struct thread *current = sched_get_current();
+  if (current && current->is_forked_child) {
+    klog_puts("[PROC] exit tid=");
+    klog_uint64(current->tid);
+    klog_puts(" tgid=");
+    klog_uint64(current->tgid);
+    if (current->clone_flags & CLONE_THREAD)
+      klog_puts(" kind=thread");
+    else
+      klog_puts(" kind=process");
+    klog_puts(" comm=");
+    klog_puts(current->comm);
+    klog_puts(" status=");
+    klog_uint64(status);
+    klog_puts("\n");
+  }
   if (current && current->tid_address) {
     uint32_t *tidptr = (uint32_t *)current->tid_address;
     if (vmm_is_user_addr_range_writable((uint64_t)tidptr, sizeof(*tidptr))) {
@@ -916,6 +931,14 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
       ci++;
     }
     current->comm[ci] = '\0';
+  }
+
+  if (current->is_forked_child) {
+    klog_puts("[PROC] exec tid=");
+    klog_uint64(current->tid);
+    klog_puts(" path=");
+    klog_puts(path);
+    klog_puts("\n");
   }
 
   // Store the full executable path for /proc/self/exe

@@ -537,6 +537,16 @@ static uint64_t sys_tgkill(uint64_t tgid, uint64_t tid, uint64_t sig,
     return 0;
 
   // Queue the signal on the target thread
+  if (sig == SIGKILL) {
+    struct thread *sender = sched_get_current();
+    klog_puts("[SIGNAL] tgkill sender=");
+    klog_uint64(sender ? sender->tid : 0);
+    klog_puts(" target=");
+    klog_uint64(target->tid);
+    klog_puts(" tgid=");
+    klog_uint64(target->tgid);
+    klog_puts("\n");
+  }
   target->pending_signals |= (1ULL << (sig - 1));
   signal_notify_thread(target, (int)sig);
 
@@ -692,12 +702,26 @@ static uint64_t sys_kill(uint64_t pid_val, uint64_t sig, uint64_t a2,
   }
 
   if (pid == 0) {
+    if (sig == SIGKILL) {
+      klog_puts("[SIGNAL] killpg sender=");
+      klog_uint64(current ? current->tid : 0);
+      klog_puts(" pgid=");
+      klog_uint64(current ? current->pgid : 0);
+      klog_puts("\n");
+    }
     signal_send_pgid(current->pgid, (int)sig);
     return 0;
   } else if (pid == -1) {
     // Send to everyone? Not implemented for safety.
     return 0;
   } else if (pid < -1) {
+    if (sig == SIGKILL) {
+      klog_puts("[SIGNAL] killpg sender=");
+      klog_uint64(current ? current->tid : 0);
+      klog_puts(" pgid=");
+      klog_uint64((uint32_t)-pid);
+      klog_puts("\n");
+    }
     signal_send_pgid((uint32_t)-pid, (int)sig);
     return 0;
   }
@@ -712,6 +736,13 @@ static uint64_t sys_kill(uint64_t pid_val, uint64_t sig, uint64_t a2,
           current->euid != t->uid) {
         spinlock_release(&tid_lock);
         return (uint64_t)-1;
+      }
+      if (sig == SIGKILL) {
+        klog_puts("[SIGNAL] kill sender=");
+        klog_uint64(current ? current->tid : 0);
+        klog_puts(" target=");
+        klog_uint64(t->tid);
+        klog_puts("\n");
       }
       t->pending_signals |= (1ULL << (sig - 1));
       break;

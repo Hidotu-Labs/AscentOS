@@ -1,5 +1,7 @@
 #include "ext4_extent.h"
+#include "drivers/storage/block.h"
 #include "fs/ext2/ext2_internal.h"
+#include "console/klog.h"
 #include "mm/heap.h"
 
 uint64_t ext4_extent_get_pblock(ext4_extent_t *ex) {
@@ -96,7 +98,19 @@ static void ext4_idx_set_pblock(ext4_extent_idx_t *idx, uint64_t phys_block) {
 
 static int ext4_extent_write_node(ext2_mount_t *mnt, uint32_t block,
                                   void *buffer) {
-    return ext3_journal_block(mnt, block, buffer);
+    /*
+     * A newly grown extent leaf can be read again before the surrounding
+     * inode update completes. Queueing it only in the journal left that leaf
+     * unreadable to the next write; GNU ld exposes this with sparse output.
+     * Persist the node now, matching the caller's direct inode update.
+     */
+    int result = ext2_write_block(mnt, block, buffer);
+    if (result != 0)
+        return result;
+
+    /* Extent nodes are immediately traversed by later sparse writes.  Force
+     * visibility before their small direct-mapped cache slot can be evicted. */
+    return block_flush(mnt->dev);
 }
 
 static int ext4_extent_insert_leaf_entry(ext4_extent_header_t *hdr,
@@ -322,12 +336,14 @@ retry:
     if (!best)
         best = &idxs[0];
     uint64_t leaf_phys = ext4_idx_get_pblock(best);
-    if (!leaf_phys || leaf_phys > UINT32_MAX)
+    if (!leaf_phys || leaf_phys > UINT32_MAX) {
         return -1;
+    }
 
     uint8_t *buf = kmalloc(mnt->block_size);
-    if (!buf)
+    if (!buf) {
         return -1;
+    }
     if (ext2_read_block(mnt, (uint32_t)leaf_phys, buf) != 0) {
         kfree(buf);
         return -1;
@@ -337,6 +353,17 @@ retry:
     if (leaf->eh_magic != EXT4_EXT_MAGIC || leaf->eh_depth != 0 ||
         leaf->eh_entries > leaf->eh_max ||
         leaf->eh_max > ext4_extent_block_max(mnt)) {
+        klog_puts("[EXT4] invalid extent leaf block=");
+        klog_uint64(leaf_phys);
+        klog_puts(" magic=");
+        klog_uint64(leaf->eh_magic);
+        klog_puts(" depth=");
+        klog_uint64(leaf->eh_depth);
+        klog_puts(" entries=");
+        klog_uint64(leaf->eh_entries);
+        klog_puts(" max=");
+        klog_uint64(leaf->eh_max);
+        klog_puts("\n");
         kfree(buf);
         return -1;
     }
@@ -372,16 +399,18 @@ int ext4_alloc_extent(ext2_mount_t *mnt, ext2_inode_t *inode,
     int result = -1;
     while (count < num_blocks) {
         blocks[count] = ext2_alloc_block(mnt);
-        if (!blocks[count])
+        if (!blocks[count]) {
             goto done;
+        }
         count++;
         if (count > 1 && blocks[count - 1] != blocks[0] + count - 1)
             goto done;
     }
 
     if (ext4_extent_insert(mnt, inode, inode_num, logical_block,
-                           blocks[0], (uint16_t)num_blocks) != 0)
+                           blocks[0], (uint16_t)num_blocks) != 0) {
         goto done;
+    }
 
     *out_phys = blocks[0];
     result = 0;

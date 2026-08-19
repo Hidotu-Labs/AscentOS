@@ -163,19 +163,19 @@ avoryos-dist.iso: limine/limine kernel disk.img limine.conf create_dist_usb.sh
 	./create_dist_usb.sh avoryos-dist.iso
 
 .PHONY: run-x86_64
+# No KVM device is available here, so a single TCG vCPU preserves host time
+# for QEMU's realtime audio callback.  Use QEMUFLAGS='-smp N' for SMP tests.
 run-x86_64: edk2-ovmf $(IMAGE_NAME).iso disk.img
 	qemu-system-$(ARCH) \
 		-M q35,pcspk-audiodev=snd0 \
 		-drive if=pflash,unit=0,format=raw,file=edk2-ovmf/ovmf-code-$(ARCH).fd,readonly=on \
 		-cdrom $(IMAGE_NAME).iso \
 		-drive file=disk.img,format=raw,if=ide \
-		-cpu host -enable-kvm \
+		-smp 4 \
 		-serial stdio \
-		-audiodev pa,id=snd0 \
+		-audiodev pa,id=snd0,timer-period=2000,out.frequency=48000,out.channels=2,out.format=s16,out.buffer-length=500000,out.latency=500000 \
 		-device rtl8139,netdev=net0 \
 		-netdev user,id=net0 \
-		-device sb16,audiodev=snd0 \
-		-device AC97,audiodev=snd0 \
 		-device intel-hda -device hda-duplex,audiodev=snd0 \
 		-device qemu-xhci,id=xhci \
 		-device usb-kbd,bus=xhci.0 \
@@ -395,6 +395,7 @@ disk.img:  userland/dns_lookup.elf
 disk.img: userland/test_clone_futex.elf
 disk.img: userland/test_unix_sockets.elf
 disk.img: userland/test_syscall_speed.elf
+disk.img: userland/proc_bench.elf
 disk.img: $(QUAKE2_BUNDLE_FILES)
 disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets/mc9.mp3 assets/train.mp3 assets/test.bmp assets/test.tar assets/room.png assets/logo.png assets/linus.gif assets/video.mp4 userland/forkit.elf userland/forkit-launch.sh userland/about.elf userland/hello_glibc.elf userland/booter.elf userland/reboot.elf userland/shutdown.elf userland/apm.elf userland/test_cpp.elf  userland/kilo.elf  userland/ls.elf userland/lspci.elf userland/lsblk.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/asplay.elf userland/kria.elf userland/doom.elf userland/xrootcursor.elf  userland/jwm.elf userland/doom_x11.elf userland/gtk_test.elf userland/qt5_test.elf userland/tglgears_fb.elf userland/tglgears_drm.elf userland/tglhello_drm.elf userland/test_mem_stress.elf userland/classicube.elf userland/terrain.png userland/texpacks/classicube.zip initrd/startx.sh initrd/startw.sh initrd/weston.ini AetherDE/x11-wm/AetherWM AetherDE/aether-dock/aether-dock AetherDE/aether-panel/aether-panel AetherDE/wayland-compositor/aether-compositor AetherDE/demo-client/aether-window AetherDE/scripts/sax11.sh AetherDE/scripts/sawayland.sh userland/avoryd.elf $(AVORYD_CONFIG_FILES)
 	@echo "Creating root filesystem (ext4)..."
@@ -564,6 +565,8 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 		echo "write userland/test_unix_sockets.elf bin/test_unix_sockets"; \
 		echo "rm bin/test_syscall_speed"; \
 		echo "write userland/test_syscall_speed.elf bin/test_syscall_speed"; \
+		echo "rm bin/proc_bench"; \
+		echo "write userland/proc_bench.elf bin/proc_bench"; \
 		echo "rm bin/classicube"; \
 		echo "write userland/classicube.elf bin/classicube"; \
 		echo "mkdir texpacks"; \
@@ -620,6 +623,20 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 		./scripts/configure-accounts.sh build/alpine/rootfs; \
 		./scripts/populate-ext2-dir.sh ./part.img build/alpine/rootfs /; \
 	fi
+	# The Alpine rootfs also has a stale bin/startx.sh.  Restore these
+	# AvoryOS-owned files after the overlay, otherwise XFCE runs startxfce4
+	# and opens its failsafe-session error dialog.
+	@{ \
+		echo "cd /"; \
+		echo "rm bin/startx.sh"; \
+		echo "write initrd/startx.sh bin/startx.sh"; \
+		echo "rm bin/startw.sh"; \
+		echo "write initrd/startw.sh bin/startw.sh"; \
+		echo "rm etc/weston.ini"; \
+		echo "write initrd/weston.ini etc/weston.ini"; \
+		echo "set_inode_field bin/startx.sh mode 0100755"; \
+		echo "set_inode_field bin/startw.sh mode 0100755"; \
+	} | debugfs -w ./part.img >/dev/null 2>&1 || true
 	@echo "Installing Quake II into disk image..."
 	@./scripts/populate-ext2-dir.sh ./part.img userland/quake2 opt/quake2
 	@{ \
@@ -1079,6 +1096,10 @@ userland/test_unix_sockets.elf: userland/test_unix_sockets.c $(MUSL_LIBC)
 userland/test_syscall_speed.elf: userland/test_syscall_speed.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/test_syscall_speed.c -o userland/test_syscall_speed.elf
+
+userland/proc_bench.elf: userland/proc_bench.c userland/proc_bench_trampoline.S $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/proc_bench.c userland/proc_bench_trampoline.S -o userland/proc_bench.elf
 
 userland/panic_test.elf: userland/panic_test.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \

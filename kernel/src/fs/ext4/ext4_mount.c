@@ -71,8 +71,16 @@ uint32_t ext4_write_impl(vfs_node_t *node, uint32_t offset, uint32_t size, uint8
         if (!disk_block) {
             uint64_t allocated = 0;
             if (ext4_alloc_extent(mnt, &inode, node->inode, logical, 1,
-                                  &allocated) != 0)
+                                  &allocated) != 0) {
+                klog_puts("[EXT4] extent allocation failed inode=");
+                klog_uint64(node->inode);
+                klog_puts(" logical=");
+                klog_uint64(logical);
+                klog_puts(" size=");
+                klog_uint64(inode.i_size);
+                klog_puts("\n");
                 break;
+            }
             disk_block = (uint32_t)allocated;
             inode.i_blocks += mnt->block_size / 512;
             memset(block_buf, 0, mnt->block_size);
@@ -82,8 +90,16 @@ uint32_t ext4_write_impl(vfs_node_t *node, uint32_t offset, uint32_t size, uint8
         }
 
         memcpy(block_buf + in_block, buffer + bytes_written, count);
-        if (ext2_write_block(mnt, disk_block, block_buf) != 0)
+        if (ext2_write_block(mnt, disk_block, block_buf) != 0) {
+            klog_puts("[EXT4] data write failed inode=");
+            klog_uint64(node->inode);
+            klog_puts(" logical=");
+            klog_uint64(logical);
+            klog_puts(" physical=");
+            klog_uint64(disk_block);
+            klog_puts("\n");
             break;
+        }
         bytes_written += count;
     }
 

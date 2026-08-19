@@ -683,6 +683,28 @@ static uint64_t sys_writev(uint64_t fd, uint64_t iov_u, uint64_t iovcnt,
     int64_t w = fd_write((int)fd, (const void *)base, (size_t)len);
     if (w < 0)
       return total > 0 ? total : (uint64_t)w;
+    if (w == 0 && len != 0) {
+      /* A non-empty writev must not report a zero-byte success: callers such
+       * as GNU ld retry it forever. Leave a focused diagnostic while finding
+       * the backing filesystem path responsible for the short write. */
+      struct thread *t = sched_get_current();
+      klog_puts("[WRITEV] zero write fd=");
+      klog_uint64(fd);
+      klog_puts(" len=");
+      klog_uint64(len);
+      klog_puts(" node=");
+      if (t && fd < MAX_FDS && t->fds[fd])
+        klog_puts(t->fds[fd]->name);
+      else
+        klog_puts("(invalid)");
+      klog_puts(" flags=");
+      if (t && fd < MAX_FDS && t->fds[fd])
+        klog_uint64(t->fds[fd]->flags);
+      else
+        klog_puts("0");
+      klog_puts("\n");
+      return total > 0 ? total : (uint64_t)-5; /* EIO */
+    }
     total += (size_t)w;
     if ((size_t)w != len)
       break;
