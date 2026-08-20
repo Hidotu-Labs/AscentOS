@@ -238,23 +238,17 @@ run-fat32: edk2-ovmf $(IMAGE_NAME).iso fat32_test.img
 		-device usb-mouse,bus=xhci.0 \
 		$(QEMUFLAGS)
 
-AetherDE/x11-wm/AetherWM: AetherDE/x11-wm/main.c AetherDE/x11-wm/render.c AetherDE/x11-wm/input.c AetherDE/x11-wm/frames.c AetherDE/x11-wm/wm.h scripts/setup-alpine.sh
+AetherDE/x11-wm/AetherWM: AetherDE/x11-wm/main.c AetherDE/x11-wm/render.c AetherDE/x11-wm/input.c AetherDE/x11-wm/frames.c AetherDE/x11-wm/wm.h AetherDE/x11-wm/stb_image.h scripts/setup-alpine.sh
 	@if [ ! -d "$(ALPINE_SYSROOT)" ]; then \
 		echo "Error: Alpine rootfs not found. Run scripts/setup-alpine.sh first."; \
 		exit 1; \
 	fi
-	@echo "[*] Compiling AetherDE X11 Window Manager..."
+	@echo "[*] Compiling AetherDE X11 Window Manager (low-level: Xft+XRender, no Cairo/Pango)..."
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" \
 		$(MUSL_CC) -O2 -Wall -Wextra -march=x86-64 -mtune=generic \
-		-I$(ALPINE_SYSROOT)/usr/include \
-		-I$(ALPINE_SYSROOT)/usr/include/cairo \
-		-I$(ALPINE_SYSROOT)/usr/include/pango-1.0 \
-		-I$(ALPINE_SYSROOT)/usr/include/glib-2.0 \
-		-I$(ALPINE_SYSROOT)/usr/lib/glib-2.0/include \
-		-I$(ALPINE_SYSROOT)/usr/include/harfbuzz \
-		-I$(ALPINE_SYSROOT)/usr/include/pixman-1 \
-		-I$(ALPINE_SYSROOT)/usr/include/freetype2 \
-		-I$(ALPINE_SYSROOT)/usr/include/libpng16 \
+		-isystem $(ALPINE_SYSROOT)/usr/include \
+		-isystem $(ALPINE_SYSROOT)/usr/include/freetype2 \
+		-IAetherDE/x11-wm \
 		AetherDE/x11-wm/main.c \
 		AetherDE/x11-wm/render.c \
 		AetherDE/x11-wm/input.c \
@@ -262,10 +256,10 @@ AetherDE/x11-wm/AetherWM: AetherDE/x11-wm/main.c AetherDE/x11-wm/render.c Aether
 		-o AetherDE/x11-wm/AetherWM \
 		-L$(ALPINE_SYSROOT)/usr/lib -L$(ALPINE_SYSROOT)/lib \
 		-lX11 \
-		-lcairo \
-		-lpangocairo-1.0 -lpango-1.0 \
-		-lgobject-2.0 -lglib-2.0 \
-		-lfontconfig -lfreetype -lpng16 -lz -lm \
+		-lXrender \
+		-lXft \
+		-lXext \
+		-lfontconfig -lfreetype -lm \
 		-Wl,-dynamic-linker,/lib/ld-musl-x86_64.so.1 \
 		-Wl,-rpath,/usr/lib \
 		-Wl,-rpath-link,$(ALPINE_SYSROOT)/usr/lib:$(ALPINE_SYSROOT)/lib
