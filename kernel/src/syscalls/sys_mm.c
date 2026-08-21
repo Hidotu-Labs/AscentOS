@@ -18,6 +18,9 @@
 #define MAP_PRIVATE 0x02
 #define MAP_FIXED 0x10
 #define MAP_ANONYMOUS 0x20
+#define MAP_HUGETLB 0x40000         /* Linux user-space: request huge pages */
+/* Kernel-internal MAP_HUGEPAGE — must match vma.h */
+#define MAP_HUGEPAGE 0x200000000ULL /* enable 2MB demand paging for this VMA */
 
 #define MAP_FAILED ((uint64_t)-1)
 
@@ -87,6 +90,23 @@ static void teardown_range(uint64_t *pml4, struct thread *t, uint64_t base,
 
     phys = PAGE_ALIGN_DOWN(phys); // Strip low flag bits VMM may leave set.
 
+    // Detect a 2 MB PS-bit huge page: the VA is 2MB-aligned and phys is
+    // the base of the huge block (no intra-page offset).
+    // vmm_unmap_page now handles this correctly — it clears the PDE and frees
+    // all 512 pages via pmm_free_pages in one shot. Skip the remaining 511
+    // sub-page VAs inside this huge mapping to avoid redundant work.
+#define HUGE_2MB (2ULL * 1024 * 1024)
+    if ((va & (HUGE_2MB - 1)) == 0 && (phys & (HUGE_2MB - 1)) == 0) {
+      // 2 MB PS-bit huge page. vmm_unmap_page clears the PDE and frees all
+      // 512 constituent frames via pmm_free_pages in one shot. Skip forward
+      // past the remaining 511 sub-page VAs inside this huge mapping.
+      vmm_unmap_page(pml4, va);
+      va += HUGE_2MB - PAGE_SIZE; // loop will add PAGE_SIZE next iteration
+      continue;
+    }
+#undef HUGE_2MB
+
+
     // Only free frames we own: anonymous private mappings.
     bool free_phys = false;
     if (t && t->mm) {
@@ -100,6 +120,7 @@ static void teardown_range(uint64_t *pml4, struct thread *t, uint64_t base,
     safe_unmap_and_free(pml4, va, phys, free_phys, ctx);
   }
 }
+
 
 // sys_mmap
 // Linux ABI: mmap(addr, length, prot, flags, fd, offset)
@@ -245,12 +266,18 @@ uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot, uint64_t flags,
   // Register VMA
   if (current_thread && current_thread->mm) {
     spinlock_acquire(&current_thread->mm->lock);
+    // Translate the Linux MAP_HUGETLB user flag to our kernel-internal
+    // MAP_HUGEPAGE marker so the page-fault handler knows to use 2 MB pages.
+    uint64_t vma_flags = flags;
+    if (flags & MAP_HUGETLB)
+      vma_flags |= MAP_HUGEPAGE;
     int vma_idx = vma_add(&current_thread->mm->vmas, vaddr, vaddr + aligned_len,
-                          prot, flags, -1, 0, NULL, 0);
+                          prot, vma_flags, -1, 0, NULL, 0);
     if (vma_idx < 0) {
       spinlock_release(&current_thread->mm->lock);
       return E_NOMEM;
     }
+
 
     // Update the mmap bump pointer if we were using the old-style allocator
     // range
@@ -655,16 +682,61 @@ static uint64_t sys_mremap(uint64_t old_addr, uint64_t old_size,
   return new_addr;
 }
 
+// Linux madvise advice values
+#define MADV_HUGEPAGE   14
+#define MADV_NOHUGEPAGE 15
+
 static uint64_t sys_madvise(uint64_t addr, uint64_t len, uint64_t advice,
                             uint64_t a3, uint64_t a4, uint64_t a5) {
-  (void)addr;
-  (void)len;
-  (void)advice;
-  (void)a3;
-  (void)a4;
-  (void)a5;
-  return 0; // Success stub
+  (void)a3; (void)a4; (void)a5;
+
+  // Only handle MADV_HUGEPAGE and MADV_NOHUGEPAGE — everything else is
+  // advisory and safe to silently accept (Linux behaviour).
+  if (advice != MADV_HUGEPAGE && advice != MADV_NOHUGEPAGE)
+    return 0;
+
+  if (addr & (PAGE_SIZE - 1))
+    return (uint64_t)-22; // EINVAL — must be page-aligned
+
+  if (len == 0)
+    return 0;
+
+  uint64_t aligned_len = PAGE_ALIGN_UP(len);
+  uint64_t end = addr + aligned_len;
+
+  struct thread *current = sched_get_current();
+  if (!current || !current->mm)
+    return 0;
+
+  spinlock_acquire(&current->mm->lock);
+
+  // Walk the range page-by-page, jumping by VMA end boundaries to avoid
+  // redundant tree lookups inside the same VMA.
+  uint64_t page = addr & ~(PAGE_SIZE - 1ULL);
+  while (page < end) {
+    struct vma *v = vma_find(&current->mm->vmas, page);
+    if (!v) {
+      // Gap in the mapping — skip to the next page and try again.
+      page += PAGE_SIZE;
+      continue;
+    }
+
+    // Only apply to anonymous private mappings.
+    if ((v->flags & MAP_ANONYMOUS) && (v->flags & MAP_PRIVATE)) {
+      if (advice == MADV_HUGEPAGE)
+        v->flags |= MAP_HUGEPAGE;
+      else
+        v->flags &= ~MAP_HUGEPAGE;
+    }
+
+    // Jump to the end of this VMA, clamped to the requested range.
+    page = (v->end < end) ? v->end : end;
+  }
+
+  spinlock_release(&current->mm->lock);
+  return 0;
 }
+
 
 // Public API
 

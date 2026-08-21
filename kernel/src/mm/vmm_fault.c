@@ -97,7 +97,22 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
 
     if (*pte & PAGE_FLAG_COW) {
       uint64_t old_phys = *pte & PAGE_MASK;
+
+      if (old_phys == pmm_get_zero_page_phys()) {
+        void *new_phys = pmm_alloc_page();
+        if (!new_phys)
+          return -1;
+
+        memset(PHYS_TO_VIRT((uint64_t)new_phys), 0, PAGE_SIZE);
+
+        *pte = ((uint64_t)new_phys & PAGE_MASK) |
+               (*pte & ~PAGE_MASK & ~PAGE_FLAG_COW) | PAGE_FLAG_RW;
+        vmm_flush_tlb(virt);
+        return 0; // zero page CoW broken with fresh zeroed page
+      }
+
       uint16_t refs = pmm_get_ref((void *)old_phys);
+
 
       if (refs > 1) {
         // Multiple owners — make a private copy.
@@ -421,7 +436,58 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
 
   } else {
     // ---- Anonymous zero-fill-on-demand -------------------------------------
+
+    // Try to satisfy the fault with a 2 MB huge page when the VMA requests it.
+    // All four conditions must hold for a huge page to be installed:
+    //   1. VMA is flagged MAP_HUGEPAGE (set by madvise or MAP_HUGETLB)
+    //   2. The 2 MB-aligned base of the fault address falls inside the VMA
+    //   3. The VMA covers the entire 2 MB region starting at that base
+    //   4. PMM can hand us a 2 MB-aligned physical block (order-9 buddy)
+    //
+    // If any condition fails we fall through to the ordinary 4 KB path.
+    if (vma_flags & MAP_HUGEPAGE) {
+#define HUGE_PAGE_SIZE (2ULL * 1024 * 1024)
+      uint64_t hp_base = cr2 & ~(HUGE_PAGE_SIZE - 1ULL); // 2 MB-align down
+      if (hp_base >= vma_start && hp_base + HUGE_PAGE_SIZE <= vma_end) {
+        void *huge_phys = pmm_alloc_huge_page();
+        if (huge_phys) {
+          // Zero the entire 2 MB frame.
+          memset((void *)((uint64_t)huge_phys + pmm_get_hhdm_offset()),
+                 0, HUGE_PAGE_SIZE);
+
+          uint64_t hp_flags = dp_build_flags(vma_prot);
+          if (vmm_map_huge_page((uint64_t *)target_cr3, hp_base,
+                                (uint64_t)huge_phys, hp_flags)) {
+            klog_puts("[THP] Installed 2MB huge page at VA ");
+            klog_hex64(hp_base);
+            klog_puts("\n");
+            // Success — the whole 2 MB region is now mapped.
+            return 0;
+          }
+          // Map failed (e.g. OOM for intermediate page table) — free and
+          // fall through to the 4 KB path below.
+          pmm_free_pages(huge_phys, 512);
+        }
+        // PMM OOM for 2 MB block — fall through to 4 KB allocation.
+      }
+#undef HUGE_PAGE_SIZE
+    }
+
+    // Zero-Page Sharing: If this is a read fault on a private anonymous mapping,
+    // map the global shared zero page (read-only + COW) without allocating physical RAM.
+    if (!write_fault && (vma_flags & MAP_PRIVATE)) {
+      uint64_t zp = pmm_get_zero_page_phys();
+      if (zp) {
+        uint64_t flags = (dp_build_flags(vma_prot) & ~PAGE_FLAG_RW) | PAGE_FLAG_COW;
+        if (vmm_map_page((uint64_t *)target_cr3, cr2 & ~0xFFFULL, zp, flags)) {
+          return 0; // Zero page mapped! No physical allocation or zeroing needed.
+        }
+      }
+    }
+
+    // 4 KB fallback (always correct, also handles non-huge VMAs).
     frame = pmm_alloc_page();
+
     if (!frame) {
       klog_puts("[VMM] OOM during demand paging!\n");
       if (user_mode) {
@@ -432,6 +498,7 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
     }
     memset(PHYS_TO_VIRT((uint64_t)frame), 0, 4096);
   }
+
 
   // ---- Map the faulting page ----------------------------------------------
 
@@ -469,6 +536,29 @@ void vmm_map_signal_trampoline(uint64_t *pml4) {
 
 static uint64_t vsyscall_page_phys = 0;
 
+extern uint8_t vdso_blob_start[];
+extern uint8_t vdso_blob_end[];
+
+void vmm_update_vdso_data(void) {
+  if (vsyscall_page_phys == 0)
+    return;
+
+  extern uint64_t tsc_get_freq_khz(void);
+  extern uint64_t lapic_timer_get_boot_tsc(void);
+  extern uint64_t rtc_get_boot_timestamp(void);
+
+  uint64_t khz = tsc_get_freq_khz();
+  uint64_t boot_tsc = lapic_timer_get_boot_tsc();
+  uint64_t boot_sec = rtc_get_boot_timestamp();
+  uint64_t tsc_hz = khz * 1000ULL;
+
+  uint64_t *data = (uint64_t *)(PHYS_TO_VIRT(vsyscall_page_phys) + 0xE00);
+  data[0] = boot_tsc;
+  data[1] = khz;
+  data[2] = boot_sec;
+  data[3] = tsc_hz;
+}
+
 void vmm_init_vsyscall_page(void) {
   if (vsyscall_page_phys != 0)
     return; // already done
@@ -477,51 +567,18 @@ void vmm_init_vsyscall_page(void) {
   if (!page)
     return;
 
-  uint8_t *v = (uint8_t *)PHYS_TO_VIRT(page);
-  // Fill entire page with 0xCC (int3) as a safe default
-  for (int i = 0; i < 4096; i++)
-    v[i] = 0xCC;
-
-  // ── gettimeofday stub at offset 0x000 (syscall NR 96) ──
-  // mov rax, 96; syscall; ret
-  uint8_t gtod[] = {0x48,0xC7,0xC0,0x60,0x00,0x00,0x00, 0x0F,0x05, 0xC3};
-  for (size_t i = 0; i < sizeof(gtod); i++)
-    v[0x000 + i] = gtod[i];
-
-  // ── time stub at offset 0x400 (syscall NR 201) ──
-  // mov rax, 201; syscall; ret
-  uint8_t t[] = {0x48,0xC7,0xC0,0xC9,0x00,0x00,0x00, 0x0F,0x05, 0xC3};
-  for (size_t i = 0; i < sizeof(t); i++)
-    v[0x400 + i] = t[i];
-
-  // ── getcpu stub at offset 0x800 ──
-  // getcpu(unsigned *cpu, unsigned *node, void *unused)
-  // Always returns CPU 0, node 0.  HotSpot uses this to pick a TLAB shard.
-  //   xor  eax, eax          ; return 0
-  //   test rdi, rdi          ; if (cpu != NULL)
-  //   jz   skip_cpu          ;
-  //   mov  dword [rdi], 0    ;   *cpu = 0
-  // skip_cpu:
-  //   test rsi, rsi          ; if (node != NULL)
-  //   jz   skip_node         ;
-  //   mov  dword [rsi], 0    ;   *node = 0
-  // skip_node:
-  //   ret
-  uint8_t gc[] = {
-    0x31, 0xC0,                         // xor eax, eax
-    0x48, 0x85, 0xFF,                   // test rdi, rdi
-    0x74, 0x06,                         // jz  +6  (skip_cpu → land at test rsi)
-    0xC7, 0x07, 0x00, 0x00, 0x00, 0x00,// mov dword [rdi], 0
-    0x48, 0x85, 0xF6,                   // test rsi, rsi
-    0x74, 0x06,                         // jz  +6  (skip_node → land at ret)
-    0xC7, 0x06, 0x00, 0x00, 0x00, 0x00,// mov dword [rsi], 0
-    0xC3,                               // ret
-  };
-  for (size_t i = 0; i < sizeof(gc); i++)
-    v[0x800 + i] = gc[i];
-
   vsyscall_page_phys = (uint64_t)page;
+  uint8_t *v = (uint8_t *)PHYS_TO_VIRT(page);
+
+  // Copy compiled vDSO assembly blob into the page
+  size_t blob_len = (size_t)(vdso_blob_end - vdso_blob_start);
+  if (blob_len > 4096)
+    blob_len = 4096;
+  memcpy(v, vdso_blob_start, blob_len);
+
+  vmm_update_vdso_data();
 }
+
 
 void vmm_map_vsyscall_page(uint64_t *pml4) {
   if (vsyscall_page_phys == 0)

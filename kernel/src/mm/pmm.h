@@ -22,8 +22,13 @@ void *pmm_alloc_pages(
 void *pmm_alloc_pages_constrained(size_t count, uint64_t max_phys_addr);
 void *pmm_alloc_pages_range(size_t count, uint64_t min_phys_addr,
                             uint64_t max_phys_addr);
+// Allocate a 2 MB huge page (512 contiguous 4 KB frames, 2 MB-aligned).
+// The buddy allocator at order-9 guarantees 2 MB alignment by construction.
+// Returns the physical address, or NULL on OOM.
+void *pmm_alloc_huge_page(void);
 void pmm_free_page(void *ptr);                // Free single page
 void pmm_free_pages(void *ptr, size_t count); // Free multiple pages
+
 
 // Refcounting (for CoW)
 void pmm_incref(void *ptr);      // Increment reference count
@@ -56,5 +61,11 @@ uint64_t pmm_get_hhdm_offset(void);
 
 // Statistics
 size_t pmm_get_free_pages(void);
+
+// Shared zero page — a single physically-allocated page whose contents are
+// always zero.  Used by the demand-pager for anonymous read faults so that
+// physical frames are not allocated until the process actually writes.
+// Returns the physical address of the zero page, or 0 if not yet ready.
+uint64_t pmm_get_zero_page_phys(void);
 
 #endif

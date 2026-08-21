@@ -1,6 +1,7 @@
 // Signal Syscalls: rt_sigaction, rt_sigprocmask
 #include "../apic/lapic_timer.h"
 #include "../console/klog.h"
+#include "../cpu/fpu.h"
 #include "../fs/vfs.h"
 #include "../lib/string.h"
 #include "../lock/spinlock.h"
@@ -13,6 +14,7 @@
 #include "syscall.h"
 #include <stddef.h>
 #include <stdint.h>
+
 
 #define SIG_BLOCK 0
 #define SIG_UNBLOCK 1
@@ -139,8 +141,12 @@ static void fill_signal_context(struct sigframe *frame, int sig,
     __asm__ volatile("mov %%cr2, %0" : "=r"(g[22]));
   uc->uc_sigmask[0] = current->signal_mask;
   uc->uc_mcontext.fpregs = (uint64_t)&uc->fpregs_mem[0];
+  /* With lazy FPU, hardware registers may belong to a different thread.
+     Ensure this thread's FPU state is live in hardware before saving. */
+  fpu_ensure_loaded(current);
   __asm__ volatile("fxsave64 %0" : "=m"(uc->fpregs_mem));
 }
+
 
 // rt_sigaction: Set or get signal action
 static uint64_t sys_rt_sigaction(uint64_t signum, uint64_t act_ptr,

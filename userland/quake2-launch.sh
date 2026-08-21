@@ -27,6 +27,12 @@ if [ -z "${SDL_VIDEODRIVER:-}" ]; then
     export DISPLAY SDL_VIDEODRIVER
 fi
 
+# Disable audio completely.  The OSS /dev/dsp backend initialises but then
+# blocks in the SDL audio callback thread waiting for the ring buffer, causing
+# the game to hang after "SDL audio initialized."  Use the dummy driver so SDL
+# never opens any audio device and Yamagi skips all sound processing.
+export SDL_AUDIODRIVER=dummy
+
 # Yamagi falls back to the current directory when /proc/self/exe is unavailable.
 cd /opt/quake2 || exit 1
 export SDL_RENDER_DRIVER=software

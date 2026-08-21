@@ -11,8 +11,12 @@
 #define MAP_FIXED 0x10
 #define MAP_ANONYMOUS 0x20
 #define MAP_GROWSDOWN 0x0100
-/* Kernel-internal: preserve the identity of individual SysV SHM attaches. */
+#define MAP_HUGETLB 0x40000  /* Linux user-space flag: request huge pages */
+/* Kernel-internal flags — stored in vma.flags, never exposed to user space */
 #define MAP_SYSV_SHM 0x100000000ULL
+/* Kernel-internal: use 2 MB huge pages for this anonymous VMA.
+ * Set automatically when madvise(MADV_HUGEPAGE) or MAP_HUGETLB is used. */
+#define MAP_HUGEPAGE 0x200000000ULL
 
 // VMA structure - internally represents an AVL Interval Tree Node
 struct vma {

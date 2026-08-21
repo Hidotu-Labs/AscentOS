@@ -155,7 +155,135 @@ static void vfs_dentry_insert(vfs_node_t *parent, const char *name,
     vfs_close(evicted_parent);
 }
 
+/* Fast-Path Full Path Resolution Cache (Path Dcache)
+ * Maps (base_dir, path_string) -> resolved_vfs_node.
+ * Directly bypasses string parsing, loops, and per-component lookup overhead
+ * for high-frequency access to binaries, libs, JVM classes, and assets.
+ */
+#define VFS_PATH_CACHE_SIZE 4096
+#define VFS_PATH_CACHE_WAYS 4
+#define VFS_PATH_CACHE_BUCKETS (VFS_PATH_CACHE_SIZE / VFS_PATH_CACHE_WAYS)
+
+typedef struct vfs_path_cache_entry {
+  vfs_node_t *dir;
+  vfs_node_t *node;
+  char path[256];
+  bool valid;
+} vfs_path_cache_entry_t;
+
+typedef struct vfs_path_cache_bucket {
+  vfs_path_cache_entry_t entries[VFS_PATH_CACHE_WAYS];
+  uint8_t next_victim;
+  spinlock_t lock;
+} vfs_path_cache_bucket_t;
+
+static vfs_path_cache_bucket_t vfs_path_cache[VFS_PATH_CACHE_BUCKETS];
+
+static uint32_t vfs_path_hash(vfs_node_t *dir, const char *path) {
+  uint64_t hash = ((uint64_t)(uintptr_t)dir >> 4) ^ 0xcbf29ce484222325ULL;
+  while (*path) {
+    hash ^= (uint8_t)*path++;
+    hash *= 0x100000001b3ULL;
+  }
+  return (uint32_t)(hash ^ (hash >> 32));
+}
+
+static vfs_node_t *vfs_path_cache_lookup(vfs_node_t *dir, const char *path) {
+  if (!dir || !path || strlen(path) >= 256)
+    return NULL;
+
+  uint32_t slot = vfs_path_hash(dir, path) % VFS_PATH_CACHE_BUCKETS;
+  vfs_path_cache_bucket_t *bucket = &vfs_path_cache[slot];
+
+  spinlock_acquire(&bucket->lock);
+  for (uint32_t i = 0; i < VFS_PATH_CACHE_WAYS; i++) {
+    vfs_path_cache_entry_t *entry = &bucket->entries[i];
+    if (entry->valid && entry->dir == dir && strcmp(entry->path, path) == 0) {
+      vfs_node_t *node = entry->node;
+      vfs_open(node);
+      spinlock_release(&bucket->lock);
+      return node;
+    }
+  }
+  spinlock_release(&bucket->lock);
+  return NULL;
+}
+
+static void vfs_path_cache_insert(vfs_node_t *dir, const char *path, vfs_node_t *node) {
+  if (!dir || !node || !path || strlen(path) >= 256 || (node->flags & FS_DENTRY_NOCACHE))
+    return;
+
+  uint32_t slot = vfs_path_hash(dir, path) % VFS_PATH_CACHE_BUCKETS;
+  vfs_path_cache_bucket_t *bucket = &vfs_path_cache[slot];
+  vfs_node_t *evicted_node = NULL;
+  vfs_node_t *evicted_dir = NULL;
+
+  spinlock_acquire(&bucket->lock);
+  vfs_path_cache_entry_t *entry = NULL;
+  for (uint32_t i = 0; i < VFS_PATH_CACHE_WAYS; i++) {
+    vfs_path_cache_entry_t *candidate = &bucket->entries[i];
+    if (candidate->valid && candidate->dir == dir && strcmp(candidate->path, path) == 0) {
+      spinlock_release(&bucket->lock);
+      return;
+    }
+    if (!candidate->valid && !entry)
+      entry = candidate;
+  }
+  if (!entry) {
+    entry = &bucket->entries[bucket->next_victim];
+    bucket->next_victim = (bucket->next_victim + 1) % VFS_PATH_CACHE_WAYS;
+  }
+  if (entry->valid) {
+    evicted_node = entry->node;
+    evicted_dir = entry->dir;
+  }
+
+  dir->refcount++;
+  node->refcount++;
+  entry->dir = dir;
+  entry->node = node;
+  strncpy(entry->path, path, sizeof(entry->path) - 1);
+  entry->path[sizeof(entry->path) - 1] = '\0';
+  entry->valid = true;
+  spinlock_release(&bucket->lock);
+
+  if (evicted_node)
+    vfs_close(evicted_node);
+  if (evicted_dir)
+    vfs_close(evicted_dir);
+}
+
+void vfs_path_cache_invalidate(void) {
+  for (uint32_t b = 0; b < VFS_PATH_CACHE_BUCKETS; b++) {
+    vfs_node_t *rel_node[VFS_PATH_CACHE_WAYS];
+    vfs_node_t *rel_dir[VFS_PATH_CACHE_WAYS];
+    uint32_t count = 0;
+    vfs_path_cache_bucket_t *bucket = &vfs_path_cache[b];
+
+    spinlock_acquire(&bucket->lock);
+    for (uint32_t i = 0; i < VFS_PATH_CACHE_WAYS; i++) {
+      vfs_path_cache_entry_t *entry = &bucket->entries[i];
+      if (entry->valid) {
+        rel_node[count] = entry->node;
+        rel_dir[count++] = entry->dir;
+        entry->valid = false;
+        entry->dir = NULL;
+        entry->node = NULL;
+        entry->path[0] = '\0';
+      }
+    }
+    spinlock_release(&bucket->lock);
+
+    for (uint32_t i = 0; i < count; i++) {
+      vfs_close(rel_node[i]);
+      vfs_close(rel_dir[i]);
+    }
+  }
+}
+
 void vfs_dentry_invalidate(vfs_node_t *parent, const char *name) {
+  vfs_path_cache_invalidate();
+
   for (uint32_t b = 0; b < VFS_DENTRY_BUCKETS; b++) {
     vfs_node_t *released[VFS_DENTRY_WAYS];
     vfs_node_t *released_parents[VFS_DENTRY_WAYS];
@@ -184,6 +312,7 @@ void vfs_dentry_invalidate(vfs_node_t *parent, const char *name) {
     }
   }
 }
+
 
 uint32_t vfs_read(vfs_node_t *node, uint32_t offset, uint32_t size,
                   uint8_t *buffer) {
@@ -415,11 +544,20 @@ vfs_node_t *vfs_resolve_path_at(vfs_node_t *dir, const char *path) {
   if (!path || !fs_root)
     return 0;
 
+  vfs_node_t *effective_dir = (path[0] == '/') ? fs_root : (dir ? dir : fs_root);
+
+  // 1. Fast Path Full-Path Dcache lookup:
+  // Check if we already resolved this exact path string from this directory
+  vfs_node_t *cached = vfs_path_cache_lookup(effective_dir, path);
+  if (cached) {
+    return cached;
+  }
+
   char path_buf[512];
   strncpy(path_buf, path, 511);
   path_buf[511] = '\0';
 
-  vfs_node_t *current = (path[0] == '/') ? fs_root : (dir ? dir : fs_root);
+  vfs_node_t *current = effective_dir;
   vfs_open(current); // Reference for 'current'
 
   int symlink_depth = 0;
@@ -536,7 +674,13 @@ vfs_node_t *vfs_resolve_path_at(vfs_node_t *dir, const char *path) {
     vfs_close(parent_stack[j]);
   }
 
+  // Cache successfully resolved path
+  if (current && strstr(path, "..") == NULL) {
+    vfs_path_cache_insert(effective_dir, path, current);
+  }
+
   return current;
+
 
 fail:
   for (int j = 0; j <= stack_top; j++)

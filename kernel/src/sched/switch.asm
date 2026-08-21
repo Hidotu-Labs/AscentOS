@@ -1,6 +1,8 @@
 global switch_context
 global thread_stub
 
+extern fpu_on_context_switch
+
 section .text
 
 ; void switch_context(struct thread *old_t, struct thread *new_t)
@@ -15,8 +17,11 @@ switch_context:
     push r14
     push r15
 
-    ; Save FPU state (at offset 16 in struct thread)
-    fxsave64 [rdi + 16]
+    ; ---- FPU state is NOT saved here (Lazy FPU) ----
+    ; The fxsave64 is now deferred: CR0.TS is set below so that the
+    ; arriving thread takes a #NM fault on its first FPU/SSE instruction,
+    ; triggering fpu_nm_handler which saves the old owner and loads the new
+    ; owner's state just-in-time.  Threads that never use FPU never pay.
 
     ; Save current stack pointer into old_t->rsp (offset 0)
     mov [rdi], rsp
@@ -28,8 +33,14 @@ switch_context:
     ; stack hazard here; a resumed C frame may hold a stale CPU pointer.
     mov qword [gs:376], 0
 
-    ; Restore FPU state from new thread (at offset 16 in struct thread)
-    fxrstor64 [rsi + 16]
+    ; Set CR0.TS = 1 to mark FPU state as stale for the incoming thread.
+    ; The arriving thread will take #NM on its first SSE/x87 instruction,
+    ; at which point fpu_nm_handler will do the actual fxsave/fxrstor.
+    mov rax, cr0
+    or  rax, 8          ; CR0.TS bit (bit 3)
+    mov cr0, rax
+
+    ; ---- FPU state is NOT restored here (Lazy FPU) ----
 
     ; Pop callee-saved registers for the arriving thread
     pop r15
@@ -48,10 +59,10 @@ switch_context:
 thread_stub:
     ; Ensure interrupts are enabled for the new thread
     sti
-    
+
     ; Call the entry function
     call r12
-    
-    ; If the entry function returns, it will return into thread_exit() 
+
+    ; If the entry function returns, it will return into thread_exit()
     ; because thread_exit was pushed just below the context struct.
     ret

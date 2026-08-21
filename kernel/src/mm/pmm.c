@@ -34,6 +34,7 @@ static uint64_t usable_memory = 0;
 static uint64_t total_memory = 0;
 static uint64_t physical_memory_offset = 0;
 static struct limine_memmap_response *internal_memmap = NULL;
+static uint64_t zero_page_phys = 0;
 
 static inline void bitmap_clear(uint8_t *bm, size_t bit) {
   bm[bit / 8] &= ~(1 << (bit % 8));
@@ -141,7 +142,7 @@ size_t pmm_get_free_pages(void) {
 static void buddy_free_internal(uint64_t phys, size_t order);
 
 // Internal function to add a free block to the buddy system
-static void buddy_free_internal(uint64_t phys, size_t order) {
+__attribute__((optimize("O3"))) static void buddy_free_internal(uint64_t phys, size_t order) {
   uint64_t pfn = phys / PAGE_SIZE;
 
   // Clear bitmap for this block
@@ -346,9 +347,24 @@ void pmm_init(struct limine_memmap_response *memmap, uint64_t hhdm_offset) {
   klog_puts("[PMM] Initialized. Usable memory: ");
   klog_uint64(usable_memory / 1024 / 1024);
   klog_puts(" MB\n");
+
+  // Allocate and permanently pin the shared zero page
+  void *zp = pmm_alloc_page();
+  if (zp) {
+    zero_page_phys = (uint64_t)zp;
+    memset((void *)(zero_page_phys + hhdm_offset), 0, PAGE_SIZE);
+    uint64_t pfn = zero_page_phys / PAGE_SIZE;
+    refcounts[pfn - lowest_page] = 0xFFFF; // Permanently pinned
+  }
 }
 
-void *pmm_alloc_pages(size_t count) {
+uint64_t pmm_get_zero_page_phys(void) {
+  return zero_page_phys;
+}
+
+
+
+__attribute__((optimize("O3"))) void *pmm_alloc_pages(size_t count) {
   if (count == 0)
     return NULL;
 
@@ -473,8 +489,23 @@ void *pmm_alloc_pages_range(size_t count, uint64_t min_phys_addr,
 
 void *pmm_alloc_page(void) { return pmm_alloc_pages(1); }
 
-void pmm_free_pages(void *ptr, size_t count) {
-  if (!ptr || count == 0)
+// Allocate a 2 MB huge page (512 contiguous 4 KB pages).
+// Buddy allocator order-9 blocks are always 2 MB-aligned by construction.
+__attribute__((optimize("O3"))) void *pmm_alloc_huge_page(void) {
+  void *phys = pmm_alloc_pages(512);
+  if (!phys)
+    return NULL;
+  // Safety assert: the buddy allocator must give us a 2MB-aligned block.
+  if ((uint64_t)phys & 0x1FFFFULL) {
+    pmm_free_pages(phys, 512);
+    return NULL;
+  }
+  return phys;
+}
+
+
+__attribute__((optimize("O3"))) void pmm_free_pages(void *ptr, size_t count) {
+  if (!ptr || count == 0 || (uint64_t)ptr == zero_page_phys)
     return;
 
   size_t order = get_order(count);
@@ -522,7 +553,7 @@ bool pmm_is_managed(uint64_t phys) {
 }
 
 void pmm_incref(void *ptr) {
-  if (!ptr)
+  if (!ptr || (uint64_t)ptr == zero_page_phys)
     return;
   if (!pmm_is_managed((uint64_t)ptr))
     return;
@@ -533,12 +564,13 @@ void pmm_incref(void *ptr) {
   spinlock_release(&pmm_lock);
 }
 
-void pmm_decref(void *ptr) {
-  if (!ptr)
+__attribute__((optimize("O3"))) void pmm_decref(void *ptr) {
+  if (!ptr || (uint64_t)ptr == zero_page_phys)
     return;
   if (!pmm_is_managed((uint64_t)ptr))
     return;
   uint64_t pfn = (uint64_t)ptr / PAGE_SIZE;
+
 
   spinlock_acquire(&pmm_lock);
   if (refcounts[pfn - lowest_page] > 0) {
@@ -565,9 +597,13 @@ uint16_t pmm_get_ref(void *ptr) {
 }
 
 void pmm_mark_used(void *ptr, size_t count) {
-  if (!ptr || count == 0)
+  if (count == 0 || !ptr)
     return;
+
   uint64_t addr = (uint64_t)ptr;
+  if (addr == zero_page_phys)
+    return;
+
   size_t start_bit = addr / PAGE_SIZE;
   bitmap_set_range(bitmap, start_bit, count);
 }

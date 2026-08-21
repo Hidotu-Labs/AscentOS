@@ -10,6 +10,8 @@
 #include "../io/io.h"
 #include "../sched/sched.h"
 #include "../smp/cpu.h"
+#include "../mm/vmm.h"
+
 
 // PIT constants for calibration
 #define PIT_CMD_PORT   0x43
@@ -159,7 +161,9 @@ void lapic_timer_init(void) {
     klog_uint64(LAPIC_TIMER_VECTOR);
     klog_puts(")\n");
     lapic_timer_arm_at(monotonic_ms() + LAPIC_SCHED_QUANTUM_MS);
+    vmm_update_vdso_data();
 }
+
 
 void lapic_timer_init_ap(void) {
     if (ticks_per_ms == 0) return;
@@ -179,6 +183,11 @@ uint64_t lapic_timer_get_ms(void) {
 uint64_t lapic_timer_get_ns(void) {
     return monotonic_ns();
 }
+
+uint64_t lapic_timer_get_boot_tsc(void) {
+    return boot_tsc;
+}
+
 
 void lapic_timer_arm_at(uint64_t deadline_ms) {
     if (!ticks_per_ms || !lapic_is_ready()) return;

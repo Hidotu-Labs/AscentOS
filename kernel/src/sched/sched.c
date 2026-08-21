@@ -4,6 +4,7 @@
 #include "../apic/lapic_timer.h"
 #include "../console/console.h"
 #include "../console/klog.h"
+#include "../cpu/fpu.h"
 #include "../cpu/idt.h"
 #include "../cpu/msr.h"
 #include "../fs/procfs.h"
@@ -13,6 +14,7 @@
 #include "../mm/pmm.h"
 #include "../mm/vmm.h"
 #include "../smp/cpu.h"
+
 
 // Futex waiter records are stack-resident and must be detached before a
 // forced-exit thread stack is released.
@@ -373,7 +375,7 @@ static void sched_age_runqueues_locked(struct cpu_info *cpu, uint64_t now) {
   }
 }
 
-static struct thread *sched_pick_next_locked(struct cpu_info *cpu) {
+__attribute__((optimize("O3"))) static struct thread *sched_pick_next_locked(struct cpu_info *cpu) {
   while (cpu->runqueue_bitmap) {
     uint8_t p = (uint8_t)__builtin_ctz(cpu->runqueue_bitmap);
     struct thread *head = cpu->runqueues[p];
@@ -1376,10 +1378,14 @@ void sched_reap_thread(struct thread *t) {
 
   /* HHDM-backed stack pages need no page-table unmap during release. */
   thread_stack_release(t->stack_base);
+  /* Clear any per-CPU fpu_owner references pointing at this thread
+     before the struct is freed, to avoid stale pointer dereferences. */
+  fpu_forget_thread(t);
   kfree(t);
 
   klog_debug_puts("[REAP] Done\n");
 }
+
 
 static struct thread *find_thread_by_tid_locked(uint32_t tid) {
   struct thread *curr = global_thread_list;

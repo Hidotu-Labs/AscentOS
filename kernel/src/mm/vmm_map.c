@@ -337,8 +337,18 @@ void vmm_unmap_page(uint64_t *pml4, uint64_t virtual_addr) {
   uint64_t  pd_entry = pd_virt[pd_index];
   if (!(pd_entry & PAGE_FLAG_PRESENT))
     goto unlock;
-  if (pd_entry & PAGE_FLAG_PS)
-    goto unlock; // 2 MB page
+
+  if (pd_entry & PAGE_FLAG_PS) {
+    // 2 MB huge page — clear the PDE and free all 512 constituent frames.
+    // We must release vmm_lock before calling into the PMM to avoid a
+    // lock-order inversion (pmm_free_pages acquires b_zone.lock).
+    uint64_t huge_phys = pd_entry & 0xFFFFFFFE00000ULL;
+    pd_virt[pd_index] = 0;
+    tlb_shootdown_page(virtual_addr & ~0x1FFFFFULL);
+    spinlock_release(&vmm_lock);
+    pmm_free_pages((void *)huge_phys, 512);
+    return;
+  }
 
   uint64_t *pt_virt = (uint64_t *)PHYS_TO_VIRT(pd_entry & PAGE_MASK);
   pt_virt[pt_index] = 0;
@@ -352,6 +362,7 @@ void vmm_unmap_page(uint64_t *pml4, uint64_t virtual_addr) {
 unlock:
   spinlock_release(&vmm_lock);
 }
+
 
 uint64_t vmm_virt_to_phys(uint64_t *pml4_phys, uint64_t virtual_addr) {
   size_t pml4_index = (virtual_addr >> 39) & 0x1FF;

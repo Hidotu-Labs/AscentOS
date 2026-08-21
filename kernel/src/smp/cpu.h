@@ -55,7 +55,9 @@ struct cpu_info {
   uint64_t next_aging_scan_ms;      // Next per-thread aging pass
   struct thread *timer_heap[MAX_TIMER_HEAP_SIZE];
   uint32_t timer_heap_count;
+  struct thread *fpu_owner; // Currently loaded FPU/SSE state owner on this CPU
 } __attribute__((aligned(64)));
+
 
 _Static_assert(offsetof(struct cpu_info, scratch_rsp) == 368,
                "update syscall_entry.asm scratch_rsp offset");

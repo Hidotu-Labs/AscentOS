@@ -29,6 +29,10 @@ uint64_t lapic_timer_get_ms(void);
 // Returns uptime in nanoseconds (TSC-based, no rounding).
 uint64_t lapic_timer_get_ns(void);
 
+// Returns the TSC value recorded at boot calibration.
+uint64_t lapic_timer_get_boot_tsc(void);
+
+
 // Program the current CPU's one-shot timer with an absolute deadline.
 void lapic_timer_arm_at(uint64_t deadline_ms);
 void lapic_timer_rearm_if_earlier(uint64_t deadline_ms);

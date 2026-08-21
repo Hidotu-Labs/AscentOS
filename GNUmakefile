@@ -389,7 +389,20 @@ disk.img:  userland/dns_lookup.elf
 disk.img: userland/test_clone_futex.elf
 disk.img: userland/test_unix_sockets.elf
 disk.img: userland/test_syscall_speed.elf
+disk.img: userland/test_hugepages.elf
+disk.img: userland/test_zero_page.elf
+disk.img: userland/test_vdso_bench.elf
+disk.img: userland/test_lazy_fpu.elf
+disk.img: userland/test_heap_smp.elf
+disk.img: userland/test_dcache.elf
 disk.img: userland/proc_bench.elf
+
+
+
+
+
+
+
 disk.img: $(QUAKE2_BUNDLE_FILES)
 disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets/mc9.mp3 assets/train.mp3 assets/test.bmp assets/test.tar assets/room.png assets/logo.png assets/linus.gif assets/video.mp4 userland/forkit.elf userland/forkit-launch.sh userland/about.elf userland/hello_glibc.elf userland/booter.elf userland/reboot.elf userland/shutdown.elf userland/apm.elf userland/test_cpp.elf  userland/kilo.elf  userland/ls.elf userland/lspci.elf userland/lsblk.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/asplay.elf userland/kria.elf userland/doom.elf userland/xrootcursor.elf  userland/jwm.elf userland/doom_x11.elf userland/gtk_test.elf userland/qt5_test.elf userland/tglgears_fb.elf userland/tglgears_drm.elf userland/tglhello_drm.elf userland/test_mem_stress.elf userland/classicube.elf userland/terrain.png userland/texpacks/classicube.zip initrd/startx.sh initrd/startw.sh initrd/weston.ini AetherDE/x11-wm/AetherWM AetherDE/aether-dock/aether-dock AetherDE/aether-panel/aether-panel AetherDE/wayland-compositor/aether-compositor AetherDE/demo-client/aether-window AetherDE/scripts/sax11.sh AetherDE/scripts/sawayland.sh userland/avoryd.elf $(AVORYD_CONFIG_FILES)
 	@echo "Creating root filesystem (ext4)..."
@@ -559,6 +572,20 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 		echo "write userland/test_unix_sockets.elf bin/test_unix_sockets"; \
 		echo "rm bin/test_syscall_speed"; \
 		echo "write userland/test_syscall_speed.elf bin/test_syscall_speed"; \
+		echo "rm bin/test_hugepages"; \
+		echo "write userland/test_hugepages.elf bin/test_hugepages"; \
+		echo "rm bin/test_zero_page"; \
+		echo "write userland/test_zero_page.elf bin/test_zero_page"; \
+		echo "rm bin/test_vdso_bench"; \
+		echo "write userland/test_vdso_bench.elf bin/test_vdso_bench"; \
+		echo "rm bin/test_lazy_fpu"; \
+		echo "write userland/test_lazy_fpu.elf bin/test_lazy_fpu"; \
+		echo "rm bin/test_heap_smp"; \
+		echo "write userland/test_heap_smp.elf bin/test_heap_smp"; \
+		echo "rm bin/test_dcache"; \
+		echo "write userland/test_dcache.elf bin/test_dcache"; \
+		echo "rm bin/test_readahead"; \
+		echo "write userland/test_readahead.elf bin/test_readahead"; \
 		echo "rm bin/proc_bench"; \
 		echo "write userland/proc_bench.elf bin/proc_bench"; \
 		echo "rm bin/classicube"; \
@@ -575,6 +602,12 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 		echo "rm bin/fault_mon"; \
 		echo "write userland/fault_mon.elf bin/fault_mon"; \
 	} | debugfs -w ./part.img >/dev/null 2>&1 || true
+
+
+
+
+
+
 	@echo "Writing ClassiCube options.txt (texture pack config)..."
 	@printf 'texture-pack=classicube.zip\nskin-server=\n' > /tmp/classicube_options.txt
 	debugfs -w -R "rm options.txt" ./part.img >/dev/null 2>&1 || true
@@ -811,9 +844,22 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 		echo "set_inode_field bin/forkit mode 0100755"; \
 		echo "set_inode_field bin/test_cred mode 0100755"; \
 		echo "set_inode_field bin/test_accounts mode 0100755"; \
+		echo "set_inode_field bin/test_hugepages mode 0100755"; \
+		echo "set_inode_field bin/test_zero_page mode 0100755"; \
+		echo "set_inode_field bin/test_vdso_bench mode 0100755"; \
+		echo "set_inode_field bin/test_lazy_fpu mode 0100755"; \
+		echo "set_inode_field bin/test_heap_smp mode 0100755"; \
+		echo "set_inode_field bin/test_dcache mode 0100755"; \
+		echo "set_inode_field bin/test_readahead mode 0100755"; \
 		echo "set_inode_field home/avory uid 1000"; \
 		echo "set_inode_field home/avory gid 1000"; \
 	} | debugfs -w ./part.img >/dev/null 2>&1 || true
+
+
+
+
+
+
 	@echo "Creating partitioned disk image (MBR)..."
 	dd if=/dev/zero of=disk.img bs=1M count=2048
 	parted -s disk.img mklabel msdos
@@ -1091,9 +1137,41 @@ userland/test_syscall_speed.elf: userland/test_syscall_speed.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/test_syscall_speed.c -o userland/test_syscall_speed.elf
 
+userland/test_hugepages.elf: userland/test_hugepages.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_hugepages.c -o userland/test_hugepages.elf
+
+userland/test_zero_page.elf: userland/test_zero_page.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_zero_page.c -o userland/test_zero_page.elf
+
+userland/test_vdso_bench.elf: userland/test_vdso_bench.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_vdso_bench.c -o userland/test_vdso_bench.elf
+
+userland/test_lazy_fpu.elf: userland/test_lazy_fpu.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_lazy_fpu.c -o userland/test_lazy_fpu.elf -lpthread -lm
+
+userland/test_heap_smp.elf: userland/test_heap_smp.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_heap_smp.c -o userland/test_heap_smp.elf -lpthread -lm
+
+userland/test_dcache.elf: userland/test_dcache.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_dcache.c -o userland/test_dcache.elf
+
+userland/test_readahead.elf: userland/test_readahead.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_readahead.c -o userland/test_readahead.elf
+
 userland/proc_bench.elf: userland/proc_bench.c userland/proc_bench_trampoline.S $(MUSL_LIBC)
+
+
+
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/proc_bench.c userland/proc_bench_trampoline.S -o userland/proc_bench.elf
+
 
 userland/panic_test.elf: userland/panic_test.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \

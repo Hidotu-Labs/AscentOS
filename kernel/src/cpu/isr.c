@@ -7,6 +7,7 @@
 #include "../sched/sched.h"
 #include "apic/lapic.h"
 #include "fault.h"
+#include "fpu.h"
 #include "msr.h"
 #include "pic.h"
 
@@ -781,7 +782,9 @@ void isr_init_exceptions(void) {
   register_interrupt_handler(12, stack_fault_handler);
   register_interrupt_handler(13, gpf_handler);
   register_interrupt_handler(14, page_fault_handler);
+  fpu_init(); // Register #NM (vector 7) handler for Lazy FPU switching
 }
+
 
 void isr_handler(struct registers *regs) {
   if (interrupt_handlers[regs->int_no] != 0) {

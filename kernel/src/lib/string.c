@@ -73,6 +73,25 @@ char *strncat(char *dest, const char *src, size_t n) {
   return dest;
 }
 
+char *strstr(const char *haystack, const char *needle) {
+  if (!*needle)
+    return (char *)haystack;
+  for (; *haystack; haystack++) {
+    if (*haystack == *needle) {
+      const char *h = haystack;
+      const char *n = needle;
+      while (*h && *n && *h == *n) {
+        h++;
+        n++;
+      }
+      if (!*n)
+        return (char *)haystack;
+    }
+  }
+  return NULL;
+}
+
+
 void *memset(void *s, int c, size_t n) {
   unsigned char *p = s;
   uint8_t b = (uint8_t)c;

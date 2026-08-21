@@ -115,6 +115,8 @@ bool vmm_is_user_addr_range_writable(uint64_t addr, size_t size);
 void vmm_map_signal_trampoline(uint64_t *pml4);
 void vmm_init_vsyscall_page(void);
 void vmm_map_vsyscall_page(uint64_t *pml4);
+void vmm_update_vdso_data(void);
+
 
 // ---- Internal helpers used across vmm_*.c modules -----------------------
 // (not part of the public kernel API — do not call from outside mm/)
