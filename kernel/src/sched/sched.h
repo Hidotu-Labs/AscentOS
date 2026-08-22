@@ -3,7 +3,9 @@
 
 #include "../cpu/isr.h"
 #include "../fs/vfs.h"
+#include "../lib/rbtree.h"
 #include "../mm/vma.h"
+#include "eevfd.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -22,8 +24,10 @@ struct mm_struct {
   uint64_t brk_current;    // Current end of the heap
   uint64_t mmap_next_addr; // Bump-pointer for anonymous mmap
   int ref_count;           // Reference count for sharing across threads
+  uint16_t pcid;           // Hardware PCID tag (0 = kernel/unassigned)
   spinlock_t lock;         // Lock for thread-safe MM state updates
 };
+
 
 #define MAX_FDS 256
 
@@ -126,8 +130,8 @@ struct context {
   uint64_t r14;
   uint64_t r13;
   uint64_t r12;
-  uint64_t rbx;
   uint64_t rbp;
+  uint64_t rbx;
   uint64_t ret_addr; // RIP (pushed automatically by call)
 } __attribute__((packed));
 
@@ -213,7 +217,8 @@ struct thread {
   // invalid when the thread is descheduled, leading to corrupted wait queues
   struct wait_queue_entry *wq_entry_next; // For multi-wait (epoll)
 
-  // Scheduling/MLFQ priority state
+  // Scheduling/EEVFD priority state
+  struct sched_entity se;  // EEVFD scheduling entity
   uint32_t cpu_index;      // Index of CPU this thread is enqueued on
   uint8_t priority;        // Current dynamic priority (0-31)
   uint8_t static_priority; // Base priority

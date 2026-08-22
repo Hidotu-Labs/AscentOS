@@ -169,11 +169,16 @@ typedef struct {
 #define TIMERFD_MAX 64
 static timerfd_ctx_t *timerfd_table[TIMERFD_MAX];
 static spinlock_t timerfd_table_lock = SPINLOCK_INIT;
+static volatile uint32_t timerfd_active_count = 0;
 
 static void timerfd_register(timerfd_ctx_t *ctx) {
     spinlock_acquire(&timerfd_table_lock);
     for (int i = 0; i < TIMERFD_MAX; i++) {
-        if (!timerfd_table[i]) { timerfd_table[i] = ctx; break; }
+        if (!timerfd_table[i]) {
+            timerfd_table[i] = ctx;
+            __atomic_fetch_add(&timerfd_active_count, 1, __ATOMIC_RELAXED);
+            break;
+        }
     }
     spinlock_release(&timerfd_table_lock);
 }
@@ -181,12 +186,20 @@ static void timerfd_register(timerfd_ctx_t *ctx) {
 static void timerfd_unregister(timerfd_ctx_t *ctx) {
     spinlock_acquire(&timerfd_table_lock);
     for (int i = 0; i < TIMERFD_MAX; i++) {
-        if (timerfd_table[i] == ctx) { timerfd_table[i] = NULL; break; }
+        if (timerfd_table[i] == ctx) {
+            timerfd_table[i] = NULL;
+            if (timerfd_active_count)
+                __atomic_fetch_sub(&timerfd_active_count, 1, __ATOMIC_RELAXED);
+            break;
+        }
     }
     spinlock_release(&timerfd_table_lock);
 }
 
 void timerfd_tick(void) {
+    if (__atomic_load_n(&timerfd_active_count, __ATOMIC_RELAXED) == 0)
+        return;
+
     extern uint64_t lapic_timer_get_ms(void);
     extern void epoll_notify_event(struct vfs_node *node, uint32_t events);
     uint64_t now = lapic_timer_get_ms();
@@ -474,16 +487,16 @@ static uint32_t pipe_read(vfs_node_t *node, uint32_t offset, uint32_t size,
     vfs_node_t storage = {0};
     storage.device = &ctx->ramfs;
     storage.length = ctx->length;
-    uint32_t ret = ramfs_read(&storage, ctx->read_offset, size, buffer);
+    int32_t ret = (int32_t)ramfs_read(&storage, ctx->read_offset, size, buffer);
     if (ret > 0) {
-        ctx->read_offset += ret;
+        ctx->read_offset += (uint32_t)ret;
         if (ctx->read_offset >= ctx->length) {
             ctx->read_offset = 0;
             ctx->length = 0;
         }
     }
     spinlock_release(&ctx->lock);
-    return ret;
+    return (uint32_t)ret;
 }
 
 static uint32_t pipe_write(vfs_node_t *node, uint32_t offset, uint32_t size,
@@ -498,15 +511,16 @@ static uint32_t pipe_write(vfs_node_t *node, uint32_t offset, uint32_t size,
     vfs_node_t storage = {0};
     storage.device = &ctx->ramfs;
     storage.length = ctx->length;
-    uint32_t ret = ramfs_write(&storage, ctx->length, size, buffer);
-    ctx->length = storage.length;
-    spinlock_release(&ctx->lock);
-
+    int32_t ret = (int32_t)ramfs_write(&storage, ctx->length, size, buffer);
     if (ret > 0) {
+        ctx->length = storage.length;
+        spinlock_release(&ctx->lock);
         wait_queue_wake_all(&ctx->wq);
         epoll_notify_event(ctx->read_node, 0x0001);
+        return (uint32_t)ret;
     }
-    return ret;
+    spinlock_release(&ctx->lock);
+    return (uint32_t)ret;
 }
 
 static int pipe_poll(vfs_node_t *node, int events) {

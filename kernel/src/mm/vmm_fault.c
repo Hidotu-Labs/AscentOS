@@ -1,4 +1,5 @@
 
+#include "../arch/x86_64/extable.h"
 #include "../console/klog.h"
 #include "../fs/vfs.h"
 #include "../lib/string.h"
@@ -253,6 +254,9 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
     }
 
     if (!user_mode && cr2 <= USER_SPACE_LIMIT) {
+      if (regs && extable_has_entry(regs->rip)) {
+        return -1;
+      }
       klog_puts("\n" KLOG_CLR_RED "[ FATAL ]" KLOG_CLR_RESET
                 " KERNEL-MODE FAULT on user address\n");
       klog_puts("          CR2:  ");
@@ -552,12 +556,29 @@ void vmm_update_vdso_data(void) {
   uint64_t boot_sec = rtc_get_boot_timestamp();
   uint64_t tsc_hz = khz * 1000ULL;
 
+  uint32_t sec_shift = 20;
+  uint64_t sec_mult = 0;
+  uint64_t mult_rem_ns = 0;
+  uint64_t mult_rem_us = 0;
+
+  if (tsc_hz > 0) {
+    __uint128_t num = ((__uint128_t)1 << (64 + sec_shift));
+    sec_mult = (uint64_t)(num / tsc_hz) + 1;
+    mult_rem_ns = (1000000000ULL << 32) / tsc_hz;
+    mult_rem_us = (1000000ULL << 32) / tsc_hz;
+  }
+
   uint64_t *data = (uint64_t *)(PHYS_TO_VIRT(vsyscall_page_phys) + 0xE00);
   data[0] = boot_tsc;
   data[1] = khz;
   data[2] = boot_sec;
   data[3] = tsc_hz;
+  data[4] = sec_mult;
+  data[5] = (uint64_t)sec_shift;
+  data[6] = mult_rem_ns;
+  data[7] = mult_rem_us;
 }
+
 
 void vmm_init_vsyscall_page(void) {
   if (vsyscall_page_phys != 0)

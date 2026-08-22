@@ -412,6 +412,13 @@ struct drm_framebuffer {
   uint32_t pitch, bpp;
   uint32_t pixel_format; /* DRM_FORMAT_* fourcc; important for cursor alpha */
   struct drm_gem_object *gem_obj;
+
+  /* Legacy DIRTYFB damage retained until this buffer is next scanned out.
+   * A new framebuffer is always uploaded in full once; afterwards a producer
+   * which supplies DIRTYFB can avoid a redundant full upload on PAGE_FLIP. */
+  uint8_t scanout_valid;
+  uint8_t pending_damage_valid;
+  struct drm_clip_rect pending_damage;
 };
 
 struct drm_encoder {

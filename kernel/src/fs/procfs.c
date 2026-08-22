@@ -275,6 +275,76 @@ uint32_t procfs_cpuinfo_read(vfs_node_t *node, uint32_t offset, uint32_t size,
   return size;
 }
 
+uint32_t procfs_sched_debug_read(vfs_node_t *node, uint32_t offset,
+                                 uint32_t size, uint8_t *buffer) {
+  char *buf = kmalloc(4096);
+  if (!buf)
+    return 0;
+
+  int pos = 0;
+  pos += snprintf(buf + pos, 4096 - pos,
+                  "Sched Debug: EEVFD (Earliest Eligible Virtual Deadline First)\n"
+                  "============================================================\n");
+
+  uint32_t cpus = cpu_get_count();
+  for (uint32_t i = 0; i < cpus && pos < 3800; i++) {
+    struct cpu_info *cpu = cpu_get_info(i);
+    if (!cpu || cpu->status == CPU_STATUS_OFFLINE)
+      continue;
+
+    hal_irq_state_t flags = hal_irq_save();
+    spinlock_acquire(&cpu->queue_lock);
+
+    pos += snprintf(buf + pos, 4096 - pos,
+                    "\nCPU#%u: vtime=%llu nr_running=%u total_weight=%llu\n"
+                    "  %-6s %-6s %-6s %-8s %-12s %-12s %-6s %-10s\n",
+                    cpu->cpu_id,
+                    (unsigned long long)cpu->eevfd.vtime,
+                    cpu->eevfd.nr_running,
+                    (unsigned long long)cpu->eevfd.total_weight,
+                    "TID", "COMM", "NICE", "WEIGHT", "VRUNTIME", "DEADLINE", "STATE", "RUNTIME");
+
+    if (cpu->current_thread && !cpu->current_thread->is_idle) {
+      struct thread *t = cpu->current_thread;
+      pos += snprintf(buf + pos, 4096 - pos,
+                      "  %-6u %-6s %-6d %-8u %-12llu %-12llu %-6s %-10llu\n",
+                      t->tid, t->comm, (int)t->nice_value, t->se.weight,
+                      (unsigned long long)(t->se.vruntime / 1000000ULL),
+                      (unsigned long long)(t->se.deadline / 1000000ULL),
+                      "RUN",
+                      (unsigned long long)t->runtime_total);
+    }
+
+    struct rb_node *n = rb_first(&cpu->eevfd.tasks_tree);
+    while (n && pos < 3900) {
+      struct sched_entity *se = rb_entry(n, struct sched_entity, rb_node);
+      struct thread *t = rb_entry(se, struct thread, se);
+      pos += snprintf(buf + pos, 4096 - pos,
+                      "  %-6u %-6s %-6d %-8u %-12llu %-12llu %-6s %-10llu\n",
+                      t->tid, t->comm, (int)t->nice_value, se->weight,
+                      (unsigned long long)(se->vruntime / 1000000ULL),
+                      (unsigned long long)(se->deadline / 1000000ULL),
+                      "RDY",
+                      (unsigned long long)t->runtime_total);
+      n = rb_next(n);
+    }
+
+    spinlock_release(&cpu->queue_lock);
+    hal_irq_restore(flags);
+  }
+
+  node->length = (uint32_t)pos;
+  if (offset >= (uint32_t)pos) {
+    kfree(buf);
+    return 0;
+  }
+  if (offset + size > (uint32_t)pos)
+    size = (uint32_t)pos - offset;
+  memcpy(buffer, buf + offset, size);
+  kfree(buf);
+  return size;
+}
+
 uint32_t procfs_partitions_read(vfs_node_t *node, uint32_t offset,
                                 uint32_t size, uint8_t *buffer) {
   char *buf = kmalloc(4096);
@@ -1274,6 +1344,17 @@ void procfs_init(void) {
       static_node->mask = 0444;
       static_node->read = procfs_stat_read;
       ramfs_mount_node(procfs_root, static_node);
+    }
+
+    // Add /proc/sched_debug
+    vfs_node_t *sched_node = kmalloc(sizeof(vfs_node_t));
+    if (sched_node) {
+      vfs_node_init(sched_node);
+      strncpy(sched_node->name, "sched_debug", 127);
+      sched_node->flags = FS_FILE | FS_PERSISTENT;
+      sched_node->mask = 0444;
+      sched_node->read = procfs_sched_debug_read;
+      ramfs_mount_node(procfs_root, sched_node);
     }
 
     // Add /proc/loadavg

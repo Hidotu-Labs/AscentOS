@@ -7,6 +7,8 @@ QEMUFLAGS := -m 2G \
 	-display gtk,zoom-to-fit=off
 
 
+
+
 override IMAGE_NAME := avoryos-$(ARCH)
 
 AVORYD_CONFIG_FILES := \
@@ -181,6 +183,27 @@ run-x86_64: edk2-ovmf $(IMAGE_NAME).iso disk.img
 		-device usb-kbd,bus=xhci.0 \
 		-device usb-mouse,bus=xhci.0 \
 		$(QEMUFLAGS)
+
+
+run-kvm: edk2-ovmf $(IMAGE_NAME).iso disk.img
+	qemu-system-$(ARCH) \
+		-M q35,pcspk-audiodev=snd0 \
+		-drive if=pflash,unit=0,format=raw,file=edk2-ovmf/ovmf-code-$(ARCH).fd,readonly=on \
+		-cdrom $(IMAGE_NAME).iso \
+		-drive file=disk.img,format=raw,if=ide \
+		-cpu host -enable-kvm \
+		-smp 12 \
+		-serial stdio \
+		-audiodev pa,id=snd0,timer-period=2000,out.frequency=48000,out.channels=2,out.format=s16,out.buffer-length=500000,out.latency=500000 \
+		-device rtl8139,netdev=net0 \
+		-netdev user,id=net0 \
+		-device intel-hda -device hda-duplex,audiodev=snd0 \
+		-device qemu-xhci,id=xhci \
+		-device usb-kbd,bus=xhci.0 \
+		-device usb-mouse,bus=xhci.0 \
+		$(QEMUFLAGS)
+
+		
 
 .PHONY: run-bios
 run-bios: $(IMAGE_NAME).iso disk.img
@@ -391,11 +414,17 @@ disk.img: userland/test_unix_sockets.elf
 disk.img: userland/test_syscall_speed.elf
 disk.img: userland/test_hugepages.elf
 disk.img: userland/test_zero_page.elf
+disk.img: userland/test_copy_user.elf
+disk.img: userland/test_pcp_pmm.elf
+disk.img: userland/test_ticket_lock.elf
+disk.img: userland/test_fb_perf.elf
 disk.img: userland/test_vdso_bench.elf
 disk.img: userland/test_lazy_fpu.elf
 disk.img: userland/test_heap_smp.elf
 disk.img: userland/test_dcache.elf
+disk.img: userland/test_uaccess_bench.elf
 disk.img: userland/proc_bench.elf
+
 
 
 
@@ -576,6 +605,14 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 		echo "write userland/test_hugepages.elf bin/test_hugepages"; \
 		echo "rm bin/test_zero_page"; \
 		echo "write userland/test_zero_page.elf bin/test_zero_page"; \
+		echo "rm bin/test_copy_user"; \
+		echo "write userland/test_copy_user.elf bin/test_copy_user"; \
+		echo "rm bin/test_pcp_pmm"; \
+		echo "write userland/test_pcp_pmm.elf bin/test_pcp_pmm"; \
+		echo "rm bin/test_ticket_lock"; \
+		echo "write userland/test_ticket_lock.elf bin/test_ticket_lock"; \
+		echo "rm bin/test_fb_perf"; \
+		echo "write userland/test_fb_perf.elf bin/test_fb_perf"; \
 		echo "rm bin/test_vdso_bench"; \
 		echo "write userland/test_vdso_bench.elf bin/test_vdso_bench"; \
 		echo "rm bin/test_lazy_fpu"; \
@@ -584,6 +621,8 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 		echo "write userland/test_heap_smp.elf bin/test_heap_smp"; \
 		echo "rm bin/test_dcache"; \
 		echo "write userland/test_dcache.elf bin/test_dcache"; \
+		echo "rm bin/test_uaccess_bench"; \
+		echo "write userland/test_uaccess_bench.elf bin/test_uaccess_bench"; \
 		echo "rm bin/test_readahead"; \
 		echo "write userland/test_readahead.elf bin/test_readahead"; \
 		echo "rm bin/proc_bench"; \
@@ -846,10 +885,15 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 		echo "set_inode_field bin/test_accounts mode 0100755"; \
 		echo "set_inode_field bin/test_hugepages mode 0100755"; \
 		echo "set_inode_field bin/test_zero_page mode 0100755"; \
+		echo "set_inode_field bin/test_copy_user mode 0100755"; \
+		echo "set_inode_field bin/test_pcp_pmm mode 0100755"; \
+		echo "set_inode_field bin/test_ticket_lock mode 0100755"; \
+		echo "set_inode_field bin/test_fb_perf mode 0100755"; \
 		echo "set_inode_field bin/test_vdso_bench mode 0100755"; \
 		echo "set_inode_field bin/test_lazy_fpu mode 0100755"; \
 		echo "set_inode_field bin/test_heap_smp mode 0100755"; \
 		echo "set_inode_field bin/test_dcache mode 0100755"; \
+		echo "set_inode_field bin/test_uaccess_bench mode 0100755"; \
 		echo "set_inode_field bin/test_readahead mode 0100755"; \
 		echo "set_inode_field home/avory uid 1000"; \
 		echo "set_inode_field home/avory gid 1000"; \
@@ -860,13 +904,12 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 
 
 
+
 	@echo "Creating partitioned disk image (MBR)..."
 	dd if=/dev/zero of=disk.img bs=1M count=2048
-	parted -s disk.img mklabel msdos
-	parted -s disk.img mkpart primary ext3 1MiB 100%
-	parted -s disk.img set 1 boot on
+	echo '2048,,L,*' | sfdisk disk.img >/dev/null 2>&1 || (parted -s disk.img mklabel msdos && parted -s disk.img mkpart primary ext3 1MiB 100% && parted -s disk.img set 1 boot on)
 	dd if=./part.img of=disk.img bs=1M seek=1 conv=notrunc
-	rm ./part.img
+	rm -f ./part.img
 	@touch disk.img
 
 edk2-ovmf:
@@ -1145,6 +1188,22 @@ userland/test_zero_page.elf: userland/test_zero_page.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/test_zero_page.c -o userland/test_zero_page.elf
 
+userland/test_copy_user.elf: userland/test_copy_user.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_copy_user.c -o userland/test_copy_user.elf
+
+userland/test_pcp_pmm.elf: userland/test_pcp_pmm.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_pcp_pmm.c -o userland/test_pcp_pmm.elf -lpthread -lm
+
+userland/test_ticket_lock.elf: userland/test_ticket_lock.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_ticket_lock.c -o userland/test_ticket_lock.elf -lpthread -lm
+
+userland/test_fb_perf.elf: userland/test_fb_perf.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_fb_perf.c -o userland/test_fb_perf.elf -lpthread -lm
+
 userland/test_vdso_bench.elf: userland/test_vdso_bench.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/test_vdso_bench.c -o userland/test_vdso_bench.elf
@@ -1161,7 +1220,12 @@ userland/test_dcache.elf: userland/test_dcache.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/test_dcache.c -o userland/test_dcache.elf
 
+userland/test_uaccess_bench.elf: userland/test_uaccess_bench.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_uaccess_bench.c -o userland/test_uaccess_bench.elf
+
 userland/test_readahead.elf: userland/test_readahead.c $(MUSL_LIBC)
+
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/test_readahead.c -o userland/test_readahead.elf
 
@@ -1208,42 +1272,3 @@ userland/terrain.png: userland/texpacks/classicube.zip
 	cd userland && unzip -o texpacks/classicube.zip terrain.png
 
 .PHONY: all qemu clean
-
-# ── addr2line helper ──────────────────────────────────────────────────────────
-# Resolve one or more kernel addresses from the serial log to source locations.
-#
-# Usage:
-#   make addr2line ADDRS="0xffffffff80012abc 0xffffffff80034def"
-#
-# Or pipe addresses extracted from the log directly:
-#   grep -oP '(?<=caller=|TRACE #\d\] )0x[0-9A-Fa-f]+' serial.log | \
-#       xargs make addr2line ADDRS=
-#
-# The kernel binary keeps full DWARF info (-g) so addr2line gives exact
-# file:line and function name for every address.
-KERNEL_BIN := kernel/bin-x86_64/kernel
-ADDRS ?=
-
-.PHONY: addr2line
-addr2line:
-	@if [ -z "$(ADDRS)" ]; then \
-		echo "Usage: make addr2line ADDRS=\"0xffffffff80012abc 0xffffffff80034def\""; \
-		echo ""; \
-		echo "Quick extract from serial.log:"; \
-		echo "  grep -oP '(?<=caller=|\\[TRACE #[0-9]+\\] )0x[0-9A-Fa-f]+' serial.log | sort -u | xargs -I{} make addr2line ADDRS={}"; \
-		exit 0; \
-	fi
-	@echo "=== addr2line: $(KERNEL_BIN) ==="
-	@for addr in $(ADDRS); do \
-		echo -n "$$addr  ->  "; \
-		addr2line -e $(KERNEL_BIN) -f -p "$$addr" 2>/dev/null || echo "(not found)"; \
-	done
-
-# Convenience: extract ALL [HERE]/[TRACE] addresses from serial.log and resolve them
-.PHONY: resolve-log
-resolve-log:
-	@echo "=== Resolving all [HERE]/[TRACE] addresses from serial.log ==="
-	@grep -oP '(?<=(caller=|\] ))0x[0-9A-Fa-f]+' serial.log 2>/dev/null | sort -u | while read addr; do \
-		echo -n "$$addr  ->  "; \
-		addr2line -e $(KERNEL_BIN) -f -p "$$addr" 2>/dev/null || echo "(not found)"; \
-	done

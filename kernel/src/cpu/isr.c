@@ -6,6 +6,7 @@
 #include "../mm/vmm.h"
 #include "../sched/sched.h"
 #include "apic/lapic.h"
+#include "arch/x86_64/extable.h"
 #include "fault.h"
 #include "fpu.h"
 #include "msr.h"
@@ -747,6 +748,9 @@ static void page_fault_handler(struct registers *regs) {
       klog_puts("[VMM] User-mode fault could not be handled by paging engine.\n");
       isr_report_user_fault(regs, SIGSEGV, cr2);
     } else {
+      if (extable_fixup(regs)) {
+        return;
+      }
       klog_puts("[VMM] KERNEL-mode fault could not be handled by paging engine!\n");
       isr_panic(regs, "Unhandled Kernel Page Fault");
     }

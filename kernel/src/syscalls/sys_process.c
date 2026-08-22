@@ -7,9 +7,11 @@
 #include "../drivers/timer/rtc.h"
 #include "../lib/string.h"
 #include "../mm/heap.h"
+#include "../mm/pcid.h"
 #include "../mm/pmm.h"
 #include "../mm/vma.h"
 #include "../mm/vmm.h"
+
 #include "../sched/sched.h"
 #include "../smp/cpu.h"
 #include "sys_io_shared.h"
@@ -826,6 +828,7 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
 
     vma_list_init(&new_mm->vmas);
     new_mm->ref_count = 1;
+    new_mm->pcid = pcid_alloc();
     new_mm->brk_base = 0;
     new_mm->brk_current = 0;
     new_mm->mmap_next_addr = MMAP_REGION_BASE;
@@ -860,8 +863,13 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
       // ENOEXEC (including a #! script) must leave the caller on the original
       // address space with its program break intact.
       struct mm_struct *failed_mm = current->mm;
+      if (failed_mm->pcid) {
+        pcid_free(failed_mm->pcid);
+        failed_mm->pcid = 0;
+      }
       vma_list_destroy(&failed_mm->vmas);
       kfree(failed_mm);
+
 
       current->mm = old_mm;
       spinlock_acquire(&old_mm->lock);
@@ -1077,6 +1085,7 @@ uint64_t sys_fork(struct syscall_regs *regs) {
   child->priority = parent->static_priority;
   child->static_priority = parent->static_priority;
   child->nice_value = parent->nice_value;
+  eevfd_set_nice(&child->se, (int)child->nice_value);
   child->tgid = child->tid; // Fork creates a new process (new thread group)
 
   // 6. Copy file descriptors from parent to child (with reference counting)
@@ -1104,8 +1113,10 @@ uint64_t sys_fork(struct syscall_regs *regs) {
       child->mm->brk_current = parent->mm->brk_current;
       child->mm->mmap_next_addr = parent->mm->mmap_next_addr;
       child->mm->ref_count = 1;
+      child->mm->pcid = pcid_alloc();
       spinlock_init(&child->mm->lock);
     }
+
     memcpy(child->cwd_path, parent->cwd_path, sizeof(child->cwd_path));
     // sched_create_kernel_thread() already inherited and referenced the
     // parent's CWD. Do not take a second, unmatched reference here.
@@ -1198,6 +1209,7 @@ static uint64_t sys_clone_internal(struct syscall_regs *regs, uint64_t flags,
     child_mm->brk_current = parent->mm->brk_current;
     child_mm->mmap_next_addr = parent->mm->mmap_next_addr;
     child_mm->ref_count = 1;
+    child_mm->pcid = pcid_alloc();
     spinlock_init(&child_mm->lock);
   }
 
@@ -1206,6 +1218,10 @@ static uint64_t sys_clone_internal(struct syscall_regs *regs, uint64_t flags,
   if (!child) {
     if (private_mm) {
       vmm_free_user_pages_vma(child_cr3, &child_mm->vmas);
+      if (child_mm->pcid) {
+        pcid_free(child_mm->pcid);
+        child_mm->pcid = 0;
+      }
       vma_list_destroy(&child_mm->vmas);
       kfree(child_mm);
     }
@@ -1216,9 +1232,14 @@ static uint64_t sys_clone_internal(struct syscall_regs *regs, uint64_t flags,
   /* Replace the generic kernel-thread MM only after every clone-owned
    * allocation has succeeded. From this point initialization cannot fail. */
   if (child->mm) {
+    if (child->mm->pcid) {
+      pcid_free(child->mm->pcid);
+      child->mm->pcid = 0;
+    }
     vma_list_destroy(&child->mm->vmas);
     kfree(child->mm);
   }
+
   if (!private_mm)
     __atomic_add_fetch(&child_mm->ref_count, 1, __ATOMIC_ACQ_REL);
 
@@ -1231,6 +1252,7 @@ static uint64_t sys_clone_internal(struct syscall_regs *regs, uint64_t flags,
   child->priority = parent->static_priority;
   child->static_priority = parent->static_priority;
   child->nice_value = parent->nice_value;
+  eevfd_set_nice(&child->se, (int)child->nice_value);
   child->clone_flags = flags;
   child->tgid = (flags & CLONE_THREAD) ? parent->tgid : child->tid;
   child->fs_base = (flags & CLONE_SETTLS) ? newtls : parent->fs_base;

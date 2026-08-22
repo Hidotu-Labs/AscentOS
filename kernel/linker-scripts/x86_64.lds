@@ -27,6 +27,10 @@ SECTIONS {
 
     .rodata : {
         *(.rodata .rodata.*)
+        . = ALIGN(8);
+        __start___ex_table = .;
+        KEEP(*(__ex_table))
+        __stop___ex_table = .;
     } :rodata
 
     . = ALIGN(0x1000);

@@ -1,8 +1,40 @@
 #include "features.h"
 #include "msr.h"
 #include <stdint.h>
+#include <stdbool.h>
 
 #define IA32_PAT_MSR 0x277
+
+static inline void cpuid(uint32_t leaf, uint32_t subleaf, uint32_t *eax,
+                         uint32_t *ebx, uint32_t *ecx, uint32_t *edx) {
+  uint32_t a = 0, b = 0, c = 0, d = 0;
+  __asm__ volatile("cpuid"
+                   : "=a"(a), "=b"(b), "=c"(c), "=d"(d)
+                   : "a"(leaf), "c"(subleaf)
+                   : "memory");
+  if (eax) *eax = a;
+  if (ebx) *ebx = b;
+  if (ecx) *ecx = c;
+  if (edx) *edx = d;
+}
+
+bool cpu_has_pcid(void) {
+  uint32_t eax = 0, ebx = 0, ecx = 0, edx = 0;
+  cpuid(1, 0, &eax, &ebx, &ecx, &edx);
+  return (ecx & (1U << 17)) != 0; // CPUID.01H:ECX.PCID[bit 17]
+}
+
+bool cpu_has_invpcid(void) {
+  uint32_t max_leaf = 0, ebx = 0, ecx = 0, edx = 0;
+  cpuid(0, 0, &max_leaf, &ebx, &ecx, &edx);
+  if (max_leaf < 7)
+    return false;
+
+  uint32_t eax = 0;
+  cpuid(7, 0, &eax, &ebx, &ecx, &edx);
+  return (ebx & (1U << 10)) != 0; // CPUID.07H:EBX.INVPCID[bit 10]
+}
+
 
 // Set up PAT (Page Attribute Table) to define memory types.
 // We configure PA7 to be Write-Combining (01h).
@@ -15,22 +47,27 @@ static void cpu_pat_init(void) {
   wrmsr(IA32_PAT_MSR, pat);
 }
 
-// Enable SSE/SSE2 for ring 3 (musl/gcc use XMM for string/memory ops). Without
-// CR4.OSFXSR, executing those instructions raises #UD (Invalid Opcode).
-
+// Enable SSE/SSE2 and PCID for long mode execution.
 void cpu_features_init(void) {
   uint64_t cr0;
   __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
   cr0 &= ~(1ULL << 2); // EM — no x87 emulation
-  cr0 |= (1ULL << 1); // MP — monitor coprocessor (with TS, matches PC behavior)
+  cr0 |= (1ULL << 1);  // MP — monitor coprocessor (with TS, matches PC behavior)
   __asm__ volatile("mov %0, %%cr0" : : "r"(cr0) : "memory");
 
   uint64_t cr4;
   __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
   cr4 |= (1ULL << 9);  // OSFXSR — allow FXSAVE/FXRSTOR + SSE in user mode
   cr4 |= (1ULL << 10); // OSXMMEXCPT — #XF for unmasked SIMD exceptions
+
+  // Enable PCID (Process-Context Identifiers) if supported by the CPU
+  if (cpu_has_pcid()) {
+    cr4 |= (1ULL << 17); // CR4.PCIDE (bit 17)
+  }
+
   __asm__ volatile("mov %0, %%cr4" : : "r"(cr4) : "memory");
 
   __asm__ volatile("fninit");
   cpu_pat_init();
 }
+

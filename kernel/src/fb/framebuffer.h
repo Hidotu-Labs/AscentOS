@@ -79,6 +79,8 @@ void fb_init(struct limine_framebuffer *framebuffer);
 void fb_put_pixel(uint32_t x, uint32_t y, uint32_t color);
 void fb_fill_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                   uint32_t color);
+void fb_copy_rect(uint32_t dst_x, uint32_t dst_y, uint32_t src_x,
+                  uint32_t src_y, uint32_t w, uint32_t h);
 void fb_clear(uint32_t color);
 void fb_draw_glyph_scanline(uint32_t x, uint32_t y, uint8_t bits, uint32_t fg,
                             uint32_t bg);

@@ -4,6 +4,7 @@
 #include "console/klog.h"
 #include "mm/heap.h"
 #include "lib/string.h"
+#include "arch/uaccess.h"
 
 uint32_t ext4_read_impl(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
     ext2_mount_t *mnt = (ext2_mount_t *)node->device;
@@ -31,10 +32,21 @@ uint32_t ext4_read_impl(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_
 
         uint32_t disk_block = ext4_get_block_num(mnt, &inode, lblock);
         if (disk_block == 0) {
-            memset(buffer + bytes_read, 0, to_copy);
+            if (is_user_ptr((uint64_t)buffer))
+                clear_user(buffer + bytes_read, to_copy);
+            else
+                memset(buffer + bytes_read, 0, to_copy);
         } else {
             ext2_read_block(mnt, disk_block, block_buf);
-            memcpy(buffer + bytes_read, block_buf + off_in, to_copy);
+            if (is_user_ptr((uint64_t)buffer)) {
+                unsigned long uncopied = copy_to_user(buffer + bytes_read, block_buf + off_in, to_copy);
+                if (uncopied > 0) {
+                    bytes_read += (to_copy - (uint32_t)uncopied);
+                    break;
+                }
+            } else {
+                memcpy(buffer + bytes_read, block_buf + off_in, to_copy);
+            }
         }
         bytes_read += to_copy;
     }
@@ -89,7 +101,16 @@ uint32_t ext4_write_impl(vfs_node_t *node, uint32_t offset, uint32_t size, uint8
                 break;
         }
 
-        memcpy(block_buf + in_block, buffer + bytes_written, count);
+        if (is_user_ptr((uint64_t)buffer)) {
+            unsigned long uncopied = copy_from_user(block_buf + in_block, buffer + bytes_written, count);
+            if (uncopied > 0) {
+                bytes_written += (count - (uint32_t)uncopied);
+                ext2_write_block(mnt, disk_block, block_buf);
+                break;
+            }
+        } else {
+            memcpy(block_buf + in_block, buffer + bytes_written, count);
+        }
         if (ext2_write_block(mnt, disk_block, block_buf) != 0) {
             klog_puts("[EXT4] data write failed inode=");
             klog_uint64(node->inode);

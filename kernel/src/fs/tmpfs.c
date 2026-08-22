@@ -4,6 +4,7 @@
 #include "../lib/string.h"
 #include "../mm/heap.h"
 #include "../mm/pmm.h"
+#include "arch/uaccess.h"
 
 #define PHYS_TO_VIRT(p) ((void *)((uint64_t)(p) + pmm_get_hhdm_offset()))
 #define PAGE_SIZE 4096
@@ -163,11 +164,23 @@ static uint32_t tmpfs_read(vfs_node_t *node, uint32_t offset, uint32_t size,
         tmpfs_page_t *pg = tmpfs_get_page(file, page_index);
         if (!pg) {
             spinlock_release(&file->lock);
-            memset(buffer + done, 0, chunk);
+            if (is_user_ptr((uint64_t)buffer))
+                clear_user(buffer + done, chunk);
+            else
+                memset(buffer + done, 0, chunk);
         } else {
             uint8_t *virt = (uint8_t *)PHYS_TO_VIRT(pg->phys);
-            memcpy(buffer + done, virt + page_off, chunk);
-            spinlock_release(&file->lock);
+            if (is_user_ptr((uint64_t)buffer)) {
+                unsigned long uncopied = copy_to_user(buffer + done, virt + page_off, chunk);
+                spinlock_release(&file->lock);
+                if (uncopied > 0) {
+                    done += (chunk - (uint32_t)uncopied);
+                    break;
+                }
+            } else {
+                memcpy(buffer + done, virt + page_off, chunk);
+                spinlock_release(&file->lock);
+            }
         }
         done += chunk;
     }
@@ -194,7 +207,15 @@ static uint32_t tmpfs_write(vfs_node_t *node, uint32_t offset, uint32_t size,
             break;
 
         uint8_t *virt = (uint8_t *)PHYS_TO_VIRT(pg->phys);
-        memcpy(virt + page_off, buffer + done, chunk);
+        if (is_user_ptr((uint64_t)buffer)) {
+            unsigned long uncopied = copy_from_user(virt + page_off, buffer + done, chunk);
+            if (uncopied > 0) {
+                done += (chunk - (uint32_t)uncopied);
+                break;
+            }
+        } else {
+            memcpy(virt + page_off, buffer + done, chunk);
+        }
         done += chunk;
     }
 

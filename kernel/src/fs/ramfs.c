@@ -3,6 +3,7 @@
 #include "../lib/string.h"
 #include "../mm/heap.h"
 #include "../mm/pmm.h"
+#include "arch/uaccess.h"
 
 static uint32_t next_inode = 1;
 
@@ -53,7 +54,15 @@ uint32_t ramfs_read(vfs_node_t *node, uint32_t offset, uint32_t size,
     size = node->length - offset;
   }
 
-  memcpy(buffer, file->data + offset, size);
+  if (is_user_ptr((uint64_t)buffer)) {
+    unsigned long uncopied = copy_to_user(buffer, file->data + offset, size);
+    if (uncopied > 0) {
+      uint32_t copied = size - (uint32_t)uncopied;
+      return copied > 0 ? copied : (uint32_t)-14;
+    }
+  } else {
+    memcpy(buffer, file->data + offset, size);
+  }
   return size;
 }
 
@@ -83,7 +92,18 @@ uint32_t ramfs_write(vfs_node_t *node, uint32_t offset, uint32_t size,
     file->data_is_pmm = 0;
   }
 
-  memcpy(file->data + offset, buffer, size);
+  if (is_user_ptr((uint64_t)buffer)) {
+    unsigned long uncopied = copy_from_user(file->data + offset, buffer, size);
+    if (uncopied > 0) {
+      uint32_t copied = size - (uint32_t)uncopied;
+      if (offset + copied > node->length) {
+        node->length = offset + copied;
+      }
+      return copied > 0 ? copied : (uint32_t)-14;
+    }
+  } else {
+    memcpy(file->data + offset, buffer, size);
+  }
   if (offset + size > node->length) {
     node->length = offset + size;
   }

@@ -1,6 +1,7 @@
 #include "ext2_internal.h"
 #include "mm/vmm.h"
 #include "syscalls/syscall.h"
+#include "arch/uaccess.h"
 
 uint32_t ext2_read_impl(vfs_node_t *node, uint32_t offset, uint32_t size,
                         uint8_t *buffer) {
@@ -32,10 +33,21 @@ uint32_t ext2_read_impl(vfs_node_t *node, uint32_t offset, uint32_t size,
 
     uint32_t disk_block = ext2_get_block_num(mnt, &inode, logical_block);
     if (disk_block == 0) {
-      memset(buffer + bytes_read, 0, to_copy);
+      if (is_user_ptr((uint64_t)buffer))
+        clear_user(buffer + bytes_read, to_copy);
+      else
+        memset(buffer + bytes_read, 0, to_copy);
     } else {
       ext2_read_block(mnt, disk_block, block_buf);
-      memcpy(buffer + bytes_read, block_buf + offset_in_block, to_copy);
+      if (is_user_ptr((uint64_t)buffer)) {
+        unsigned long uncopied = copy_to_user(buffer + bytes_read, block_buf + offset_in_block, to_copy);
+        if (uncopied > 0) {
+          bytes_read += (to_copy - (uint32_t)uncopied);
+          break;
+        }
+      } else {
+        memcpy(buffer + bytes_read, block_buf + offset_in_block, to_copy);
+      }
     }
 
     bytes_read += to_copy;
@@ -96,7 +108,16 @@ uint32_t ext2_write_impl(vfs_node_t *node, uint32_t offset, uint32_t size,
       ext2_read_block(mnt, disk_block, block_buf);
     }
 
-    memcpy(block_buf + offset_in_block, buffer + bytes_written, to_write);
+    if (is_user_ptr((uint64_t)buffer)) {
+      unsigned long uncopied = copy_from_user(block_buf + offset_in_block, buffer + bytes_written, to_write);
+      if (uncopied > 0) {
+        bytes_written += (to_write - (uint32_t)uncopied);
+        ext2_write_block(mnt, disk_block, block_buf);
+        break;
+      }
+    } else {
+      memcpy(block_buf + offset_in_block, buffer + bytes_written, to_write);
+    }
     ext2_write_block(mnt, disk_block, block_buf);
 
     bytes_written += to_write;

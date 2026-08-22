@@ -4,6 +4,7 @@
 #include "../apic/lapic_timer.h"
 #include "../console/console.h"
 #include "../console/klog.h"
+#include "../cpu/features.h"
 #include "../cpu/fpu.h"
 #include "../cpu/idt.h"
 #include "../cpu/msr.h"
@@ -11,9 +12,11 @@
 #include "../lib/string.h"
 #include "../lock/spinlock.h"
 #include "../mm/heap.h"
+#include "../mm/pcid.h"
 #include "../mm/pmm.h"
 #include "../mm/vmm.h"
 #include "../smp/cpu.h"
+
 
 
 // Futex waiter records are stack-resident and must be detached before a
@@ -248,11 +251,6 @@ static void sched_deadline_insert_locked(struct cpu_info *cpu,
   t->deadline_queued = true;
 }
 
-static void sched_runqueue_append_locked(struct cpu_info *cpu,
-                                         struct thread *t, uint8_t priority);
-static bool sched_runqueue_remove_locked(struct cpu_info *cpu,
-                                         struct thread *t);
-
 static void sched_deadline_expire_locked(struct cpu_info *cpu, uint64_t now) {
   while (cpu->deadline_head && cpu->deadline_head->wakeup_ticks <= now) {
     struct thread *t = cpu->deadline_head;
@@ -266,8 +264,9 @@ static void sched_deadline_expire_locked(struct cpu_info *cpu, uint64_t now) {
       t->wakeup_ticks = 0;
       t->ready_since_ms = still_current ? 0 : now;
       if (!still_current) {
-        t->priority = t->static_priority;
-        sched_runqueue_append_locked(cpu, t, t->priority);
+        eevfd_place_entity(&cpu->eevfd, &t->se, false);
+        eevfd_enqueue_entity(&cpu->eevfd, &t->se);
+        t->on_runqueue = true;
         cpu->runnable_count++;
       }
     } else {
@@ -281,7 +280,10 @@ static void sched_arm_next_deadline(struct cpu_info *cpu,
   uint64_t now = lapic_timer_get_ms();
   uint64_t deadline = 0;
   if (next_t && !next_t->is_idle) {
-    cpu->quantum_deadline_ms = now + LAPIC_SCHED_QUANTUM_MS;
+    /* Ceiling division: round up to avoid firing late */
+    uint64_t slice_ms = (next_t->se.slice_ns + 999999ULL) / 1000000ULL;
+    if (slice_ms < 1) slice_ms = 1;
+    cpu->quantum_deadline_ms = now + slice_ms;
     deadline = cpu->quantum_deadline_ms;
   } else {
     cpu->quantum_deadline_ms = 0;
@@ -290,109 +292,6 @@ static void sched_arm_next_deadline(struct cpu_info *cpu,
       (!deadline || cpu->deadline_head->wakeup_ticks < deadline))
     deadline = cpu->deadline_head->wakeup_ticks;
   if (deadline) lapic_timer_rearm_if_earlier(deadline);
-}
-
-
-/* All run-queue helpers require cpu->queue_lock. */
-static void sched_runqueue_append_locked(struct cpu_info *cpu,
-                                         struct thread *t, uint8_t priority) {
-  if (t->on_runqueue || priority >= SCHED_PRIORITY_LEVELS ||
-      (t->state != THREAD_READY && t->state != THREAD_RUNNING)) return;
-  struct thread *head = cpu->runqueues[priority];
-  struct thread *tail = cpu->runqueue_tails[priority];
-  if (!head) {
-    cpu->runqueues[priority] = t;
-    cpu->runqueue_tails[priority] = t;
-    t->rq_next = t;
-    t->rq_prev = t;
-  } else {
-    t->rq_prev = tail;
-    t->rq_next = head;
-    tail->rq_next = t;
-    head->rq_prev = t;
-    cpu->runqueue_tails[priority] = t;
-  }
-  t->on_runqueue = true;
-  t->queued_priority = priority;
-  t->priority = priority;
-  if (t->state == THREAD_READY || t->state == THREAD_RUNNING)
-    cpu->runqueue_bitmap |= (1U << priority);
-}
-
-static bool sched_runqueue_remove_locked(struct cpu_info *cpu,
-                                         struct thread *t) {
-  if (!t->on_runqueue || t->cpu_index != cpu->cpu_id ||
-      t->queued_priority >= SCHED_PRIORITY_LEVELS ||
-      !t->rq_next || !t->rq_prev)
-    return false;
-  uint8_t p = t->queued_priority;
-  if (cpu->runqueues[p] == t && t->rq_next == t) {
-    cpu->runqueues[p] = NULL;
-    cpu->runqueue_tails[p] = NULL;
-    cpu->runqueue_bitmap &= ~(1U << p);
-  } else {
-    t->rq_prev->rq_next = t->rq_next;
-    t->rq_next->rq_prev = t->rq_prev;
-    if (cpu->runqueues[p] == t) cpu->runqueues[p] = t->rq_next;
-    if (cpu->runqueue_tails[p] == t) cpu->runqueue_tails[p] = t->rq_prev;
-  }
-  t->rq_next = NULL;
-  t->rq_prev = NULL;
-  t->on_runqueue = false;
-  t->queued_priority = SCHED_PRIORITY_LEVELS;
-  return true;
-}
-
-static bool sched_requeue_priority_locked(struct cpu_info *cpu,
-                                          struct thread *t,
-                                          uint8_t new_priority) {
-  if (t->priority == new_priority && t->on_runqueue) return true;
-  if (!sched_runqueue_remove_locked(cpu, t)) return false;
-  sched_runqueue_append_locked(cpu, t, new_priority);
-  return true;
-}
-
-static void sched_age_runqueues_locked(struct cpu_info *cpu, uint64_t now) {
-  if (now < cpu->next_aging_scan_ms) return;
-  cpu->next_aging_scan_ms = now + SCHED_AGING_SCAN_INTERVAL_MS;
-  for (uint8_t p = 1; p < SCHED_PRIORITY_LEVELS; p++) {
-    struct thread *head = cpu->runqueues[p];
-    if (!head) continue;
-    struct thread *it = head;
-    uint32_t count = 1;
-    while ((it = it->rq_next) != head) count++;
-    it = head;
-    while (count--) {
-      struct thread *next = it->rq_next;
-      if (it->state == THREAD_READY && it->ready_since_ms && now > it->ready_since_ms) {
-        uint64_t boost = (now - it->ready_since_ms) / SCHED_AGING_STEP_MS;
-        uint8_t target = boost >= it->static_priority ? 0 :
-                         (uint8_t)(it->static_priority - boost);
-        if (target < it->priority) sched_requeue_priority_locked(cpu, it, target);
-      }
-      it = next;
-    }
-  }
-}
-
-__attribute__((optimize("O3"))) static struct thread *sched_pick_next_locked(struct cpu_info *cpu) {
-  while (cpu->runqueue_bitmap) {
-    uint8_t p = (uint8_t)__builtin_ctz(cpu->runqueue_bitmap);
-    struct thread *head = cpu->runqueues[p];
-    if (!head) {
-      cpu->runqueue_bitmap &= ~(1U << p);
-      continue;
-    }
-    if (head->state != THREAD_READY && head->state != THREAD_RUNNING) {
-      sched_runqueue_remove_locked(cpu, head);
-      if (cpu->runnable_count) cpu->runnable_count--;
-      continue;
-    }
-    cpu->runqueues[p] = head->rq_next;
-    cpu->runqueue_tails[p] = head;
-    return head;
-  }
-  return NULL;
 }
 
 // Global list of all threads (for wait4)
@@ -407,21 +306,12 @@ void sched_init(void) {
 
   for (uint32_t i = 0; i < count; i++) {
     struct cpu_info *cpu = cpu_get_info(i);
-    // Initialize AP scheduler state before cpu_init_aps() starts its timer.
     if (!cpu)
       continue;
 
     spinlock_init(&cpu->queue_lock);
-
-    // Initialize all runqueues
-    for (int p = 0; p < SCHED_PRIORITY_LEVELS; p++) {
-      cpu->runqueues[p] = NULL;
-      cpu->runqueue_tails[p] = NULL;
-    }
-    cpu->runqueue_bitmap = 0;
+    eevfd_rq_init(&cpu->eevfd);
     cpu->deadline_head = NULL;
-    cpu->next_aging_scan_ms = lapic_timer_get_ms() +
-                              SCHED_AGING_SCAN_INTERVAL_MS;
 
     // Register reschedule IPI handler once on BSP
     if (i == 0) {
@@ -435,27 +325,27 @@ void sched_init(void) {
     idle_thread->cwd_node = fs_root;
     if (fs_root)
       vfs_open(fs_root);
+
     // Assign a proper TID to the idle thread (don't use 0)
     spinlock_acquire(&tid_lock);
     idle_thread->tid = next_tid++;
     spinlock_release(&tid_lock);
-    idle_thread->tgid =
-        idle_thread->tid;               // Each process is its own group leader
-    idle_thread->ss_flags = SS_DISABLE; // No alternate signal stack by default
+    idle_thread->tgid = idle_thread->tid;
+    idle_thread->ss_flags = SS_DISABLE;
     idle_thread->is_idle = true;
     idle_thread->pgid = idle_thread->tid;
     idle_thread->state = THREAD_RUNNING;
 
-    // Idle thread always at lowest priority
+    // Idle thread initialized with nice 19 (lowest priority)
+    eevfd_entity_init(&idle_thread->se, 19, EEVFD_MAX_SLICE_NS);
     idle_thread->priority = SCHED_PRIORITY_IDLE;
     idle_thread->static_priority = SCHED_PRIORITY_IDLE;
-    idle_thread->time_slice = 100; // Large slice for idle
+    idle_thread->nice_value = 19;
+    idle_thread->time_slice = 100;
     idle_thread->runtime_total = 0;
     idle_thread->runtime_burst = 0;
     strcpy(idle_thread->comm, "idle");
 
-    // Idle threads don't really use user MM, but give them a stub to avoid NULL
-    // derefs
     idle_thread->mm = kmalloc(sizeof(struct mm_struct));
     if (idle_thread->mm) {
       memset(idle_thread->mm, 0, sizeof(struct mm_struct));
@@ -466,42 +356,35 @@ void sched_init(void) {
 
     idle_thread->stack_size = CPU_STACK_SIZE;
     idle_thread->stack_base = cpu->stack_top - CPU_STACK_SIZE;
-
-    // Idle threads have no parent
     idle_thread->parent = NULL;
 
     spinlock_acquire(&tid_lock);
     idle_thread->global_next = global_thread_list;
     global_thread_list = idle_thread;
-    // Do NOT enqueue the idle thread; it's handled specially by sched_yield
     cpu->idle_thread = idle_thread;
     cpu->current_thread = idle_thread;
     idle_thread->cpu_affinity = (1ULL << count) - 1;
     if (count == 64)
       idle_thread->cpu_affinity = ~0ULL;
     spinlock_release(&tid_lock);
-
   }
 }
 
 static void thread_exit(void) {
-  // Current thread finished execution. Mark dead and yield.
   hal_irq_disable();
   struct cpu_info *cpu = cpu_get_current();
   if (cpu->current_thread) {
     cpu->current_thread->state = THREAD_DEAD;
   }
-  // Infinite loop, yield will switch away
   while (1) {
     sched_yield();
   }
 }
 
-void sched_enqueue_thread(struct thread *t, struct cpu_info *explicit_cpu) {
+__attribute__((optimize("O3"))) void sched_enqueue_thread(struct thread *t, struct cpu_info *explicit_cpu) {
   struct cpu_info *target_cpu = explicit_cpu;
 
   if (!target_cpu) {
-    // Intelligent Load Balancing: Pick the CPU with the fewest threads
     uint32_t min_threads = 0xFFFFFFFF;
     uint32_t count = cpu_get_count();
 
@@ -510,12 +393,9 @@ void sched_enqueue_thread(struct thread *t, struct cpu_info *explicit_cpu) {
       if (!cpu || cpu->status == CPU_STATUS_OFFLINE)
         continue;
 
-      // Skip if this CPU is not in the thread's affinity mask
       if (!(t->cpu_affinity & (1ULL << i)))
         continue;
 
-      // We don't necessarily need the lock here for a heuristic,
-      // but it's safer.
       if (cpu->runnable_count < min_threads) {
         min_threads = cpu->runnable_count;
         target_cpu = cpu;
@@ -523,7 +403,6 @@ void sched_enqueue_thread(struct thread *t, struct cpu_info *explicit_cpu) {
     }
   }
 
-  // Fallback just in case
   if (!target_cpu || target_cpu->status == CPU_STATUS_OFFLINE) {
     target_cpu = cpu_get_bsp();
   }
@@ -531,30 +410,26 @@ void sched_enqueue_thread(struct thread *t, struct cpu_info *explicit_cpu) {
   hal_irq_disable();
   spinlock_acquire(&target_cpu->queue_lock);
 
-  uint8_t p = t->priority;
-  if (p >= SCHED_PRIORITY_LEVELS)
-    p = SCHED_PRIORITY_DEFAULT;
-
-  if (t->on_runqueue) {
+  if (t->on_runqueue || t->se.on_rq) {
     spinlock_release(&target_cpu->queue_lock);
     hal_irq_enable();
     return;
   }
+
   t->ready_since_ms = lapic_timer_get_ms();
-  sched_runqueue_append_locked(target_cpu, t, p);
+  eevfd_place_entity(&target_cpu->eevfd, &t->se, (t->se.vruntime == 0));
+  eevfd_enqueue_entity(&target_cpu->eevfd, &t->se);
+  t->on_runqueue = true;
   if (t->state == THREAD_READY || t->state == THREAD_RUNNING)
     target_cpu->runnable_count++;
 
   t->cpu_index = target_cpu->cpu_id;
 
   struct thread *running = target_cpu->current_thread;
-  bool kick_cpu = running == target_cpu->idle_thread ||
-                  (running && t->priority <= running->priority);
+  bool kick_cpu = !running || running == target_cpu->idle_thread || running->is_idle ||
+                  eevfd_check_preempt(&target_cpu->eevfd, &running->se, &t->se);
   spinlock_release(&target_cpu->queue_lock);
 
-  /* One-shot mode has no periodic tick to notice newly runnable work. Ask
-   * the target CPU to reschedule promptly instead of making an interactive
-   * task wait for the running task's entire quantum. */
   if (kick_cpu && lapic_is_ready()) {
     struct cpu_info *self = cpu_get_current();
     if (target_cpu == self)
@@ -604,8 +479,10 @@ struct thread *sched_create_kernel_thread(void (*entry)(void),
     memset(t->mm, 0, sizeof(struct mm_struct));
     vma_list_init(&t->mm->vmas);
     t->mm->ref_count = 1;
+    t->mm->pcid = pcid_alloc();
     spinlock_init(&t->mm->lock);
   }
+
 
   uint32_t cpu_count = cpu_get_count();
   t->cpu_affinity = (1ULL << cpu_count) - 1;
@@ -613,6 +490,7 @@ struct thread *sched_create_kernel_thread(void (*entry)(void),
     t->cpu_affinity = ~0ULL;
 
   t->state = THREAD_READY;
+  eevfd_entity_init(&t->se, 0, EEVFD_BASE_SLICE_NS);
   t->priority = SCHED_PRIORITY_DEFAULT;
   t->static_priority = SCHED_PRIORITY_DEFAULT;
   t->nice_value = 0;
@@ -694,12 +572,12 @@ struct thread *sched_create_kernel_thread(void (*entry)(void),
   return t;
 }
 
-static void sched_balance(struct cpu_info *cpu) {
+__attribute__((optimize("O3"))) static void sched_balance(struct cpu_info *cpu) {
   uint32_t count = cpu_get_count();
   if (count <= 1)
     return;
 
-  // Find the CPU with the most threads.
+  // Find the CPU with highest load
   struct cpu_info *richest_cpu = NULL;
   uint32_t max_threads = 0;
 
@@ -708,63 +586,54 @@ static void sched_balance(struct cpu_info *cpu) {
     if (!other || other == cpu || other->status == CPU_STATUS_OFFLINE)
       continue;
 
-    if (other->runnable_count > max_threads) {
-      max_threads = other->runnable_count;
+    uint32_t nr = other->eevfd.nr_running;
+    if (nr > max_threads) {
+      max_threads = nr;
       richest_cpu = other;
     }
   }
 
-  // Only steal if the richest CPU actually has surplus threads (more than 1).
-  // Stealing the only thread might cause unnecessary migration or thrashing.
-  if (!richest_cpu || max_threads <= 1)
+  // Imbalance threshold: only steal if richest has 2+ more tasks than us
+  if (!richest_cpu || max_threads < 2 ||
+      (max_threads - cpu->eevfd.nr_running) < 2)
     return;
 
-  // Try to acquire the remote lock without blocking to avoid deadlocks.
   if (!spinlock_try_acquire(&richest_cpu->queue_lock))
     return;
 
-  // Find a READY thread to steal. Removal is O(1) once selected.
+  // Steal from RIGHTMOST (highest vruntime = most indebted task).
+  // This minimizes disruption to the source CPU's fairness.
   struct thread *stolen = NULL;
-  for (int p = 0; p < SCHED_PRIORITY_LEVELS && !stolen; p++) {
-    struct thread *head = richest_cpu->runqueues[p];
-    if (!head) continue;
-    struct thread *curr = head;
-    do {
-      struct thread *next = curr->rq_next;
-      if (curr->state == THREAD_READY && !curr->is_idle &&
-          curr != __atomic_load_n(&richest_cpu->current_thread,
-                                  __ATOMIC_ACQUIRE) &&
-          curr != __atomic_load_n(&richest_cpu->switching_from,
-                                  __ATOMIC_ACQUIRE) &&
-          (curr->cpu_affinity & (1ULL << cpu->cpu_id))) {
-        stolen = curr;
-        sched_runqueue_remove_locked(richest_cpu, curr);
+  struct rb_node *n = rb_last(&richest_cpu->eevfd.tasks_tree);
+  while (n) {
+    struct sched_entity *se = rb_entry(n, struct sched_entity, rb_node);
+    struct thread *curr = rb_entry(se, struct thread, se);
+    if (curr->state == THREAD_READY && !curr->is_idle &&
+        curr != __atomic_load_n(&richest_cpu->current_thread, __ATOMIC_ACQUIRE) &&
+        curr != __atomic_load_n(&richest_cpu->switching_from, __ATOMIC_ACQUIRE) &&
+        (curr->cpu_affinity & (1ULL << cpu->cpu_id))) {
+      stolen = curr;
+      eevfd_dequeue_entity(&richest_cpu->eevfd, &stolen->se);
+      stolen->on_runqueue = false;
+      if (richest_cpu->runnable_count)
         richest_cpu->runnable_count--;
-        break;
-      }
-      curr = next;
-    } while (curr != head);
+      break;
+    }
+    n = rb_prev(n);
+  }
+
+  if (stolen) {
+    stolen->cpu_index = cpu->cpu_id;
+    eevfd_migrate_entity(&richest_cpu->eevfd, &cpu->eevfd, &stolen->se);
+    eevfd_enqueue_entity(&cpu->eevfd, &stolen->se);
+    stolen->on_runqueue = true;
+    cpu->runnable_count++;
   }
 
   spinlock_release(&richest_cpu->queue_lock);
-
-  if (stolen) {
-    // Add to local runqueue in O(1).
-    stolen->cpu_index = cpu->cpu_id;
-    sched_runqueue_append_locked(cpu, stolen, stolen->priority);
-    cpu->runnable_count++;
-
-    klog_puts("[SCHED] CPU ");
-    klog_uint64(cpu->cpu_id);
-    klog_puts(" stole thread ");
-    klog_uint64(stolen->tid);
-    klog_puts(" from CPU ");
-    klog_uint64(richest_cpu->cpu_id);
-    klog_puts("\n");
-  }
 }
 
-void sched_yield(void) {
+__attribute__((optimize("O3"))) static void sched_schedule(bool voluntary_yield) {
   hal_irq_disable();
   struct cpu_info *cpu = cpu_get_current();
   if (!cpu->current_thread) {
@@ -774,38 +643,36 @@ void sched_yield(void) {
 
   struct thread *prev = cpu->current_thread;
 
-  // Reap detached threads from a different scheduler context. Never reap the
-  // current thread: it is still executing on the stack that will be freed.
-  // Only one CPU performs destructive reclamation at a time; queue
-  // publication remains concurrent.
-  if (spinlock_try_acquire(&reap_worker_lock)) {
-  while (1) {
-    struct thread *victim = NULL;
-    spinlock_acquire(&reap_queue_lock);
-    struct thread **link = &reap_queue;
-    while (*link) {
-      if (*link != prev && sched_thread_off_cpu(*link)) {
-        victim = *link;
-        *link = victim->reap_next;
-        victim->reap_next = NULL;
-        break;
+  // Reap detached threads from a different scheduler context.
+  if (__atomic_load_n(&reap_queue, __ATOMIC_RELAXED) != NULL &&
+      spinlock_try_acquire(&reap_worker_lock)) {
+    while (1) {
+      struct thread *victim = NULL;
+      spinlock_acquire(&reap_queue_lock);
+      struct thread **link = &reap_queue;
+      while (*link) {
+        if (*link != prev && sched_thread_off_cpu(*link)) {
+          victim = *link;
+          *link = victim->reap_next;
+          victim->reap_next = NULL;
+          break;
+        }
+        link = &(*link)->reap_next;
       }
-      link = &(*link)->reap_next;
-    }
-    spinlock_release(&reap_queue_lock);
+      spinlock_release(&reap_queue_lock);
 
-    if (!victim)
-      break;
-    sched_reap_thread(victim);
-  }
+      if (!victim)
+        break;
+      sched_reap_thread(victim);
+    }
     spinlock_release(&reap_worker_lock);
   }
 
   spinlock_acquire(&cpu->queue_lock);
 
-  /* Publish a newly requested timeout once, then wake only deadlines that are
-   * actually due. This replaces two full runqueue scans on every yield. */
-  uint64_t now = lapic_timer_get_ticks();
+  uint64_t now = lapic_timer_get_ms();
+  uint64_t now_ns = lapic_timer_get_ns();
+
   if ((prev->state == THREAD_SLEEPING || prev->state == THREAD_BLOCKED) &&
       prev->wakeup_ticks) {
     if (prev->wakeup_ticks <= now) {
@@ -816,51 +683,94 @@ void sched_yield(void) {
     }
   }
   sched_deadline_expire_locked(cpu, now);
-  sched_age_runqueues_locked(cpu, now);
 
-  // Keep only runnable threads on run queues. Timed sleepers remain on the
-  // deadline list and are re-enqueued when their timeout expires.
-  if (prev->state == THREAD_ZOMBIE || prev->state == THREAD_DEAD) {
-    sched_deadline_remove_locked(cpu, prev);
-    sched_runqueue_remove_locked(cpu, prev);
-    cpu->runnable_count--;
-  } else if (prev->state == THREAD_BLOCKED || prev->state == THREAD_SLEEPING) {
-    if (sched_runqueue_remove_locked(cpu, prev) && cpu->runnable_count)
-      cpu->runnable_count--;
+  /* Fast-path: single runnable task on this core. Zero tree overhead.
+   * Only applicable on non-voluntary preemption/ticks. */
+  if (!voluntary_yield && prev->state == THREAD_RUNNING && !prev->is_idle && cpu->eevfd.nr_running == 0) {
+    eevfd_update_curr(&cpu->eevfd, now_ns);
+    prev->runtime_total = prev->se.prev_sum_exec_ns / 1000000ULL;
+    sched_arm_next_deadline(cpu, prev);
+    spinlock_release(&cpu->queue_lock);
+    hal_irq_enable();
+    return;
   }
 
-  // 2. Select the highest effective-priority runnable thread.
-  struct thread *next_t = sched_pick_next_locked(cpu);
+  if (!prev->is_idle) {
+    eevfd_update_curr(&cpu->eevfd, now_ns);
+    prev->runtime_total = prev->se.prev_sum_exec_ns / 1000000ULL;
+    eevfd_put_prev_entity(&cpu->eevfd, &prev->se);
+  }
+
+  if (prev->state == THREAD_ZOMBIE || prev->state == THREAD_DEAD) {
+    sched_deadline_remove_locked(cpu, prev);
+    if (prev->se.on_rq) {
+      eevfd_dequeue_entity(&cpu->eevfd, &prev->se);
+      prev->on_runqueue = false;
+    }
+    if (cpu->runnable_count)
+      cpu->runnable_count--;
+  } else if (prev->state == THREAD_BLOCKED || prev->state == THREAD_SLEEPING) {
+    if (prev->se.on_rq) {
+      eevfd_dequeue_entity(&cpu->eevfd, &prev->se);
+      prev->on_runqueue = false;
+    }
+    if (cpu->runnable_count)
+      cpu->runnable_count--;
+  } else {
+    /* prev is still running or ready */
+    if (!prev->is_idle && !prev->se.on_rq) {
+      if (voluntary_yield) {
+        /* Linux yield_task_fair: advance vruntime so other waiting tasks run next */
+        if (cpu->eevfd.rb_leftmost) {
+          struct sched_entity *left = rb_entry(cpu->eevfd.rb_leftmost, struct sched_entity, rb_node);
+          if (prev->se.vruntime < left->vruntime + prev->se.slice_ns)
+            prev->se.vruntime = left->vruntime + prev->se.slice_ns;
+        }
+        prev->se.deadline = calc_deadline(prev->se.vruntime, prev->se.slice_ns, prev->se.weight, prev->se.wmult);
+        prev->se.min_deadline = prev->se.deadline;
+      } else {
+        /* Involuntary preemption/tick: only recalculate deadline if expired */
+        if (prev->se.deadline <= prev->se.vruntime) {
+          prev->se.deadline = calc_deadline(prev->se.vruntime, prev->se.slice_ns, prev->se.weight, prev->se.wmult);
+          prev->se.min_deadline = prev->se.deadline;
+        }
+      }
+      eevfd_enqueue_entity(&cpu->eevfd, &prev->se);
+      prev->on_runqueue = true;
+    }
+  }
+
+  // 2. Select earliest eligible virtual deadline task
+  struct sched_entity *next_se = eevfd_pick_next_entity(&cpu->eevfd);
+  struct thread *next_t = next_se ? rb_entry(next_se, struct thread, se) : NULL;
 
   // 2.5 Load Balancing (Work Stealing)
-  // If we found no READY thread on this CPU, try to steal one from others.
   if (!next_t) {
     sched_balance(cpu);
-    next_t = sched_pick_next_locked(cpu);
+    next_se = eevfd_pick_next_entity(&cpu->eevfd);
+    next_t = next_se ? rb_entry(next_se, struct thread, se) : NULL;
   }
 
   // 3. Perform the switch
   if (!next_t) {
     next_t = cpu->idle_thread;
   }
+
   if (next_t && !next_t->is_idle) {
     next_t->ready_since_ms = 0;
-    if (next_t->priority != next_t->static_priority)
-      sched_requeue_priority_locked(cpu, next_t, next_t->static_priority);
+    eevfd_set_next_entity(&cpu->eevfd, &next_t->se);
+    next_t->se.exec_start_ns = now_ns;
+    next_t->on_runqueue = false;
   }
 
   sched_arm_next_deadline(cpu, next_t);
 
   if (next_t && next_t != prev) {
-    if (prev->state == THREAD_RUNNING) {
+    if (!prev->is_idle && prev->state == THREAD_RUNNING) {
       prev->state = THREAD_READY;
       prev->ready_since_ms = now;
     }
     next_t->state = THREAD_RUNNING;
-    // current_thread must describe the arriving task before interrupts can
-    // run on it, but publishing it alone does not mean the old kernel stack
-    // is unused yet. Keep a separate hazard pointer until switch_context has
-    // actually loaded the new RSP. A remote reaper must check both fields.
     __atomic_store_n(&cpu->switching_from, prev, __ATOMIC_RELEASE);
     cpu->current_thread = next_t;
 
@@ -875,8 +785,7 @@ void sched_yield(void) {
       __asm__ volatile("mov %0, %%cr3" ::"r"(target_cr3) : "memory");
     }
 
-    /* arch_prctl and clone keep these cached fields authoritative. Reading
-     * both MSRs on every switch is redundant and especially costly in TCG. */
+
     if (prev->fs_base != next_t->fs_base)
       wrmsr(0xC0000100, next_t->fs_base);
     if (prev->gs_base != next_t->gs_base)
@@ -888,18 +797,12 @@ void sched_yield(void) {
     spinlock_release(&cpu->queue_lock);
   }
 
-  /*
-   * switch_context() returns on the incoming thread's kernel stack, which
-   * means the outgoing stack is no longer live.  Clear the handoff hazard
-   * published before the switch so reapers can eventually reclaim exited
-   * children.  Leaving this pointer set made sched_thread_off_cpu() regard
-   * every previously switched-out child as permanently on-CPU, causing
-   * wait4() to spin forever in sched_queue_reap_and_wait().
-   */
   __atomic_store_n(&cpu->switching_from, NULL, __ATOMIC_RELEASE);
-
-  // Only enable here if we are returning normally
   hal_irq_enable();
+}
+
+__attribute__((optimize("O3"))) void sched_yield(void) {
+  sched_schedule(true);
 }
 
 void sched_queue_reap(struct thread *t) {
@@ -919,11 +822,8 @@ void sched_queue_reap_and_wait(struct thread *t) {
   sched_queue_reap(t);
 
   for (;;) {
-    /* Give the exiting child a chance to switch off its kernel stack. */
     sched_yield();
 
-    /* Holding the worker lock also waits for a concurrent reaper that may
-     * already have removed and begun destroying this victim. */
     spinlock_acquire(&reap_worker_lock);
     spinlock_acquire(&reap_queue_lock);
     bool pending = false;
@@ -941,20 +841,16 @@ void sched_queue_reap_and_wait(struct thread *t) {
   }
 }
 
-void sched_tick(struct registers *regs) {
+__attribute__((optimize("O3"))) void sched_tick(struct registers *regs) {
   (void)regs;
   struct cpu_info *cpu = cpu_get_current();
   struct thread *curr = cpu->current_thread;
   if (curr) {
-    // Account elapsed runtime independently of interrupt frequency.
     uint64_t now = lapic_timer_get_ms();
-    uint64_t elapsed = cpu->ticks ? now - cpu->ticks : 0;
-    curr->runtime_total += elapsed;
+    uint64_t now_ns = lapic_timer_get_ns();
     cpu->ticks = now;
 
-    /* ITIMER_REAL is global and protected by tid_lock. Any CPU whose
-     * one-shot deadline fires may deliver an expired alarm. */
-    {
+    if (cpu == cpu_get_bsp()) {
       spinlock_acquire(&tid_lock);
       for (struct thread *t = global_thread_list; t; t = t->global_next) {
         if (t->it_real_next && now >= t->it_real_next) {
@@ -970,7 +866,40 @@ void sched_tick(struct registers *regs) {
       spinlock_release(&tid_lock);
     }
 
-    sched_yield();
+    hal_irq_state_t flags = hal_irq_save();
+    spinlock_acquire(&cpu->queue_lock);
+
+    if (!curr->is_idle) {
+      eevfd_update_curr(&cpu->eevfd, now_ns);
+      curr->runtime_total = curr->se.prev_sum_exec_ns / 1000000ULL;
+    }
+
+    bool preempt = false;
+    if (curr->is_idle && cpu->eevfd.nr_running > 0) {
+      preempt = true;
+    } else if (!curr->is_idle && cpu->eevfd.nr_running > 0) {
+      uint64_t exec_delta = (curr->se.exec_start_ns && now_ns > curr->se.exec_start_ns)
+                                ? (now_ns - curr->se.exec_start_ns)
+                                : 0;
+      if (curr->se.vruntime >= curr->se.deadline || exec_delta >= curr->se.slice_ns) {
+        preempt = true;
+      } else if (exec_delta >= EEVFD_MIN_GRANULARITY_NS && cpu->eevfd.rb_leftmost) {
+        struct sched_entity *left = rb_entry(cpu->eevfd.rb_leftmost, struct sched_entity, rb_node);
+        if (left && eevfd_check_preempt(&cpu->eevfd, &curr->se, left)) {
+          preempt = true;
+        }
+      }
+    }
+
+    if (!preempt) {
+      sched_arm_next_deadline(cpu, curr);
+    }
+    spinlock_release(&cpu->queue_lock);
+    hal_irq_restore(flags);
+
+    if (preempt) {
+      sched_schedule(false);
+    }
   }
 }
 
@@ -982,56 +911,29 @@ bool sched_validate_runqueues(struct cpu_info *cpu) {
   if (!cpu) return false;
   hal_irq_state_t flags = hal_irq_save();
   spinlock_acquire(&cpu->queue_lock);
-  bool valid = true;
-  uint32_t count = 0;
-  uint32_t bitmap = 0;
-  for (uint8_t p = 0; p < SCHED_PRIORITY_LEVELS && valid; p++) {
-    struct thread *head = cpu->runqueues[p];
-    struct thread *tail = cpu->runqueue_tails[p];
-    if (!!head != !!tail) { valid = false; break; }
-    if (!head) continue;
-    if (head->rq_prev != tail || tail->rq_next != head) { valid = false; break; }
-    struct thread *it = head;
-    uint32_t guard = 0;
-    do {
-      if (!it->on_runqueue || it->queued_priority != p || it->priority != p ||
-          (it->state != THREAD_READY && it->state != THREAD_RUNNING) ||
-          !it->rq_next || !it->rq_prev || it->rq_next->rq_prev != it ||
-          it->rq_prev->rq_next != it || it->cpu_index != cpu->cpu_id) {
-        valid = false;
-        break;
-      }
-      count++;
-      bitmap |= (1U << p);
-      it = it->rq_next;
-    } while (it != head && ++guard < 100000);
-    if (guard >= 100000) valid = false;
-  }
-  if (count != cpu->runnable_count || bitmap != cpu->runqueue_bitmap)
-    valid = false;
+  bool valid = eevfd_validate_rq(&cpu->eevfd);
   spinlock_release(&cpu->queue_lock);
   hal_irq_restore(flags);
   return valid;
 }
 
 bool sched_set_priority(struct thread *t, uint8_t priority, int8_t nice_value) {
-  if (!t || t->is_idle || priority >= SCHED_PRIORITY_LEVELS) return false;
+  if (!t || t->is_idle) return false;
   struct cpu_info *cpu = cpu_get_info(t->cpu_index);
   if (!cpu || cpu->status == CPU_STATUS_OFFLINE) return false;
   hal_irq_state_t flags = hal_irq_save();
   spinlock_acquire(&cpu->queue_lock);
-  uint8_t old_priority = t->priority;
   t->static_priority = priority;
+  t->priority = priority;
   t->nice_value = nice_value;
-  sched_requeue_priority_locked(cpu, t, priority);
-  bool preempt = (t->state == THREAD_READY || t->state == THREAD_RUNNING) &&
-                 priority < old_priority;
-  spinlock_release(&cpu->queue_lock);
-  if (preempt && lapic_is_ready()) {
-    struct cpu_info *self = cpu_get_current();
-    if (cpu == self) lapic_timer_rearm_if_earlier(lapic_timer_get_ms() + 1);
-    else lapic_send_ipi(cpu->apic_id, IPI_VECTOR_RESCHEDULE);
+  if (t->se.on_rq) {
+    eevfd_dequeue_entity(&cpu->eevfd, &t->se);
+    eevfd_set_nice(&t->se, (int)nice_value);
+    eevfd_enqueue_entity(&cpu->eevfd, &t->se);
+  } else {
+    eevfd_set_nice(&t->se, (int)nice_value);
   }
+  spinlock_release(&cpu->queue_lock);
   hal_irq_restore(flags);
   return true;
 }
@@ -1071,7 +973,7 @@ void sched_terminate_thread_group(struct thread *current) {
 }
 
 void sched_print_tasks(void) {
-  console_puts("TID  CPU  PRIO  STATE       RSP\n");
+  console_puts("TID  CPU  NICE  WEIGHT  VRUNTIME(ms)  DEADLINE(ms)  STATE       COMM\n");
   for (uint32_t i = 0; i < cpu_get_count(); i++) {
     struct cpu_info *cpu = cpu_get_info(i);
     if (!cpu || cpu->status == CPU_STATUS_OFFLINE)
@@ -1080,79 +982,35 @@ void sched_print_tasks(void) {
     hal_irq_disable();
     spinlock_acquire(&cpu->queue_lock);
 
-    for (int p = 0; p < SCHED_PRIORITY_LEVELS; p++) {
-      struct thread *first = cpu->runqueues[p];
-      struct thread *curr = first;
-      if (curr) {
-        do {
-          // TID
-          char tid_buf[10];
-          int j = 0;
-          uint32_t tid = curr->tid;
-          if (tid == 0) {
-            tid_buf[j++] = '0';
-          } else {
-            while (tid > 0) {
-              tid_buf[j++] = '0' + (tid % 10);
-              tid /= 10;
-            }
-          }
-          while (j < 4)
-            tid_buf[j++] = ' ';
-          for (int k = j - 1; k >= 0; k--)
-            console_putchar(tid_buf[k]);
-          console_putchar(' ');
+    struct rb_node *n = rb_first(&cpu->eevfd.tasks_tree);
+    while (n) {
+      struct sched_entity *se = rb_entry(n, struct sched_entity, rb_node);
+      struct thread *curr = rb_entry(se, struct thread, se);
 
-          // CPU
-          console_putchar('0' + (cpu->cpu_id % 10));
-          console_puts("    ");
-
-          // PRIO
-          char prio_buf[4];
-          prio_buf[0] = '0' + (curr->priority / 10);
-          prio_buf[1] = '0' + (curr->priority % 10);
-          prio_buf[2] = ' ';
-          prio_buf[3] = '\0';
-          console_puts(prio_buf);
-          console_puts("  ");
-
-          // STATE
-          switch (curr->state) {
-          case THREAD_RUNNING:
-            console_puts("RUNNING   ");
-            break;
-          case THREAD_READY:
-            console_puts("READY     ");
-            break;
-          case THREAD_BLOCKED:
-            console_puts("BLOCKED   ");
-            break;
-          case THREAD_SLEEPING:
-            console_puts("SLEEPING  ");
-            break;
-          case THREAD_DEAD:
-            console_puts("DEAD      ");
-            break;
-          case THREAD_ZOMBIE:
-            console_puts("ZOMBIE    ");
-            break;
-          }
-
-          // RSP (Hex)
-          console_puts("0x");
-          uint64_t rsp = curr->rsp;
-          for (int bit = 60; bit >= 0; bit -= 4) {
-            int nibble = (rsp >> bit) & 0xF;
-            if (nibble < 10)
-              console_putchar('0' + nibble);
-            else
-              console_putchar('A' + (nibble - 10));
-          }
-          console_putchar('\n');
-
-          curr = curr->rq_next;
-        } while (curr != first);
+      klog_puts("TID: ");
+      klog_uint64(curr->tid);
+      klog_puts(" CPU: ");
+      klog_uint64(cpu->cpu_id);
+      klog_puts(" Nice: ");
+      if (curr->nice_value < 0) {
+        klog_puts("-");
+        klog_uint64((uint64_t)(-curr->nice_value));
+      } else {
+        klog_uint64((uint64_t)curr->nice_value);
       }
+      klog_puts(" W: ");
+      klog_uint64(curr->se.weight);
+      klog_puts(" V: ");
+      klog_uint64(curr->se.vruntime / 1000000ULL);
+      klog_puts(" D: ");
+      klog_uint64(curr->se.deadline / 1000000ULL);
+      klog_puts(" State: ");
+      klog_puts(curr->state == THREAD_RUNNING ? "RUN " : "RDY ");
+      klog_puts(" Comm: ");
+      klog_puts(curr->comm);
+      klog_puts("\n");
+
+      n = rb_next(n);
     }
     spinlock_release(&cpu->queue_lock);
     hal_irq_enable();
@@ -1174,7 +1032,7 @@ bool sched_terminate_thread(uint32_t tid) {
 }
 
 // Helper: remove thread from global thread list
-static void remove_from_global_list(struct thread *t) {
+__attribute__((unused)) static void remove_from_global_list(struct thread *t) {
   if (!global_thread_list)
     return;
 
@@ -1202,21 +1060,11 @@ static void remove_from_runqueue(struct thread *t) {
   if (!cpu_local || cpu_local->status == CPU_STATUS_OFFLINE) return;
   spinlock_acquire(&cpu_local->queue_lock);
   sched_deadline_remove_locked(cpu_local, t);
-  if (sched_runqueue_remove_locked(cpu_local, t)) {
-    cpu_local->runnable_count = 0;
-    cpu_local->runqueue_bitmap = 0;
-    for (int q = 0; q < SCHED_PRIORITY_LEVELS; q++) {
-      struct thread *head = cpu_local->runqueues[q];
-      if (!head) continue;
-      struct thread *it = head;
-      do {
-        bool runnable = it->state == THREAD_READY || it->state == THREAD_RUNNING;
-        if (runnable || cpu_local->current_thread == it)
-          cpu_local->runnable_count++;
-        if (runnable) cpu_local->runqueue_bitmap |= (1U << q);
-        it = it->rq_next;
-      } while (it != head);
-    }
+  if (t->se.on_rq) {
+    eevfd_dequeue_entity(&cpu_local->eevfd, &t->se);
+    t->on_runqueue = false;
+    if (cpu_local->runnable_count)
+      cpu_local->runnable_count--;
   }
   spinlock_release(&cpu_local->queue_lock);
 }
@@ -1367,8 +1215,13 @@ void sched_reap_thread(struct thread *t) {
         vmm_free_user_pages_vma(t->cr3, &t->mm->vmas);
         t->cr3 = 0;
       }
+      if (t->mm->pcid) {
+        pcid_free(t->mm->pcid);
+        t->mm->pcid = 0;
+      }
       vma_list_destroy(&t->mm->vmas);
       kfree(t->mm);
+
     } else {
       klog_debug_puts("[REAP] MM still shared, skipping CR3 free\n");
       t->cr3 = 0; // Don't free for THIS thread
@@ -1535,7 +1388,7 @@ uint16_t sched_get_runnable_thread_count(void) {
 
 struct thread *sched_get_thread_list_head(void) { return global_thread_list; }
 
-void sched_wakeup(struct thread *t) {
+__attribute__((optimize("O3"))) void sched_wakeup(struct thread *t) {
   if (!t)
     return;
   if (t->state == THREAD_READY || t->state == THREAD_RUNNING)
@@ -1543,44 +1396,47 @@ void sched_wakeup(struct thread *t) {
 
   hal_irq_state_t rflags = hal_irq_save();
 
-  // O(1) wakeup: use the saved CPU assignment and append a descheduled
-  // blocked thread to its base-priority queue.
   struct cpu_info *target = cpu_get_info(t->cpu_index);
   if (target && target->status != CPU_STATUS_OFFLINE) {
+    bool send_ipi = false;
+    bool rearm_local = false;
+
     spinlock_acquire(&target->queue_lock);
     if (t->state != THREAD_READY && t->state != THREAD_RUNNING) {
-      /* A wake may race between publishing BLOCKED and sched_yield(). The
-       * current thread is still included in runnable_count in that window. */
       bool still_current =
           __atomic_load_n(&target->current_thread, __ATOMIC_ACQUIRE) == t;
-      /* A wake that beats the caller into sched_yield() cancels the
-       * block; the task is still executing and must never be published READY
-       * for another CPU to steal. */
       sched_deadline_remove_locked(target, t);
       t->state = still_current ? THREAD_RUNNING : THREAD_READY;
       t->wakeup_ticks = 0;
       if (!still_current) {
-        t->priority = t->static_priority;
-        t->ready_since_ms = lapic_timer_get_ms();
-        sched_runqueue_append_locked(target, t, t->priority);
+        eevfd_place_entity(&target->eevfd, &t->se, false);
+        eevfd_enqueue_entity(&target->eevfd, &t->se);
+        t->on_runqueue = true;
         target->runnable_count++;
+
+        struct cpu_info *self = cpu_get_current();
+        if (target->apic_id != self->apic_id) {
+          if (!target->current_thread || target->current_thread->is_idle ||
+              eevfd_check_preempt(&target->eevfd, &target->current_thread->se, &t->se)) {
+            send_ipi = true;
+          }
+        } else if (self->current_thread &&
+                   (self->current_thread->is_idle ||
+                    eevfd_check_preempt(&self->eevfd, &self->current_thread->se, &t->se))) {
+          rearm_local = true;
+        }
       } else {
         t->ready_since_ms = 0;
       }
     }
     spinlock_release(&target->queue_lock);
 
-    /* A same-CPU wake previously waited as long as a complete quantum. This
-     * is particularly visible in Xorg/client request-response workloads. */
-    struct cpu_info *self = cpu_get_current();
-    if (target->apic_id != self->apic_id) {
+    if (send_ipi) {
       lapic_send_ipi(target->apic_id, IPI_VECTOR_RESCHEDULE);
-    } else if (self->current_thread &&
-               t->priority <= self->current_thread->priority) {
+    } else if (rearm_local) {
       lapic_timer_rearm_if_earlier(lapic_timer_get_ms() + 1);
     }
   } else {
-    // Fallback: thread has no valid cpu_index (freshly created?)
     t->state = THREAD_READY;
     t->wakeup_ticks = 0;
     sched_enqueue_thread(t, cpu_get_current());
@@ -1588,3 +1444,4 @@ void sched_wakeup(struct thread *t) {
 
   hal_irq_restore(rflags);
 }
+

@@ -115,8 +115,36 @@ int main(void) {
            vdso_gtod_cycles, vdso_gtod_avg);
     printf("    >>> SPEEDUP: %.1fx FASTER! <<<\n\n", speedup_gtod);
 
+    // 4. Benchmark: time()
+    printf("[4] Benchmarking time() (%d iterations)...\n", ITERATIONS);
+
+    time_t dummy_t;
+
+    start_tsc = rdtsc_pure();
+    for (int i = 0; i < ITERATIONS; i++) {
+        syscall(SYS_time, &dummy_t);
+    }
+    uint64_t sys_time_cycles = rdtsc_pure() - start_tsc;
+
+    start_tsc = rdtsc_pure();
+    for (int i = 0; i < ITERATIONS; i++) {
+        VSYSCALL_TIME(&dummy_t);
+    }
+    uint64_t vdso_time_cycles = rdtsc_pure() - start_tsc;
+
+    double sys_time_avg = (double)sys_time_cycles / ITERATIONS;
+    double vdso_time_avg = (double)vdso_time_cycles / ITERATIONS;
+    double speedup_time = sys_time_avg / (vdso_time_avg > 0 ? vdso_time_avg : 1.0);
+
+    printf("    Syscall time():         %lu cycles total (%.1f cycles/call)\n",
+           sys_time_cycles, sys_time_avg);
+    printf("    vDSO    time():         %lu cycles total (%.1f cycles/call)\n",
+           vdso_time_cycles, vdso_time_avg);
+    printf("    >>> SPEEDUP: %.1fx FASTER! <<<\n\n", speedup_time);
+
     printf("====================================================\n");
     printf("vDSO BENCHMARK COMPLETED SUCCESSFULLY!\n");
     printf("====================================================\n");
     return 0;
 }
+

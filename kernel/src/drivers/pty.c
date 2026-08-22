@@ -14,6 +14,7 @@
 #include "../sched/wait.h"
 #include "../socket/epoll.h"
 #include "../syscalls/syscall.h"
+#include "arch/uaccess.h"
 
 // PTY pair pool
 static pty_pair_t pty_pool[PTY_MAX_PAIRS];
@@ -50,9 +51,26 @@ static uint32_t ring_write(uint8_t *buffer, uint32_t *head, uint32_t tail,
   if (first_part > to_write)
     first_part = to_write;
 
-  memcpy(buffer + *head, data, first_part);
-  if (to_write > first_part) {
-    memcpy(buffer, data + first_part, to_write - first_part);
+  if (is_user_ptr((uint64_t)data)) {
+    unsigned long u1 = copy_from_user(buffer + *head, data, first_part);
+    if (u1 > 0) {
+      uint32_t written = first_part - (uint32_t)u1;
+      *head = (*head + written) % PTY_BUFFER_SIZE;
+      return written;
+    }
+    if (to_write > first_part) {
+      unsigned long u2 = copy_from_user(buffer, data + first_part, to_write - first_part);
+      if (u2 > 0) {
+        uint32_t written = (to_write - first_part) - (uint32_t)u2;
+        *head = (*head + first_part + written) % PTY_BUFFER_SIZE;
+        return first_part + written;
+      }
+    }
+  } else {
+    memcpy(buffer + *head, data, first_part);
+    if (to_write > first_part) {
+      memcpy(buffer, data + first_part, to_write - first_part);
+    }
   }
 
   *head = (*head + to_write) % PTY_BUFFER_SIZE;
@@ -73,9 +91,26 @@ static uint32_t ring_read(uint8_t *buffer, uint32_t head, uint32_t *tail,
     first_part = to_read;
 
   if (data) {
-    memcpy(data, buffer + *tail, first_part);
-    if (to_read > first_part) {
-      memcpy(data + first_part, buffer, to_read - first_part);
+    if (is_user_ptr((uint64_t)data)) {
+      unsigned long u1 = copy_to_user(data, buffer + *tail, first_part);
+      if (u1 > 0) {
+        uint32_t read_bytes = first_part - (uint32_t)u1;
+        *tail = (*tail + read_bytes) % PTY_BUFFER_SIZE;
+        return read_bytes;
+      }
+      if (to_read > first_part) {
+        unsigned long u2 = copy_to_user(data + first_part, buffer, to_read - first_part);
+        if (u2 > 0) {
+          uint32_t read_bytes = (to_read - first_part) - (uint32_t)u2;
+          *tail = (*tail + first_part + read_bytes) % PTY_BUFFER_SIZE;
+          return first_part + read_bytes;
+        }
+      }
+    } else {
+      memcpy(data, buffer + *tail, first_part);
+      if (to_read > first_part) {
+        memcpy(data + first_part, buffer, to_read - first_part);
+      }
     }
   }
 

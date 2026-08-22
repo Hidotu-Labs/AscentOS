@@ -4,6 +4,7 @@
 #include "../mm/heap.h"
 #include "../mm/pmm.h"
 #include "../sched/sched.h"
+#include "arch/uaccess.h"
 
 #define PHYS_TO_VIRT(p) ((void *)((uint64_t)(p) + pmm_get_hhdm_offset()))
 #define CACHE_BATCH 64u
@@ -194,10 +195,21 @@ uint32_t vfs_cache_read(vfs_node_t *node, uint32_t offset, uint32_t size,
     vfs_page_t *page = vfs_cache_get_or_create(node, page_offset);
     if (!page)
       break;
-    memcpy(buffer + done,
-           (uint8_t *)PHYS_TO_VIRT(page->frame_phys) + in_page, count);
-    vfs_cache_put(node, page);
-    done += count;
+    if (is_user_ptr((uint64_t)buffer)) {
+      unsigned long uncopied = copy_to_user(
+          buffer + done,
+          (uint8_t *)PHYS_TO_VIRT(page->frame_phys) + in_page, count);
+      uint32_t copied = count - (uint32_t)uncopied;
+      done += copied;
+      vfs_cache_put(node, page);
+      if (uncopied > 0)
+        break;
+    } else {
+      memcpy(buffer + done,
+             (uint8_t *)PHYS_TO_VIRT(page->frame_phys) + in_page, count);
+      vfs_cache_put(node, page);
+      done += count;
+    }
   }
   return done;
 }

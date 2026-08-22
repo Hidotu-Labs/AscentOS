@@ -20,6 +20,7 @@
 #include "../fs/ext2.h"
 #include "../fs/ext4.h"
 #include "../drivers/storage/block.h"
+#include "arch/uaccess.h"
 #include <stdint.h>
 
 // ---------------------------------------------------------------------------
@@ -510,26 +511,8 @@ static uint64_t sys_read(uint64_t fd, uint64_t buf, uint64_t count, uint64_t a3,
   (void)a4;
   (void)a5;
   struct thread *t = sched_get_current();
-  if (!is_user_ptr(buf)) {
-    if (count > 0) {  // only log non-zero reads with invalid buffers
-      klog_puts("[SYSCALL] read EFAULT: !is_user_ptr(buf) buf=");
-      klog_hex64(buf);
-      klog_puts(" count=");
-      klog_uint64(count);
-      klog_puts("\n");
-    }
+  if (!is_user_range((const void *)buf, count))
     return (uint64_t)-14;
-  }
-  if (!vmm_is_user_addr_range_valid(buf, count)) {
-    if (count > 0) {  // only log non-zero reads with invalid buffers
-      klog_puts("[SYSCALL] read EFAULT: !vmm_is_user_addr_range_valid(buf, ");
-      klog_uint64(count);
-      klog_puts(") buf=");
-      klog_hex64(buf);
-      klog_puts("\n");
-    }
-    return (uint64_t)-14;
-  }
   if (!t || fd >= MAX_FDS || !t->fds[fd])
     return (uint64_t)-9;
 
@@ -539,12 +522,6 @@ static uint64_t sys_read(uint64_t fd, uint64_t buf, uint64_t count, uint64_t a3,
   if (bytes_read > 0)
     t->fd_offsets[fd] += (uint32_t)bytes_read;
 
-  if (bytes_read == -14) {
-    klog_puts("[SYSCALL] read EFAULT: vfs_read returned -14 for fd=");
-    klog_uint64(fd);
-    klog_puts("\n");
-  }
-
   return (uint64_t)(int64_t)bytes_read;
 }
 
@@ -553,7 +530,7 @@ static uint64_t sys_write(uint64_t fd, uint64_t buf, uint64_t count,
   (void)a3;
   (void)a4;
   (void)a5;
-  if (!is_user_ptr(buf) || !vmm_is_user_addr_range_valid(buf, count))
+  if (!is_user_range((const void *)buf, count))
     return (uint64_t)-14;
   return (uint64_t)fd_write((int)fd, (const void *)buf, (size_t)count);
 }
@@ -563,7 +540,7 @@ static uint64_t sys_pread64(uint64_t fd, uint64_t buf, uint64_t count,
   (void)a4;
   (void)a5;
   struct thread *t = sched_get_current();
-  if (!is_user_ptr(buf) || !vmm_is_user_addr_range_valid(buf, count))
+  if (!is_user_range((const void *)buf, count))
     return (uint64_t)-14;
   if (!t || fd >= MAX_FDS || !t->fds[fd])
     return (uint64_t)-9;
@@ -579,7 +556,7 @@ static uint64_t sys_pwrite64(uint64_t fd, uint64_t buf, uint64_t count,
   (void)a4;
   (void)a5;
   struct thread *t = sched_get_current();
-  if (!is_user_ptr(buf) || !vmm_is_user_addr_range_valid(buf, count))
+  if (!is_user_range((const void *)buf, count))
     return (uint64_t)-14;
   if (!t || fd >= MAX_FDS || !t->fds[fd])
     return (uint64_t)-9;
@@ -602,6 +579,9 @@ static uint64_t sys_readv(uint64_t fd, uint64_t iov_u, uint64_t iovcnt,
     return (uint64_t)-22;
 
   struct user_iovec *iov = (struct user_iovec *)iov_u;
+  if (!is_user_range((const void *)iov_u, iovcnt * sizeof(*iov)))
+    return (uint64_t)-14;
+
   size_t total = 0;
 
   for (uint64_t i = 0; i < iovcnt; i++) {
@@ -609,7 +589,7 @@ static uint64_t sys_readv(uint64_t fd, uint64_t iov_u, uint64_t iovcnt,
     uint64_t len = iov[i].iov_len;
     if (len == 0)
       continue;
-    if (!is_user_ptr(base))
+    if (!is_user_range((const void *)base, len))
       return (uint64_t)-14;
 
     struct thread *ct = sched_get_current();
@@ -644,14 +624,12 @@ static uint64_t sys_writev(uint64_t fd, uint64_t iov_u, uint64_t iovcnt,
     return (uint64_t)-22;
 
   struct user_iovec *iov = (struct user_iovec *)iov_u;
-  if (!is_user_ptr(iov_u) ||
-      !vmm_is_user_addr_range_valid(iov_u, iovcnt * sizeof(*iov)))
+  if (!is_user_range((const void *)iov_u, iovcnt * sizeof(*iov)))
     return (uint64_t)-14;
 
   for (uint64_t i = 0; i < iovcnt; i++) {
     if (iov[i].iov_len > 0 &&
-        (!is_user_ptr(iov[i].iov_base) ||
-         !vmm_is_user_addr_range_valid(iov[i].iov_base, iov[i].iov_len)))
+        !is_user_range((const void *)iov[i].iov_base, iov[i].iov_len))
       return (uint64_t)-14;
   }
 

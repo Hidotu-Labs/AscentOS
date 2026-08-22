@@ -4,11 +4,23 @@
 #include "lib/list.h"
 #include "lib/string.h"
 #include "lock/spinlock.h"
+#include "smp/cpu.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
 #define MAX_ORDER 20
+
+#define PCP_CAPACITY 128
+#define PCP_BATCH 32
+
+struct pcp_cache {
+  void *pages[PCP_CAPACITY];
+  uint32_t count;
+};
+
+static struct pcp_cache pcp_caches[MAX_CPUS];
+static bool pcp_initialized = false;
 
 struct buddy_zone {
   struct list_head free_list[MAX_ORDER];
@@ -487,7 +499,83 @@ void *pmm_alloc_pages_range(size_t count, uint64_t min_phys_addr,
   return NULL; // No block found within constraints
 }
 
-void *pmm_alloc_page(void) { return pmm_alloc_pages(1); }
+void pmm_pcp_init(void) {
+  for (uint32_t i = 0; i < MAX_CPUS; i++) {
+    pcp_caches[i].count = 0;
+  }
+  pcp_initialized = true;
+  klog_puts("[PMM] Per-CPU Page Frame Allocator (PCP) initialized.\n");
+}
+
+static void *pmm_alloc_page_locked(void) {
+  size_t cur_order = 0;
+  while (cur_order < MAX_ORDER && list_empty(&b_zone.free_list[cur_order])) {
+    cur_order++;
+  }
+
+  if (cur_order == MAX_ORDER) {
+    return NULL; // OOM
+  }
+
+  struct buddy_block *block =
+      list_first_entry(&b_zone.free_list[cur_order], struct buddy_block, node);
+  list_del(&block->node);
+
+  uint64_t pfn = buddy_to_phys(block) / PAGE_SIZE;
+
+  while (cur_order > 0) {
+    cur_order--;
+    uint64_t buddy_pfn = pfn + (1ULL << cur_order);
+    struct buddy_block *buddy = virt_to_buddy(buddy_pfn * PAGE_SIZE);
+    buddy->order = cur_order;
+    list_add_tail(&buddy->node, &b_zone.free_list[cur_order]);
+  }
+
+  bitmap_set_range(bitmap, pfn, 1);
+  refcounts[pfn - lowest_page] = 1;
+  return (void *)(pfn * PAGE_SIZE);
+}
+
+__attribute__((optimize("O3"))) void *pmm_alloc_page(void) {
+  if (!pcp_initialized) {
+    return pmm_alloc_pages(1);
+  }
+
+  hal_irq_state_t flags = hal_irq_save();
+  struct cpu_info *cpu = cpu_get_current();
+  if (!cpu || cpu->cpu_id >= MAX_CPUS) {
+    hal_irq_restore(flags);
+    return pmm_alloc_pages(1);
+  }
+
+  struct pcp_cache *pcp = &pcp_caches[cpu->cpu_id];
+  if (pcp->count > 0) {
+    void *page = pcp->pages[--pcp->count];
+    uint64_t pfn = (uint64_t)page / PAGE_SIZE;
+    __atomic_store_n(&refcounts[pfn - lowest_page], 1, __ATOMIC_RELEASE);
+    hal_irq_restore(flags);
+    return page;
+  }
+
+  // Refill batch under 1 global lock
+  spinlock_acquire(&b_zone.lock);
+  for (uint32_t i = 0; i < PCP_BATCH; i++) {
+    void *p = pmm_alloc_page_locked();
+    if (!p)
+      break;
+    pcp->pages[pcp->count++] = p;
+  }
+  spinlock_release(&b_zone.lock);
+
+  void *page = NULL;
+  if (pcp->count > 0) {
+    page = pcp->pages[--pcp->count];
+    uint64_t pfn = (uint64_t)page / PAGE_SIZE;
+    __atomic_store_n(&refcounts[pfn - lowest_page], 1, __ATOMIC_RELEASE);
+  }
+  hal_irq_restore(flags);
+  return page;
+}
 
 // Allocate a 2 MB huge page (512 contiguous 4 KB pages).
 // Buddy allocator order-9 blocks are always 2 MB-aligned by construction.
@@ -531,8 +619,9 @@ __attribute__((optimize("O3"))) void pmm_free_pages(void *ptr, size_t count) {
   // memory). For user pages (CoW), we always use pmm_decref (which calls
   // pmm_free_page).
   for (size_t i = 0; i < (1ULL << order); i++) {
-    if (refcounts[pfn + i - lowest_page] > 0) {
-      refcounts[pfn + i - lowest_page]--;
+    uint16_t r = __atomic_load_n(&refcounts[pfn + i - lowest_page], __ATOMIC_RELAXED);
+    if (r > 0) {
+      __atomic_fetch_sub(&refcounts[pfn + i - lowest_page], 1, __ATOMIC_ACQ_REL);
     }
   }
 
@@ -559,9 +648,7 @@ void pmm_incref(void *ptr) {
     return;
   uint64_t pfn = (uint64_t)ptr / PAGE_SIZE;
 
-  spinlock_acquire(&pmm_lock);
-  refcounts[pfn - lowest_page]++;
-  spinlock_release(&pmm_lock);
+  __atomic_fetch_add(&refcounts[pfn - lowest_page], 1, __ATOMIC_RELAXED);
 }
 
 __attribute__((optimize("O3"))) void pmm_decref(void *ptr) {
@@ -571,20 +658,50 @@ __attribute__((optimize("O3"))) void pmm_decref(void *ptr) {
     return;
   uint64_t pfn = (uint64_t)ptr / PAGE_SIZE;
 
-
-  spinlock_acquire(&pmm_lock);
-  if (refcounts[pfn - lowest_page] > 0) {
-    refcounts[pfn - lowest_page]--;
-    if (refcounts[pfn - lowest_page] == 0) {
-      spinlock_release(&pmm_lock);
-
-      spinlock_acquire(&b_zone.lock);
-      buddy_free_internal((uint64_t)ptr, 0);
-      spinlock_release(&b_zone.lock);
-      return;
-    }
+  uint16_t old = __atomic_fetch_sub(&refcounts[pfn - lowest_page], 1, __ATOMIC_ACQ_REL);
+  if (old > 1) {
+    return;
   }
-  spinlock_release(&pmm_lock);
+  if (old == 0) {
+    __atomic_store_n(&refcounts[pfn - lowest_page], 0, __ATOMIC_RELAXED);
+    return;
+  }
+
+  // Refcount is now 0
+  if (!pcp_initialized) {
+    spinlock_acquire(&b_zone.lock);
+    buddy_free_internal((uint64_t)ptr, 0);
+    spinlock_release(&b_zone.lock);
+    return;
+  }
+
+  hal_irq_state_t flags = hal_irq_save();
+  struct cpu_info *cpu = cpu_get_current();
+  if (!cpu || cpu->cpu_id >= MAX_CPUS) {
+    hal_irq_restore(flags);
+    spinlock_acquire(&b_zone.lock);
+    buddy_free_internal((uint64_t)ptr, 0);
+    spinlock_release(&b_zone.lock);
+    return;
+  }
+
+  struct pcp_cache *pcp = &pcp_caches[cpu->cpu_id];
+  if (pcp->count < PCP_CAPACITY) {
+    pcp->pages[pcp->count++] = ptr;
+    hal_irq_restore(flags);
+    return;
+  }
+
+  // Drain PCP_BATCH pages back to buddy allocator
+  spinlock_acquire(&b_zone.lock);
+  for (uint32_t i = 0; i < PCP_BATCH; i++) {
+    void *drain_p = pcp->pages[--pcp->count];
+    buddy_free_internal((uint64_t)drain_p, 0);
+  }
+  buddy_free_internal((uint64_t)ptr, 0);
+  spinlock_release(&b_zone.lock);
+
+  hal_irq_restore(flags);
 }
 
 uint16_t pmm_get_ref(void *ptr) {
@@ -593,7 +710,7 @@ uint16_t pmm_get_ref(void *ptr) {
   if (!pmm_is_managed((uint64_t)ptr))
     return 1; // Hardware is always "referenced"
   uint64_t pfn = (uint64_t)ptr / PAGE_SIZE;
-  return refcounts[pfn - lowest_page];
+  return __atomic_load_n(&refcounts[pfn - lowest_page], __ATOMIC_RELAXED);
 }
 
 void pmm_mark_used(void *ptr, size_t count) {

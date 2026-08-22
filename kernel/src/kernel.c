@@ -57,11 +57,13 @@
 #include "lib/radix_tree.h"
 #include "mm/dma_alloc.h"
 #include "mm/heap.h"
+#include "mm/pcid.h"
 #include "mm/pmm.h"
 #include "mm/shm.h"
 #include "mm/slab_cache.h"
 #include "mm/tlb_shootdown.h"
 #include "mm/vmm.h"
+
 #include "net/core.h"
 #include "net/dhcp.h"
 #include "net/ipv4.h"
@@ -305,6 +307,7 @@ void kmain(void) {
   vmm_init();
   vmm_init_vsyscall_page();
   klog_puts("     Active CR3 Page Map hooked.\n");
+  pcid_init();
   heap_init();
 
   /* ── LinuxKPI Phase 1a stress test ── */
@@ -315,7 +318,22 @@ void kmain(void) {
   extern void linuxkpi_test_1b(void);
   linuxkpi_test_1b();
 
+  /* ── PCID Hardware Tagging & Benchmark test ── */
+  extern void test_pcid(void);
+  test_pcid();
+
+  /* ── Batched TLB Shootdown Clone test ── */
+  extern void test_vmm_clone(void);
+  test_vmm_clone();
+
+  /* ── Fast Word-at-a-time uaccess test ── */
+  extern void test_uaccess(void);
+  test_uaccess();
+
   slab_cache_init();
+
+
+
 
   extern kmem_cache_t *vma_cache;
   vma_cache = kmem_cache_create("vma", sizeof(struct vma), 8, NULL, NULL);

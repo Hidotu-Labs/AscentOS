@@ -6,16 +6,9 @@
 #include "../fs/vfs.h"
 #include "../mm/vmm.h"
 #include "../sched/sched.h"
+#include "arch/uaccess.h"
 #include "syscall.h"
 #include <stdint.h>
-
-// ---------------------------------------------------------------------------
-// User-space pointer validation
-// ---------------------------------------------------------------------------
-#define USER_ADDR_MAX 0x00007FFFFFFFFFFFULL
-static inline bool is_user_ptr(uint64_t addr) {
-  return addr != 0 && addr <= USER_ADDR_MAX;
-}
 
 // ---------------------------------------------------------------------------
 // Open / file-status flags

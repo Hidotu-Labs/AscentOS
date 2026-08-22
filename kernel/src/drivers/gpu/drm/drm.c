@@ -529,8 +529,118 @@ static void drm_commit_cursor_damage(struct drm_device *dev,
 }
 
 static void drm_commit_heads(struct drm_device *dev,const struct drm_clip_rect *clips,uint32_t count){uint32_t ids[16],n=0;spinlock_acquire(&dev->lock);struct drm_mode_object *o;list_for_each_entry(o,&dev->kms_objects,list)if(o->type==DRM_MODE_OBJECT_CRTC&&((struct drm_crtc*)o)->fb&&n<16)ids[n++]=o->id;spinlock_release(&dev->lock);for(uint32_t i=0;i<n;i++)drm_commit_damage(dev,clips,count,ids[i]);}
+
+/* PAGE_FLIP has no damage payload. DIRTYFB may have described changes to a
+ * back buffer before it became active, so consume that cached damage here.
+ * A buffer that has never been scanned out remains a full upload: the host
+ * has no valid contents for it yet. */
+static void drm_commit_flipped_crtc(struct drm_device *dev, uint32_t crtc_id) {
+  struct drm_clip_rect damage;
+  bool have_damage = false;
+
+  spinlock_acquire(&dev->lock);
+  struct drm_mode_object *obj = drm_mode_object_find(dev, crtc_id);
+  if (obj && obj->type == DRM_MODE_OBJECT_CRTC) {
+    struct drm_crtc *crtc = (struct drm_crtc *)obj;
+    struct drm_framebuffer *fb = crtc->fb;
+    if (fb) {
+      if (fb->scanout_valid && fb->pending_damage_valid) {
+        damage = fb->pending_damage;
+        have_damage = true;
+      }
+      fb->pending_damage_valid = 0;
+      fb->scanout_valid = 1;
+    }
+  }
+  spinlock_release(&dev->lock);
+
+  drm_commit_damage(dev, have_damage ? &damage : NULL, have_damage ? 1 : 0,
+                    crtc_id);
+}
+
 static void drm_commit(struct drm_device *dev) {
   drm_commit_heads(dev,NULL,0);
+}
+
+/* Store legacy damage on the framebuffer. If it is already visible, submit
+ * it immediately; otherwise PAGE_FLIP will submit it when that buffer is
+ * selected. */
+static int drm_dirtyfb(struct drm_device *dev,
+                       const struct drm_mode_fb_dirty_cmd *dirty) {
+  if (!dirty)
+    return -14;
+  if (dirty->num_clips > 4096)
+    return -22;
+
+  struct drm_clip_rect damage = {0};
+  bool have_damage = false;
+  if (dirty->num_clips && dirty->clips_ptr) {
+    const struct drm_clip_rect *clips =
+        (const struct drm_clip_rect *)dirty->clips_ptr;
+    uint32_t x1 = UINT16_MAX, y1 = UINT16_MAX, x2 = 0, y2 = 0;
+    for (uint32_t i = 0; i < dirty->num_clips; i++) {
+      if (clips[i].x2 <= clips[i].x1 || clips[i].y2 <= clips[i].y1)
+        continue;
+      if (clips[i].x1 < x1) x1 = clips[i].x1;
+      if (clips[i].y1 < y1) y1 = clips[i].y1;
+      if (clips[i].x2 > x2) x2 = clips[i].x2;
+      if (clips[i].y2 > y2) y2 = clips[i].y2;
+    }
+    if (x1 < x2 && y1 < y2) {
+      damage.x1 = (uint16_t)x1;
+      damage.y1 = (uint16_t)y1;
+      damage.x2 = (uint16_t)x2;
+      damage.y2 = (uint16_t)y2;
+      have_damage = true;
+    }
+  }
+
+  bool active = false;
+  spinlock_acquire(&dev->lock);
+  struct drm_mode_object *obj = drm_mode_object_find(dev, dirty->fb_id);
+  if (!obj || obj->type != DRM_MODE_OBJECT_FB) {
+    spinlock_release(&dev->lock);
+    return -2;
+  }
+  struct drm_framebuffer *fb = (struct drm_framebuffer *)obj;
+  if (have_damage) {
+    if (damage.x2 > fb->width) damage.x2 = fb->width;
+    if (damage.y2 > fb->height) damage.y2 = fb->height;
+    if (damage.x1 < damage.x2 && damage.y1 < damage.y2) {
+      if (fb->pending_damage_valid) {
+        if (damage.x1 < fb->pending_damage.x1) fb->pending_damage.x1 = damage.x1;
+        if (damage.y1 < fb->pending_damage.y1) fb->pending_damage.y1 = damage.y1;
+        if (damage.x2 > fb->pending_damage.x2) fb->pending_damage.x2 = damage.x2;
+        if (damage.y2 > fb->pending_damage.y2) fb->pending_damage.y2 = damage.y2;
+      } else {
+        fb->pending_damage = damage;
+        fb->pending_damage_valid = 1;
+      }
+    }
+  }
+  struct drm_mode_object *iter;
+  list_for_each_entry(iter, &dev->kms_objects, list) {
+    if (iter->type == DRM_MODE_OBJECT_CRTC &&
+        ((struct drm_crtc *)iter)->fb == fb) {
+      active = true;
+      break;
+    }
+  }
+  if (active) {
+    if (have_damage)
+      damage = fb->pending_damage;
+    /* An empty or malformed DIRTYFB is conservatively a full update; do not
+     * let a region from an earlier frame turn its following flip into a
+     * partial upload. */
+    fb->pending_damage_valid = 0;
+    fb->scanout_valid = 1;
+  }
+  spinlock_release(&dev->lock);
+
+  if (active)
+    drm_commit_damage(dev, have_damage ? &damage : NULL, have_damage ? 1 : 0,
+                      dirty->fb_id);
+  return 0;
 }
 
 /* Consume damage recorded while applying the immediately preceding atomic
@@ -1285,7 +1395,7 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
         g_drm_set_fb_fn(crtc->base.id, crtc->fb);
     }
     spinlock_release(&dev->lock);
-    drm_commit(dev);
+    drm_commit_flipped_crtc(dev, crtc_cmd->crtc_id);
     return 0;
   }
   case DRM_IOCTL_MODE_PAGE_FLIP: {
@@ -1320,7 +1430,7 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
       if (g_drm_pageflip_fn)
         g_drm_pageflip_fn(file, node, flip->crtc_id, flip->fb_id, flip->user_data);
       spinlock_release(&dev->lock);
-      drm_commit(dev);
+      drm_commit_flipped_crtc(dev, flip->crtc_id);
       /* If no virtio hook took ownership, deliver event via legacy path */
       if (!g_drm_pageflip_fn) {
         struct drm_event_vblank ev = {0};
@@ -1333,7 +1443,7 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
       return 0;
     }
     spinlock_release(&dev->lock);
-    drm_commit(dev);
+    drm_commit_flipped_crtc(dev, flip->crtc_id);
     return 0;
   }
 
@@ -1359,15 +1469,7 @@ static int drm_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
   case DRM_IOCTL_MODE_DIRTYFB:
   case DRM_IOCTL_MODE_DIRTYFB_LEGACY: {
     struct drm_mode_fb_dirty_cmd *dirty = (void *)arg;
-    if (!dirty) return -14;
-    if (!dirty->num_clips || !dirty->clips_ptr) {
-      drm_commit(dev);
-      return 0;
-    }
-    if (dirty->num_clips > 4096) return -22;
-    drm_commit_damage(dev, (const struct drm_clip_rect *)dirty->clips_ptr,
-                      dirty->num_clips, dirty->fb_id);
-    return 0;
+    return drm_dirtyfb(dev, dirty);
   }
   case DRM_IOCTL_MODE_CREATEPROPBLOB: {
     struct drm_mode_create_blob *b = (struct drm_mode_create_blob *)arg;

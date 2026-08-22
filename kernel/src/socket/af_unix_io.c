@@ -1,18 +1,11 @@
-// AF_UNIX – I/O: send / recv / sendto / recvfrom / sendmsg / recvmsg
-
 #include "af_unix_internal.h"
 #include "../apic/lapic_timer.h"
-
-#define USER_ADDR_MAX 0x00007FFFFFFFFFFFULL
+#include "arch/uaccess.h"
 
 static bool unix_user_range_valid(uint64_t addr, size_t len) {
   if (!addr)
     return false;
-  if (addr > USER_ADDR_MAX)
-    return false;
-  if (len && addr + len - 1 > USER_ADDR_MAX)
-    return false;
-  return vmm_is_user_addr_range_valid(addr, len);
+  return is_user_range((const void *)addr, len);
 }
 
 struct unix_ucred {

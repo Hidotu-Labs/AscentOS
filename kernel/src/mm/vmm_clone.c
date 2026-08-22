@@ -63,7 +63,8 @@ static bool is_shared_vma(struct vma_list *vmas, uint64_t vaddr) {
 
 static uint64_t *clone_table_vma(uint64_t *src_table_phys, int level,
                                  size_t start, size_t end,
-                                 struct vma_list *vmas, uint64_t base_addr) {
+                                 struct vma_list *vmas, uint64_t base_addr,
+                                 size_t *cow_count) {
   void *new_table_phys = pmm_alloc();
   if (!new_table_phys)
     return NULL;
@@ -93,10 +94,8 @@ static uint64_t *clone_table_vma(uint64_t *src_table_phys, int level,
           if (src_virt[i] & PAGE_FLAG_RW) {
             src_virt[i] &= ~PAGE_FLAG_RW;
             src_virt[i] |= PAGE_FLAG_COW;
-            // Flush the parent's stale RW TLB entry on ALL CPUs.
-            // Without this, remote CPUs that cached the old RW entry
-            // can still write through it, bypassing CoW.
-            tlb_shootdown_page(page_vaddr);
+            if (cow_count)
+              (*cow_count)++;
           }
           pmm_incref((void *)phys);
         }
@@ -108,7 +107,8 @@ static uint64_t *clone_table_vma(uint64_t *src_table_phys, int level,
 
       uint64_t *child_src_phys = (uint64_t *)(src_virt[i] & PAGE_MASK);
       uint64_t *child_new_phys =
-          clone_table_vma(child_src_phys, level - 1, 0, 512, vmas, child_base);
+          clone_table_vma(child_src_phys, level - 1, 0, 512, vmas, child_base,
+                          cow_count);
       if (!child_new_phys)
         return NULL;
 
@@ -179,6 +179,8 @@ uint64_t vmm_clone_user_mappings_vma(uint64_t *src_pml4_phys,
   for (size_t i = 0; i < 512; i++)
     new_pml4_virt[i] = 0;
 
+  size_t cow_count = 0;
+
   // Clone user half with VMA awareness.
   for (size_t i = 0; i < 256; i++) {
     if (!(src_pml4_virt[i] & PAGE_FLAG_PRESENT))
@@ -193,7 +195,7 @@ uint64_t vmm_clone_user_mappings_vma(uint64_t *src_pml4_phys,
 
     uint64_t *child_src_phys = (uint64_t *)(src_pml4_virt[i] & PAGE_MASK);
     uint64_t *child_new_phys =
-        clone_table_vma(child_src_phys, 3, 0, 512, vmas, base_addr);
+        clone_table_vma(child_src_phys, 3, 0, 512, vmas, base_addr, &cow_count);
     if (!child_new_phys) {
       spinlock_release(lock);
       return 0;
@@ -207,9 +209,16 @@ uint64_t vmm_clone_user_mappings_vma(uint64_t *src_pml4_phys,
   for (size_t i = 256; i < 512; i++)
     new_pml4_virt[i] = src_pml4_virt[i];
 
+  // If any pages were converted to CoW, issue a single batched TLB shootdown
+  // instead of thousands of serial per-page IPI interrupts!
+  if (cow_count > 0) {
+    tlb_shootdown_all();
+  }
+
   spinlock_release(lock);
   return (uint64_t)new_pml4_phys;
 }
+
 
 uint64_t *vmm_create_pml4(void) {
   spinlock_t *lock = vmm_get_lock();

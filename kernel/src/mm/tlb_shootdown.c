@@ -5,6 +5,7 @@
 #include "../cpu/isr.h"
 #include "../sched/sched.h"
 #include "../smp/cpu.h"
+#include "pcid.h"
 #include "vmm.h"
 #include "../lock/spinlock.h"
 #include <stdint.h>
@@ -43,8 +44,13 @@ void tlb_shootdown_handle_ipi(void) {
 
     if (addr == TLB_SHOOTDOWN_ALL) {
         // Full CR3 reload flushes all TLB entries including globals.
+        struct cpu_info *self = cpu_get_current();
+        if (self) {
+            cpu_pcid_invalidate_all(self);
+        }
         uint64_t cr3;
         __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
+        cr3 &= ~CR3_NOFLUSH;
         __asm__ volatile("mov %0, %%cr3" :: "r"(cr3) : "memory");
     } else {
         __asm__ volatile("invlpg (%0)" :: "r"(addr) : "memory");
@@ -53,6 +59,7 @@ void tlb_shootdown_handle_ipi(void) {
     // Signal the initiator that this CPU is done.
     __atomic_fetch_sub(&ack_pending, 1, __ATOMIC_RELEASE);
 }
+
 
 static void tlb_shootdown_isr(struct registers *regs) {
     (void)regs;
@@ -85,14 +92,19 @@ static void do_shootdown(uint64_t addr) {
     if (targets == 0) {
         // Uniprocessor — just flush locally.
         if (addr == TLB_SHOOTDOWN_ALL) {
+            if (self) {
+                cpu_pcid_invalidate_all(self);
+            }
             uint64_t cr3;
             __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
+            cr3 &= ~CR3_NOFLUSH;
             __asm__ volatile("mov %0, %%cr3" :: "r"(cr3) : "memory");
         } else {
             __asm__ volatile("invlpg (%0)" :: "r"(addr) : "memory");
         }
         return;
     }
+
 
     spinlock_acquire(&shootdown_lock);
 

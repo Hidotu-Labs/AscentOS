@@ -16,24 +16,33 @@ vdso_gettimeofday:
     shl rdx, 32
     or rax, rdx                 ; rax = current tsc
 
-    mov r8, [rel vdso_boot_tsc]
-    sub rax, r8                 ; elapsed = current_tsc - boot_tsc
+    sub rax, [rel vdso_boot_tsc] ; rax = delta_cycles
 
-    mov r9, [rel vdso_tsc_hz]
-    test r9, r9
+    mov rcx, [rel vdso_tsc_sec_mult]
+    test rcx, rcx
     jz .gtod_fallback
 
-    xor edx, edx
-    div r9                      ; rax = sec, rdx = rem_cycles
+    mov r8, rax                 ; r8 = delta_cycles
 
-    mov r8, rax                 ; r8 = sec
-    mov rax, rdx                ; rax = rem_cycles
-    mov rcx, 1000000            ; 10^6 (usec)
-    mul rcx                     ; rdx:rax = rem_cycles * 10^6
-    div r9                      ; rax = usec
+    ; 1. sec = ((delta_cycles * M) >> 64) >> shift
+    mul rcx                     ; rdx = high 64 bits of delta_cycles * M
+    mov ecx, [rel vdso_tsc_sec_shift]
+    shr rdx, cl
+    mov r9, rdx                 ; r9 = sec
 
-    add r8, [rel vdso_boot_sec] ; sec += boot_sec
-    mov [rdi], r8               ; tv->tv_sec = sec
+    ; 2. rem_cycles = delta_cycles - (sec * tsc_hz)
+    mov rax, r9
+    imul rax, [rel vdso_tsc_hz]
+    sub r8, rax                 ; r8 = rem_cycles
+
+    ; 3. usec = (rem_cycles * mult_rem_us) >> 32
+    mov rax, r8
+    mov rcx, [rel vdso_mult_rem_us]
+    mul rcx
+    shrd rax, rdx, 32           ; rax = usec (0 .. 999,999)
+
+    add r9, [rel vdso_boot_sec]
+    mov [rdi], r9               ; tv->tv_sec = sec
     mov [rdi + 8], rax          ; tv->tv_usec = usec
 
 .gtod_done:
@@ -56,22 +65,23 @@ vdso_time:
     shl rdx, 32
     or rax, rdx
 
-    mov r8, [rel vdso_boot_tsc]
-    sub rax, r8
+    sub rax, [rel vdso_boot_tsc]
 
-    mov r9, [rel vdso_tsc_hz]
-    test r9, r9
+    mov rcx, [rel vdso_tsc_sec_mult]
+    test rcx, rcx
     jz .time_fallback
 
-    xor edx, edx
-    div r9                      ; rax = sec
-    add rax, [rel vdso_boot_sec]; rax = now_sec
+    mul rcx
+    mov ecx, [rel vdso_tsc_sec_shift]
+    shr rdx, cl
+    add rdx, [rel vdso_boot_sec]
 
     test rdi, rdi
     jz .time_done
-    mov [rdi], rax
+    mov [rdi], rdx
 
 .time_done:
+    mov rax, rdx
     ret
 
 .time_fallback:
@@ -111,21 +121,30 @@ vdso_clock_gettime:
     shl rdx, 32
     or rax, rdx
 
-    mov r8, [rel vdso_boot_tsc]
-    sub rax, r8
+    sub rax, [rel vdso_boot_tsc] ; rax = delta_cycles
 
-    mov r9, [rel vdso_tsc_hz]
-    test r9, r9
+    mov rcx, [rel vdso_tsc_sec_mult]
+    test rcx, rcx
     jz .cgt_fallback
 
-    xor edx, edx
-    div r9                      ; rax = sec, rdx = rem_cycles
+    mov r8, rax                 ; r8 = delta_cycles
 
-    mov r8, rax                 ; r8 = sec
-    mov rax, rdx                ; rax = rem_cycles
-    mov rcx, 1000000000         ; 10^9 (nsec)
+    ; 1. sec = ((delta_cycles * M) >> 64) >> shift
+    mul rcx                     ; rdx = high 64 bits of delta_cycles * M
+    mov ecx, [rel vdso_tsc_sec_shift]
+    shr rdx, cl
+    mov r9, rdx                 ; r9 = sec
+
+    ; 2. rem_cycles = delta_cycles - (sec * tsc_hz)
+    mov rax, r9
+    imul rax, [rel vdso_tsc_hz]
+    sub r8, rax                 ; r8 = rem_cycles
+
+    ; 3. nsec = (rem_cycles * mult_rem_ns) >> 32
+    mov rax, r8
+    mov rcx, [rel vdso_mult_rem_ns]
     mul rcx
-    div r9                      ; rax = nsec
+    shrd rax, rdx, 32           ; rax = nsec (0 .. 999,999,999)
     mov r10, rax                ; r10 = nsec
 
     ; Check if clock is REALTIME (0 or 4)
@@ -136,10 +155,10 @@ vdso_clock_gettime:
     jmp .cgt_store
 
 .cgt_add_boot_sec:
-    add r8, [rel vdso_boot_sec]
+    add r9, [rel vdso_boot_sec]
 
 .cgt_store:
-    mov [rsi], r8               ; tp->tv_sec
+    mov [rsi], r9               ; tp->tv_sec
     mov [rsi + 8], r10          ; tp->tv_nsec
     xor eax, eax                ; return 0
     ret
@@ -159,10 +178,15 @@ times (3584 - ($ - vdso_blob_start)) db 0xCC
 ; -------------------------------------------------------------
 ; Offset 0xE00: Shared Time Data
 ; -------------------------------------------------------------
-vdso_boot_tsc: dq 0
-vdso_tsc_khz:  dq 0
-vdso_boot_sec: dq 0
-vdso_tsc_hz:   dq 0
+vdso_boot_tsc:       dq 0
+vdso_tsc_khz:        dq 0
+vdso_boot_sec:       dq 0
+vdso_tsc_hz:         dq 0
+vdso_tsc_sec_mult:   dq 0
+vdso_tsc_sec_shift:  dq 0
+vdso_mult_rem_ns:    dq 0
+vdso_mult_rem_us:    dq 0
+
 
 ; Pad to full 4096 bytes
 times (4096 - ($ - vdso_blob_start)) db 0xCC

@@ -2,6 +2,7 @@
 #define SMP_CPU_H
 
 #include "../lock/spinlock.h"
+#include "../sched/eevfd.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -56,7 +57,10 @@ struct cpu_info {
   struct thread *timer_heap[MAX_TIMER_HEAP_SIZE];
   uint32_t timer_heap_count;
   struct thread *fpu_owner; // Currently loaded FPU/SSE state owner on this CPU
+  struct eevfd_rq eevfd;    // EEVFD Runqueue structure
+  uint64_t active_pcids_bmp[64]; // PCID caching tracking (4096 bits)
 } __attribute__((aligned(64)));
+
 
 
 _Static_assert(offsetof(struct cpu_info, scratch_rsp) == 368,

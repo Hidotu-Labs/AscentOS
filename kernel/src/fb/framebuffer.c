@@ -290,15 +290,22 @@ void fb_swap_buffer(void) {
   dirty_y2 = 0;
   dirty_valid = false;
 
-  // Copy only the dirty region scanlines
+  // Copy dirty region
   uint32_t copy_width = x2 - x1;
   if (copy_width == 0)
     return;
 
-  for (uint32_t y = y1; y < y2; y++) {
-    uint8_t *src = (uint8_t *)backbuffer + y * fb->pitch + x1 * 4;
-    uint8_t *dst = (uint8_t *)fb->address + y * fb->pitch + x1 * 4;
-    memcpy_to_wc(dst, src, copy_width * 4);
+  if (x1 == 0 && copy_width == fb->width) {
+    uint8_t *src = (uint8_t *)backbuffer + (uint64_t)y1 * fb->pitch;
+    uint8_t *dst = (uint8_t *)fb->address + (uint64_t)y1 * fb->pitch;
+    uint64_t total_bytes = (uint64_t)(y2 - y1) * fb->pitch;
+    memcpy_to_wc(dst, src, total_bytes);
+  } else {
+    for (uint32_t y = y1; y < y2; y++) {
+      uint8_t *src = (uint8_t *)backbuffer + (uint64_t)y * fb->pitch + x1 * 4;
+      uint8_t *dst = (uint8_t *)fb->address + (uint64_t)y * fb->pitch + x1 * 4;
+      memcpy_to_wc(dst, src, copy_width * 4);
+    }
   }
   __asm__ volatile("sfence" ::: "memory");
 }
@@ -1161,24 +1168,29 @@ void fb_put_pixel(uint32_t x, uint32_t y, uint32_t color) {
   fb_mark_dirty(x, y, 1, 1);
 }
 
-// Fast 32-bit fill for aligned regions
+// Fast 64-bit/32-bit fill for aligned scanlines
 static inline void fill_scanline32(uint32_t *dst, uint32_t count,
                                    uint32_t color) {
-  // Unroll for speed
-  while (count >= 8) {
-    dst[0] = color;
-    dst[1] = color;
-    dst[2] = color;
-    dst[3] = color;
-    dst[4] = color;
-    dst[5] = color;
-    dst[6] = color;
-    dst[7] = color;
-    dst += 8;
-    count -= 8;
+  if (count == 0)
+    return;
+
+  uint64_t col64 = ((uint64_t)color << 32) | color;
+  uint64_t *d64 = (uint64_t *)dst;
+
+  if ((uintptr_t)d64 & 4) {
+    *(uint32_t *)d64 = color;
+    d64 = (uint64_t *)((uint32_t *)d64 + 1);
+    count--;
   }
-  while (count--) {
-    *dst++ = color;
+
+  size_t qwords = count >> 1;
+  __asm__ volatile("rep stosq"
+                   : "+D"(d64), "+c"(qwords)
+                   : "a"(col64)
+                   : "memory");
+
+  if (count & 1) {
+    *(uint32_t *)d64 = color;
   }
 }
 
@@ -1207,8 +1219,54 @@ void fb_fill_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
           (uint32_t *)((uint8_t *)fb->address + row * fb->pitch + x * 4);
       fill_scanline32(line, w, color);
     }
+    __asm__ volatile("sfence" ::: "memory");
   } else {
     fb_mark_dirty(x, y, w, h);
+  }
+}
+
+void fb_copy_rect(uint32_t dst_x, uint32_t dst_y, uint32_t src_x,
+                  uint32_t src_y, uint32_t w, uint32_t h) {
+  if (!fb)
+    return;
+
+  if (src_x >= fb->width || src_y >= fb->height ||
+      dst_x >= fb->width || dst_y >= fb->height)
+    return;
+
+  if (src_x + w > fb->width)
+    w = fb->width - src_x;
+  if (dst_x + w > fb->width)
+    w = fb->width - dst_x;
+  if (src_y + h > fb->height)
+    h = fb->height - src_y;
+  if (dst_y + h > fb->height)
+    h = fb->height - dst_y;
+  if (w == 0 || h == 0)
+    return;
+
+  void *target = backbuffer_enabled ? backbuffer : fb->address;
+  uint32_t pitch = fb->pitch;
+  size_t bytes_per_line = (size_t)w * 4;
+
+  if (dst_y < src_y || (dst_y == src_y && dst_x <= src_x)) {
+    for (uint32_t r = 0; r < h; r++) {
+      uint8_t *s = (uint8_t *)target + (src_y + r) * pitch + src_x * 4;
+      uint8_t *d = (uint8_t *)target + (dst_y + r) * pitch + dst_x * 4;
+      memcpy(d, s, bytes_per_line);
+    }
+  } else {
+    for (int r = (int)h - 1; r >= 0; r--) {
+      uint8_t *s = (uint8_t *)target + (src_y + r) * pitch + src_x * 4;
+      uint8_t *d = (uint8_t *)target + (dst_y + r) * pitch + dst_x * 4;
+      memcpy(d, s, bytes_per_line);
+    }
+  }
+
+  if (!backbuffer_enabled) {
+    __asm__ volatile("sfence" ::: "memory");
+  } else {
+    fb_mark_dirty(dst_x, dst_y, w, h);
   }
 }
 
@@ -1216,40 +1274,69 @@ void fb_clear(uint32_t color) {
   void *target = backbuffer_enabled ? backbuffer : fb->address;
   if (!target)
     return;
-  for (uint32_t y = 0; y < fb->height; y++) {
-    uint32_t *line =
-        (uint32_t *)((uint8_t *)target + (uint64_t)y * fb->pitch);
-    fill_scanline32(line, fb->width, color);
+
+  uint64_t col64 = ((uint64_t)color << 32) | color;
+  uint32_t *pixels = (uint32_t *)target;
+
+  if (fb->pitch == fb->width * 4) {
+    size_t total_pixels = (size_t)fb->width * fb->height;
+    uint64_t *d64 = (uint64_t *)pixels;
+    size_t qwords = total_pixels >> 1;
+    __asm__ volatile("rep stosq"
+                     : "+D"(d64), "+c"(qwords)
+                     : "a"(col64)
+                     : "memory");
+    if (total_pixels & 1) {
+      *(uint32_t *)d64 = color;
+    }
+  } else {
+    for (uint32_t y = 0; y < fb->height; y++) {
+      uint32_t *line =
+          (uint32_t *)((uint8_t *)target + (uint64_t)y * fb->pitch);
+      fill_scanline32(line, fb->width, color);
+    }
   }
+
   if (!backbuffer_enabled)
     __asm__ volatile("sfence" ::: "memory");
   fb_mark_dirty(0, 0, fb->width, fb->height);
 }
 
-// Draw a single glyph scanline (8 pixels) with fg/bg colors in one operation
-// This replaces 8 individual fb_put_pixel calls per scanline
+// Branchless 8-pixel glyph scanline unpacking
+static inline void draw_8pixels_branchless(uint32_t *line, uint8_t bits,
+                                           uint32_t fg, uint32_t bg) {
+  uint64_t p0 = (bits & 0x80) ? fg : bg;
+  uint64_t p1 = (bits & 0x40) ? fg : bg;
+  uint64_t p2 = (bits & 0x20) ? fg : bg;
+  uint64_t p3 = (bits & 0x10) ? fg : bg;
+  uint64_t p4 = (bits & 0x08) ? fg : bg;
+  uint64_t p5 = (bits & 0x04) ? fg : bg;
+  uint64_t p6 = (bits & 0x02) ? fg : bg;
+  uint64_t p7 = (bits & 0x01) ? fg : bg;
+
+  uint64_t *d64 = (uint64_t *)line;
+  d64[0] = (p1 << 32) | p0;
+  d64[1] = (p3 << 32) | p2;
+  d64[2] = (p5 << 32) | p4;
+  d64[3] = (p7 << 32) | p6;
+}
+
 void fb_draw_glyph_scanline(uint32_t x, uint32_t y, uint8_t bits, uint32_t fg,
                             uint32_t bg) {
   if (x >= fb->width || y >= fb->height)
     return;
 
-  // Always update backbuffer if it exists to keep it in sync
   if (backbuffer) {
     uint32_t *line =
         (uint32_t *)((uint8_t *)backbuffer + y * fb->pitch + x * 4);
-    for (int i = 0; i < 8; i++) {
-      line[i] = (bits & (0x80 >> i)) ? fg : bg;
-    }
+    draw_8pixels_branchless(line, bits, fg, bg);
   }
 
   if (!backbuffer_enabled) {
     uint32_t *line =
         (uint32_t *)((uint8_t *)fb->address + y * fb->pitch + x * 4);
-    for (int i = 0; i < 8; i++) {
-      line[i] = (bits & (0x80 >> i)) ? fg : bg;
-    }
+    draw_8pixels_branchless(line, bits, fg, bg);
   } else {
-    // Mark dirty only when backbuffering is active
     fb_mark_dirty(x, y, 8, 1);
   }
 }

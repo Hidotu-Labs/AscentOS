@@ -15,6 +15,9 @@ void pmm_init_early(uint64_t hhdm_offset);
 // offset.
 void pmm_init(struct limine_memmap_response *memmap, uint64_t hhdm_offset);
 
+// Initialize Per-CPU Page Frame Allocator (PCP) caches after SMP/CPU is initialized
+void pmm_pcp_init(void);
+
 // New Buddy Allocator API
 void *pmm_alloc_page(void); // Allocate single page
 void *pmm_alloc_pages(
