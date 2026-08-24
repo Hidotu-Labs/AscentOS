@@ -245,6 +245,8 @@ void syscall_register_poll(void);
 void syscall_register_shm(void);
 void syscall_register_futex(void);
 
+const char *syscall_get_name(uint64_t num);
+
 void syscall_init(void);
 
 uint64_t mm_alloc_mmap_region(uint64_t length);

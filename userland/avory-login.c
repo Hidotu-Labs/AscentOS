@@ -55,6 +55,13 @@ static void run_session(const struct passwd *pw) {
     char login_argv0[260];
     snprintf(login_argv0, sizeof(login_argv0), "-%s", base);
     execl(shell, login_argv0, (char *)NULL);
+
+    if (strcmp(shell, "/bin/sh") != 0) {
+        execl("/bin/sh", "-sh", (char *)NULL);
+    }
+    if (strcmp(shell, "/bin/busybox") != 0) {
+        execl("/bin/busybox", "sh", (char *)NULL);
+    }
     perror("login: exec shell");
     _exit(127);
 }

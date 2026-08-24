@@ -31,6 +31,10 @@ setup_dep "kernel/limine-protocol" "$LIMINE_PROTOCOL_URL"
 setup_dep "kernel/freestnd-c-hdrs" "$FREESTND_C_HDRS_URL"
 setup_dep "AetherDE" "$AETHERDE_URL"
 
+echo "--- Setting up musl toolchain ---"
+chmod +x scripts/musl-toolchain.sh
+./scripts/musl-toolchain.sh
+
 echo "--- Setting up glibc toolchain ---"
 chmod +x scripts/glibc-toolchain.sh
 ./scripts/glibc-toolchain.sh

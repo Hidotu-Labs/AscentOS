@@ -117,9 +117,11 @@ build_classicube() {
                     -DCC_BUILD_X11 -DCC_GFX_BACKEND=2 -DCC_BUILD_POSIX \
                     -DCC_BUILD_NOMUSIC -I$MESA_ROOT/usr/include -I$PREFIX/include"
             LDFLAGS="-L$MESA_ROOT/usr/lib -L$MESA_ROOT/lib \
+                     -Wl,-dynamic-linker,/lib/ld-musl-x86_64.so.1 \
+                     -Wl,-rpath,/usr/lib \
                      -Wl,-rpath-link,$MESA_ROOT/usr/lib \
                      -Wl,-rpath-link,$MESA_ROOT/lib -Wl,--allow-shlib-undefined"
-            LIBS="-lGL -lX11 -ldl -lpthread -lm -lc"
+            LIBS="-lGL -lX11 -lXi -ldl -lpthread -lm -lc"
             BACKEND_SOURCES="src/Platform_Posix.c src/Window_X11.c src/Graphics_GL1.c"
             ;;
         softgpu)

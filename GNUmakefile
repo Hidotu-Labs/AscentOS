@@ -1,5 +1,7 @@
 .SUFFIXES:
 
+.DEFAULT_GOAL := all
+
 ARCH := x86_64
 QEMUFLAGS := -m 2G \
 	-vga none \
@@ -34,7 +36,7 @@ QUAKE2_STAMP := build/quake2/.built
 # unless the outputs are actually missing.
 $(QUAKE2_BUNDLE_FILES): $(QUAKE2_STAMP)
 
-$(QUAKE2_STAMP): scripts/build-quake2.sh \
+$(QUAKE2_STAMP): $(ALPINE_STAMP) scripts/build-quake2.sh \
 		scripts/quake2-sdl2-config.in scripts/quake2-avoryos-evdev.h
 	./scripts/build-quake2.sh && \
 		mkdir -p $(dir $(QUAKE2_STAMP)) && \
@@ -66,6 +68,48 @@ GLIBC_USER_CFLAGS := -O2 -Wall -Wextra -fno-stack-protector \
 
 # Alpine rootfs sysroot (built by scripts/setup-alpine.sh)
 ALPINE_SYSROOT := $(CURDIR)/build/alpine/rootfs
+ALPINE_STAMP := $(CURDIR)/build/alpine/.built
+
+$(ALPINE_STAMP): scripts/setup-alpine.sh
+	@if [ ! -d "$(ALPINE_SYSROOT)/usr/include" ]; then \
+		echo "[*] Setting up Alpine rootfs..."; \
+		chmod +x scripts/setup-alpine.sh && \
+		./scripts/setup-alpine.sh; \
+	fi
+	@mkdir -p $(dir $(ALPINE_STAMP))
+	@touch $(ALPINE_STAMP)
+
+.PHONY: setup-alpine
+setup-alpine: $(ALPINE_STAMP)
+
+GLIBC_SYSROOT := $(CURDIR)/toolchain/glibc-sysroot
+GLIBC_STAMP := $(GLIBC_SYSROOT)/lib/libc.so.6
+
+$(GLIBC_STAMP): scripts/glibc-toolchain.sh
+	@echo "[*] Setting up glibc toolchain..."
+	chmod +x scripts/glibc-toolchain.sh && ./scripts/glibc-toolchain.sh
+
+.PHONY: glibc-toolchain
+glibc-toolchain: $(GLIBC_STAMP)
+
+BASH_STAMP := $(GLIBC_SYSROOT)/opt/bash/bin/bash
+
+$(BASH_STAMP): $(GLIBC_STAMP) scripts/build-bash.sh
+	@echo "[*] Building GNU Bash..."
+	chmod +x scripts/build-bash.sh && ./scripts/build-bash.sh
+
+.PHONY: bash
+bash: $(BASH_STAMP)
+
+COREUTILS_STAMP := $(GLIBC_SYSROOT)/opt/coreutils/bin/ls
+
+$(COREUTILS_STAMP): $(GLIBC_STAMP) scripts/build-coreutils.sh
+	@echo "[*] Building GNU Coreutils..."
+	chmod +x scripts/build-coreutils.sh && ./scripts/build-coreutils.sh
+
+.PHONY: coreutils
+coreutils: $(COREUTILS_STAMP)
+
 
 # GTK2 test - include/lib flags
 GTK2_INCLUDES := \
@@ -261,11 +305,7 @@ run-fat32: edk2-ovmf $(IMAGE_NAME).iso fat32_test.img
 		-device usb-mouse,bus=xhci.0 \
 		$(QEMUFLAGS)
 
-AetherDE/x11-wm/AetherWM: AetherDE/x11-wm/main.c AetherDE/x11-wm/render.c AetherDE/x11-wm/input.c AetherDE/x11-wm/frames.c AetherDE/x11-wm/wm.h AetherDE/x11-wm/stb_image.h scripts/setup-alpine.sh
-	@if [ ! -d "$(ALPINE_SYSROOT)" ]; then \
-		echo "Error: Alpine rootfs not found. Run scripts/setup-alpine.sh first."; \
-		exit 1; \
-	fi
+AetherDE/x11-wm/AetherWM: AetherDE/x11-wm/main.c AetherDE/x11-wm/render.c AetherDE/x11-wm/input.c AetherDE/x11-wm/frames.c AetherDE/x11-wm/wm.h AetherDE/x11-wm/stb_image.h $(ALPINE_STAMP) $(MUSL_LIBC)
 	@echo "[*] Compiling AetherDE X11 Window Manager (low-level: Xft+XRender, no Cairo/Pango)..."
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" \
 		$(MUSL_CC) -O2 -Wall -Wextra -march=x86-64 -mtune=generic \
@@ -288,11 +328,7 @@ AetherDE/x11-wm/AetherWM: AetherDE/x11-wm/main.c AetherDE/x11-wm/render.c Aether
 		-Wl,-rpath-link,$(ALPINE_SYSROOT)/usr/lib:$(ALPINE_SYSROOT)/lib
 
 
-AetherDE/aether-dock/aether-dock: AetherDE/aether-dock/main.c AetherDE/aether-dock/dock.c AetherDE/aether-dock/render_dock.c AetherDE/aether-dock/dock.h scripts/setup-alpine.sh
-	@if [ ! -d "$(ALPINE_SYSROOT)" ]; then \
-		echo "Error: Alpine rootfs not found. Run scripts/setup-alpine.sh first."; \
-		exit 1; \
-	fi
+AetherDE/aether-dock/aether-dock: AetherDE/aether-dock/main.c AetherDE/aether-dock/dock.c AetherDE/aether-dock/render_dock.c AetherDE/aether-dock/dock.h $(ALPINE_STAMP) $(MUSL_LIBC)
 	@echo "[*] Compiling AetherDE Dock..."
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" \
 		$(MUSL_CC) -O2 -Wall -Wextra -march=x86-64 -mtune=generic \
@@ -333,11 +369,7 @@ AetherDE/aether-dock/aether-dock: AetherDE/aether-dock/main.c AetherDE/aether-do
 		-Wl,-rpath-link,$(ALPINE_SYSROOT)/usr/lib:$(ALPINE_SYSROOT)/lib
 
 
-AetherDE/aether-panel/aether-panel: AetherDE/aether-panel/panel.c scripts/setup-alpine.sh
-	@if [ ! -d "$(ALPINE_SYSROOT)" ]; then \
-		echo "Error: Alpine rootfs not found. Run scripts/setup-alpine.sh first."; \
-		exit 1; \
-	fi
+AetherDE/aether-panel/aether-panel: AetherDE/aether-panel/panel.c $(ALPINE_STAMP) $(MUSL_LIBC)
 	@echo "[*] Compiling AetherDE Panel..."
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" \
 		$(MUSL_CC) -O2 -Wall -Wextra \
@@ -365,11 +397,7 @@ AetherDE/aether-panel/aether-panel: AetherDE/aether-panel/panel.c scripts/setup-
 		-Wl,-rpath-link,$(ALPINE_SYSROOT)/usr/lib:$(ALPINE_SYSROOT)/lib
 
 
-AetherDE/wayland-compositor/aether-compositor: AetherDE/wayland-compositor/main.c AetherDE/wayland-compositor/render.c AetherDE/wayland-compositor/input.c AetherDE/wayland-compositor/pixel_server.c AetherDE/wayland-compositor/protocols.c AetherDE/wayland-compositor/xdg-shell-protocol.c scripts/setup-alpine.sh
-	@if [ ! -d "$(ALPINE_SYSROOT)" ]; then \
-		echo "Error: Alpine rootfs not found. Run scripts/setup-alpine.sh first."; \
-		exit 1; \
-	fi
+AetherDE/wayland-compositor/aether-compositor: AetherDE/wayland-compositor/main.c AetherDE/wayland-compositor/render.c AetherDE/wayland-compositor/input.c AetherDE/wayland-compositor/pixel_server.c AetherDE/wayland-compositor/protocols.c AetherDE/wayland-compositor/xdg-shell-protocol.c $(ALPINE_STAMP) $(MUSL_LIBC)
 	@echo "[*] Compiling AetherDE/wayland-compositor modular source files..."
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" \
 		$(MUSL_CC) -O2 -Wall -march=x86-64 -mtune=generic \
@@ -390,11 +418,7 @@ AetherDE/wayland-compositor/aether-compositor: AetherDE/wayland-compositor/main.
 		-o AetherDE/wayland-compositor/aether-compositor
 
 
-AetherDE/demo-client/aether-window: AetherDE/demo-client/main.c scripts/setup-alpine.sh
-	@if [ ! -d "$(ALPINE_SYSROOT)" ]; then \
-		echo "Error: Alpine rootfs not found. Run scripts/setup-alpine.sh first."; \
-		exit 1; \
-	fi
+AetherDE/demo-client/aether-window: AetherDE/demo-client/main.c $(ALPINE_STAMP) $(MUSL_LIBC)
 	@echo "[*] Compiling AetherDE GTK3 Wayland Window Client..."
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" \
 		$(MUSL_CC) -O2 -Wall -march=x86-64 -mtune=generic \
@@ -406,7 +430,7 @@ AetherDE/demo-client/aether-window: AetherDE/demo-client/main.c scripts/setup-al
 
 
 # Create a 64MB ext2 disk image with sample files for testing
-disk.img: GNUmakefile userland/winoptions userland/icewm-menu
+disk.img: GNUmakefile userland/winoptions userland/icewm-menu $(ALPINE_STAMP)
 disk.img: scripts/configure-accounts.sh userland/avory-account userland/test_accounts.sh userland/avory-login.elf
 disk.img:  userland/dns_lookup.elf
 disk.img: userland/test_clone_futex.elf
@@ -432,8 +456,8 @@ disk.img: userland/proc_bench.elf
 
 
 
-disk.img: $(QUAKE2_BUNDLE_FILES)
-disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets/mc9.mp3 assets/train.mp3 assets/test.bmp assets/test.tar assets/room.png assets/logo.png assets/linus.gif assets/video.mp4 userland/forkit.elf userland/forkit-launch.sh userland/about.elf userland/hello_glibc.elf userland/booter.elf userland/reboot.elf userland/shutdown.elf userland/apm.elf userland/test_cpp.elf  userland/kilo.elf  userland/ls.elf userland/lspci.elf userland/lsblk.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/asplay.elf userland/kria.elf userland/doom.elf userland/xrootcursor.elf  userland/jwm.elf userland/doom_x11.elf userland/gtk_test.elf userland/qt5_test.elf userland/tglgears_fb.elf userland/tglgears_drm.elf userland/tglhello_drm.elf userland/test_mem_stress.elf userland/classicube.elf userland/terrain.png userland/texpacks/classicube.zip initrd/startx.sh initrd/startw.sh initrd/weston.ini AetherDE/x11-wm/AetherWM AetherDE/aether-dock/aether-dock AetherDE/aether-panel/aether-panel AetherDE/wayland-compositor/aether-compositor AetherDE/demo-client/aether-window AetherDE/scripts/sax11.sh AetherDE/scripts/sawayland.sh userland/avoryd.elf $(AVORYD_CONFIG_FILES)
+disk.img: $(BASH_STAMP) $(COREUTILS_STAMP) $(ALPINE_STAMP) $(QUAKE2_BUNDLE_FILES)
+disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets/mc9.mp3 assets/train.mp3 assets/test.bmp assets/test.tar assets/room.png assets/logo.png assets/linus.gif assets/video.mp4 userland/forkit.elf userland/forkit-launch.sh userland/about.elf userland/hello_glibc.elf userland/booter.elf userland/reboot.elf userland/shutdown.elf userland/apm.elf userland/test_cpp.elf  userland/kilo.elf  userland/ls.elf userland/lspci.elf userland/lsblk.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/asplay.elf userland/kria.elf userland/doom.elf userland/doom_x11.elf userland/gtk_test.elf userland/qt5_test.elf userland/tglgears_fb.elf userland/tglgears_drm.elf userland/tglhello_drm.elf userland/test_mem_stress.elf userland/classicube.elf userland/terrain.png userland/texpacks/classicube.zip initrd/startx.sh initrd/startw.sh initrd/weston.ini AetherDE/x11-wm/AetherWM AetherDE/aether-dock/aether-dock AetherDE/aether-panel/aether-panel AetherDE/wayland-compositor/aether-compositor AetherDE/demo-client/aether-window AetherDE/scripts/sax11.sh AetherDE/scripts/sawayland.sh userland/avoryd.elf $(AVORYD_CONFIG_FILES)
 	@echo "Creating root filesystem (ext4)..."
 	rm -f ./part.img
 	dd if=/dev/zero of=./part.img bs=1M count=2047
@@ -468,8 +492,6 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 		echo "write userland/avoryd.elf bin/avoryd"; \
 		echo "rm bin/avory-login"; \
 		echo "write userland/avory-login.elf bin/avory-login"; \
-		echo "rm bin/xrootcursor"; \
-		echo "write userland/xrootcursor.elf bin/xrootcursor"; \
 		echo "mkdir etc"; \
 		echo "mkdir etc/apm"; \
 		echo "mkdir etc/apm/cache"; \
@@ -833,6 +855,10 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 		debugfs -w -R "write /tmp/os-release usr/lib/os-release" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "rm .bashrc" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "write /tmp/bashrc .bashrc" ./part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "rm etc/profile" ./part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write /tmp/bashrc etc/profile" ./part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "rm etc/bash.bashrc" ./part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write /tmp/bashrc etc/bash.bashrc" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "mkdir .config" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "mkdir .config/fastfetch" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "mkdir fastfetch" ./part.img >/dev/null 2>&1 || true; \
@@ -873,6 +899,10 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 	@{ \
 		echo "rm bin/ls"; \
 		echo "symlink bin/ls /opt/coreutils/bin/ls"; \
+		echo "set_inode_field bin/bash mode 0100755"; \
+		echo "set_inode_field bin/sh mode 0100755"; \
+		echo "set_inode_field bin/avory-login mode 0100755"; \
+		echo "set_inode_field bin/avoryd mode 0100755"; \
 		echo "set_inode_field bin/sax11.sh mode 0100755"; \
 		echo "set_inode_field bin/sawayland.sh mode 0100755"; \
 		echo "set_inode_field bin/AetherWM mode 0100755"; \
@@ -1104,20 +1134,17 @@ doomgeneric:
 	rm -rf doomgeneric
 	git clone https://github.com/ozkl/doomgeneric.git --depth=1
 
-userland/doom.elf: doomgeneric $(MUSL_LIBC)
+userland/doom.elf userland/doom_x11.elf: doomgeneric $(MUSL_LIBC) $(ALPINE_STAMP)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MAKE) -C userland -f Makefile.avoryos \
-		MUSL_CC="$(MUSL_CC)" \
-		MUSL_SYSROOT="$(MUSL_SYSROOT)"
+		MUSL_CC="$(MUSL_TOOLCHAIN_BIN)/x86_64-linux-musl-gcc" \
+		MUSL_SYSROOT="$(MUSL_SYSROOT)" \
+		ALPINE_SYSROOT="$(ALPINE_SYSROOT)"
 
 .PHONY: clean-doom
 clean-doom:
 	$(MAKE) -C userland -f Makefile.avoryos clean
 
-userland/gtk_test.elf: userland/gtk_test.c scripts/setup-alpine.sh
-	@if [ ! -d "$(ALPINE_SYSROOT)" ]; then \
-		echo "Error: Alpine rootfs not found. Run scripts/setup-alpine.sh first."; \
-		exit 1; \
-	fi
+userland/gtk_test.elf: userland/gtk_test.c $(ALPINE_STAMP) $(MUSL_LIBC)
 	@echo "[*] Compiling userland/gtk_test.c (GTK2) ..."
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" \
 		$(MUSL_TOOLCHAIN_BIN)/x86_64-linux-musl-gcc -O2 \
@@ -1127,11 +1154,7 @@ userland/gtk_test.elf: userland/gtk_test.c scripts/setup-alpine.sh
 		$(GTK2_LIBS) \
 		$(GTK2_LDFLAGS)
 
-userland/gtk3_test.elf: userland/gtk3_test.c scripts/setup-alpine.sh
-	@if [ ! -d "$(ALPINE_SYSROOT)" ]; then \
-		echo "Error: Alpine rootfs not found. Run scripts/setup-alpine.sh first."; \
-		exit 1; \
-	fi
+userland/gtk3_test.elf: userland/gtk3_test.c $(ALPINE_STAMP) $(MUSL_LIBC)
 	@echo "[*] Compiling userland/gtk3_test.c (GTK3) ..."
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" \
 		$(MUSL_TOOLCHAIN_BIN)/x86_64-linux-musl-gcc -O2 \
@@ -1141,15 +1164,7 @@ userland/gtk3_test.elf: userland/gtk3_test.c scripts/setup-alpine.sh
 		$(GTK3_LIBS) \
 		$(GTK3_LDFLAGS)
 
-userland/qt5_test.elf: userland/qt5_test.cpp scripts/setup-alpine.sh
-	@if [ ! -d "$(ALPINE_SYSROOT)" ]; then \
-		echo "Error: Alpine rootfs not found. Run scripts/setup-alpine.sh first."; \
-		exit 1; \
-	fi
-	@if [ ! -d "$(ALPINE_SYSROOT)/usr/include/qt5" ]; then \
-		echo "Error: Qt5 dev headers not found. Re-run scripts/setup-alpine.sh to install qt5-qtbase-dev."; \
-		exit 1; \
-	fi
+userland/qt5_test.elf: userland/qt5_test.cpp $(ALPINE_STAMP) $(MUSL_LIBC)
 	@echo "[*] Compiling userland/qt5_test.cpp (Qt5) ..."
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" \
 		$(MUSL_TOOLCHAIN_BIN)/x86_64-linux-musl-g++ -O2 -std=c++14 \
@@ -1160,7 +1175,17 @@ userland/qt5_test.elf: userland/qt5_test.cpp scripts/setup-alpine.sh
 		$(QT5_LIBS) \
 		$(QT5_LDFLAGS)
 
-userland/tglgears_fb.elf: userland/tglgears_fb.c $(MUSL_LIBC) scripts/build-tinygl.sh
+TINYGL_LIB := $(MUSL_SYSROOT)/opt/tinygl/lib/libTinyGL.a
+
+$(TINYGL_LIB): scripts/build-tinygl.sh $(MUSL_LIBC)
+	@echo "[*] Building TinyGL library..."
+	chmod +x scripts/build-tinygl.sh
+	./scripts/build-tinygl.sh
+
+.PHONY: tinygl
+tinygl: $(TINYGL_LIB)
+
+userland/tglgears_fb.elf: userland/tglgears_fb.c $(MUSL_LIBC) $(TINYGL_LIB)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/tglgears_fb.c -I$(MUSL_SYSROOT)/opt/tinygl/include -L$(MUSL_SYSROOT)/opt/tinygl/lib -lTinyGL -L$(MUSL_SYSROOT)/lib -lm -o userland/tglgears_fb.elf
 
@@ -1245,21 +1270,21 @@ userland/fault_mon.elf: userland/fault_mon.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/fault_mon.c -o userland/fault_mon.elf
 
-userland/tglgears_drm.elf: userland/tglgears_drm.c $(MUSL_LIBC) scripts/build-tinygl.sh
+userland/tglgears_drm.elf: userland/tglgears_drm.c $(MUSL_LIBC) $(TINYGL_LIB)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/tglgears_drm.c -I$(MUSL_SYSROOT)/opt/tinygl/include -L$(MUSL_SYSROOT)/opt/tinygl/lib -lTinyGL -lm -o userland/tglgears_drm.elf
 
-userland/tglhello_drm.elf: userland/tglhello_drm.c $(MUSL_LIBC) scripts/build-tinygl.sh
+userland/tglhello_drm.elf: userland/tglhello_drm.c $(MUSL_LIBC) $(TINYGL_LIB)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/tglhello_drm.c -I$(MUSL_SYSROOT)/opt/tinygl/include -L$(MUSL_SYSROOT)/opt/tinygl/lib -lTinyGL -lm -o userland/tglhello_drm.elf
 
-userland/classicube.elf: scripts/build-classicube.sh
+userland/classicube.elf: $(ALPINE_STAMP) $(MUSL_LIBC) scripts/build-classicube.sh
 	./scripts/build-classicube.sh
 
-userland/forkit.elf: scripts/build-forkit.sh
+userland/forkit.elf: $(MUSL_LIBC) scripts/build-forkit.sh
 	./scripts/build-forkit.sh
 
-userland/about.elf: userland/about.c scripts/build-about.sh scripts/setup-alpine.sh
+userland/about.elf: userland/about.c scripts/build-about.sh $(ALPINE_STAMP) $(MUSL_LIBC)
 	./scripts/build-about.sh
 
 userland/texpacks/classicube.zip:

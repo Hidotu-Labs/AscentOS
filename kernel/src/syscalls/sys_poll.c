@@ -5,9 +5,14 @@
 #include "../lib/string.h"
 #include "../mm/vmm.h"
 #include "../sched/sched.h"
-#include "arch/uaccess.h"
 #include "syscall.h"
 #include <stdint.h>
+
+// User-space pointer validation: reject kernel/HHDM addresses
+#define USER_ADDR_MAX 0x00007FFFFFFFFFFFULL
+static inline bool is_user_ptr(uint64_t addr) {
+  return addr != 0 && addr <= USER_ADDR_MAX;
+}
 
 struct pollfd {
   int fd;
@@ -91,7 +96,8 @@ static uint64_t sys_poll(uint64_t fds_ptr, uint64_t nfds, uint64_t timeout_ms,
     }
     return 0;
   }
-  if (!is_user_range((const void *)fds_ptr, nfds * sizeof(struct pollfd)))
+  if (!is_user_ptr(fds_ptr) ||
+      !vmm_is_user_addr_range_valid(fds_ptr, nfds * sizeof(struct pollfd)))
     return (uint64_t)-14;
 
   return do_poll((struct pollfd *)fds_ptr, nfds, timeout_ms);
@@ -104,13 +110,13 @@ static uint64_t sys_ppoll(uint64_t fds_ptr, uint64_t nfds, uint64_t timeout_ptr,
   (void)a5;
 
   uint64_t timeout_ms = (uint64_t)-1;
-  if (timeout_ptr) {
-    if (!is_user_range((const void *)timeout_ptr, 16))
-      return (uint64_t)-14;
+  if (timeout_ptr && is_user_ptr(timeout_ptr)) {
     struct {
       int64_t tv_sec;
       int64_t tv_nsec;
     } *ts = (void *)timeout_ptr;
+    if (!vmm_is_user_addr_range_valid(timeout_ptr, 16))
+      return (uint64_t)-14;
     timeout_ms = (uint64_t)(ts->tv_sec * 1000 + ts->tv_nsec / 1000000);
   }
 
@@ -192,16 +198,19 @@ static uint64_t sys_pselect6(uint64_t nfds, uint64_t readfds, uint64_t writefds,
   if (nfds > 1024)
     return (uint64_t)-22;
   size_t set_size = (nfds + 7) / 8;
-  if (readfds && !is_user_range((const void *)readfds, set_size))
+  if (readfds && (!is_user_ptr(readfds) ||
+                  !vmm_is_user_addr_range_valid(readfds, set_size)))
     return (uint64_t)-14;
-  if (writefds && !is_user_range((const void *)writefds, set_size))
+  if (writefds && (!is_user_ptr(writefds) ||
+                   !vmm_is_user_addr_range_valid(writefds, set_size)))
     return (uint64_t)-14;
-  if (exceptfds && !is_user_range((const void *)exceptfds, set_size))
+  if (exceptfds && (!is_user_ptr(exceptfds) ||
+                    !vmm_is_user_addr_range_valid(exceptfds, set_size)))
     return (uint64_t)-14;
 
   uint64_t timeout_ms = (uint64_t)-1;
-  if (timeout) {
-    if (!is_user_range((const void *)timeout, 16))
+  if (timeout && is_user_ptr(timeout)) {
+    if (!vmm_is_user_addr_range_valid(timeout, 16))
       return (uint64_t)-14;
     struct {
       int64_t tv_sec;
@@ -218,13 +227,13 @@ static uint64_t sys_select(uint64_t nfds, uint64_t readfds, uint64_t writefds,
   (void)a5;
   uint64_t timeout_ms = (uint64_t)-1;
 
-  if (timeout) {
-    if (!is_user_range((const void *)timeout, 16))
-      return (uint64_t)-14;
+  if (timeout && is_user_ptr(timeout)) {
     struct {
       int64_t tv_sec;
       int64_t tv_usec;
     } *tv = (void *)timeout;
+    if (!vmm_is_user_addr_range_valid(timeout, 16))
+      return (uint64_t)-14;
     timeout_ms = (uint64_t)(tv->tv_sec * 1000 + tv->tv_usec / 1000);
   }
 

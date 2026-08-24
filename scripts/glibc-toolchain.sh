@@ -31,6 +31,16 @@ else
     echo "glibc toolchain already exists at $OUTPUT_DIR. Skipping."
 fi
 
+# Create convenience aliases
+if [ -d "$OUTPUT_DIR/bin" ]; then
+    for tool in gcc g++ cpp ar as ld nm objcopy objdump ranlib strip; do
+        if [ -f "$OUTPUT_DIR/bin/x86_64-buildroot-linux-gnu-$tool" ]; then
+            ln -sfn "x86_64-buildroot-linux-gnu-$tool" "$OUTPUT_DIR/bin/x86_64-linux-$tool"
+            ln -sfn "x86_64-buildroot-linux-gnu-$tool" "$OUTPUT_DIR/bin/x86_64-linux-gnu-$tool"
+        fi
+    done
+fi
+
 # Create a symlink to the sysroot if needed
 SYSROOT="$OUTPUT_DIR/x86_64-buildroot-linux-gnu/sysroot"
 if [ -d "$SYSROOT" ]; then

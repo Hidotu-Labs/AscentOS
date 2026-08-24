@@ -21,12 +21,19 @@ COREUTILS_INSTALL="${PREFIX}/opt/coreutils"
 JOBS=$(nproc 2>/dev/null || echo 4)
 
 find_compiler() {
-    LOCAL_CC="$ROOT_DIR/toolchain/x86_64-linux-glibc/bin/x86_64-linux-gcc"
+    LOCAL_CC="$ROOT_DIR/toolchain/x86_64-linux-glibc/bin/x86_64-buildroot-linux-gnu-gcc"
+    if [ ! -x "$LOCAL_CC" ]; then
+        LOCAL_CC="$ROOT_DIR/toolchain/x86_64-linux-glibc/bin/x86_64-linux-gcc"
+    fi
 
     if [ -x "$LOCAL_CC" ]; then
         CC="$LOCAL_CC"
+    elif command -v x86_64-buildroot-linux-gnu-gcc >/dev/null 2>&1; then
+        CC="x86_64-buildroot-linux-gnu-gcc"
     elif command -v x86_64-linux-gnu-gcc >/dev/null 2>&1; then
         CC="x86_64-linux-gnu-gcc"
+    elif command -v x86_64-linux-gcc >/dev/null 2>&1; then
+        CC="x86_64-linux-gcc"
     else
         echo "Error: No glibc compiler found. Run scripts/glibc-toolchain.sh first." >&2
         exit 1

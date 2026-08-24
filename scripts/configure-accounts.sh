@@ -5,9 +5,14 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 ROOT_DIR=$(dirname "$SCRIPT_DIR")
 ROOTFS_DIR=${1:?usage: configure-accounts.sh ROOTFS_DIR}
 
+DEFAULT_SHELL="/bin/sh"
+if [ -f "${ROOTFS_DIR}/opt/bash/bin/bash" ] || [ -f "${ROOT_DIR}/toolchain/glibc-sysroot/opt/bash/bin/bash" ]; then
+    DEFAULT_SHELL="/bin/bash"
+fi
+
 mkdir -p "${ROOTFS_DIR}/etc" "${ROOTFS_DIR}/home" "${ROOTFS_DIR}/etc/skel"
 sed -E "s/^([^:]+):x:/\1:!:/" "${ROOTFS_DIR}/etc/passwd" | \
-    sed -E "s#^root:[^:]*:0:0:([^:]*):[^:]*:.*#root::0:0:\1:/:/bin/bash#" > \
+    sed -E "s#^root:[^:]*:0:0:([^:]*):[^:]*:.*#root::0:0:\1:/:${DEFAULT_SHELL}#" > \
     "${ROOTFS_DIR}/etc/passwd.avory-new"
 mv "${ROOTFS_DIR}/etc/passwd.avory-new" "${ROOTFS_DIR}/etc/passwd"
 rm -f "${ROOTFS_DIR}/etc/shadow" "${ROOTFS_DIR}/etc/shadow-" \
@@ -20,7 +25,7 @@ if ! grep -q "^avory:" "${ROOTFS_DIR}/etc/group"; then
     echo "avory:x:1000:" >> "${ROOTFS_DIR}/etc/group"
 fi
 if ! grep -q "^avory:" "${ROOTFS_DIR}/etc/passwd"; then
-    echo "avory::1000:1000:AvoryOS User:/home/avory:/bin/bash" >> "${ROOTFS_DIR}/etc/passwd"
+    echo "avory::1000:1000:AvoryOS User:/home/avory:${DEFAULT_SHELL}" >> "${ROOTFS_DIR}/etc/passwd"
 fi
 mkdir -p "${ROOTFS_DIR}/home/avory"
 cp -a "${ROOTFS_DIR}/etc/skel/." "${ROOTFS_DIR}/home/avory/" 2>/dev/null || true

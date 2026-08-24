@@ -136,7 +136,7 @@ int ext3_journal_block(ext2_mount_t *mnt, uint32_t block_nr, const void *data) {
   uint32_t tag_offset = sizeof(jbd_header_t) + (trans->blocks_in_trans *
                                                 sizeof(jbd_block_tag_t));
   if (tag_offset + sizeof(jbd_block_tag_t) > mnt->block_size) {
-    return -1;
+    return ext2_write_block(mnt, block_nr, data);
   }
 
   jbd_block_tag_t *tag =

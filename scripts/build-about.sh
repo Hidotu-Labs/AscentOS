@@ -3,7 +3,15 @@
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SYSROOT="${ROOT_DIR}/build/alpine/rootfs"
-CC="${ROOT_DIR}/toolchain/x86_64-linux-musl/bin/x86_64-linux-musl-gcc"
+LOCAL_CC="${ROOT_DIR}/toolchain/x86_64-linux-musl/bin/x86_64-linux-musl-gcc"
+if [ -x "$LOCAL_CC" ]; then
+    CC="$LOCAL_CC"
+elif command -v x86_64-linux-musl-gcc >/dev/null 2>&1; then
+    CC="x86_64-linux-musl-gcc"
+else
+    echo "Error: x86_64-linux-musl-gcc not found. Run scripts/musl-toolchain.sh first." >&2
+    exit 1
+fi
 
 if [ ! -d "$SYSROOT" ]; then
     echo "Error: Alpine rootfs not found. Run scripts/setup-alpine.sh first."

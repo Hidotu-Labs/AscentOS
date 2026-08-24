@@ -52,13 +52,36 @@ build_tinygl() {
         curl -L -o "master.tar.gz" "$REPO_URL"
     fi
     
+    case "$CC" in
+        *-gcc)
+            _prefix="${CC%gcc}"
+            if command -v "${_prefix}ar" >/dev/null 2>&1; then
+                AR="${_prefix}ar"
+            elif [ -x "$ROOT_DIR/toolchain/x86_64-linux-musl/bin/x86_64-linux-musl-ar" ]; then
+                AR="$ROOT_DIR/toolchain/x86_64-linux-musl/bin/x86_64-linux-musl-ar"
+            else
+                AR=ar
+            fi
+            ;;
+        *)
+            AR=ar
+            ;;
+    esac
+
     # Extract
-    if [ ! -d "tinygl-main" ]; then
+    if [ ! -d "tinygl-main" ] && [ ! -d "tinygl-master" ]; then
         echo "Extracting TinyGL ..."
         tar xf "master.tar.gz"
     fi
     
-    cd "tinygl-main"
+    if [ -d "tinygl-main" ]; then
+        cd "tinygl-main"
+    elif [ -d "tinygl-master" ]; then
+        cd "tinygl-master"
+    else
+        echo "Error: Failed to find extracted tinygl directory" >&2
+        exit 1
+    fi
     
     echo "Configuring TinyGL for AscentOS cross-compilation ..."
     
@@ -66,6 +89,7 @@ build_tinygl() {
     # We overwrite config.mk to set up our target architectures and paths cleanly.
     cat > config.mk << EOF
 CC=$CC
+AR=$AR
 CFLAGS= -Wall -O3 -std=c99 -DNDEBUG -fno-stack-protector -Wno-unused-function -I$PREFIX/include
 CFLAGS_LIB= \$(CFLAGS) -pedantic
 LFLAGS= -static -L$PREFIX/lib

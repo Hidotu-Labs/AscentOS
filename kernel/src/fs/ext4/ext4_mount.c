@@ -72,7 +72,16 @@ uint32_t ext4_write_impl(vfs_node_t *node, uint32_t offset, uint32_t size, uint8
     }
 
     uint32_t bytes_written = 0;
+    uint32_t blocks_in_batch = 0;
     while (bytes_written < size) {
+        if (blocks_in_batch >= 32) {
+            ext2_write_inode(mnt, node->inode, &inode);
+            ext3_journal_stop(mnt);
+            if (ext3_journal_start(mnt) != 0)
+                break;
+            blocks_in_batch = 0;
+        }
+
         uint32_t current = offset + bytes_written;
         uint32_t logical = current / mnt->block_size;
         uint32_t in_block = current % mnt->block_size;
@@ -122,6 +131,7 @@ uint32_t ext4_write_impl(vfs_node_t *node, uint32_t offset, uint32_t size, uint8
             break;
         }
         bytes_written += count;
+        blocks_in_batch++;
     }
 
     if (offset + bytes_written > inode.i_size)

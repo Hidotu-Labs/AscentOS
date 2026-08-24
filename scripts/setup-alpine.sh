@@ -1355,20 +1355,23 @@ if [ -x "${TARGET_LOADER}" ] && [ -x "${TARGET_FC_CACHE}" ]; then
         --system-only
 fi
 
-# 5. Inject into disk.img
-if [ ! -f "${DISK_IMG}" ]; then
-    echo "[!] disk.img not found. Please run 'make disk.img' first."
-    exit 1
+# 5. Inject into disk.img if present
+if [ -f "${DISK_IMG}" ]; then
+    echo "[*] Extracting partition 1 from disk.img..."
+    PART_IMG="${BUILD_DIR}/part1.img"
+    dd if="${DISK_IMG}" of="${PART_IMG}" bs=1M skip=1 status=none
+
+    echo "[*] Populating partition with Alpine rootfs (using debugfs)..."
+    "${POPULATE_SCRIPT}" "${PART_IMG}" "${ROOTFS_DIR}" "/"
+
+    echo "[*] Re-injecting partition 1 into disk.img..."
+    dd if="${PART_IMG}" of="${DISK_IMG}" bs=1M seek=1 conv=notrunc status=none
+
+    echo "[SUCCESS] Alpine rootfs installed into ${DISK_IMG}"
+else
+    echo "[SUCCESS] Alpine rootfs prepared in ${ROOTFS_DIR}"
 fi
 
-echo "[*] Extracting partition 1 from disk.img..."
-PART_IMG="${BUILD_DIR}/part1.img"
-dd if="${DISK_IMG}" of="${PART_IMG}" bs=1M skip=1 status=none
+mkdir -p "${BUILD_DIR}"
+touch "${BUILD_DIR}/.built"
 
-echo "[*] Populating partition with Alpine rootfs (using debugfs)..."
-"${POPULATE_SCRIPT}" "${PART_IMG}" "${ROOTFS_DIR}" "/"
-
-echo "[*] Re-injecting partition 1 into disk.img..."
-dd if="${PART_IMG}" of="${DISK_IMG}" bs=1M seek=1 conv=notrunc status=none
-
-echo "[SUCCESS] Alpine rootfs with GTK 2.0 and 'st' installed into ${DISK_IMG}"
