@@ -23,6 +23,7 @@ static struct virtio_gpu_device gpu;
 static spinlock_t gpu_poll_lock;
 static spinlock_t gpu_present_lock;
 static wait_queue_t gpu_worker_wait;
+static wait_queue_t gpu_gem_drain_wait;
 static bool gpu_worker_started;
 static bool gpu_irq_installed;
 enum gpu_irq_mode { GPU_IRQ_POLL, GPU_IRQ_INTX, GPU_IRQ_MSIX };
@@ -64,6 +65,7 @@ static bool gpu_command_locked(
         return false;
     }
     gpu.stats.commands_submitted++;
+
     uint64_t start = lapic_timer_get_ms();
     for (;;) {
         void *cookie = NULL;
@@ -265,11 +267,103 @@ static bool gpu_refresh_displays(void) {
     }
     return true;
 }
+
+static void virtio_gpu_irq(struct registers *regs) {
+    (void)regs;
+    if (!gpu.transport.isr)
+        return;
+    uint8_t status = *gpu.transport.isr;
+    if (!status)
+        return;
+    gpu.stats.interrupts++;
+    gpu.stats.intx_interrupts++;
+    uint32_t pending = 0;
+    if (status & 1U) {
+        pending |= GPU_WORK_CONTROL | GPU_WORK_CURSOR;
+        gpu.stats.control_interrupts++;
+    }
+    if (status & 2U) {
+        pending |= GPU_WORK_CONFIG;
+        gpu.stats.config_interrupts++;
+    }
+    __atomic_fetch_or(&gpu_pending_work, pending, __ATOMIC_RELEASE);
+    wait_queue_wake_one(&gpu_worker_wait);
+}
+
+static void virtio_gpu_msix_irq(struct registers *regs) {
+    uint32_t pending = 0;
+    gpu.stats.interrupts++;
+    gpu.stats.msix_interrupts++;
+    if (regs->int_no == gpu_msix_vectors[0]) {
+        pending = GPU_WORK_CONTROL;
+        gpu.stats.control_interrupts++;
+    } else if (regs->int_no == gpu_msix_vectors[1]) {
+        pending = GPU_WORK_CURSOR;
+        gpu.stats.cursor_interrupts++;
+    } else if (regs->int_no == gpu_msix_vectors[2]) {
+        pending = GPU_WORK_CONFIG;
+        gpu.stats.config_interrupts++;
+    }
+    if (pending)
+        __atomic_fetch_or(&gpu_pending_work, pending, __ATOMIC_RELEASE);
+    wait_queue_wake_one(&gpu_worker_wait);
+}
+
+static bool virtio_gpu_setup_msix(void) {
+    if (!virtio_pci_msix_init(&gpu.transport) || gpu.transport.msix.table_size < 3)
+        return false;
+    for (uint32_t i = 0; i < 3; i++) {
+        int vector = interrupt_vector_alloc(virtio_gpu_msix_irq);
+        if (vector < 0)
+            goto fail;
+        gpu_msix_vectors[i] = (uint8_t)vector;
+        if (!virtio_pci_msix_route(
+                &gpu.transport, (uint16_t)i, (uint8_t)vector, (uint8_t)lapic_get_id()))
+            goto fail;
+    }
+    if (!virtio_pci_msix_enable(&gpu.transport) ||
+        !virtio_pci_msix_assign_queue(&gpu.transport, GPU_CONTROLQ, 0) ||
+        !virtio_pci_msix_assign_queue(&gpu.transport, GPU_CURSORQ, 1) ||
+        !virtio_pci_msix_assign_config(&gpu.transport, 2))
+        goto fail;
+    for (uint16_t i = 0; i < 3; i++)
+        pci_msix_mask(&gpu.transport.msix, i, false);
+    gpu_irq_mode = GPU_IRQ_MSIX;
+    gpu_irq_installed = true;
+    return true;
+fail:
+    virtio_pci_msix_disable(&gpu.transport);
+    for (uint32_t i = 0; i < 3; i++)
+        if (gpu_msix_vectors[i] != 0xFF) {
+            interrupt_vector_free(gpu_msix_vectors[i]);
+            gpu_msix_vectors[i] = 0xFF;
+        }
+    return false;
+}
+
+static bool virtio_gpu_setup_irq(void) {
+    if (gpu_irq_installed)
+        return true;
+    if (virtio_gpu_setup_msix())
+        return true;
+    struct pci_device *pci = gpu.transport.pci;
+    if (pci && pci->irq_line < 224 &&
+        irq_install_handler(pci->irq_line, virtio_gpu_irq, 0x000F)) {
+        uint16_t command = pci_config_read16(pci->bus, pci->slot, pci->func, 0x04);
+        pci_config_write16(pci->bus, pci->slot, pci->func, 0x04, command & ~(1U << 10));
+        gpu_irq_mode = GPU_IRQ_INTX;
+        gpu_irq_installed = true;
+        return true;
+    }
+    return false;
+}
+
 bool virtio_gpu_init(void) {
     memset(&gpu, 0, sizeof(gpu));
     spinlock_init(&gpu_poll_lock);
     spinlock_init(&gpu_present_lock);
     wait_queue_init(&gpu_worker_wait);
+    wait_queue_init(&gpu_gem_drain_wait);
     struct pci_device *pci = find_gpu();
     if (!pci) {
         klog_puts("[VIRTIO-GPU] Modern PCI device 1af4:1050 not found\n");
@@ -300,6 +394,7 @@ bool virtio_gpu_init(void) {
         virtio_pci_set_failed(&gpu.transport);
         return false;
     }
+    virtio_gpu_setup_irq();
     read_config();
     if (!virtio_pci_set_driver_ok(&gpu.transport)) {
         klog_puts("[VIRTIO-GPU] DRIVER_OK rejected\n");
@@ -762,8 +857,10 @@ static bool handle_async_completion(void *cookie, uint32_t used_len) {
             event_node = slot->event_node;
             send_event = true;
         }
-        if (slot->owner && __atomic_load_n(&slot->owner->inflight, __ATOMIC_ACQUIRE))
-            __atomic_sub_fetch(&slot->owner->inflight, 1, __ATOMIC_RELEASE);
+        if (slot->owner && __atomic_load_n(&slot->owner->inflight, __ATOMIC_ACQUIRE)) {
+            if (__atomic_sub_fetch(&slot->owner->inflight, 1, __ATOMIC_RELEASE) == 0)
+                wait_queue_wake_all(&gpu_gem_drain_wait);
+        }
         slot->owner = NULL;
         slot->in_use = false;
         slot->has_event = false;
@@ -1030,47 +1127,6 @@ static void virtio_gpu_worker(void) {
     }
 }
 
-static void virtio_gpu_irq(struct registers *regs) {
-    (void)regs;
-    if (!gpu.transport.isr)
-        return;
-    uint8_t status = *gpu.transport.isr;
-    if (!status)
-        return;
-    gpu.stats.interrupts++;
-    gpu.stats.intx_interrupts++;
-    uint32_t pending = 0;
-    if (status & 1U) {
-        pending |= GPU_WORK_CONTROL | GPU_WORK_CURSOR;
-        gpu.stats.control_interrupts++;
-    }
-    if (status & 2U) {
-        pending |= GPU_WORK_CONFIG;
-        gpu.stats.config_interrupts++;
-    }
-    __atomic_fetch_or(&gpu_pending_work, pending, __ATOMIC_RELEASE);
-    wait_queue_wake_one(&gpu_worker_wait);
-}
-
-static void virtio_gpu_msix_irq(struct registers *regs) {
-    uint32_t pending = 0;
-    gpu.stats.interrupts++;
-    gpu.stats.msix_interrupts++;
-    if (regs->int_no == gpu_msix_vectors[0]) {
-        pending = GPU_WORK_CONTROL;
-        gpu.stats.control_interrupts++;
-    } else if (regs->int_no == gpu_msix_vectors[1]) {
-        pending = GPU_WORK_CURSOR;
-        gpu.stats.cursor_interrupts++;
-    } else if (regs->int_no == gpu_msix_vectors[2]) {
-        pending = GPU_WORK_CONFIG;
-        gpu.stats.config_interrupts++;
-    }
-    if (pending)
-        __atomic_fetch_or(&gpu_pending_work, pending, __ATOMIC_RELEASE);
-    wait_queue_wake_one(&gpu_worker_wait);
-}
-
 static bool async_present_submit(uint32_t head,
                                  struct virtio_gpu_gem *owner,
                                  const struct virtio_gpu_rect *rect,
@@ -1185,52 +1241,13 @@ static bool async_present_submit(uint32_t head,
     return true;
 }
 
-static bool virtio_gpu_setup_msix(void) {
-    if (!virtio_pci_msix_init(&gpu.transport) || gpu.transport.msix.table_size < 3)
-        return false;
-    for (uint32_t i = 0; i < 3; i++) {
-        int vector = interrupt_vector_alloc(virtio_gpu_msix_irq);
-        if (vector < 0)
-            goto fail;
-        gpu_msix_vectors[i] = (uint8_t)vector;
-        if (!virtio_pci_msix_route(
-                &gpu.transport, (uint16_t)i, (uint8_t)vector, (uint8_t)lapic_get_id()))
-            goto fail;
-    }
-    if (!virtio_pci_msix_enable(&gpu.transport) ||
-        !virtio_pci_msix_assign_queue(&gpu.transport, GPU_CONTROLQ, 0) ||
-        !virtio_pci_msix_assign_queue(&gpu.transport, GPU_CURSORQ, 1) ||
-        !virtio_pci_msix_assign_config(&gpu.transport, 2))
-        goto fail;
-    for (uint16_t i = 0; i < 3; i++)
-        pci_msix_mask(&gpu.transport.msix, i, false);
-    gpu_irq_mode = GPU_IRQ_MSIX;
-    gpu_irq_installed = true;
-    return true;
-fail:
-    virtio_pci_msix_disable(&gpu.transport);
-    for (uint32_t i = 0; i < 3; i++)
-        if (gpu_msix_vectors[i] != 0xFF) {
-            interrupt_vector_free(gpu_msix_vectors[i]);
-            gpu_msix_vectors[i] = 0xFF;
-        }
-    return false;
-}
-
 bool virtio_gpu_phase6_start(void) {
     for (uint32_t i = 0; i < GPU_ASYNC_SLOTS; i++) {
         async_slots[i].dma = dma_alloc(PAGE_SIZE, DMA_FLAG_32BIT);
         if (!async_slots[i].dma)
             return false;
     }
-    struct pci_device *pci = gpu.transport.pci;
-    if (!virtio_gpu_setup_msix() && pci && pci->irq_line < 224 &&
-        irq_install_handler(pci->irq_line, virtio_gpu_irq, 0x000F)) {
-        uint16_t command = pci_config_read16(pci->bus, pci->slot, pci->func, 0x04);
-        pci_config_write16(pci->bus, pci->slot, pci->func, 0x04, command & ~(1U << 10));
-        gpu_irq_mode = GPU_IRQ_INTX;
-        gpu_irq_installed = true;
-    }
+    virtio_gpu_setup_irq();
     struct thread *worker = sched_create_kernel_thread(virtio_gpu_worker, NULL, true);
     if (!worker)
         return false;
@@ -1398,11 +1415,27 @@ static void virtio_gpu_gem_free(struct drm_device *dev, struct drm_gem_object *o
     (void)dev;
     struct virtio_gpu_gem *vg = (struct virtio_gpu_gem *)obj->driver_private;
     if (vg) {
-        for (uint32_t tries = 0;
-             __atomic_load_n(&vg->inflight, __ATOMIC_ACQUIRE) && tries < GPU_TIMEOUT_MS;
-             tries++) {
-            gpu_drain_completions();
-            sched_yield();
+        if (gpu_irq_installed && gpu_worker_started && sched_get_current()) {
+            struct thread *self = sched_get_current();
+            wait_queue_entry_t entry = {.thread = self, .next = NULL};
+            uint64_t deadline = lapic_timer_get_ticks() + (GPU_TIMEOUT_MS / 10 > 0 ? GPU_TIMEOUT_MS / 10 : 100);
+            while (__atomic_load_n(&vg->inflight, __ATOMIC_ACQUIRE) > 0) {
+                if (lapic_timer_get_ticks() >= deadline)
+                    break;
+                wait_queue_add(&gpu_gem_drain_wait, &entry);
+                self->state = THREAD_BLOCKED;
+                self->wakeup_ticks = deadline;
+                sched_yield();
+                self->wakeup_ticks = 0;
+                wait_queue_remove(&gpu_gem_drain_wait, &entry);
+            }
+        } else {
+            for (uint32_t tries = 0;
+                 __atomic_load_n(&vg->inflight, __ATOMIC_ACQUIRE) && tries < GPU_TIMEOUT_MS;
+                 tries++) {
+                gpu_drain_completions();
+                sched_yield();
+            }
         }
         if (__atomic_load_n(&vg->inflight, __ATOMIC_ACQUIRE)) {
             klog_puts("[VIRTIO-GPU] WARN: quarantining GEM with in-flight frames\n");

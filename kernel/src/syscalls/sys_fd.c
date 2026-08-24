@@ -787,20 +787,8 @@ static uint64_t sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,
   (void)a4;
   (void)a5;
   struct thread *t = sched_get_current();
-  if (!t || fd >= MAX_FDS || !t->fds[fd]) {
-    klog_puts("[FCNTL] EBADF: fd=");
-    klog_uint64(fd);
-    klog_puts(" tid=");
-    if (t)
-      klog_uint64(t->tid);
-    klog_puts(" fds[fd]=");
-    if (t && fd < MAX_FDS)
-      klog_uint64((uint64_t)t->fds[fd]);
-    else
-      klog_puts("(invalid)");
-    klog_puts("\n");
-    return (uint64_t)-9;
-  }
+  if (!t || fd >= MAX_FDS || !t->fds[fd])
+    return (uint64_t)-9; // EBADF
 
   switch (cmd) {
   case F_DUPFD:

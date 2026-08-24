@@ -1765,6 +1765,24 @@ static uint64_t sys_getpgid(uint64_t pid, uint64_t a1, uint64_t a2, uint64_t a3,
   return target->pgid;
 }
 
+static uint64_t sys_getsid(uint64_t pid, uint64_t a1, uint64_t a2, uint64_t a3,
+                           uint64_t a4, uint64_t a5) {
+  (void)a1;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  struct thread *current = sched_get_current();
+  if (!current)
+    return (uint64_t)-3; // ESRCH
+  if (pid == 0)
+    return (uint64_t)current->sid;
+  struct thread *target = sched_get_thread_by_tid((uint32_t)pid);
+  if (!target)
+    return (uint64_t)-3; // ESRCH
+  return (uint64_t)target->sid;
+}
+
 // sys_getpgrp
 static uint64_t sys_getpgrp(struct syscall_regs *regs) {
   (void)regs;
@@ -1896,6 +1914,78 @@ static uint64_t sys_alarm(uint64_t seconds, uint64_t a1, uint64_t a2,
   if (t->it_real_next)
     lapic_timer_rearm_if_earlier(t->it_real_next);
   return remaining;
+}
+
+// getrusage (syscall 98)
+#define RUSAGE_SELF     0
+#define RUSAGE_CHILDREN (-1)
+#define RUSAGE_THREAD   1
+
+struct rusage {
+  struct { int64_t tv_sec; int64_t tv_usec; } ru_utime; // user CPU time
+  struct { int64_t tv_sec; int64_t tv_usec; } ru_stime; // system CPU time
+  int64_t ru_maxrss;     // maximum resident set size (KB)
+  int64_t ru_ixrss;      // integral shared memory size
+  int64_t ru_idrss;      // integral unshared data size
+  int64_t ru_isrss;      // integral unshared stack size
+  int64_t ru_minflt;     // page reclaims (soft page faults)
+  int64_t ru_majflt;     // page faults (hard page faults)
+  int64_t ru_nswap;      // swaps
+  int64_t ru_inblock;    // block input operations
+  int64_t ru_oublock;    // block output operations
+  int64_t ru_msgsnd;     // IPC messages sent
+  int64_t ru_msgrcv;     // IPC messages received
+  int64_t ru_nsignals;   // signals received
+  int64_t ru_nvcsw;      // voluntary context switches
+  int64_t ru_nivcsw;     // involuntary context switches
+};
+
+static uint64_t sys_getrusage(uint64_t who, uint64_t usage_ptr, uint64_t a2,
+                               uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+
+  struct rusage *ru = (struct rusage *)usage_ptr;
+  if (!ru || !vmm_is_user_addr_range_writable((uint64_t)ru, sizeof(*ru)))
+    return (uint64_t)-14; // EFAULT
+
+  int who_int = (int)(int64_t)who;
+  if (who_int != RUSAGE_SELF && who_int != RUSAGE_CHILDREN &&
+      who_int != RUSAGE_THREAD)
+    return (uint64_t)-22; // EINVAL
+
+  memset(ru, 0, sizeof(*ru));
+
+  struct thread *t = sched_get_current();
+  if (!t)
+    return (uint64_t)-22;
+
+  if (who_int == RUSAGE_SELF || who_int == RUSAGE_THREAD) {
+    // runtime_total is in LAPIC ticks (1 tick ≈ 1ms)
+    // Report as user time (we don't separately track user vs kernel time)
+    uint64_t total_ms = t->runtime_total;
+    ru->ru_utime.tv_sec = (int64_t)(total_ms / 1000);
+    ru->ru_utime.tv_usec = (int64_t)((total_ms % 1000) * 1000);
+
+    // Report resident memory if mm is available
+    if (t->mm) {
+      // Convert bytes to KB for ru_maxrss (Linux convention)
+      uint64_t resident = 0;
+      spinlock_acquire(&t->mm->lock);
+      // Estimate from brk range + mmap allocations
+      if (t->mm->brk_current > t->mm->brk_base)
+        resident += t->mm->brk_current - t->mm->brk_base;
+      spinlock_release(&t->mm->lock);
+      ru->ru_maxrss = (int64_t)(resident / 1024);
+      if (ru->ru_maxrss == 0)
+        ru->ru_maxrss = 4; // minimum 4 KB
+    }
+  }
+  // RUSAGE_CHILDREN: leave zeroed (we don't accumulate child usage yet)
+
+  return 0;
 }
 
 // Resource Limits (getrlimit / prlimit64)
@@ -2329,6 +2419,7 @@ void syscall_register_process(void) {
   syscall_register_raw(SYS_SETPGID, sys_setpgid);
   syscall_register_raw(SYS_GETPGRP, sys_getpgrp);
   syscall_register(SYS_GETPGID, sys_getpgid);
+  syscall_register(SYS_GETSID, sys_getsid);
   syscall_register_raw(SYS_SETSID, sys_setsid);
   syscall_register_raw(SYS_SETUID, sys_setuid);
   syscall_register_raw(SYS_SETGID, sys_setgid);
@@ -2337,6 +2428,7 @@ void syscall_register_process(void) {
   syscall_register_raw(SYS_SETFSUID, sys_setfsuid);
   syscall_register_raw(SYS_SETFSGID, sys_setfsgid);
   syscall_register(SYS_GETRLIMIT, sys_getrlimit);
+  syscall_register(SYS_GETRUSAGE, sys_getrusage);
   syscall_register_raw(SYS_PRLIMIT64, sys_prlimit64);
   syscall_register(SYS_MEMBARRIER, sys_membarrier);
   syscall_register(SYS_SCHED_YIELD, sys_sched_yield);

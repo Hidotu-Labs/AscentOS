@@ -121,6 +121,11 @@ static uint32_t ring_read(uint8_t *buffer, uint32_t head, uint32_t *tail,
 // PTY subsystem initialization
 
 void pty_init(void) {
+  static bool pty_initialized = false;
+  if (pty_initialized)
+    return;
+  pty_initialized = true;
+
   for (int i = 0; i < PTY_MAX_PAIRS; i++) {
     pty_pool[i].index = i;
     pty_pool[i].allocated = false;
@@ -135,12 +140,18 @@ void pty_init(void) {
     pty_pool[i].s2m_head = 0;
     pty_pool[i].s2m_tail = 0;
     pty_pool[i].pgid = 0;
-    pty_pool[i].master_waitq = kmalloc(sizeof(wait_queue_t));
-    pty_pool[i].slave_waitq = kmalloc(sizeof(wait_queue_t));
-    pty_pool[i].slave_write_waitq = kmalloc(sizeof(wait_queue_t));
-    wait_queue_init((wait_queue_t *)pty_pool[i].master_waitq);
-    wait_queue_init((wait_queue_t *)pty_pool[i].slave_waitq);
-    wait_queue_init((wait_queue_t *)pty_pool[i].slave_write_waitq);
+    if (!pty_pool[i].master_waitq)
+      pty_pool[i].master_waitq = kmalloc(sizeof(wait_queue_t));
+    if (!pty_pool[i].slave_waitq)
+      pty_pool[i].slave_waitq = kmalloc(sizeof(wait_queue_t));
+    if (!pty_pool[i].slave_write_waitq)
+      pty_pool[i].slave_write_waitq = kmalloc(sizeof(wait_queue_t));
+    if (pty_pool[i].master_waitq)
+      wait_queue_init((wait_queue_t *)pty_pool[i].master_waitq);
+    if (pty_pool[i].slave_waitq)
+      wait_queue_init((wait_queue_t *)pty_pool[i].slave_waitq);
+    if (pty_pool[i].slave_write_waitq)
+      wait_queue_init((wait_queue_t *)pty_pool[i].slave_write_waitq);
     spinlock_init(&pty_pool[i].lock);
 
     // Default terminal settings
@@ -172,6 +183,8 @@ void pty_init(void) {
 // PTY allocation
 
 int pty_alloc_pair(void) {
+  pty_init();
+
   for (int i = 0; i < PTY_MAX_PAIRS; i++) {
     int idx = (pty_next_index + i) % PTY_MAX_PAIRS;
     if (!pty_pool[idx].allocated) {
@@ -195,8 +208,20 @@ int pty_alloc_pair(void) {
       pty_pool[idx].termios.c_cflag = 0;
       pty_pool[idx].termios.c_lflag = 0x0000000b;
 
-      wait_queue_init((wait_queue_t *)pty_pool[idx].master_waitq);
-      wait_queue_init((wait_queue_t *)pty_pool[idx].slave_waitq);
+      if (!pty_pool[idx].master_waitq)
+        pty_pool[idx].master_waitq = kmalloc(sizeof(wait_queue_t));
+      if (!pty_pool[idx].slave_waitq)
+        pty_pool[idx].slave_waitq = kmalloc(sizeof(wait_queue_t));
+      if (!pty_pool[idx].slave_write_waitq)
+        pty_pool[idx].slave_write_waitq = kmalloc(sizeof(wait_queue_t));
+
+      if (pty_pool[idx].master_waitq)
+        wait_queue_init((wait_queue_t *)pty_pool[idx].master_waitq);
+      if (pty_pool[idx].slave_waitq)
+        wait_queue_init((wait_queue_t *)pty_pool[idx].slave_waitq);
+      if (pty_pool[idx].slave_write_waitq)
+        wait_queue_init((wait_queue_t *)pty_pool[idx].slave_write_waitq);
+
       spinlock_init(&pty_pool[idx].lock);
 
       pty_next_index = (idx + 1) % PTY_MAX_PAIRS;

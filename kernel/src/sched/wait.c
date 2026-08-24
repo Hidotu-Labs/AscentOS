@@ -5,6 +5,8 @@
 #include <stddef.h>
 
 void wait_queue_init(wait_queue_t *wq) {
+  if (!wq)
+    return;
   spinlock_init(&wq->lock);
   wq->head = NULL;
 }

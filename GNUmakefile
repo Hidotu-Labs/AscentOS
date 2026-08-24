@@ -831,7 +831,6 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 		echo "SSL_CERT_DIR=/etc/ssl/certs" >> /tmp/bashrc; \
 		echo "CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt" >> /tmp/bashrc; \
 		echo "export SSL_CERT_FILE SSL_CERT_DIR CURL_CA_BUNDLE" >> /tmp/bashrc; \
-		echo "export NO_AT_BRIDGE=1 GTK_A11Y=none GIO_USE_VFS=local GIO_USE_VOLUME_MONITOR=unix GTK_USE_PORTAL=0 GDK_GL=disable LIBGL_DRI3_DISABLE=1" >> /tmp/bashrc; \
 		debugfs -w -R "mkdir etc" ./part.img >/dev/null 2>&1 || true; \
 		echo "nameserver 10.0.2.3" > /tmp/resolv.conf; \
 		echo "127.0.0.1 localhost" > /tmp/hosts; \

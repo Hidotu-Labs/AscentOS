@@ -388,8 +388,7 @@ cat <<'EOF' > "${ROOTFS_DIR}/usr/bin/vlc"
 #!/bin/sh
 export DISPLAY=${DISPLAY:-:0}
 export QT_QPA_PLATFORM=xcb
-export NO_AT_BRIDGE=1
-export PULSE_SERVER=
+export PULSE_SERVER=""
 export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/tmp/runtime-avory}
 mkdir -p "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR"
@@ -827,28 +826,14 @@ install_apk "cmatrix" "community"
 install_apk "btop" "community" 
 
 # 4. Finalize GTK environment
-echo "[*] Setting up global GTK performance environment variables..."
+echo "[*] Setting up global audio environment variables..."
 mkdir -p "${ROOTFS_DIR}/etc/profile.d" "${ROOTFS_DIR}/etc/pulse"
 cat > "${ROOTFS_DIR}/etc/profile.d/gtk_avoryos.sh" << 'ENV_EOF'
-export NO_AT_BRIDGE=1
-export GTK_A11Y=none
-export GIO_USE_VFS=local
-export GIO_USE_VOLUME_MONITOR=unix
-export GTK_USE_PORTAL=0
-export GDK_GL=disable
-export LIBGL_DRI3_DISABLE=1
 export PULSE_SERVER=""
 ENV_EOF
 chmod +x "${ROOTFS_DIR}/etc/profile.d/gtk_avoryos.sh"
 
 cat > "${ROOTFS_DIR}/etc/environment" << 'ENV_EOF'
-NO_AT_BRIDGE=1
-GTK_A11Y=none
-GIO_USE_VFS=local
-GIO_USE_VOLUME_MONITOR=unix
-GTK_USE_PORTAL=0
-GDK_GL=disable
-LIBGL_DRI3_DISABLE=1
 PULSE_SERVER=""
 ENV_EOF
 
@@ -1075,13 +1060,6 @@ export XDG_SESSION_TYPE=x11
 export XDG_CURRENT_DESKTOP=XFCE
 export XCURSOR_THEME=Adwaita
 export XCURSOR_SIZE=24
-export GDK_GL=disable
-export LIBGL_DRI3_DISABLE=1
-export NO_AT_BRIDGE=1
-export GTK_A11Y=none
-export GIO_USE_VFS=local
-export GIO_USE_VOLUME_MONITOR=unix
-export GTK_USE_PORTAL=0
 
 # Ensure XDG dirs exist
 export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-${HOME}/.config}"

@@ -533,6 +533,8 @@ mount_success:
   fb_detect_drm_backend();
   mouse_register_vfs();
   random_register_vfs();
+  extern void pty_register_devices(void);
+  pty_register_devices();
   procfs_init();
 
 mount_fail:

@@ -5,14 +5,11 @@
 rm -f /tmp/.X0-lock /tmp/.X11-unix/X0
 
 export DISPLAY=:0
-: "${HOME:=/root}"
+: "${HOME:=/}"
 export HOME
 export XAUTHORITY="${HOME}/.Xauthority"
-export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-root}"
-mkdir -p "${XDG_RUNTIME_DIR}"
-chmod 700 "${XDG_RUNTIME_DIR}"
 
-export PATH="/usr/bin:/bin:/usr/local/bin:/opt/coreutils/bin:/opt/bash/bin:${PATH}"
+export PATH="/opt/coreutils/bin:/opt/bash/bin:/bin:/usr/local/bin:/usr/bin:/opt/tcc/bin:${PATH}"
 export LD_LIBRARY_PATH="/usr/lib:/lib:/usr/local/lib:${LD_LIBRARY_PATH:-}"
 
 XORG_LOG="/var/log/Xorg.0.log"
@@ -26,9 +23,7 @@ if [ ! -x "$XORG" ]; then
     exit 1
 fi
 
-"$XORG" "$DISPLAY" -noreset -nolisten tcp \
-    -configdir /etc/X11/xorg.conf.d \
-    -logfile "$XORG_LOG" &
+"$XORG" "$DISPLAY" -noreset -nolisten tcp -logfile "$XORG_LOG" &
 XORG_PID=$!
 
 ready=0
@@ -50,56 +45,52 @@ if [ "$ready" != 1 ]; then
     exit 1
 fi
 
-# ── D-Bus Initialization ──────────────────────────────────────────────────
-if [ ! -s /etc/machine-id ]; then
-    if command -v dbus-uuidgen >/dev/null 2>&1; then
-        dbus-uuidgen --ensure=/etc/machine-id 2>/dev/null || true
-    else
-        echo "10000000000000000000000000000001" > /etc/machine-id
-    fi
-fi
-mkdir -p /var/lib/dbus /run/dbus /var/run
-[ -e /var/run/dbus ] || ln -sf /run/dbus /var/run/dbus 2>/dev/null || true
-[ -f /var/lib/dbus/machine-id ] || cp -f /etc/machine-id /var/lib/dbus/machine-id 2>/dev/null || true
-
-if command -v dbus-daemon >/dev/null 2>&1 && [ ! -S /run/dbus/system_bus_socket ]; then
-    rm -f /tmp/ascent-system-dbus.log
-    dbus-daemon --system --nofork >/tmp/ascent-system-dbus.log 2>&1 &
-    SYSTEM_DBUS_PID=$!
-    # The bus can bind its socket and then abort during initialization.  Give
-    # it a moment so a failed launch is visible before XFCE depends on it.
-    sleep 0.1
-    if [ ! -S /run/dbus/system_bus_socket ] ||
-       ! kill -0 "$SYSTEM_DBUS_PID" 2>/dev/null; then
-        echo "[startx] Warning: system D-Bus did not stay running."
-        [ -s /tmp/ascent-system-dbus.log ] && cat /tmp/ascent-system-dbus.log
-    fi
-fi
-export DBUS_SYSTEM_BUS_ADDRESS=unix:path=/var/run/dbus/system_bus_socket
-
-if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && command -v dbus-daemon >/dev/null 2>&1; then
-    DBUS_SESSION_BUS_SOCKET=/tmp/ascent-session-bus
-    rm -f "$DBUS_SESSION_BUS_SOCKET"
-    DBUS_SESSION_BUS_ADDRESS="unix:path=${DBUS_SESSION_BUS_SOCKET}"
-    dbus-daemon --session --nofork --address="$DBUS_SESSION_BUS_ADDRESS" >/tmp/ascent-dbus.log 2>&1 &
-    export DBUS_SESSION_BUS_ADDRESS
-
-    # xfce4-session talks to xfconfd over the session bus during its first
-    # few milliseconds.  Do not race that connection with daemon startup.
-    for _ in 1 2 3 4 5 6 7 8 9 10; do
-        [ -S "$DBUS_SESSION_BUS_SOCKET" ] && break
-        sleep 0.1
-    done
-    if [ ! -S "$DBUS_SESSION_BUS_SOCKET" ]; then
-        echo "[startx] Error: session D-Bus failed to create its socket."
-        [ -s /tmp/ascent-dbus.log ] && cat /tmp/ascent-dbus.log
-        exit 1
-    fi
-fi
-
 # ── XFCE4 Session ─────────────────────────────────────────────────────────
 if [ "${ASCENT_SESSION:-}" = "xfce4" ]; then
     echo "[startx] Starting XFCE4 session..."
+
+    # ── D-Bus Initialization for XFCE ─────────────────────────────────────
+    if [ ! -s /etc/machine-id ]; then
+        if command -v dbus-uuidgen >/dev/null 2>&1; then
+            dbus-uuidgen --ensure=/etc/machine-id 2>/dev/null || true
+        else
+            echo "10000000000000000000000000000001" > /etc/machine-id
+        fi
+    fi
+    mkdir -p /var/lib/dbus /run/dbus /var/run
+    [ -e /var/run/dbus ] || ln -sf /run/dbus /var/run/dbus 2>/dev/null || true
+    [ -f /var/lib/dbus/machine-id ] || cp -f /etc/machine-id /var/lib/dbus/machine-id 2>/dev/null || true
+
+    if command -v dbus-daemon >/dev/null 2>&1 && [ ! -S /run/dbus/system_bus_socket ]; then
+        rm -f /tmp/ascent-system-dbus.log
+        dbus-daemon --system --nofork >/tmp/ascent-system-dbus.log 2>&1 &
+        SYSTEM_DBUS_PID=$!
+        sleep 0.1
+        if [ ! -S /run/dbus/system_bus_socket ] ||
+           ! kill -0 "$SYSTEM_DBUS_PID" 2>/dev/null; then
+            echo "[startx] Warning: system D-Bus did not stay running."
+            [ -s /tmp/ascent-system-dbus.log ] && cat /tmp/ascent-system-dbus.log
+        fi
+    fi
+    export DBUS_SYSTEM_BUS_ADDRESS=unix:path=/var/run/dbus/system_bus_socket
+
+    if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && command -v dbus-daemon >/dev/null 2>&1; then
+        DBUS_SESSION_BUS_SOCKET=/tmp/ascent-session-bus
+        rm -f "$DBUS_SESSION_BUS_SOCKET"
+        DBUS_SESSION_BUS_ADDRESS="unix:path=${DBUS_SESSION_BUS_SOCKET}"
+        dbus-daemon --session --nofork --address="$DBUS_SESSION_BUS_ADDRESS" >/tmp/ascent-dbus.log 2>&1 &
+        export DBUS_SESSION_BUS_ADDRESS
+
+        for _ in 1 2 3 4 5 6 7 8 9 10; do
+            [ -S "$DBUS_SESSION_BUS_SOCKET" ] && break
+            sleep 0.1
+        done
+        if [ ! -S "$DBUS_SESSION_BUS_SOCKET" ]; then
+            echo "[startx] Error: session D-Bus failed to create its socket."
+            [ -s /tmp/ascent-dbus.log ] && cat /tmp/ascent-dbus.log
+            exit 1
+        fi
+    fi
     export XDG_SESSION_TYPE=x11
     export XDG_CURRENT_DESKTOP=XFCE
     export XDG_SESSION_DESKTOP=xfce
@@ -111,13 +102,6 @@ if [ "${ASCENT_SESSION:-}" = "xfce4" ]; then
     export XDG_CONFIG_HOME="${HOME}/.config"
     export XDG_DATA_HOME="${HOME}/.local/share"
     export XDG_CACHE_HOME="${HOME}/.cache"
-    export GDK_GL=disable
-    export LIBGL_DRI3_DISABLE=1
-    export NO_AT_BRIDGE=1
-    export GTK_A11Y=none
-    export GIO_USE_VFS=local
-    export GIO_USE_VOLUME_MONITOR=unix
-    export GTK_USE_PORTAL=0
     unset SESSION_MANAGER
 
     mkdir -p "${XDG_CONFIG_HOME}/xfce4/xfconf/xfce-perchannel-xml" \
@@ -155,13 +139,10 @@ fi
 
 # ── Default: IceWM Session ────────────────────────────────────────────────
 echo "[startx] Starting IceWM session..."
-export NO_AT_BRIDGE=1
-export GTK_A11Y=none
-export GIO_USE_VFS=local
-export GIO_USE_VOLUME_MONITOR=unix
-export GTK_USE_PORTAL=0
-export GDK_GL=disable
-export LIBGL_DRI3_DISABLE=1
+export XDG_SESSION_TYPE=x11
+export XDG_CURRENT_DESKTOP=IceWM
+export XDG_SESSION_DESKTOP=icewm
+export DESKTOP_SESSION=icewm
 mkdir -p "${HOME}/.icewm"
 if [ -d /etc/icewm ]; then
     cp -n /etc/icewm/* "${HOME}/.icewm/" 2>/dev/null || true

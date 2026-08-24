@@ -303,6 +303,54 @@ static uint64_t sys_mlock(uint64_t addr, uint64_t len, uint64_t a2, uint64_t a3,
   return 0;
 }
 
+static uint64_t sys_munlock(uint64_t addr, uint64_t len, uint64_t a2,
+                            uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)addr;
+  (void)len;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  // Stub: pretend we unlocked the memory
+  return 0;
+}
+
+static uint64_t sys_mlockall(uint64_t flags, uint64_t a1, uint64_t a2,
+                             uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)flags;
+  (void)a1;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  // Stub: pretend we locked all memory
+  return 0;
+}
+
+static uint64_t sys_munlockall(uint64_t a0, uint64_t a1, uint64_t a2,
+                               uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a0;
+  (void)a1;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  // Stub: pretend we unlocked all memory
+  return 0;
+}
+
+static uint64_t sys_mlock2(uint64_t addr, uint64_t len, uint64_t flags,
+                           uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)addr;
+  (void)len;
+  (void)flags;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  // Stub: pretend we locked the memory with flags
+  return 0;
+}
+
 // membarrier(cmd, flags, cpu_id) - syscall 324
 // Memory barrier syscall - support all commands for GTK
 static uint64_t sys_membarrier(uint64_t cmd, uint64_t flags, uint64_t cpu_id,
@@ -338,5 +386,9 @@ void syscall_register_arch(void) {
   syscall_register(SYS_NANOSLEEP, sys_nanosleep);
   syscall_register(SYS_GETTIMEOFDAY, sys_gettimeofday);
   syscall_register(SYS_MLOCK, sys_mlock);
+  syscall_register(SYS_MUNLOCK, sys_munlock);
+  syscall_register(SYS_MLOCKALL, sys_mlockall);
+  syscall_register(SYS_MUNLOCKALL, sys_munlockall);
+  syscall_register(SYS_MLOCK2, sys_mlock2);
   syscall_register(SYS_MEMBARRIER, sys_membarrier);
 }
