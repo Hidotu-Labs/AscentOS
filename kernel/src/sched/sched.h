@@ -299,6 +299,11 @@ bool sched_ensure_files(struct thread *t);
 uint16_t sched_get_thread_count(void);
 uint16_t sched_get_runnable_thread_count(void);
 
+// Aggregates CPU time across all threads.
+// *out_user_ms = sum of runtime_total for non-idle threads (ms)
+// *out_idle_ms = total elapsed CPU-ms minus user_ms (ms)
+void sched_get_total_cpu_ms(uint64_t *out_user_ms, uint64_t *out_idle_ms);
+
 // Returns the head of the global thread list (caller must hold no locks;
 // used by procfs for read-only enumeration under tid_lock)
 struct thread *sched_get_thread_list_head(void);

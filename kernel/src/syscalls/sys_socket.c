@@ -36,7 +36,7 @@ static uint64_t sys_socket(uint64_t domain, uint64_t type, uint64_t protocol,
   if (!sock) {
     // Determine error - extract base type for comparison
     int base = typ & ~SOCK_NONBLOCK & ~SOCK_CLOEXEC;
-    if (dom != AF_UNIX && dom != AF_INET && dom != AF_NETLINK)
+    if (dom != AF_UNIX && dom != AF_INET && dom != AF_INET6 && dom != AF_NETLINK)
       return (uint64_t)-EAFNOSUPPORT;
     if (base != SOCK_STREAM && base != SOCK_DGRAM && base != SOCK_RAW &&
         base != SOCK_SEQPACKET)

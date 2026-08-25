@@ -192,20 +192,27 @@ __attribute__((optimize("O3"))) void sched_enqueue_thread(struct thread *t, stru
   struct cpu_info *target_cpu = explicit_cpu;
 
   if (!target_cpu) {
-    uint32_t min_threads = 0xFFFFFFFF;
-    uint32_t count = cpu_get_count();
+    struct cpu_info *self = cpu_get_current();
+    if (self && self->status != CPU_STATUS_OFFLINE &&
+        (t->cpu_affinity & (1ULL << self->cpu_id)) &&
+        self->runnable_count == 0) {
+      target_cpu = self;
+    } else {
+      uint32_t min_threads = 0xFFFFFFFF;
+      uint32_t count = cpu_get_count();
 
-    for (uint32_t i = 0; i < count; i++) {
-      struct cpu_info *cpu = cpu_get_info(i);
-      if (!cpu || cpu->status == CPU_STATUS_OFFLINE)
-        continue;
+      for (uint32_t i = 0; i < count; i++) {
+        struct cpu_info *cpu = cpu_get_info(i);
+        if (!cpu || cpu->status == CPU_STATUS_OFFLINE)
+          continue;
 
-      if (!(t->cpu_affinity & (1ULL << i)))
-        continue;
+        if (!(t->cpu_affinity & (1ULL << i)))
+          continue;
 
-      if (cpu->runnable_count < min_threads) {
-        min_threads = cpu->runnable_count;
-        target_cpu = cpu;
+        if (cpu->runnable_count < min_threads) {
+          min_threads = cpu->runnable_count;
+          target_cpu = cpu;
+        }
       }
     }
   }
@@ -627,10 +634,37 @@ __attribute__((optimize("O3"))) void sched_wakeup(struct thread *t) {
 
   hal_irq_state_t rflags = hal_irq_save();
 
-  struct cpu_info *target = cpu_get_info(t->cpu_index);
+  struct cpu_info *self = cpu_get_current();
+  struct cpu_info *prev_cpu = cpu_get_info(t->cpu_index);
+  struct cpu_info *target = prev_cpu;
+
+  /* Wake-Affinity: If the current CPU is allowed by affinity and is not heavily
+   * overloaded, wake the thread locally on the caller's CPU. This keeps the
+   * communicating processes (e.g. X11 client/server, pipe/socket producer/consumer)
+   * on the same core, keeping L1/L2 caches hot and eliminating cross-core IPI VM-Exits. */
+  if (self && self->status != CPU_STATUS_OFFLINE &&
+      (t->cpu_affinity & (1ULL << self->cpu_id))) {
+    if (!prev_cpu || prev_cpu->status == CPU_STATUS_OFFLINE ||
+        self->runnable_count <= prev_cpu->runnable_count + 1) {
+      target = self;
+    }
+  }
+
+  if (!target || target->status == CPU_STATUS_OFFLINE) {
+    target = cpu_get_bsp();
+  }
+
   if (target && target->status != CPU_STATUS_OFFLINE) {
     bool send_ipi = false;
     bool rearm_local = false;
+
+    if (target != prev_cpu && prev_cpu && prev_cpu->status != CPU_STATUS_OFFLINE && t->deadline_queued) {
+      spinlock_acquire(&prev_cpu->queue_lock);
+      sched_deadline_remove_locked(prev_cpu, t);
+      spinlock_release(&prev_cpu->queue_lock);
+    }
+
+    t->cpu_index = target->cpu_id;
 
     spinlock_acquire(&target->queue_lock);
     if (t->state == THREAD_BLOCKED || t->state == THREAD_SLEEPING) {
@@ -645,7 +679,6 @@ __attribute__((optimize("O3"))) void sched_wakeup(struct thread *t) {
         t->on_runqueue = true;
         target->runnable_count++;
 
-        struct cpu_info *self = cpu_get_current();
         if (target->apic_id != self->apic_id) {
           send_ipi = true;
         } else if (self->current_thread &&

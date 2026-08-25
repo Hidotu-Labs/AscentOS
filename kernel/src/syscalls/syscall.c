@@ -398,6 +398,37 @@ const char *syscall_get_name(uint64_t num) {
   return 0;
 }
 
+#if SYSCALL_LOG
+static void log_syscall_entry(struct syscall_regs *regs, struct thread *t) {
+  const char *name = syscall_get_name(regs->rax);
+  klog_puts("[SYSCALL] ");
+  klog_puts(name ? name : "unknown");
+  klog_puts("(");
+  klog_hex64(regs->rax);
+  klog_puts(") pid=");
+  klog_uint64(t ? t->tgid : 0);
+  klog_puts(" tid=");
+  klog_uint64(t ? t->tid : 0);
+  klog_puts(" comm=");
+  klog_puts((t && t->comm[0]) ? t->comm : "?");
+  klog_puts(" rip=");
+  klog_hex64(regs->rip);
+  klog_puts(" args=");
+  klog_hex64(regs->rdi);
+  klog_puts(",");
+  klog_hex64(regs->rsi);
+  klog_puts(",");
+  klog_hex64(regs->rdx);
+  klog_puts(",");
+  klog_hex64(regs->r10);
+  klog_puts(",");
+  klog_hex64(regs->r8);
+  klog_puts(",");
+  klog_hex64(regs->r9);
+  klog_puts("\n");
+}
+#endif
+
 static void log_unimplemented_syscall(struct syscall_regs *regs, struct thread *t) {
   const char *name = syscall_get_name(regs->rax);
   klogf(KLOG_CLR_YELLOW "[WARN] Unimplemented syscall: " KLOG_CLR_RESET
@@ -428,6 +459,9 @@ void syscall_dispatcher(struct syscall_regs *regs) {
   // Check raw handlers first (e.g. fork needs the full register frame)
   if (raw_syscall_table[regs->rax]) {
     syscall_raw_handler_t raw_handler = raw_syscall_table[regs->rax];
+#if SYSCALL_LOG
+    log_syscall_entry(regs, t);
+#endif
     regs->rax = raw_handler(regs);
     return;
   }
@@ -438,8 +472,12 @@ void syscall_dispatcher(struct syscall_regs *regs) {
     return;
   }
 
-  uint64_t syscall_num = regs->rax; 
+  uint64_t syscall_num = regs->rax;
   syscall_handler_t handler = syscall_table[syscall_num];
+
+#if SYSCALL_LOG
+  log_syscall_entry(regs, t);
+#endif
 
   regs->rax =
       handler(regs->rdi, regs->rsi, regs->rdx, regs->r10, regs->r8, regs->r9);

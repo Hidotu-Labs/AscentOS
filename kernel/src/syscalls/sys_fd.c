@@ -74,6 +74,12 @@ uint64_t sys_open_path(int dirfd, const char *path, uint64_t flags,
   if (!path)
     return (uint64_t)-14; // EFAULT
 
+#if SYSCALL_LOG
+  klog_puts("[SYSCALL] open path=\"");
+  klog_puts(path);
+  klog_puts("\"\n");
+#endif
+
   (void)flags;
   (void)mode;
 

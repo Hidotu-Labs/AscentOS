@@ -433,20 +433,33 @@ uint32_t procfs_stat_read(vfs_node_t *node, uint32_t offset, uint32_t size,
   if (!buf)
     return 0;
 
-  uint64_t ms     = lapic_timer_get_ms();
-  uint64_t jiffies = ms / 10; // USER_HZ = 100
-  uint32_t ncpus  = cpu_get_count();
+  uint32_t ncpus = cpu_get_count();
   if (ncpus == 0)
     ncpus = 1;
 
-  int pos = snprintf(buf, 2048,
-      "cpu  0 0 0 %llu 0 0 0 0 0 0\n",
-      (unsigned long long)(jiffies * ncpus));
+  /* Get aggregated user/idle time in ms, then convert to jiffies (USER_HZ=100,
+   * so 1 jiffy = 10 ms).  Divide evenly across CPUs for the per-cpu lines. */
+  uint64_t total_user_ms, total_idle_ms;
+  sched_get_total_cpu_ms(&total_user_ms, &total_idle_ms);
 
+  uint64_t user_jiffies = total_user_ms / 10;
+  uint64_t idle_jiffies = total_idle_ms / 10;
+
+  /* "cpu" aggregate line: fields are user nice system idle iowait irq softirq */
+  int pos = snprintf(buf, 2048,
+      "cpu  %llu 0 0 %llu 0 0 0 0 0 0\n",
+      (unsigned long long)user_jiffies,
+      (unsigned long long)idle_jiffies);
+
+  /* Per-CPU lines — split the aggregate evenly across cores. */
+  uint64_t per_cpu_user = user_jiffies / ncpus;
+  uint64_t per_cpu_idle = idle_jiffies / ncpus;
   for (uint32_t i = 0; i < ncpus; i++) {
     pos += snprintf(buf + pos, 2048 - pos,
-        "cpu%u 0 0 0 %llu 0 0 0 0 0 0\n",
-        i, (unsigned long long)jiffies);
+        "cpu%u %llu 0 0 %llu 0 0 0 0 0 0\n",
+        i,
+        (unsigned long long)per_cpu_user,
+        (unsigned long long)per_cpu_idle);
   }
 
   uint16_t nthreads = sched_get_thread_count();
@@ -455,10 +468,11 @@ uint32_t procfs_stat_read(vfs_node_t *node, uint32_t offset, uint32_t size,
       "ctxt 0\n"
       "btime %llu\n"
       "processes %u\n"
-      "procs_running 1\n"
+      "procs_running %u\n"
       "procs_blocked 0\n",
       (unsigned long long)rtc_get_boot_timestamp(),
-      (unsigned int)nthreads);
+      (unsigned int)nthreads,
+      (unsigned int)sched_get_runnable_thread_count());
 
   node->length = (uint32_t)pos;
   if (offset >= (uint32_t)pos) {
@@ -471,6 +485,7 @@ uint32_t procfs_stat_read(vfs_node_t *node, uint32_t offset, uint32_t size,
   kfree(buf);
   return size;
 }
+
 
 // /proc/loadavg — "load1 load5 load15 running/total last_pid\n"
 uint32_t procfs_loadavg_read(vfs_node_t *node, uint32_t offset, uint32_t size,

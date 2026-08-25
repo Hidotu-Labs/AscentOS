@@ -578,11 +578,26 @@ install_apk "binutils" "main"
 # cc1 always resolves #include <...> against the rootfs's musl headers
 # rather than any host glibc headers that may bleed through the VFS.
 echo "[*] Installing gcc sysroot wrapper..."
-GCC_REAL="${ROOTFS_DIR}/usr/bin/gcc"
-GCC_WRAPPER="${ROOTFS_DIR}/usr/bin/gcc"
-if [ -f "${GCC_REAL}" ]; then
-    mv "${GCC_REAL}" "${ROOTFS_DIR}/usr/bin/gcc.real"
-    cat > "${GCC_WRAPPER}" << 'GCC_WRAP_EOF'
+GCC_BIN="${ROOTFS_DIR}/usr/bin/gcc"
+GCC_REAL="${ROOTFS_DIR}/usr/bin/gcc.real"
+GCC_DRIVER="${ROOTFS_DIR}/usr/bin/x86_64-alpine-linux-musl-gcc"
+
+is_elf() {
+    [ -f "$1" ] && file "$1" | grep -q 'ELF'
+}
+
+# First install: move the real driver aside. Re-runs must not clobber gcc.real
+# with the wrapper script (that causes an infinite exec loop).
+if ! is_elf "${GCC_REAL}"; then
+    if is_elf "${GCC_BIN}"; then
+        mv "${GCC_BIN}" "${GCC_REAL}"
+    elif is_elf "${GCC_DRIVER}"; then
+        cp "${GCC_DRIVER}" "${GCC_REAL}"
+    fi
+fi
+
+if is_elf "${GCC_REAL}"; then
+    cat > "${GCC_BIN}" << 'GCC_WRAP_EOF'
 #!/bin/sh
 # gcc wrapper — forces --sysroot=/ so the compiler always uses the musl
 # headers and libraries inside the AvoryOS rootfs image, not host glibc.
@@ -592,7 +607,7 @@ exec /usr/bin/gcc.real \
     -isystem /usr/include \
     "$@"
 GCC_WRAP_EOF
-    chmod +x "${GCC_WRAPPER}"
+    chmod +x "${GCC_BIN}"
 fi
 
 # GTK 3.0 Development headers
@@ -643,6 +658,15 @@ install_apk "xfce4-appfinder" "community"
 install_apk "xfce4-power-manager" "community"
 install_apk "xfce4-notifyd" "community"
 install_apk "xfce4-screensaver" "community"
+install_apk "linux-pam" "main"
+install_apk "acl-libs" "main"
+install_apk "elogind-common" "community"
+install_apk "elogind" "community"
+install_apk "lightdm" "community"
+install_apk "lightdm-gtk-greeter" "community"
+install_apk "lxdm" "community"
+install_apk "xinit" "community"
+ln -sf elogind/libelogind-shared-252.so "${ROOTFS_DIR}/usr/lib/libelogind-shared-252.so" 2>/dev/null || true
 
 # Plugins commonly expected to exist at XFCE4 startup
 install_apk "xfce4-panel-dev" "community"
@@ -1272,6 +1296,67 @@ XfdesktopIconView rubberband {
     border: 1px solid #1c71d8;
     border-radius: 0;
 }
+EOF
+
+mkdir -p "${ROOTFS_DIR}/etc/lightdm" "${ROOTFS_DIR}/etc/X11/xinit"
+cat > "${ROOTFS_DIR}/etc/lightdm/lightdm-gtk-greeter.conf" << 'EOF'
+[greeter]
+background=/usr/share/backgrounds/xfce/xfce-stripes.png
+theme-name=Adwaita
+icon-theme-name=Adwaita
+font-name=Sans 10
+indicators=~host;~spacer;~clock;~spacer;~session;~power
+clock-format=%a, %b %d  %H:%M
+default-user-image=#avatar-default
+screensaver-timeout=0
+EOF
+
+cat > "${ROOTFS_DIR}/etc/lightdm/lightdm.conf" << 'EOF'
+[LightDM]
+run-directory=/run/lightdm
+start-default-seat=true
+logind-load-seats=false
+logind-check-graphical=false
+
+[Seat:*]
+type=local
+greeter-session=lightdm-gtk-greeter
+greeter-hide-users=false
+user-session=xfce
+xserver-command=/usr/libexec/Xorg -noreset -nolisten tcp
+session-wrapper=/etc/X11/xinit/Xsession
+EOF
+rm -f "${ROOTFS_DIR}/usr/share/dbus-1/system-services/org.freedesktop.login1.service"
+
+mkdir -p "${ROOTFS_DIR}/etc/lxdm" "${ROOTFS_DIR}/etc/pam.d"
+cat > "${ROOTFS_DIR}/etc/lxdm/lxdm.conf" << 'EOF'
+[base]
+session=/usr/bin/startxfce4
+skip_password=1
+greeter=/usr/lib/lxdm/lxdm-greeter-gtk
+
+[server]
+
+[display]
+gtk_theme=Adwaita
+bg=/usr/share/backgrounds/xfce/xfce-stripes.png
+bottom_pane=1
+lang=0
+keyboard=0
+theme=Alpine
+
+[input]
+
+[userlist]
+disable=0
+EOF
+
+cat > "${ROOTFS_DIR}/etc/pam.d/lxdm" << 'EOF'
+#%PAM-1.0
+auth        include     base-auth
+account     include     base-account
+password    include     base-password
+session     include     base-session
 EOF
 
 # 3c. Do not patch xfce4-about in place.  Even a one-byte change in an ELF

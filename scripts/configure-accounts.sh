@@ -21,7 +21,7 @@ chmod 0644 "${ROOTFS_DIR}/etc/passwd" "${ROOTFS_DIR}/etc/group"
 chmod 0755 "${ROOTFS_DIR}/home"
 rm -rf "${ROOTFS_DIR}/root"
 
-if !grep -q "^avory:" "${ROOTFS_DIR}/etc/group"; then
+if ! grep -q "^avory:" "${ROOTFS_DIR}/etc/group"; then
     echo "avory:x:1000:" >> "${ROOTFS_DIR}/etc/group"
 fi
 if ! grep -q "^avory:" "${ROOTFS_DIR}/etc/passwd"; then

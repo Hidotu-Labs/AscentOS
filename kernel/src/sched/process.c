@@ -193,6 +193,9 @@ static bool do_elf_load(const char *path, uint64_t *pml4,
     load_base = ELF_PIE_BASE;
   }
 
+  // Single pass over program headers: collect PT_INTERP, PT_PHDR, and
+  // process PT_LOAD segments all at once, halving the number of vfs_read
+  // calls compared to the previous two-loop approach.
   uint64_t phdr_vaddr = 0;
   for (uint16_t i = 0; i < ehdr.e_phnum; i++) {
     Elf64_Phdr phdr;
@@ -201,6 +204,7 @@ static bool do_elf_load(const char *path, uint64_t *pml4,
         sizeof(Elf64_Phdr))
       continue;
 
+    // Collect interpreter path from PT_INTERP.
     if (phdr.p_type == PT_INTERP && interp_path) {
       uint32_t len = phdr.p_filesz;
       if (len >= interp_max_len)
@@ -209,6 +213,8 @@ static bool do_elf_load(const char *path, uint64_t *pml4,
       interp_path[len] = '\0';
     }
 
+    // Track phdr table virtual address (PT_PHDR takes priority; fall back to
+    // the PT_LOAD segment that contains the phdr table if PT_PHDR is absent).
     if (phdr.p_type == PT_PHDR) {
       phdr_vaddr = load_base + phdr.p_vaddr;
     } else if (phdr.p_type == PT_LOAD && phdr_vaddr == 0 &&
@@ -216,15 +222,7 @@ static bool do_elf_load(const char *path, uint64_t *pml4,
                ehdr.e_phoff < phdr.p_offset + phdr.p_filesz) {
       phdr_vaddr = load_base + phdr.p_vaddr + (ehdr.e_phoff - phdr.p_offset);
     }
-  }
 
-  for (uint16_t i = 0; i < ehdr.e_phnum; i++) {
-    Elf64_Phdr phdr;
-    uint32_t offset = ehdr.e_phoff + (i * ehdr.e_phentsize);
-
-    if (vfs_read(file, offset, sizeof(Elf64_Phdr), (uint8_t *)&phdr) !=
-        sizeof(Elf64_Phdr))
-      continue;
     if (phdr.p_type != PT_LOAD)
       continue;
 

@@ -236,7 +236,7 @@ run-kvm: edk2-ovmf $(IMAGE_NAME).iso disk.img
 		-cdrom $(IMAGE_NAME).iso \
 		-drive file=disk.img,format=raw,if=ide \
 		-cpu host -enable-kvm \
-		-smp 12 \
+		-smp 4 \
 		-serial stdio \
 		-audiodev pa,id=snd0,timer-period=2000,out.frequency=48000,out.channels=2,out.format=s16,out.buffer-length=500000,out.latency=500000 \
 		-device rtl8139,netdev=net0 \
@@ -844,9 +844,9 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 		debugfs -w -R "write build/alpine/rootfs/etc/ssl/certs/ca-certificates.crt etc/ssl/certs/ca-certificates.crt" ./part.img >/dev/null 2>&1 || true; \
 		echo "NAME=\"AvoryOS\"" > /tmp/os-release; \
 		echo "ID=avoryos" >> /tmp/os-release; \
-		echo "VERSION=\"2.0.0 Beta\"" >> /tmp/os-release; \
-		echo "VERSION_ID=2.0.0-beta" >> /tmp/os-release; \
-		echo "PRETTY_NAME=\"AvoryOS 2.0.0 Beta x86_64\"" >> /tmp/os-release; \
+		echo "VERSION=\"2.5.0 Beta\"" >> /tmp/os-release; \
+		echo "VERSION_ID=2.5.0-beta" >> /tmp/os-release; \
+		echo "PRETTY_NAME=\"AvoryOS 2.5.0 Beta x86_64\"" >> /tmp/os-release; \
 		echo "HOME_URL=\"https://github.com/Hidotu-Labs/AvoryOS\"" >> /tmp/os-release; \
 		debugfs -w -R "rm etc/os-release" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "write /tmp/os-release etc/os-release" ./part.img >/dev/null 2>&1 || true; \

@@ -1,6 +1,7 @@
 #include "sched.h"
 #include "sched_internal.h"
 #include "hal/hal.h"
+#include "../apic/lapic_timer.h"
 #include "../console/klog.h"
 #include "../fs/procfs.h"
 #include "../fs/vfs.h"
@@ -263,6 +264,34 @@ uint16_t sched_get_runnable_thread_count(void) {
       count++;
   spinlock_release(&tid_lock);
   return count;
+}
+
+/*
+ * Sum the runtime of every non-idle thread to derive user-mode CPU ms.
+ * idle_ms = total_elapsed_ms * ncpus - user_ms (clamped ≥ 0).
+ * Both outputs are in milliseconds.
+ */
+void sched_get_total_cpu_ms(uint64_t *out_user_ms, uint64_t *out_idle_ms) {
+  uint64_t user_ms = 0;
+
+  spinlock_acquire(&tid_lock);
+  for (struct thread *t = global_thread_list; t; t = t->global_next) {
+    if (!t->is_idle)
+      user_ms += t->runtime_total;
+  }
+  spinlock_release(&tid_lock);
+
+  uint32_t ncpus = cpu_get_count();
+  if (ncpus == 0) ncpus = 1;
+
+  uint64_t elapsed_ms = lapic_timer_get_ms();
+  uint64_t total_ms   = elapsed_ms * (uint64_t)ncpus;
+
+  if (user_ms > total_ms)
+    user_ms = total_ms;
+
+  if (out_user_ms) *out_user_ms = user_ms;
+  if (out_idle_ms) *out_idle_ms = total_ms - user_ms;
 }
 
 struct thread *sched_get_thread_list_head(void) { return global_thread_list; }

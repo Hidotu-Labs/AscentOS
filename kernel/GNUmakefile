@@ -33,6 +33,10 @@ endif
 CFLAGS := -g -O2 -pipe
 CPPFLAGS :=
 
+ifeq ($(SYSCALL_LOG),1)
+override CPPFLAGS += -DSYSCALL_LOG=1
+endif
+
 ifeq ($(ARCH),x86_64)
     NASMFLAGS := -g
 endif

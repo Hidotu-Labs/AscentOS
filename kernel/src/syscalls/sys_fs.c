@@ -1,6 +1,6 @@
 // sys_fs.c — Filesystem namespace syscalls:
 //   mkdir, mkdirat, unlink, unlinkat, rmdir, rename, symlink, readlink,
-//   link, chmod, chown, fchmod, fchmodat, fchmodat2, fchownat, access,
+//   link, linkat, chmod, chown, fchmod, fchmodat, fchmodat2, fchownat, access,
 //   faccessat2, getcwd, chdir, fchdir, utimensat, futimesat, utimes, readlinkat
 #include "sys_io_shared.h"
 #include "../console/klog.h"
@@ -16,6 +16,8 @@
 
 #define AT_REMOVEDIR        0x200
 #define AT_SYMLINK_NOFOLLOW 0x100  /* fchmodat2 / fstatat: do not follow symlinks */
+#define AT_SYMLINK_FOLLOW   0x400  /* linkat: follow symlinks on old path */
+#define AT_EMPTY_PATH       0x1000 /* linkat: use olddirfd as the source if oldpath is "" */
 
 // ---------------------------------------------------------------------------
 // vfs_resolve_symlink_node — resolve WITHOUT following the final symlink
@@ -510,6 +512,135 @@ static uint64_t sys_link(uint64_t oldpath_ptr, uint64_t newpath_ptr,
 }
 
 // ---------------------------------------------------------------------------
+// linkat (265)
+// linkat(olddirfd, oldpath, newdirfd, newpath, flags)
+//   flags: AT_SYMLINK_FOLLOW (0x400) – follow symlinks on oldpath (default)
+//          AT_EMPTY_PATH     (0x1000) – use olddirfd node directly when oldpath==""
+// ---------------------------------------------------------------------------
+
+static uint64_t sys_linkat(uint64_t olddirfd, uint64_t oldpath_ptr,
+                            uint64_t newdirfd, uint64_t newpath_ptr,
+                            uint64_t flags, uint64_t a5) {
+    (void)a5;
+    const char *oldpath = (const char *)oldpath_ptr;
+    const char *newpath = (const char *)newpath_ptr;
+    if (!oldpath || !newpath) return (uint64_t)-14; // EFAULT
+
+    struct thread *t = sched_get_current();
+
+    // ---- Resolve source node -----------------------------------------------
+    vfs_node_t *src = NULL;
+
+    if ((flags & AT_EMPTY_PATH) && oldpath[0] == '\0') {
+        // Use the fd referred to by olddirfd directly as the source.
+        if ((int64_t)olddirfd == AT_FDCWD) {
+            src = t ? t->cwd_node : fs_root;
+        } else if (olddirfd < MAX_FDS && t && t->fds[olddirfd]) {
+            src = t->fds[olddirfd];
+        } else {
+            return (uint64_t)-9; // EBADF
+        }
+    } else {
+        // Normal path resolution relative to olddirfd.
+        vfs_node_t *old_base;
+        if (oldpath[0] == '/') {
+            old_base = fs_root;
+        } else if ((int64_t)olddirfd == AT_FDCWD) {
+            old_base = (t && t->cwd_node) ? t->cwd_node : fs_root;
+        } else if (olddirfd < MAX_FDS && t && t->fds[olddirfd]) {
+            old_base = t->fds[olddirfd];
+            if ((old_base->flags & FS_TYPE_MASK) != FS_DIRECTORY)
+                return (uint64_t)-20; // ENOTDIR
+        } else {
+            return (uint64_t)-9; // EBADF
+        }
+
+        // AT_SYMLINK_FOLLOW: follow the final symlink (vfs_resolve_path_at already does).
+        // Without AT_SYMLINK_FOLLOW we'd need to avoid following the final component,
+        // but hard-linking a symlink is EPERM on Linux anyway, so either way we
+        // resolve the symlink target for the source node.
+        src = vfs_resolve_path_at(old_base, oldpath);
+        if (!src) return (uint64_t)-2; // ENOENT
+    }
+
+    // Hard-linking directories is not allowed.
+    if ((src->flags & FS_TYPE_MASK) == FS_DIRECTORY)
+        return (uint64_t)-1; // EPERM
+
+    // ---- Resolve destination parent + name ---------------------------------
+    vfs_node_t *new_base;
+    if (newpath[0] == '/') {
+        new_base = fs_root;
+    } else if ((int64_t)newdirfd == AT_FDCWD) {
+        new_base = (t && t->cwd_node) ? t->cwd_node : fs_root;
+    } else if (newdirfd < MAX_FDS && t && t->fds[newdirfd]) {
+        new_base = t->fds[newdirfd];
+        if ((new_base->flags & FS_TYPE_MASK) != FS_DIRECTORY)
+            return (uint64_t)-20; // ENOTDIR
+    } else {
+        return (uint64_t)-9; // EBADF
+    }
+
+    char file_name[128];
+    size_t len = strlen(newpath);
+    if (len == 0 || len >= sizeof(file_name)) return (uint64_t)-36; // ENAMETOOLONG
+
+    // Temporarily override the cwd so resolve_parent_and_name picks up new_base.
+    // Instead, parse the new path manually the same way sys_link does.
+    const char *slash = NULL;
+    for (const char *p = newpath; *p; p++)
+        if (*p == '/') slash = p;
+
+    vfs_node_t *new_parent;
+    const char *basename;
+
+    if (slash) {
+        size_t parent_len = (size_t)(slash - newpath);
+        if (parent_len == 0) {
+            new_parent = fs_root;
+        } else {
+            char parent_path[256];
+            if (parent_len >= sizeof(parent_path)) return (uint64_t)-36;
+            memcpy(parent_path, newpath, parent_len);
+            parent_path[parent_len] = '\0';
+            new_parent = vfs_resolve_path_at(new_base, parent_path);
+        }
+        basename = slash + 1;
+    } else {
+        new_parent = new_base;
+        basename   = newpath;
+    }
+
+    size_t blen = strlen(basename);
+    if (blen == 0 || blen >= sizeof(file_name)) return (uint64_t)-36;
+    memcpy(file_name, basename, blen + 1);
+
+    if (!new_parent || (new_parent->flags & FS_TYPE_MASK) != FS_DIRECTORY)
+        return (uint64_t)-20; // ENOTDIR
+    if (!vfs_access(new_parent, 3)) return (uint64_t)-13;  // EACCES
+    if (vfs_finddir(new_parent, file_name)) return (uint64_t)-17; // EEXIST
+
+    // ---- Create the destination entry and copy data ------------------------
+    if (vfs_create(new_parent, file_name, src->mask & 0777) != 0)
+        return (uint64_t)-1;
+
+    vfs_node_t *dst = vfs_finddir(new_parent, file_name);
+    if (dst && src->length > 0) {
+        uint8_t buf[512];
+        uint32_t offset = 0;
+        while (offset < src->length) {
+            uint32_t chunk = src->length - offset;
+            if (chunk > sizeof(buf)) chunk = sizeof(buf);
+            uint32_t rd = vfs_read(src, offset, chunk, buf);
+            if (rd == 0) break;
+            vfs_write(dst, offset, rd, buf);
+            offset += rd;
+        }
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
 // chmod / chown / fchmod / fchmodat / fchownat
 // ---------------------------------------------------------------------------
 
@@ -782,6 +913,23 @@ static uint64_t sys_utimes(uint64_t pathname, uint64_t times, uint64_t a2,
 }
 
 // ---------------------------------------------------------------------------
+// name_to_handle_at / open_by_handle_at
+// Returning -EOPNOTSUPP (95) tells elogind/systemd to fallback to stat/fstat.
+// ---------------------------------------------------------------------------
+
+static uint64_t sys_name_to_handle_at(uint64_t dfd, uint64_t name, uint64_t handle,
+                                      uint64_t mount_id, uint64_t flags, uint64_t a5) {
+    (void)dfd; (void)name; (void)handle; (void)mount_id; (void)flags; (void)a5;
+    return (uint64_t)(-(int64_t)95);
+}
+
+static uint64_t sys_open_by_handle_at(uint64_t mountdirfd, uint64_t handle, uint64_t flags,
+                                      uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)mountdirfd; (void)handle; (void)flags; (void)a3; (void)a4; (void)a5;
+    return (uint64_t)(-(int64_t)95);
+}
+
+// ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
 
@@ -796,6 +944,7 @@ void syscall_register_fs(void) {
     syscall_register(SYS_READLINK,   sys_readlink);
     syscall_register(SYS_READLINKAT, sys_readlinkat);
     syscall_register(SYS_LINK,       sys_link);
+    syscall_register(SYS_LINKAT,     sys_linkat);
     syscall_register(SYS_CHMOD,      sys_chmod);
     syscall_register(SYS_CHOWN,      sys_chown);
     syscall_register(SYS_FCHOWN,     sys_fchown);
@@ -810,4 +959,6 @@ void syscall_register_fs(void) {
     syscall_register(SYS_UTIMENSAT,  sys_utimensat);
     syscall_register(SYS_FUTIMESAT,  sys_futimesat);
     syscall_register(SYS_UTIMES,     sys_utimes);
+    syscall_register(SYS_NAME_TO_HANDLE_AT, sys_name_to_handle_at);
+    syscall_register(SYS_OPEN_BY_HANDLE_AT, sys_open_by_handle_at);
 }

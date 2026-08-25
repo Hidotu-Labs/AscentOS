@@ -1392,14 +1392,14 @@ static uint64_t sys_uname(uint64_t buf_ptr, uint64_t a1, uint64_t a2,
 
   strcpy(buf->sysname, "Ascension");
   strcpy(buf->nodename, "AvoryOS");
-  strcpy(buf->release, "2.0.0 Beta");
+  strcpy(buf->release, "2.5.0 Beta");
 
   // Dynamic date/time from RTC
   char datetime[32];
   rtc_format_datetime(rtc_get_timestamp(), datetime, sizeof(datetime));
 
   char version[80];
-  strcpy(version, "2.0.0 Beta ");
+  strcpy(version, "2.5.0 Beta ");
   strcat(version, datetime);
   strcpy(buf->version, version);
 
@@ -1409,7 +1409,32 @@ static uint64_t sys_uname(uint64_t buf_ptr, uint64_t a1, uint64_t a2,
   return 0;
 }
 
-// sys_uptime
+// sys_getcpu(unsigned *cpu, unsigned *node, struct getcpu_cache *tcache)
+// Returns the calling thread's current CPU index and NUMA node.
+// AvoryOS has a single NUMA node (0); tcache is ignored.
+static uint64_t sys_getcpu(uint64_t cpu_ptr, uint64_t node_ptr, uint64_t tcache,
+                            uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)tcache;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+
+  struct cpu_info *ci = cpu_get_current();
+
+  if (cpu_ptr) {
+    uint32_t *p = (uint32_t *)cpu_ptr;
+    *p = ci ? ci->cpu_id : 0;
+  }
+
+  if (node_ptr) {
+    uint32_t *p = (uint32_t *)node_ptr;
+    *p = 0; // single NUMA node
+  }
+
+  return 0;
+}
+
+
 static uint64_t sys_uptime(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
                            uint64_t a4, uint64_t a5) {
   (void)a0;
@@ -2450,4 +2475,5 @@ void syscall_register_process(void) {
   syscall_register(SYS_SET_ROBUST_LIST, sys_set_robust_list);
   syscall_register(SYS_REBOOT, sys_reboot);
   syscall_register(SYS_PIDFD_OPEN, sys_pidfd_open);
+  syscall_register(SYS_GETCPU, sys_getcpu);
 }
