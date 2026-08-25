@@ -177,9 +177,6 @@ static uint32_t ep_check_events(epitem_t *epi) {
 // Helper: Add item to ready list
 
 static void ep_add_to_ready_list(eventpoll_t *ep, epitem_t *epi) {
-  if (epi->on_ready_list)
-    return;
-
   spinlock_acquire(&ep->lock);
 
   bool was_empty = (ep->rdllist_count == 0);
@@ -402,132 +399,65 @@ int epoll_wait_impl(eventpoll_t *ep, struct epoll_event *events, int maxevents,
   entry.next = NULL;
   wait_queue_add(&ep->wq, &entry);
 
+  uint64_t deadline_ticks = 0;
+  if (timeout_ms > 0 && timeout_ms != -1) {
+    deadline_ticks = lapic_timer_get_ticks() + (uint64_t)timeout_ms;
+  }
+
   while (returned == 0) {
-    spinlock_acquire(&ep->lock);
-
-    // If ready list has items, return them immediately
-    if (!list_empty(&ep->rdllist)) {
-      struct list_head *pos, *n;
-      list_for_each_safe(pos, n, &ep->rdllist) {
-        if (returned >= maxevents)
-          break;
-
-        epitem_t *epi = list_entry(pos, epitem_t, rdllink);
-
-        // Get current events - this may call VFS poll which could take other
-        // locks Normally we should be careful about lock ordering, but ep->lock
-        // is likely safe as it's a leaf structure's lock.
-        uint32_t current_events = ep_check_events(epi);
-
-        if (current_events) {
-          events[returned].events = current_events;
-          events[returned].data.u64 = epi->event.data.u64;
-
-          returned++;
-
-          // Handle edge-triggered mode
-          if (epi->event.events & EPOLLET) {
-            list_del(&epi->rdllink);
-            epi->on_ready_list = false;
-            ep->rdllist_count--;
-            // Track events for next edge
-            epi->last_events = current_events &
-                               (EPOLLIN | EPOLLOUT | EPOLLRDNORM | EPOLLWRNORM);
-          }
-
-          // Handle oneshot mode
-          if (epi->oneshot) {
-            epi->oneshot_disabled = true;
-            epi->registered_events = 0;
-            if (!(epi->event.events & EPOLLET)) {
-              list_del(&epi->rdllink);
-              epi->on_ready_list = false;
-              ep->rdllist_count--;
-            }
-          }
-        } else {
-          // No longer has events, remove from ready list
-          list_del(&epi->rdllink);
-          epi->on_ready_list = false;
-          ep->rdllist_count--;
-        }
-      }
-
-      if (returned > 0) {
-        spinlock_release(&ep->lock);
-        break;
-      }
-    }
-
-    // No events ready - handle immediate timeout
-    if (timeout_ms == 0) {
-      spinlock_release(&ep->lock);
+    if (thread_has_pending_signal(current)) {
+      returned = -4; // -EINTR
       break;
     }
 
-    // Set state to BLOCKED while still holding ep->lock.
-    // This closes the race window: if a notification arrives now, it will
-    // call ep_add_to_ready_list (which acquires ep->lock and will block
-    // until we release it below), then call wait_queue_wake_all which will
-    // see THREAD_BLOCKED and properly call sched_wakeup().
-    current->state = THREAD_BLOCKED;
+    // 1. Collect pending items from ready list under ep->lock WITHOUT calling ep_check_events.
+    epitem_t *candidates[64];
+    int cand_count = 0;
 
-    // Set up timeout if specified.
-    // Save the absolute deadline in a local variable — the scheduler clears
-    // wakeup_ticks to 0 when it wakes the thread, so we cannot rely on it
-    // after sched_yield() returns.
-    uint64_t deadline_ticks = 0;
-    if (timeout_ms > 0 && timeout_ms != -1) {
-      deadline_ticks = lapic_timer_get_ticks() + (uint64_t)timeout_ms;
-      current->wakeup_ticks = deadline_ticks;
-    } else if (timeout_ms == -1) {
-      /*
-       * An infinite epoll wait must still recover if a producer ever fails
-       * to notify us. This is not a user-visible timeout: after waking we
-       * re-poll watched descriptors and continue waiting if none are ready.
-       */
-      current->wakeup_ticks =
-          lapic_timer_get_ticks() + EPOLL_RESCAN_INTERVAL_MS;
-    } else {
-      current->wakeup_ticks = 0;
+    spinlock_acquire(&ep->lock);
+    struct list_head *pos, *n;
+    list_for_each_safe(pos, n, &ep->rdllist) {
+      if (cand_count >= 64 || cand_count >= maxevents)
+        break;
+      epitem_t *epi = list_entry(pos, epitem_t, rdllink);
+      list_del(&epi->rdllink);
+      epi->on_ready_list = false;
+      ep->rdllist_count--;
+      candidates[cand_count++] = epi;
     }
-
-    // Re-check the ready list one more time before yielding.
-    // A notification may have added items to the ready list between our
-    // first check and setting THREAD_BLOCKED above.  If so, cancel the
-    // block and loop back to collect the events.
-    if (!list_empty(&ep->rdllist)) {
-      current->state = THREAD_RUNNING;
-      current->wakeup_ticks = 0;
-      spinlock_release(&ep->lock);
-      continue;
-    }
-
     spinlock_release(&ep->lock);
 
-    // Yield control
-    sched_yield();
+    // 2. Poll candidates OUTSIDE of ep->lock to eliminate lock-inversion deadlocks.
+    for (int i = 0; i < cand_count; i++) {
+      epitem_t *epi = candidates[i];
+      if (!epi)
+        continue;
 
-    // After waking up, reset state to RUNNING.
-    // NOTE: Do this BEFORE re-acquiring ep->lock so the lock acquisition
-    // itself doesn't race with another notification.
-    current->state = THREAD_RUNNING;
+      uint32_t current_events = ep_check_events(epi);
+      if (current_events && returned < maxevents) {
+        events[returned].events = current_events;
+        events[returned].data.u64 = epi->event.data.u64;
+        returned++;
 
-    // After waking up, check if it was due to a timeout
-    if (timeout_ms > 0 && timeout_ms != -1) {
-      if (deadline_ticks != 0 && lapic_timer_get_ticks() >= deadline_ticks) {
-        current->wakeup_ticks = 0;
-        break; // Return whatever we found (likely 0)
+        if (epi->event.events & EPOLLET) {
+          epi->last_events = current_events &
+                             (EPOLLIN | EPOLLOUT | EPOLLRDNORM | EPOLLWRNORM);
+        }
+        if (epi->oneshot) {
+          epi->oneshot_disabled = true;
+          epi->registered_events = 0;
+        }
       }
     }
 
-    // Missed-wakeup recovery: scan all watched items for events.
-    // Race: a notification may fire between sched_yield() returning and
-    // THREAD_BLOCKED being set in the next loop iteration.  sched_wakeup()
-    // sees THREAD_RUNNING and skips the wakeup, leaving data in the queue
-    // with no new notification.  Re-polling every watched item here catches
-    // that case.  ep_check_events calls vfs_poll which may acquire other
-    // locks, so we poll outside ep->lock, then add under ep->lock.
+    if (returned > 0)
+      break;
+
+    // 3. Immediate return on non-blocking poll
+    if (timeout_ms == 0)
+      break;
+
+    // 4. Check all watched items outside ep->lock for missed/level-triggered events
     for (int _i = 0; _i < EPOLL_MAX_WATCHED; _i++) {
       epitem_t *_epi = ep->items[_i];
       if (!_epi || _epi->on_ready_list)
@@ -547,10 +477,53 @@ int epoll_wait_impl(eventpoll_t *ep, struct epoll_event *events, int maxevents,
       }
     }
 
-    // Loop back and collect any events found above or via normal notification.
+    // 5. Prepare to block under ep->lock
+    spinlock_acquire(&ep->lock);
+
+    // If ready list is non-empty, loop back immediately
+    if (!list_empty(&ep->rdllist)) {
+      spinlock_release(&ep->lock);
+      continue;
+    }
+
+    current->state = THREAD_BLOCKED;
+    if (timeout_ms > 0 && timeout_ms != -1) {
+      current->wakeup_ticks = deadline_ticks;
+    } else if (timeout_ms == -1) {
+      current->wakeup_ticks = lapic_timer_get_ticks() + EPOLL_RESCAN_INTERVAL_MS;
+    } else {
+      current->wakeup_ticks = 0;
+    }
+
+    // Re-check ready list one last time before releasing lock
+    if (!list_empty(&ep->rdllist)) {
+      current->state = THREAD_RUNNING;
+      current->wakeup_ticks = 0;
+      spinlock_release(&ep->lock);
+      continue;
+    }
+
+    spinlock_release(&ep->lock);
+
+    // 6. Yield execution
+    sched_yield();
+
+    current->state = THREAD_RUNNING;
+    current->wakeup_ticks = 0;
+
+    if (thread_has_pending_signal(current)) {
+      returned = -4; // -EINTR
+      break;
+    }
+
+    // Check timeout
+    if (timeout_ms > 0 && timeout_ms != -1) {
+      if (deadline_ticks != 0 && lapic_timer_get_ticks() >= deadline_ticks) {
+        break;
+      }
+    }
   }
 
-  // Always remove from wait queue before returning
   wait_queue_remove(&ep->wq, &entry);
   current->state = THREAD_RUNNING;
   current->wakeup_ticks = 0;

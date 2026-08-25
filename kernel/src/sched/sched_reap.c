@@ -1,5 +1,6 @@
 #include "sched.h"
 #include "sched_internal.h"
+#include "wait.h"
 #include "hal/hal.h"
 #include "../apic/lapic.h"
 #include "../console/klog.h"
@@ -106,17 +107,14 @@ void sched_reap_thread(struct thread *t) {
   klog_debug_puts("\n");
 
   futex_remove_thread_waiters(t);
+  wait_queue_cleanup_thread(t);
 
   /* The reap-queue claimant already verified sched_thread_off_cpu() while
    * holding reap_queue_lock. DEAD threads cannot become runnable again, so
    * repeating that check here can only spin forever on a stale hazard. */
 
-  /* Self-exiting tasks have already removed themselves. Siblings killed by
-   * exit_group may have been blocked and therefore never run the scheduler's
-   * self-removal path. This is safe after the off-CPU check and is a no-op if
-   * the task is already absent. */
-  if (t->reap_remove_runqueue)
-    remove_from_runqueue(t);
+  /* Ensure reaped thread is removed from its CPU's runqueue before freeing */
+  remove_from_runqueue(t);
 
   klog_debug_puts("[REAP] Step 1: remove from lists\n");
   spinlock_acquire(&tid_lock);

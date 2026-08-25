@@ -368,15 +368,9 @@ static uint64_t sys_close_range(uint64_t first, uint64_t last, uint64_t flags,
   struct thread *t = sched_get_current();
   if (!t || !t->files)
     return (uint64_t)-9;
-  klog_puts("[CLOSE_RANGE] tid=");
-  klog_uint64(t->tid);
-  klog_puts(" first=");
-  klog_uint64(first);
-  klog_puts(" last=");
-  klog_uint64(last);
-  klog_puts(" flags=");
-  klog_hex64(flags);
-  klog_puts("\n");
+  klog_debugf("[CLOSE_RANGE] tid=%llu first=%llu last=%llu flags=0x%llx\n",
+              (unsigned long long)t->tid, (unsigned long long)first,
+              (unsigned long long)last, (unsigned long long)flags);
   if (first >= MAX_FDS)
     return 0;
   if (last >= MAX_FDS)

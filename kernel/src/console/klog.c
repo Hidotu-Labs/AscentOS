@@ -2,8 +2,10 @@
 #include "../drivers/serial.h"
 #include "../fb/framebuffer.h"
 #include "../font/font.h"
+#include "../lib/string.h"
 #include "../lock/spinlock.h"
 #include "console.h"
+#include <stdarg.h>
 
 static spinlock_t klog_lock = SPINLOCK_INIT;
 static bool screen_logging_enabled = false;
@@ -37,7 +39,7 @@ void klog_set_screen_logging(bool enabled) {
   spinlock_release(&klog_lock);
 }
 
-static void klog_putchar_screen(char c) {
+static void klog_putchar_screen_unlocked(char c) {
   if (!screen_logging_enabled)
     return;
 
@@ -49,7 +51,7 @@ static void klog_putchar_screen(char c) {
         esc = false;
       }
     } else if (esc_state == 1) {
-      if (c >= '0' && c <= '9' || c == ';') {
+      if ((c >= '0' && c <= '9') || c == ';') {
         if (esc_idx < 31)
           esc_buffer[esc_idx++] = c;
       } else if (c == 'm') {
@@ -57,8 +59,6 @@ static void klog_putchar_screen(char c) {
         int code = 0;
         for (int i = 0; esc_buffer[i]; i++) {
           if (esc_buffer[i] == ';') {
-            // Very basic: just take the last one or handle multiple?
-            // Let's just handle single codes for now.
             code = 0;
             continue;
           }
@@ -70,8 +70,7 @@ static void klog_putchar_screen(char c) {
         } else if (code >= 30 && code <= 37) {
           klog_fg = klog_ansi_colors[code - 30];
         } else if (code >= 90 && code <= 97) {
-            // Bright colors
-            klog_fg = klog_ansi_colors[code - 90]; // Just use same for now or brighten?
+          klog_fg = klog_ansi_colors[code - 90];
         }
 
         esc = false;
@@ -104,8 +103,6 @@ static void klog_putchar_screen(char c) {
     }
 
     if (screen_y + FONT_HEIGHT > h) {
-      // For early boot logging, we don't handle scrolling properly yet,
-      // just wrap around or stop? Let's just wrap around for now.
       screen_y = 0;
     }
 
@@ -118,72 +115,275 @@ static void klog_putchar_screen(char c) {
   }
 }
 
+static inline void klog_write_dispatch(const char *s, size_t len) {
+  if (!s || len == 0)
+    return;
+
+  serial_write(s, len);
+
+  if (__builtin_expect(screen_logging_enabled, 0)) {
+    spinlock_acquire(&klog_lock);
+    for (size_t i = 0; i < len; i++) {
+      klog_putchar_screen_unlocked(s[i]);
+    }
+    spinlock_release(&klog_lock);
+  }
+}
+
 void klog_putchar(char c) {
-  spinlock_acquire(&klog_lock);
   serial_putchar(c);
-  klog_putchar_screen(c);
-  spinlock_release(&klog_lock);
+  if (__builtin_expect(screen_logging_enabled, 0)) {
+    spinlock_acquire(&klog_lock);
+    klog_putchar_screen_unlocked(c);
+    spinlock_release(&klog_lock);
+  }
 }
 
 void klog_puts(const char *s) {
-  spinlock_acquire(&klog_lock);
-  const char *p = s;
-  while (*p)
-    p++;
-  serial_write(s, (size_t)(p - s));
-  while (*s)
-    klog_putchar_screen(*s++);
-  spinlock_release(&klog_lock);
+  if (!s)
+    return;
+
+  size_t len = 0;
+  while (s[len])
+    len++;
+
+  klog_write_dispatch(s, len);
 }
 
 void klog_uint64(uint64_t num) {
-  spinlock_acquire(&klog_lock);
+  char buf[24];
   if (num == 0) {
-    serial_putchar('0');
-    klog_putchar_screen('0');
-    spinlock_release(&klog_lock);
+    buf[0] = '0';
+    buf[1] = '\0';
+    klog_write_dispatch(buf, 1);
     return;
   }
-  char buf[20];
+
+  char tmp[24];
   int i = 0;
   while (num > 0) {
-    buf[i++] = '0' + (num % 10);
+    tmp[i++] = '0' + (num % 10);
     num /= 10;
   }
+  int len = 0;
   while (i > 0) {
-    i--;
-    serial_putchar(buf[i]);
-    klog_putchar_screen(buf[i]);
+    buf[len++] = tmp[--i];
   }
-  spinlock_release(&klog_lock);
+  buf[len] = '\0';
+
+  klog_write_dispatch(buf, (size_t)len);
 }
 
 void klog_hex64(uint64_t num) {
-  spinlock_acquire(&klog_lock);
+  char buf[20];
   const char *hex = "0123456789ABCDEF";
-  serial_putchar('0');
-  klog_putchar_screen('0');
-  serial_putchar('x');
-  klog_putchar_screen('x');
-  for (int i = 60; i >= 0; i -= 4) {
-    char c = hex[(num >> i) & 0xF];
-    serial_putchar(c);
-    klog_putchar_screen(c);
+  buf[0] = '0';
+  buf[1] = 'x';
+  for (int i = 0; i < 16; i++) {
+    buf[2 + i] = hex[(num >> (60 - i * 4)) & 0xF];
   }
-  spinlock_release(&klog_lock);
+  buf[18] = '\0';
+
+  klog_write_dispatch(buf, 18);
 }
 
 void klog_hex32(uint32_t num) {
-  spinlock_acquire(&klog_lock);
+  char buf[12];
   const char *hex = "0123456789ABCDEF";
-  serial_putchar('0');
-  klog_putchar_screen('0');
-  serial_putchar('x');
-  klog_putchar_screen('x');
-  for (int i = 28; i >= 0; i -= 4) {
-    char c = hex[(num >> i) & 0xF];
-    serial_putchar(c);
-    klog_putchar_screen(c);
+  buf[0] = '0';
+  buf[1] = 'x';
+  for (int i = 0; i < 8; i++) {
+    buf[2 + i] = hex[(num >> (28 - i * 4)) & 0xF];
   }
-  spinlock_release(&klog_lock);
+  buf[10] = '\0';
+
+  klog_write_dispatch(buf, 10);
+}
+
+void vklogf(const char *fmt, va_list ap) {
+  if (!fmt)
+    return;
+
+  char buf[512];
+  int len = vsnprintf(buf, sizeof(buf), fmt, ap);
+  if (len <= 0)
+    return;
+
+  if ((size_t)len >= sizeof(buf))
+    len = (int)sizeof(buf) - 1;
+
+  klog_write_dispatch(buf, (size_t)len);
+}
+
+void klogf(const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  vklogf(fmt, ap);
+  va_end(ap);
+}
+
+void klog_proc_exit(uint32_t tid, uint32_t tgid, bool is_thread, const char *comm, uint64_t status) {
+  char buf[160];
+  char *p = buf;
+
+  const char pfx[] = "[PROC] exit tid=";
+  for (size_t i = 0; i < sizeof(pfx) - 1; i++)
+    *p++ = pfx[i];
+
+  char num_buf[24];
+  int ni = 0;
+  uint64_t n = tid;
+  if (n == 0) {
+    num_buf[ni++] = '0';
+  } else {
+    while (n > 0) {
+      num_buf[ni++] = '0' + (n % 10);
+      n /= 10;
+    }
+  }
+  while (ni > 0)
+    *p++ = num_buf[--ni];
+
+  const char tgid_s[] = " tgid=";
+  for (size_t i = 0; i < sizeof(tgid_s) - 1; i++)
+    *p++ = tgid_s[i];
+  n = tgid;
+  if (n == 0) {
+    num_buf[ni++] = '0';
+  } else {
+    while (n > 0) {
+      num_buf[ni++] = '0' + (n % 10);
+      n /= 10;
+    }
+  }
+  while (ni > 0)
+    *p++ = num_buf[--ni];
+
+  const char *kind_str = is_thread ? " kind=thread comm=" : " kind=process comm=";
+  while (*kind_str)
+    *p++ = *kind_str++;
+
+  if (comm && *comm) {
+    while (*comm)
+      *p++ = *comm++;
+  } else {
+    *p++ = '?';
+  }
+
+  const char st_s[] = " status=";
+  for (size_t i = 0; i < sizeof(st_s) - 1; i++)
+    *p++ = st_s[i];
+  n = status;
+  if (n == 0) {
+    num_buf[ni++] = '0';
+  } else {
+    while (n > 0) {
+      num_buf[ni++] = '0' + (n % 10);
+      n /= 10;
+    }
+  }
+  while (ni > 0)
+    *p++ = num_buf[--ni];
+
+  *p++ = '\n';
+
+  klog_write_dispatch(buf, (size_t)(p - buf));
+}
+
+void klog_proc_exec(uint32_t tid, const char *path) {
+  char buf[256];
+  char *p = buf;
+
+  const char pfx[] = "[PROC] exec tid=";
+  for (size_t i = 0; i < sizeof(pfx) - 1; i++)
+    *p++ = pfx[i];
+
+  char num_buf[24];
+  int ni = 0;
+  uint64_t n = tid;
+  if (n == 0) {
+    num_buf[ni++] = '0';
+  } else {
+    while (n > 0) {
+      num_buf[ni++] = '0' + (n % 10);
+      n /= 10;
+    }
+  }
+  while (ni > 0)
+    *p++ = num_buf[--ni];
+
+  const char path_s[] = " path=";
+  for (size_t i = 0; i < sizeof(path_s) - 1; i++)
+    *p++ = path_s[i];
+
+  if (path && *path) {
+    while (*path && (size_t)(p - buf) < sizeof(buf) - 2)
+      *p++ = *path++;
+  } else {
+    *p++ = '?';
+  }
+
+  *p++ = '\n';
+
+  klog_write_dispatch(buf, (size_t)(p - buf));
+}
+
+void klog_ramfs_free(void *ptr, uint64_t capacity, bool is_pmm, uint64_t pages) {
+  char buf[160];
+  char *p = buf;
+
+  if (is_pmm) {
+    const char pfx[] = "[RAMFS] free PMM-backed data ptr=0x";
+    for (size_t i = 0; i < sizeof(pfx) - 1; i++)
+      *p++ = pfx[i];
+  } else {
+    const char pfx[] = "[RAMFS] free heap-backed data ptr=0x";
+    for (size_t i = 0; i < sizeof(pfx) - 1; i++)
+      *p++ = pfx[i];
+  }
+
+  const char *hex = "0123456789abcdef";
+  uint64_t uptr = (uint64_t)(uintptr_t)ptr;
+  for (int i = 60; i >= 0; i -= 4) {
+    *p++ = hex[(uptr >> i) & 0xF];
+  }
+
+  const char cap_s[] = " capacity=";
+  for (size_t i = 0; i < sizeof(cap_s) - 1; i++)
+    *p++ = cap_s[i];
+  char num_buf[24];
+  int ni = 0;
+  uint64_t n = capacity;
+  if (n == 0) {
+    num_buf[ni++] = '0';
+  } else {
+    while (n > 0) {
+      num_buf[ni++] = '0' + (n % 10);
+      n /= 10;
+    }
+  }
+  while (ni > 0)
+    *p++ = num_buf[--ni];
+
+  if (is_pmm) {
+    const char pgs_s[] = " pages=";
+    for (size_t i = 0; i < sizeof(pgs_s) - 1; i++)
+      *p++ = pgs_s[i];
+    ni = 0;
+    n = pages;
+    if (n == 0) {
+      num_buf[ni++] = '0';
+    } else {
+      while (n > 0) {
+        num_buf[ni++] = '0' + (n % 10);
+        n /= 10;
+      }
+    }
+    while (ni > 0)
+      *p++ = num_buf[--ni];
+  }
+
+  *p++ = '\n';
+
+  klog_write_dispatch(buf, (size_t)(p - buf));
 }

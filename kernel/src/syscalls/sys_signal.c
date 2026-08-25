@@ -279,6 +279,11 @@ static uint64_t sys_rt_sigtimedwait(uint64_t set_ptr, uint64_t info_ptr,
 
     current->state = THREAD_BLOCKED;
     current->wakeup_ticks = have_deadline ? deadline : 0;
+    if (current->pending_signals & mask) {
+      current->state = THREAD_RUNNING;
+      current->wakeup_ticks = 0;
+      continue;
+    }
     sched_yield();
     current->state = THREAD_RUNNING;
     current->wakeup_ticks = 0;
@@ -405,6 +410,7 @@ void signal_deliver(struct registers *regs) {
       process_dump_core(current, regs, sig);
     }
 
+    sched_terminate_thread_group(current);
     process_do_exit(128 + sig);
     return;
   }
@@ -661,10 +667,7 @@ void signal_send_pgid(uint32_t pgid, int sig) {
     if (t->pgid == pgid && (!sender || sender->euid == 0 ||
         sender->uid == t->uid || sender->euid == t->uid)) {
       t->pending_signals |= (1ULL << (sig - 1));
-      // Wake the thread if it is blocked/sleeping so it can deliver the signal
-      if (t->state == THREAD_SLEEPING || t->state == THREAD_BLOCKED) {
-        sched_wakeup(t);
-      }
+      signal_notify_thread(t, sig);
     }
     t = t->global_next;
   }
@@ -751,6 +754,7 @@ static uint64_t sys_kill(uint64_t pid_val, uint64_t sig, uint64_t a2,
         klog_puts("\n");
       }
       t->pending_signals |= (1ULL << (sig - 1));
+      signal_notify_thread(t, (int)sig);
       break;
     }
     t = t->global_next;
@@ -827,7 +831,15 @@ static uint32_t signalfd_read(vfs_node_t *node, uint32_t offset, uint32_t size,
     wait_queue_entry_t entry = {.thread = t, .next = NULL};
     wait_queue_add(&ctx->wq, &entry);
     t->state = THREAD_BLOCKED;
+
+    if (t->pending_signals & ctx->mask) {
+      t->state = THREAD_RUNNING;
+      wait_queue_remove(&ctx->wq, &entry);
+      continue;
+    }
+
     sched_yield();
+    t->state = THREAD_RUNNING;
     wait_queue_remove(&ctx->wq, &entry);
   }
 }

@@ -55,13 +55,6 @@ int unix_connect_impl(socket_t *sock, struct sockaddr *addr, int addrlen) {
     return -111; // ECONNREFUSED
   }
 
-  klog_puts("[UNIX_CONNECT] found listener fd=");
-  klog_uint64(listener_sock->fd);
-  klog_puts(" is_abstract=");
-  klog_uint64(dusk->is_abstract ? 1 : 0);
-  klog_puts(" has_node=");
-  klog_uint64(listener_sock->node ? 1 : 0);
-  klog_puts("\n");
 
   if (listener_sock->state != SS_LISTENING) {
     klog_puts("[WARN] unix_connect: destination is not listening\n");
@@ -123,11 +116,12 @@ int unix_connect_impl(socket_t *sock, struct sockaddr *addr, int addrlen) {
   dusk->accept_queue_len++;
 
   // Notify listener
-  if (dusk->is_abstract || !listener_sock->node) {
-    epoll_notify_socket(listener_sock->fd, POLLIN);
-  }
+  epoll_notify_socket(listener_sock->fd, POLLIN);
   if (listener_sock->node) {
     epoll_notify_event(listener_sock->node, POLLIN);
+  }
+  if (listener_sock->wait_queue) {
+    wait_queue_wake_all((wait_queue_t *)listener_sock->wait_queue);
   }
   wait_queue_wake_all(dusk->wait);
 
@@ -160,17 +154,12 @@ int unix_accept_impl(socket_t *sock, socket_t **newsock) {
     wait_queue_add(usk->wait, &entry);
     current->state = THREAD_BLOCKED;
 
-    if (usk->accept_next != NULL) {
-      current->state = THREAD_RUNNING;
-      spinlock_release(&sock->lock);
-    } else {
-      spinlock_release(&sock->lock);
-      sched_yield();
-      spinlock_acquire(&sock->lock);
-    }
-
+    spinlock_release(&sock->lock);
+    sched_yield();
     wait_queue_remove(usk->wait, &entry);
     current->state = THREAD_RUNNING;
+
+    spinlock_acquire(&sock->lock);
   }
 
   unix_sock_t *new_usk   = usk->accept_next;
@@ -181,6 +170,13 @@ int unix_accept_impl(socket_t *sock, socket_t **newsock) {
 
   socket_t *new_sock    = new_usk->parent;
   new_usk->is_accepted  = true;
+
+  struct thread *current_thread = sched_get_current();
+  if (current_thread) {
+    new_usk->owner_pid = current_thread->tgid;
+    new_usk->owner_uid = current_thread->euid;
+    new_usk->owner_gid = current_thread->egid;
+  }
 
   *newsock = new_sock;
 

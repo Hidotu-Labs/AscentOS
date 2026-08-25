@@ -178,6 +178,10 @@ __attribute__((optimize("O3"))) void eevfd_dequeue_entity(struct eevfd_rq *rq, s
     rq->nr_running--;
     se->on_rq = false;
 
+    se->rb_node.__rb_parent_color = 0;
+    se->rb_node.rb_left = NULL;
+    se->rb_node.rb_right = NULL;
+
     if (rq->rb_leftmost) {
         struct sched_entity *left = rb_entry(rq->rb_leftmost, struct sched_entity, rb_node);
         rq->min_vruntime = left->vruntime;

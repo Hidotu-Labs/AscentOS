@@ -14,20 +14,10 @@ void ramfs_free_file_data(ramfs_file_t *file) {
   if (file->data_is_pmm) {
     uint64_t hhdm = pmm_get_hhdm_offset();
     size_t pages = (file->capacity + 4095) / 4096;
-    klog_puts("[RAMFS] free PMM-backed data ptr=");
-    klog_hex64((uint64_t)file->data);
-    klog_puts(" capacity=");
-    klog_uint64(file->capacity);
-    klog_puts(" pages=");
-    klog_uint64(pages);
-    klog_puts("\n");
+    klog_ramfs_free(file->data, file->capacity, true, pages);
     pmm_free_pages((void *)((uint64_t)file->data - hhdm), pages);
   } else {
-    klog_puts("[RAMFS] free heap-backed data ptr=");
-    klog_hex64((uint64_t)file->data);
-    klog_puts(" capacity=");
-    klog_uint64(file->capacity);
-    klog_puts("\n");
+    klog_ramfs_free(file->data, file->capacity, false, 0);
     kfree(file->data);
   }
 
@@ -153,23 +143,11 @@ int ramfs_fallocate(vfs_node_t *node, int mode, uint32_t offset, uint32_t len) {
   ramfs_file_t *file = (ramfs_file_t *)node->device;
   uint32_t needed = offset + len;
 
-  klog_puts("[RAMFS] fallocate node=");
-  klog_puts(node->name);
-  klog_puts(" mode=");
-  klog_uint64(mode);
-  klog_puts(" offset=");
-  klog_uint64(offset);
-  klog_puts(" len=");
-  klog_uint64(len);
-  klog_puts(" old_len=");
-  klog_uint64(node->length);
-  klog_puts(" old_cap=");
-  klog_uint64(file->capacity);
-  klog_puts(" old_pmm=");
-  klog_uint64(file->data_is_pmm);
-  klog_puts(" needed=");
-  klog_uint64(needed);
-  klog_puts("\n");
+  klog_debugf("[RAMFS] fallocate node=%s mode=%llu offset=%llu len=%llu old_len=%llu old_cap=%llu old_pmm=%llu needed=%llu\n",
+              node->name, (unsigned long long)mode, (unsigned long long)offset,
+              (unsigned long long)len, (unsigned long long)node->length,
+              (unsigned long long)file->capacity, (unsigned long long)file->data_is_pmm,
+              (unsigned long long)needed);
 
   if (needed > file->capacity) {
     uint8_t *new_data = kmalloc(needed);

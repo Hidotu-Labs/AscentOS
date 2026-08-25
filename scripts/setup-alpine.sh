@@ -1130,12 +1130,15 @@ cat > "${XFCE_SESSION_DIR}/xfwm4.xml" << 'EOF'
 </channel>
 EOF
 
-# xfce4-panel — minimalist single top bar: app menu | tasklist | [spacer] | systray | clock
+# xfce4-panel — panel 1 (top bar) and panel 2 (bottom dock)
 cat > "${XFCE_SESSION_DIR}/xfce4-panel.xml" << 'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <channel name="xfce4-panel" version="1.0">
+  <property name="configver" type="int" value="2"/>
   <property name="panels" type="array">
     <value type="int" value="1"/>
+    <value type="int" value="2"/>
+    <property name="dark-mode" type="bool" value="true"/>
     <property name="panel-1" type="empty">
       <property name="position" type="string" value="p=6;x=0;y=0"/>
       <property name="length" type="uint" value="100"/>
@@ -1147,6 +1150,22 @@ cat > "${XFCE_SESSION_DIR}/xfce4-panel.xml" << 'EOF'
         <value type="int" value="3"/>
         <value type="int" value="4"/>
         <value type="int" value="5"/>
+      </property>
+    </property>
+    <property name="panel-2" type="empty">
+      <property name="autohide-behavior" type="uint" value="0"/>
+      <property name="position" type="string" value="p=10;x=0;y=0"/>
+      <property name="length" type="uint" value="1"/>
+      <property name="position-locked" type="bool" value="true"/>
+      <property name="size" type="uint" value="48"/>
+      <property name="plugin-ids" type="array">
+        <value type="int" value="15"/>
+        <value type="int" value="16"/>
+        <value type="int" value="17"/>
+        <value type="int" value="18"/>
+        <value type="int" value="19"/>
+        <value type="int" value="20"/>
+        <value type="int" value="21"/>
       </property>
     </property>
   </property>
@@ -1164,16 +1183,50 @@ cat > "${XFCE_SESSION_DIR}/xfce4-panel.xml" << 'EOF'
     <property name="plugin-5" type="string" value="clock">
       <property name="digital-format" type="string" value="%H:%M"/>
     </property>
+    <property name="plugin-15" type="string" value="showdesktop"/>
+    <property name="plugin-16" type="string" value="separator"/>
+    <property name="plugin-17" type="string" value="launcher">
+      <property name="items" type="array">
+        <value type="string" value="xfce4-terminal.desktop"/>
+      </property>
+    </property>
+    <property name="plugin-18" type="string" value="launcher">
+      <property name="items" type="array">
+        <value type="string" value="thunar.desktop"/>
+      </property>
+    </property>
+    <property name="plugin-19" type="string" value="launcher">
+      <property name="items" type="array">
+        <value type="string" value="netsurf.desktop"/>
+      </property>
+    </property>
+    <property name="plugin-20" type="string" value="launcher">
+      <property name="items" type="array">
+        <value type="string" value="org.xfce.mousepad.desktop"/>
+      </property>
+    </property>
+    <property name="plugin-21" type="string" value="launcher">
+      <property name="items" type="array">
+        <value type="string" value="xfce4-appfinder.desktop"/>
+      </property>
+    </property>
   </property>
 </channel>
 EOF
 
-# xfce4-desktop — no desktop icons, solid near-black background
+# xfce4-desktop — enable desktop icons (style 2: file/launcher icons + system icons)
 cat > "${XFCE_SESSION_DIR}/xfce4-desktop.xml" << 'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <channel name="xfce4-desktop" version="1.0">
   <property name="desktop-icons" type="empty">
-    <property name="style" type="int" value="0"/>
+    <property name="style" type="int" value="2"/>
+    <property name="file-icons" type="empty">
+      <property name="show-home" type="bool" value="true"/>
+      <property name="show-filesystem" type="bool" value="true"/>
+      <property name="show-trash" type="bool" value="true"/>
+      <property name="show-removable" type="bool" value="true"/>
+    </property>
+    <property name="icon-size" type="uint" value="48"/>
   </property>
   <property name="backdrop" type="empty">
     <property name="screen0" type="empty">

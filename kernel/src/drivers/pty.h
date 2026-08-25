@@ -6,6 +6,10 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#ifndef PTY_DEBUG_LOGGING
+#define PTY_DEBUG_LOGGING 0
+#endif
+
 #define PTY_MAX_PAIRS 16
 #define PTY_BUFFER_SIZE 4096
 

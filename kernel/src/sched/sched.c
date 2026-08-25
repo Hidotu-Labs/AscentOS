@@ -186,6 +186,9 @@ void sched_init(void) {
 }
 
 __attribute__((optimize("O3"))) void sched_enqueue_thread(struct thread *t, struct cpu_info *explicit_cpu) {
+  if (!t || t->is_idle || t->state == THREAD_DEAD || t->state == THREAD_ZOMBIE)
+    return;
+
   struct cpu_info *target_cpu = explicit_cpu;
 
   if (!target_cpu) {
@@ -610,11 +613,14 @@ void remove_from_runqueue(struct thread *t) {
     if (cpu_local->runnable_count)
       cpu_local->runnable_count--;
   }
+  if (cpu_local->eevfd.curr == &t->se) {
+    cpu_local->eevfd.curr = NULL;
+  }
   spinlock_release(&cpu_local->queue_lock);
 }
 
 __attribute__((optimize("O3"))) void sched_wakeup(struct thread *t) {
-  if (!t)
+  if (!t || t->is_idle || t->state == THREAD_DEAD || t->state == THREAD_ZOMBIE)
     return;
   if (t->state == THREAD_READY || t->state == THREAD_RUNNING)
     return; // Already runnable, nothing to do
@@ -627,7 +633,7 @@ __attribute__((optimize("O3"))) void sched_wakeup(struct thread *t) {
     bool rearm_local = false;
 
     spinlock_acquire(&target->queue_lock);
-    if (t->state != THREAD_READY && t->state != THREAD_RUNNING) {
+    if (t->state == THREAD_BLOCKED || t->state == THREAD_SLEEPING) {
       bool still_current =
           __atomic_load_n(&target->current_thread, __ATOMIC_ACQUIRE) == t;
       sched_deadline_remove_locked(target, t);
@@ -641,10 +647,7 @@ __attribute__((optimize("O3"))) void sched_wakeup(struct thread *t) {
 
         struct cpu_info *self = cpu_get_current();
         if (target->apic_id != self->apic_id) {
-          if (!target->current_thread || target->current_thread->is_idle ||
-              eevfd_check_preempt(&target->eevfd, &target->current_thread->se, &t->se)) {
-            send_ipi = true;
-          }
+          send_ipi = true;
         } else if (self->current_thread &&
                    (self->current_thread->is_idle ||
                     eevfd_check_preempt(&self->eevfd, &self->current_thread->se, &t->se))) {

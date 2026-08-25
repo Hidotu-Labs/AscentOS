@@ -21,11 +21,17 @@ chmod 0644 "${ROOTFS_DIR}/etc/passwd" "${ROOTFS_DIR}/etc/group"
 chmod 0755 "${ROOTFS_DIR}/home"
 rm -rf "${ROOTFS_DIR}/root"
 
-if ! grep -q "^avory:" "${ROOTFS_DIR}/etc/group"; then
+if !grep -q "^avory:" "${ROOTFS_DIR}/etc/group"; then
     echo "avory:x:1000:" >> "${ROOTFS_DIR}/etc/group"
 fi
 if ! grep -q "^avory:" "${ROOTFS_DIR}/etc/passwd"; then
     echo "avory::1000:1000:AvoryOS User:/home/avory:${DEFAULT_SHELL}" >> "${ROOTFS_DIR}/etc/passwd"
+fi
+if ! grep -q "^messagebus:" "${ROOTFS_DIR}/etc/group"; then
+    echo "messagebus:x:86:" >> "${ROOTFS_DIR}/etc/group"
+fi
+if ! grep -q "^messagebus:" "${ROOTFS_DIR}/etc/passwd"; then
+    echo "messagebus:!:86:86:D-Bus Message Bus User:/var/run/dbus:/bin/false" >> "${ROOTFS_DIR}/etc/passwd"
 fi
 mkdir -p "${ROOTFS_DIR}/home/avory"
 cp -a "${ROOTFS_DIR}/etc/skel/." "${ROOTFS_DIR}/home/avory/" 2>/dev/null || true

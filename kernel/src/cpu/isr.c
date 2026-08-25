@@ -11,6 +11,7 @@
 #include "fpu.h"
 #include "msr.h"
 #include "pic.h"
+#include "../drivers/serial.h"
 
 const char *exception_messages[] = {"Division By Zero",
                                     "Debug",
@@ -530,6 +531,7 @@ static void isr_panic(struct registers *regs, const char *msg) {
   print_cr_state();
 
   console_puts("\nSystem Halted.\n");
+  serial_flush_sync();
   for (;;) {
     __asm__ volatile("cli; hlt");
   }

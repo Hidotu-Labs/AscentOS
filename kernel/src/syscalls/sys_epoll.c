@@ -162,7 +162,6 @@ static uint64_t sys_epoll_wait(uint64_t epfd, uint64_t events_ptr,
 
   // Call implementation
   int ret = epoll_wait_impl(ep, events, (int)maxevents, (int)timeout_ms);
-
   return (uint64_t)ret;
 }
 

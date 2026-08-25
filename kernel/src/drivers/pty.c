@@ -177,7 +177,9 @@ void pty_init(void) {
     pty_pool[i].winsize.ws_ypixel = 24 * 16;
   }
 
+#if PTY_DEBUG_LOGGING
   klog_puts("[PTY] Initialized with 16 pairs\n");
+#endif
 }
 
 // PTY allocation
@@ -226,15 +228,19 @@ int pty_alloc_pair(void) {
 
       pty_next_index = (idx + 1) % PTY_MAX_PAIRS;
 
+#if PTY_DEBUG_LOGGING
       klog_puts("[PTY] Allocated PTY pair ");
       klog_uint64(idx);
       klog_puts("\n");
+#endif
 
       return idx;
     }
   }
 
+#if PTY_DEBUG_LOGGING
   klog_puts("[PTY] No free PTY pairs\n");
+#endif
   return -1; // ENOSPC
 }
 
@@ -347,17 +353,20 @@ uint32_t ptmx_write(struct vfs_node *node, uint32_t offset, uint32_t size,
   if (!pty)
     return 0;
 
+#if PTY_DEBUG_LOGGING
   klog_puts("[PTY] ptmx_write: size=");
   klog_uint64(size);
   klog_puts(" first_byte=0x");
   klog_hex64(buffer[0]);
   klog_puts("\n");
+#endif
 
   bool wake_slave = false;
   bool wake_master = false;
   uint32_t written = 0;
 
   spinlock_acquire(&pty->lock);
+#if PTY_DEBUG_LOGGING
   klog_puts("[PTY] ptmx_write: slave_open_count=");
   klog_uint64(pty->slave_open_count);
   klog_puts(" ICANON=");
@@ -365,10 +374,13 @@ uint32_t ptmx_write(struct vfs_node *node, uint32_t offset, uint32_t size,
   klog_puts(" ECHO=");
   klog_uint64(pty->termios.c_lflag & ECHO ? 1 : 0);
   klog_puts("\n");
+#endif
 
   if (pty->slave_open_count == 0) {
     spinlock_release(&pty->lock);
+#if PTY_DEBUG_LOGGING
     klog_puts("[PTY] ptmx_write: no slave open, returning 0\n");
+#endif
     return 0; // Or return -EPIPE/-32
   }
 
@@ -415,9 +427,11 @@ uint32_t ptmx_write(struct vfs_node *node, uint32_t offset, uint32_t size,
         if (c == pty->termios.c_cc[0] && pty->pgid != 0) { // VINTR -> SIGINT
           uint32_t pgid = pty->pgid;
           spinlock_release(&pty->lock);
+#if PTY_DEBUG_LOGGING
           klog_puts("[PTY] ISIG: sending SIGINT to pgid=");
           klog_uint64(pgid);
           klog_puts("\n");
+#endif
           extern void signal_send_pgid(uint32_t pgid, int sig);
           signal_send_pgid(pgid, 2); // SIGINT
           return (uint32_t)(i + 1); // consumed up to and including this char
@@ -425,9 +439,11 @@ uint32_t ptmx_write(struct vfs_node *node, uint32_t offset, uint32_t size,
         if (c == pty->termios.c_cc[1] && pty->pgid != 0) { // VQUIT -> SIGQUIT
           uint32_t pgid = pty->pgid;
           spinlock_release(&pty->lock);
+#if PTY_DEBUG_LOGGING
           klog_puts("[PTY] ISIG: sending SIGQUIT to pgid=");
           klog_uint64(pgid);
           klog_puts("\n");
+#endif
           extern void signal_send_pgid(uint32_t pgid, int sig);
           signal_send_pgid(pgid, 3); // SIGQUIT
           return (uint32_t)(i + 1);
@@ -469,9 +485,11 @@ uint32_t ptmx_write(struct vfs_node *node, uint32_t offset, uint32_t size,
             ring_write(pty->slave_to_master, &pty->s2m_head, pty->s2m_tail, &cr,
                        1);
           }
+#if PTY_DEBUG_LOGGING
           klog_puts("[PTY] ptmx_write: echoing char 0x");
           klog_hex64(c);
           klog_puts(" to s2m buffer\n");
+#endif
           ring_write(pty->slave_to_master, &pty->s2m_head, pty->s2m_tail, &c,
                      1);
           wake_master = true;
@@ -485,20 +503,26 @@ uint32_t ptmx_write(struct vfs_node *node, uint32_t offset, uint32_t size,
 
   if (wake_slave && pty->slave_waitq &&
       ((wait_queue_t *)pty->slave_waitq)->head != NULL) {
+#if PTY_DEBUG_LOGGING
     klog_puts("[PTY] ptmx_write: waking slave waitq\n");
+#endif
     wait_queue_wake_all((wait_queue_t *)pty->slave_waitq);
   }
   if (wake_master && pty->master_waitq &&
       ((wait_queue_t *)pty->master_waitq)->head != NULL) {
+#if PTY_DEBUG_LOGGING
     klog_puts("[PTY] ptmx_write: waking master waitq\n");
+#endif
     wait_queue_wake_all((wait_queue_t *)pty->master_waitq);
   }
 
+#if PTY_DEBUG_LOGGING
   klog_puts("[PTY] ptmx_write: written=");
   klog_uint64(written);
   klog_puts(" m2s_newline_count=");
   klog_uint64(pty->m2s_newline_count);
   klog_puts("\n");
+#endif
 
   return written;
 }
@@ -695,14 +719,18 @@ void ptmx_close(struct vfs_node *node) {
   if (pty->slave_open_count == 0) {
     pty->master_open = false;
     pty->allocated = false;
+#if PTY_DEBUG_LOGGING
     klog_puts("[PTY] Deallocated PTY pair ");
     klog_uint64((uint64_t)pty->index);
     klog_puts(" (master closed, no slaves)\n");
+#endif
   } else {
     // Keep master_open = true so slave can still write
     // The buffer will accumulate data until master is reopened
+#if PTY_DEBUG_LOGGING
     klog_puts(
         "[PTY] Master fd closed but slaves still open, keeping PTY alive\n");
+#endif
   }
 
   // Wake up anything waiting on the slave side to notify them of hangup
@@ -723,15 +751,18 @@ uint32_t pty_slave_read(struct vfs_node *node, uint32_t offset, uint32_t size,
   if (!pty)
     return 0;
 
+#if PTY_DEBUG_LOGGING
   klog_puts("[PTY] slave_read: size=");
   klog_uint64(size);
   klog_puts("\n");
+#endif
 
   spinlock_acquire(&pty->lock);
   // Slave reads from master→slave buffer
   while (1) {
     bool can_read = false;
     bool empty = ring_empty(pty->m2s_head, pty->m2s_tail);
+#if PTY_DEBUG_LOGGING
     klog_puts("[PTY] slave_read: ring_empty=");
     klog_uint64(empty ? 1 : 0);
     klog_puts(" m2s_newline_count=");
@@ -739,6 +770,7 @@ uint32_t pty_slave_read(struct vfs_node *node, uint32_t offset, uint32_t size,
     klog_puts(" ICANON=");
     klog_uint64(pty->termios.c_lflag & ICANON ? 1 : 0);
     klog_puts("\n");
+#endif
 
     if (!empty) {
       if (pty->termios.c_lflag & ICANON) {
@@ -756,7 +788,9 @@ uint32_t pty_slave_read(struct vfs_node *node, uint32_t offset, uint32_t size,
 
     if (!pty->master_open) {
       spinlock_release(&pty->lock);
+#if PTY_DEBUG_LOGGING
       klog_puts("[PTY] slave_read: master closed, EOF\n");
+#endif
       return 0; // EOF: Master closed
     }
 
@@ -776,7 +810,9 @@ uint32_t pty_slave_read(struct vfs_node *node, uint32_t offset, uint32_t size,
     }
 
     // Wait for data
+#if PTY_DEBUG_LOGGING
     klog_puts("[PTY] slave_read: blocking on waitq\n");
+#endif
     wait_queue_entry_t entry = {0};
     entry.thread = sched_get_current();
     wait_queue_add((wait_queue_t *)pty->slave_waitq, &entry);
@@ -801,7 +837,9 @@ uint32_t pty_slave_read(struct vfs_node *node, uint32_t offset, uint32_t size,
     spinlock_acquire(&pty->lock);
     wait_queue_remove((wait_queue_t *)pty->slave_waitq, &entry);
     entry.thread->state = THREAD_RUNNING;
+#if PTY_DEBUG_LOGGING
     klog_puts("[PTY] slave_read: woke up\n");
+#endif
   }
 
   uint32_t read = 0;
@@ -840,13 +878,17 @@ uint32_t pty_slave_write(struct vfs_node *node, uint32_t offset, uint32_t size,
 
   pty_pair_t *pty = (pty_pair_t *)node->device;
   if (!pty) {
+#if PTY_DEBUG_LOGGING
     klog_puts("[PTY] slave_write: no pty\n");
+#endif
     return 0;
   }
 
+#if PTY_DEBUG_LOGGING
   klog_puts("[PTY] slave_write: size=");
   klog_uint64(size);
   klog_puts("\n");
+#endif
 
   uint32_t total_written = 0;
 
@@ -858,7 +900,9 @@ uint32_t pty_slave_write(struct vfs_node *node, uint32_t offset, uint32_t size,
     spinlock_acquire(&pty->lock);
 
     if (!pty->master_open) {
+#if PTY_DEBUG_LOGGING
       klog_puts("[PTY] slave_write: master not open\n");
+#endif
       spinlock_release(&pty->lock);
       break; // Master gone - return what we've written so far
     }
@@ -965,9 +1009,11 @@ uint32_t pty_slave_write(struct vfs_node *node, uint32_t offset, uint32_t size,
     }
   }
 
+#if PTY_DEBUG_LOGGING
   klog_puts("[PTY] slave_write: total_written=");
   klog_uint64(total_written);
   klog_puts("\n");
+#endif
   return total_written;
 }
 
@@ -1021,6 +1067,7 @@ int pty_slave_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
       struct kernel_termios kt;
       memcpy(&kt, (const void *)arg, sizeof(struct kernel_termios));
       bool old_icanon = (pty->termios.c_lflag & ICANON);
+#if PTY_DEBUG_LOGGING
       klog_puts("[PTY] slave_ioctl TCSETS: old ICANON=");
       klog_uint64(old_icanon ? 1 : 0);
       klog_puts(" new ICANON=");
@@ -1028,6 +1075,7 @@ int pty_slave_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
       klog_puts(" new ECHO=");
       klog_uint64(kt.c_lflag & ECHO ? 1 : 0);
       klog_puts("\n");
+#endif
       pty->termios.c_iflag = kt.c_iflag;
       pty->termios.c_oflag = kt.c_oflag;
       pty->termios.c_cflag = kt.c_cflag;
@@ -1098,9 +1146,11 @@ int pty_slave_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
       // Also set the PTY's foreground pgid to the caller's pgid if not set
       if (pty->pgid == 0)
         pty->pgid = t->pgid;
+#if PTY_DEBUG_LOGGING
       klog_puts("[PTY] TIOCSCTTY: set ctty for tid=");
       klog_uint64(t->tid);
       klog_puts("\n");
+#endif
     }
     ret = 0;
     break;
@@ -1167,9 +1217,11 @@ void pty_slave_open(struct vfs_node *node) {
   struct thread *t = sched_get_current();
   if (t && !t->ctty) {
     t->ctty = node;
+#if PTY_DEBUG_LOGGING
     klog_puts("[PTY] Set ctty for tid=");
     klog_uint64(t->tid);
     klog_puts("\n");
+#endif
   }
 }
 
@@ -1193,9 +1245,11 @@ void pty_slave_close(struct vfs_node *node) {
   // If master is already closed and this was the last slave, deallocate
   if (!pty->master_open && pty->slave_open_count == 0) {
     pty->allocated = false;
+#if PTY_DEBUG_LOGGING
     klog_puts("[PTY] Deallocated PTY pair ");
     klog_uint64((uint64_t)pty->index);
     klog_puts(" (last slave closed)\n");
+#endif
   }
 
   spinlock_release(&pty->lock);
@@ -1261,9 +1315,11 @@ void pty_register_devices(void) {
     return;
 
   vfs_node_init(ptmx_node);
+#if PTY_DEBUG_LOGGING
   klog_puts("[PTY] pty_slave_write addr=0x");
   klog_hex64((uint64_t)pty_slave_write);
   klog_puts("\n");
+#endif
   strcpy(ptmx_node->name, "ptmx");
   ptmx_node->flags = FS_CHARDEV;
   ptmx_node->mask = 0666;
@@ -1275,5 +1331,7 @@ void pty_register_devices(void) {
 
   fb_register_device_node("ptmx", ptmx_node);
 
+#if PTY_DEBUG_LOGGING
   klog_puts("[PTY] Registered /dev/ptmx\n");
+#endif
 }

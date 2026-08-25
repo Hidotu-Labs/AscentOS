@@ -168,16 +168,6 @@ int64_t sys_shmget(uint64_t key, uint64_t size, uint64_t shmflg, uint64_t a3,
 
   uint32_t id = seg->shmid;
 
-  klog_puts("[SHM] Created segment id=");
-  klog_uint64(id);
-  klog_puts(" key=");
-  klog_uint64(key);
-  klog_puts(" size=");
-  klog_uint64(size);
-  klog_puts(" pages=");
-  klog_uint64(num_pages);
-  klog_puts("\n");
-
   spinlock_release(&shm_lock);
   return (int64_t)id;
 }
@@ -298,15 +288,6 @@ int64_t sys_shmat(uint64_t shmid, uint64_t shmaddr, uint64_t shmflg,
   seg->last_pid = t->tid;
 
   spinlock_release(&shm_lock);
-
-  klog_puts("[SHM] Attached shmid=");
-  klog_uint64(shmid);
-  klog_puts(" at ");
-  klog_uint64(vaddr);
-  klog_puts(" nattch=");
-  klog_uint64(seg->nattch);
-  klog_puts("\n");
-
   return (int64_t)vaddr;
 }
 
@@ -383,20 +364,11 @@ int64_t sys_shmdt(uint64_t shmaddr, uint64_t a1, uint64_t a2, uint64_t a3,
 
     // If marked for destruction and no more attaches, free the segment
     if (seg->marked_destroy && seg->nattch == 0) {
-      uint32_t destroyed_id = seg->shmid;
       shm_destroy_segment(seg);
-      klog_puts("[SHM] Segment destroyed (deferred): shmid=");
-      klog_uint64(destroyed_id);
-      klog_puts("\n");
     }
   }
 
   spinlock_release(&shm_lock);
-
-  klog_puts("[SHM] Detached at ");
-  klog_uint64(shmaddr);
-  klog_puts("\n");
-
   return 0;
 }
 
@@ -407,12 +379,6 @@ int64_t sys_shmctl(uint64_t shmid, uint64_t cmd, uint64_t buf, uint64_t a3,
   (void)a3;
   (void)a4;
   (void)a5;
-
-  klog_puts("[SHM] shmctl shmid=");
-  klog_uint64(shmid);
-  klog_puts(" cmd=");
-  klog_uint64(cmd);
-  klog_puts("\n");
 
   spinlock_acquire(&shm_lock);
 
@@ -438,17 +404,9 @@ int64_t sys_shmctl(uint64_t shmid, uint64_t cmd, uint64_t buf, uint64_t a3,
     if (seg->nattch == 0) {
       // No attaches — free immediately
       shm_destroy_segment(seg);
-      klog_puts("[SHM] Segment destroyed: shmid=");
-      klog_uint64(shmid);
-      klog_puts("\n");
     } else {
       // Mark for deferred destruction
       seg->marked_destroy = true;
-      klog_puts("[SHM] Segment marked for destruction: shmid=");
-      klog_uint64(shmid);
-      klog_puts(" (nattch=");
-      klog_uint64(seg->nattch);
-      klog_puts(")\n");
     }
     spinlock_release(&shm_lock);
     return 0;

@@ -117,36 +117,9 @@ static uint64_t sys_bind(uint64_t sockfd, uint64_t addr_ptr, uint64_t addrlen,
   }
 
   socket_t *sock = socket_from_fd(fd);
-  struct thread *t = sched_get_current();
   if (!sock) {
-    klog_puts("[BIND] tid=");
-    if (t)
-      klog_uint64(t->tid);
-    klog_puts(" EBADF: invalid fd=");
-    klog_uint64(fd);
-    klog_puts("\n");
     return (uint64_t)-9; // EBADF
   }
-
-  klog_puts("[BIND] tid=");
-  if (t)
-    klog_uint64(t->tid);
-  klog_puts(" fd=");
-  klog_uint64(fd);
-  klog_puts(" addrlen=");
-  klog_uint64(addrlen);
-  // For AF_UNIX, print the path
-  if (addr->sa_family == 1 && addrlen > 2) {
-    struct sockaddr_un *sun = (struct sockaddr_un *)addr;
-    klog_puts(" path=");
-    if (sun->sun_path[0] == '\0') {
-      klog_puts("@");
-      klog_puts(sun->sun_path + 1);
-    } else {
-      klog_puts(sun->sun_path);
-    }
-  }
-  klog_puts("\n");
 
   uint8_t kaddr_buf[128];
   if (addrlen > sizeof(kaddr_buf))
@@ -166,9 +139,6 @@ static uint64_t sys_bind(uint64_t sockfd, uint64_t addr_ptr, uint64_t addrlen,
   }
 
   int ret = socket_bind(sock, kaddr, (int)addrlen);
-  klog_puts("[BIND] returned ");
-  klog_uint64((uint64_t)ret);
-  klog_puts("\n");
   return (uint64_t)ret;
 }
 
@@ -182,30 +152,15 @@ static uint64_t sys_connect(uint64_t sockfd, uint64_t addr_ptr,
   (void)_arg5;
 
   int fd = (int)sockfd;
-  struct sockaddr *addr = (struct sockaddr *)addr_ptr;
-
-  struct thread *t = sched_get_current();
-  klog_puts("[CONNECT] tid=");
-  if (t)
-    klog_uint64(t->tid);
-  klog_puts(" fd=");
-  klog_uint64(fd);
-  klog_puts(" addr_ptr=");
-  klog_uint64(addr_ptr);
-  klog_puts(" addrlen=");
-  klog_uint64(addrlen);
-  klog_puts("\n");
 
   // Validate address pointer and range
   if (!is_user_ptr(addr_ptr) || !vmm_is_user_addr_range_valid(addr_ptr, addrlen)) {
-    klog_puts("[CONNECT] EFAULT: invalid addr_ptr range\n");
     return (uint64_t)-14; // EFAULT
   }
 
   // Get socket from FD
   socket_t *sock = socket_from_fd(fd);
   if (!sock) {
-    klog_puts("[CONNECT] EBADF: invalid fd\n");
     return (uint64_t)-9; // EBADF
   }
 
@@ -224,28 +179,7 @@ static uint64_t sys_connect(uint64_t sockfd, uint64_t addr_ptr,
       sun->sun_path[path_end] = '\0';
   }
 
-  klog_puts("[CONNECT] family=");
-  klog_uint64(kaddr->sa_family);
-  klog_puts(" domain=");
-  klog_uint64(sock->domain);
-  klog_puts(" path=");
-  // For AF_UNIX, print the path
-  if (kaddr->sa_family == 1 && addrlen > 2) {
-    struct sockaddr_un *sun = (struct sockaddr_un *)kaddr;
-    if (sun->sun_path[0] == '\0') {
-      // Abstract socket - print @ followed by the name
-      klog_puts("@");
-      klog_puts(sun->sun_path + 1);
-    } else {
-      klog_puts(sun->sun_path);
-    }
-  }
-  klog_puts("\n");
-
   int ret = socket_connect(sock, kaddr, (int)addrlen);
-  klog_puts("[CONNECT] returned ");
-  klog_uint64((uint64_t)ret);
-  klog_puts("\n");
   return (uint64_t)ret;
 }
 
@@ -258,28 +192,11 @@ static uint64_t sys_listen(uint64_t sockfd, uint64_t backlog, uint64_t _arg2,
   (void)_arg5;
 
   int fd = (int)sockfd;
-  struct thread *t = sched_get_current();
-
   // Get socket from FD
   socket_t *sock = socket_from_fd(fd);
   if (!sock) {
-    klog_puts("[LISTEN] tid=");
-    if (t)
-      klog_uint64(t->tid);
-    klog_puts(" EBADF: invalid fd=");
-    klog_uint64(fd);
-    klog_puts("\n");
     return (uint64_t)-9; // EBADF
   }
-
-  klog_puts("[LISTEN] tid=");
-  if (t)
-    klog_uint64(t->tid);
-  klog_puts(" fd=");
-  klog_uint64(fd);
-  klog_puts(" backlog=");
-  klog_uint64(backlog);
-  klog_puts("\n");
 
   int ret = socket_listen(sock, (int)backlog);
   return (uint64_t)ret;
@@ -297,25 +214,8 @@ static uint64_t sys_accept_impl(uint64_t sockfd, uint64_t addr_ptr,
   // Get socket from FD
   socket_t *sock = socket_from_fd(fd);
   if (!sock) {
-    klog_puts("[ACCEPT] tid=");
-    if (t)
-      klog_uint64(t->tid);
-    klog_puts(" EBADF: invalid fd=");
-    klog_uint64(fd);
-    klog_puts("\n");
     return (uint64_t)-9; // EBADF
   }
-
-  klog_puts("[ACCEPT] tid=");
-  if (t)
-    klog_uint64(t->tid);
-  klog_puts(" fd=");
-  klog_uint64(fd);
-  if (flags) {
-    klog_puts(" flags=");
-    klog_uint64(flags);
-  }
-  klog_puts("\n");
 
   // Accept connection
   socket_t *newsock = NULL;
@@ -350,13 +250,6 @@ static uint64_t sys_accept_impl(uint64_t sockfd, uint64_t addr_ptr,
     if (flags & SOCK_NONBLOCK)
       t->fd_flags[newfd] |= SOCK_NONBLOCK;
   }
-
-  klog_puts("[ACCEPT] tid=");
-  if (t)
-    klog_uint64(t->tid);
-  klog_puts(" returned newfd=");
-  klog_uint64((uint64_t)newfd);
-  klog_puts("\n");
 
   return (uint64_t)newfd;
 }
@@ -796,23 +689,8 @@ static uint64_t sys_setsockopt(uint64_t sockfd, uint64_t level,
   // Get socket from FD
   socket_t *sock = socket_from_fd(fd);
   if (!sock) {
-    klog_puts("[SETSOCKOPT] EBADF: fd=");
-    klog_uint64(fd);
-    klog_puts("\n");
     return (uint64_t)-9; // EBADF
   }
-
-  klog_puts("[SETSOCKOPT] tid=");
-  struct thread *_curr = sched_get_current();
-  if (_curr)
-    klog_uint64(_curr->tid);
-  klog_puts(" fd=");
-  klog_uint64(fd);
-  klog_puts(" level=");
-  klog_uint64(level);
-  klog_puts(" optname=");
-  klog_uint64(optname);
-  klog_puts("\n");
 
   // Validate pointer
   if (!is_user_ptr(optval_ptr)) {
@@ -940,15 +818,11 @@ static uint64_t sys_getpeername(uint64_t sockfd, uint64_t addr_ptr,
   if (!sock) {
     struct thread *current = sched_get_current();
     bool fd_exists = current && fd >= 0 && fd < MAX_FDS && current->fds[fd];
-    klog_puts("[GETPEERNAME] ");
-    klog_puts(fd_exists ? "ENOTSOCK" : "EBADF");
-    klog_puts(" fd=");
-    klog_uint64((uint64_t)(int64_t)fd);
-    klog_puts(" tid=");
-    klog_uint64(current ? current->tid : 0);
-    klog_puts(" comm=");
-    klog_puts(current ? current->comm : "none");
-    klog_puts("\n");
+    klog_debugf("[GETPEERNAME] %s fd=%lld tid=%u comm=%s\n",
+                fd_exists ? "ENOTSOCK" : "EBADF",
+                (long long)fd,
+                current ? current->tid : 0,
+                current ? current->comm : "none");
     // Linux distinguishes a closed/invalid descriptor (EBADF) from a valid
     // descriptor whose underlying object is not a socket (ENOTSOCK). GLib
     // deliberately probes stderr with getpeername() and relies on ENOTSOCK.

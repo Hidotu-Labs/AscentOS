@@ -131,12 +131,13 @@ ssize_t unix_send_impl(socket_t *sock, const void *buf, size_t len, int flags) {
     size_t space = (size > 0) ? (head - tail - 1 + size) % size : 0;
 
     if (space == 0) {
-      spinlock_release(&peer->recv_lock);
-
-      if (sent > 0)
+      if (sent > 0) {
+        spinlock_release(&peer->recv_lock);
         break; // Return what we've sent so far
+      }
 
       if ((sock->flags & SOCK_NONBLOCK) || (flags & 0x40)) { // MSG_DONTWAIT
+        spinlock_release(&peer->recv_lock);
         socket_put(peer_sock);
         return -11; // EAGAIN
       }
@@ -147,15 +148,8 @@ ssize_t unix_send_impl(socket_t *sock, const void *buf, size_t len, int flags) {
       wait_queue_add(peer->wait, &entry);
       current->state = THREAD_BLOCKED;
 
-      size  = peer->recv_buf_size;
-      space = (size > 0) ? (peer->recv_buf_head - peer->recv_buf_tail - 1 + size) % size : 0;
-
-      if (space > 0) {
-        current->state = THREAD_RUNNING;
-      } else {
-        sched_yield();
-      }
-
+      spinlock_release(&peer->recv_lock);
+      sched_yield();
       wait_queue_remove(peer->wait, &entry);
       current->state = THREAD_RUNNING;
 
@@ -192,7 +186,7 @@ ssize_t unix_send_impl(socket_t *sock, const void *buf, size_t len, int flags) {
 
     if (peer->parent && peer->parent->node)
       epoll_notify_event(peer->parent->node, EPOLLIN | EPOLLRDNORM);
-    else if (peer->parent)
+    if (peer->parent && peer->parent->fd >= 0)
       epoll_notify_socket(peer->parent->fd, EPOLLIN);
   }
 
@@ -229,21 +223,26 @@ ssize_t unix_recv_impl(socket_t *sock, void *buf, size_t len, int flags) {
     size_t available = (size > 0) ? (tail - head + size) % size : 0;
 
     if (available == 0) {
-      spinlock_release(&usk->recv_lock);
-
-      if (received > 0)
-        break;
-
-      if (sock->closing)
-        return 0; // EOF
+      if (sock->closing) {
+        spinlock_release(&usk->recv_lock);
+        return (ssize_t)received;
+      }
 
       if (sock->state != SS_CONNECTED) {
         usk->accepted_orphaned = false;
-        return 0; // EOF
+        spinlock_release(&usk->recv_lock);
+        return (ssize_t)received;
       }
 
-      if ((sock->flags & SOCK_NONBLOCK) || (flags & 0x40)) // MSG_DONTWAIT
+      if (received > 0) {
+        spinlock_release(&usk->recv_lock);
+        break;
+      }
+
+      if ((sock->flags & SOCK_NONBLOCK) || (flags & 0x40)) { // MSG_DONTWAIT
+        spinlock_release(&usk->recv_lock);
         return -11; // EAGAIN
+      }
 
       struct thread *current = sched_get_current();
       wait_queue_entry_t entry = {.thread = current, .next = NULL};
@@ -251,17 +250,8 @@ ssize_t unix_recv_impl(socket_t *sock, void *buf, size_t len, int flags) {
       wait_queue_add(usk->wait, &entry);
       current->state = THREAD_BLOCKED;
 
-      head      = usk->recv_buf_head;
-      tail      = usk->recv_buf_tail;
-      size      = usk->recv_buf_size;
-      available = (size > 0) ? (tail - head + size) % size : 0;
-
-      if (available > 0 || sock->state != SS_CONNECTED) {
-        current->state = THREAD_RUNNING;
-      } else {
-        sched_yield();
-      }
-
+      spinlock_release(&usk->recv_lock);
+      sched_yield();
       wait_queue_remove(usk->wait, &entry);
       current->state = THREAD_RUNNING;
 
@@ -297,6 +287,8 @@ ssize_t unix_recv_impl(socket_t *sock, void *buf, size_t len, int flags) {
   if (notify_peer_sock) {
     if (notify_peer_sock->node)
       epoll_notify_event(notify_peer_sock->node, EPOLLOUT | EPOLLWRNORM);
+    if (notify_peer_sock->fd >= 0)
+      epoll_notify_socket(notify_peer_sock->fd, EPOLLOUT | EPOLLWRNORM);
     socket_put(notify_peer_sock);
   }
 
@@ -370,9 +362,8 @@ ssize_t unix_sendmsg_impl(socket_t *sock, struct msghdr *msg, int flags) {
       break;
 
     if (space == 0) {
-      spinlock_release(&peer->recv_lock);
-
       if ((sock->flags & SOCK_NONBLOCK) || (flags & 0x40)) {
+        spinlock_release(&peer->recv_lock);
         socket_put(peer_sock);
         return -11; // EAGAIN
       }
@@ -381,6 +372,8 @@ ssize_t unix_sendmsg_impl(socket_t *sock, struct msghdr *msg, int flags) {
       wait_queue_entry_t entry = {.thread = ct, .next = NULL};
       wait_queue_add(peer->wait, &entry);
       ct->state = THREAD_BLOCKED;
+
+      spinlock_release(&peer->recv_lock);
       sched_yield();
       wait_queue_remove(peer->wait, &entry);
       ct->state = THREAD_RUNNING;
@@ -459,7 +452,7 @@ ssize_t unix_sendmsg_impl(socket_t *sock, struct msghdr *msg, int flags) {
 
   if (peer->parent && peer->parent->node)
     epoll_notify_event(peer->parent->node, EPOLLIN | EPOLLRDNORM);
-  else if (peer->parent)
+  if (peer->parent && peer->parent->fd >= 0)
     epoll_notify_socket(peer->parent->fd, EPOLLIN);
 
   socket_put(peer_sock);
@@ -489,13 +482,15 @@ ssize_t unix_recvmsg_impl(socket_t *sock, struct msghdr *msg, int flags) {
     if (available > 0)
       break; // Data ready – recv_lock stays held
 
-    spinlock_release(&usk->recv_lock);
-
-    if (sock->closing || sock->state != SS_CONNECTED)
+    if (sock->closing || sock->state != SS_CONNECTED) {
+      spinlock_release(&usk->recv_lock);
       goto no_data;
+    }
 
-    if ((sock->flags & SOCK_NONBLOCK) || (flags & 0x40))
+    if ((sock->flags & SOCK_NONBLOCK) || (flags & 0x40)) {
+      spinlock_release(&usk->recv_lock);
       return -11; // EAGAIN
+    }
 
     uint64_t rcvtimeo_deadline = 0;
     if (usk->rcvtimeo_ms > 0) {
@@ -509,6 +504,8 @@ ssize_t unix_recvmsg_impl(socket_t *sock, struct msghdr *msg, int flags) {
     if (rcvtimeo_deadline != 0) {
       ct->wakeup_ticks = rcvtimeo_deadline;
     }
+
+    spinlock_release(&usk->recv_lock);
     sched_yield();
     wait_queue_remove(usk->wait, &entry);
     ct->state = THREAD_RUNNING;
@@ -643,6 +640,8 @@ ssize_t unix_recvmsg_impl(socket_t *sock, struct msghdr *msg, int flags) {
   if (notify_peer_sock) {
     if (notify_peer_sock->node)
       epoll_notify_event(notify_peer_sock->node, EPOLLOUT | EPOLLWRNORM);
+    if (notify_peer_sock->fd >= 0)
+      epoll_notify_socket(notify_peer_sock->fd, EPOLLOUT | EPOLLWRNORM);
     socket_put(notify_peer_sock);
   }
 

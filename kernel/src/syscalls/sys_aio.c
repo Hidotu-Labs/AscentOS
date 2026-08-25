@@ -464,13 +464,8 @@ static uint32_t pipe_read(vfs_node_t *node, uint32_t offset, uint32_t size,
         /* EOF takes precedence over O_NONBLOCK/EAGAIN. */
         if (!ctx->writer_open) { spinlock_release(&ctx->lock); return 0; }
         if (fd != -1 && (t->fd_flags[fd] & 0x800)) {
-            klog_puts("[PIPE] EAGAIN ctx=");
-            klog_hex64((uint64_t)ctx);
-            klog_puts(" fd=");
-            klog_uint64((uint64_t)fd);
-            klog_puts(" writer_open=1 read_node_refs=");
-            klog_uint64(node->refcount);
-            klog_puts("\n");
+            klog_debugf("[PIPE] EAGAIN ctx=0x%llx fd=%d writer_open=1 read_node_refs=%u\n",
+                        (unsigned long long)(uintptr_t)ctx, fd, node->refcount);
             spinlock_release(&ctx->lock);
             return (uint32_t)-11;
         }

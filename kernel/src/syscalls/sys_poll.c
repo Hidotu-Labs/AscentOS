@@ -5,6 +5,7 @@
 #include "../lib/string.h"
 #include "../mm/vmm.h"
 #include "../sched/sched.h"
+#include "../sched/wait.h"
 #include "syscall.h"
 #include <stdint.h>
 
@@ -54,27 +55,70 @@ static uint64_t do_poll(struct pollfd *fds, uint64_t nfds,
   /* Fast path: check immediately. */
   int ready = poll_check_fds(fds, nfds, t);
   if (ready > 0 || timeout_ms == 0)
-    goto done;
+    return (uint64_t)ready;
 
-  /* Slow path: re-check readiness while honoring the timeout. */
+  /* Slow path: block on wait queues while honoring the timeout. */
   uint64_t deadline = (timeout_ms != (uint64_t)-1)
                           ? lapic_timer_get_ticks() + timeout_ms
                           : (uint64_t)-1;
 
-  while (1) {
-    ready = poll_check_fds(fds, nfds, t);
-    if (ready > 0)
-      break;
+  wait_queue_entry_t wq_entries[64];
+  wait_queue_t *wq_ptrs[64];
 
-    /* Check timeout. */
+  while (ready == 0) {
+    if (thread_has_pending_signal(t)) {
+      return (uint64_t)-4; // -EINTR
+    }
+
     if (deadline != (uint64_t)-1 && lapic_timer_get_ticks() >= deadline)
       break;
 
-    /* Yield so other runnable threads get CPU time. */
+    int wq_count = 0;
+    for (uint64_t i = 0; i < nfds && wq_count < 64; i++) {
+      int fd = fds[i].fd;
+      if (fd >= 0 && fd < MAX_FDS && t->fds[fd] && t->fds[fd]->wait_queue) {
+        wait_queue_t *wq = (wait_queue_t *)t->fds[fd]->wait_queue;
+        wq_entries[wq_count].thread = t;
+        wq_entries[wq_count].next = NULL;
+        wq_ptrs[wq_count] = wq;
+        wait_queue_add(wq, &wq_entries[wq_count]);
+        wq_count++;
+      }
+    }
+
+    t->state = THREAD_BLOCKED;
+    if (deadline != (uint64_t)-1) {
+      t->wakeup_ticks = deadline;
+    } else {
+      t->wakeup_ticks = lapic_timer_get_ticks() + 10;
+    }
+
+    ready = poll_check_fds(fds, nfds, t);
+    if (ready > 0) {
+      t->state = THREAD_RUNNING;
+      t->wakeup_ticks = 0;
+      for (int i = 0; i < wq_count; i++) {
+        wait_queue_remove(wq_ptrs[i], &wq_entries[i]);
+      }
+      break;
+    }
+
     sched_yield();
+
+    t->state = THREAD_RUNNING;
+    t->wakeup_ticks = 0;
+
+    for (int i = 0; i < wq_count; i++) {
+      wait_queue_remove(wq_ptrs[i], &wq_entries[i]);
+    }
+
+    if (thread_has_pending_signal(t)) {
+      return (uint64_t)-4; // -EINTR
+    }
+
+    ready = poll_check_fds(fds, nfds, t);
   }
 
-done:
   return (uint64_t)ready;
 }
 
@@ -100,7 +144,8 @@ static uint64_t sys_poll(uint64_t fds_ptr, uint64_t nfds, uint64_t timeout_ms,
       !vmm_is_user_addr_range_valid(fds_ptr, nfds * sizeof(struct pollfd)))
     return (uint64_t)-14;
 
-  return do_poll((struct pollfd *)fds_ptr, nfds, timeout_ms);
+  struct pollfd *p = (struct pollfd *)fds_ptr;
+  return do_poll(p, nfds, timeout_ms);
 }
 
 static uint64_t sys_ppoll(uint64_t fds_ptr, uint64_t nfds, uint64_t timeout_ptr,

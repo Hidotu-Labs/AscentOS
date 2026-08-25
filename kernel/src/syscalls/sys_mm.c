@@ -141,7 +141,11 @@ uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot, uint64_t flags,
     klog_puts("\n");
   */
 
-  // Validate flags
+  // Validate prot and flags
+  if ((prot & ~(PROT_READ | PROT_WRITE | PROT_EXEC | PROT_NONE | 0x01000000 | 0x02000000)) != 0) {
+    return E_INVAL;
+  }
+
   bool is_shared = (flags & MAP_SHARED) != 0;
   bool is_private = (flags & MAP_PRIVATE) != 0;
 
@@ -420,16 +424,19 @@ static uint64_t sys_mprotect(uint64_t addr, uint64_t len, uint64_t prot,
   (void)a4;
   (void)a5;
 
-  if (addr & (PAGE_SIZE - 1))
-    return E_INVAL;
+  if (addr == 0 || (addr & (PAGE_SIZE - 1)))
+    return (addr == 0) ? E_NOMEM : E_INVAL;
   if (len == 0)
     return 0;
 
   uint64_t aligned_len = PAGE_ALIGN_UP(len);
+  if (!is_user_pointer(addr) || !is_user_pointer(addr + aligned_len - 1))
+    return E_NOMEM;
+
   uint64_t *pml4 = vmm_get_active_pml4();
 
   struct thread *current = sched_get_current();
-  if (!current)
+  if (!current || !current->mm)
     return E_INVAL;
 
   spinlock_acquire(&current->mm->lock);

@@ -102,9 +102,8 @@ int unix_unbind_by_path(const char *path) {
       continue; // skip abstract sockets
 
     if (strcmp(usk->addr.sun_path, path) == 0) {
-      // Clear the VFS node pointer – file is gone, but keep in bound list
-      // so EADDRINUSE is returned for any re-bind attempt.
-      usk->parent->node = NULL;
+      list_del(&usk->bind_node);
+      usk->addr_len = 0;
       found = 1;
       break;
     }

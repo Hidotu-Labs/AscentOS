@@ -1,15 +1,25 @@
 #include "serial.h"
 #include "../io/io.h"
+#include "../lock/spinlock.h"
 
 #define COM1 0x3F8
 
-// Ring buffer for non-blocking serial output
-#define SERIAL_BUF_SIZE 4096
+// Ring buffer for non-blocking serial output (128KB power-of-2 size)
+#define SERIAL_BUF_SIZE 131072
+#define SERIAL_BUF_MASK (SERIAL_BUF_SIZE - 1)
+
 static char serial_buf[SERIAL_BUF_SIZE];
 static volatile uint32_t serial_head = 0; // write position
 static volatile uint32_t serial_tail = 0; // read/send position
 
+static spinlock_t serial_lock = SPINLOCK_INIT;
+static volatile bool serial_initialized = false;
+
+static inline int is_transmit_empty(void) { return inb(COM1 + 5) & 0x20; }
+
 void serial_init(void) {
+  spinlock_acquire(&serial_lock);
+
   outb(COM1 + 1, 0x00); // Disable all interrupts
   outb(COM1 + 3, 0x80); // Enable DLAB (set baud rate divisor)
   outb(COM1 + 0, 0x01); // Set divisor to 1 (lo byte) 115200 baud
@@ -17,59 +27,153 @@ void serial_init(void) {
   outb(COM1 + 3, 0x03); // 8 bits, no parity, one stop bit
   outb(COM1 + 2, 0xC7); // Enable FIFO, clear them, with 14-byte threshold
   outb(COM1 + 4, 0x0B); // IRQs enabled, RTS/DSR set
+
+  serial_initialized = true;
+
+  spinlock_release(&serial_lock);
 }
 
-static int is_transmit_empty(void) { return inb(COM1 + 5) & 0x20; }
+// Drain up to 16 bytes (16550 FIFO size) into UART if transmit holding register is empty.
+// Must be called while holding serial_lock.
+static inline void serial_drain_fifo_locked(void) {
+  if (!is_transmit_empty())
+    return;
 
-// Enqueue a character into the ring buffer (non-blocking, drops if full)
-static void serial_enqueue(char c) {
-  uint32_t next = (serial_head + 1) % SERIAL_BUF_SIZE;
+  int max_drain = 16;
+  uint32_t tail = serial_tail;
+  uint32_t head = serial_head;
+
+  while (tail != head && max_drain-- > 0) {
+    outb(COM1, serial_buf[tail]);
+    tail = (tail + 1) & SERIAL_BUF_MASK;
+  }
+  serial_tail = tail;
+}
+
+// Enqueue a character into the ring buffer (pure memory operation, 0 port I/O).
+// Must be called while holding serial_lock.
+static inline void serial_enqueue_locked(char c) {
+  uint32_t next = (serial_head + 1) & SERIAL_BUF_MASK;
   if (next == serial_tail)
-    return; // buffer full — drop silently
+    return; // Buffer full: drop silently without blocking or port I/O
   serial_buf[serial_head] = c;
   serial_head = next;
 }
 
 // Drain as many queued bytes as the UART FIFO can accept right now (non-blocking)
 void serial_flush(void) {
-  // THRE means the transmit FIFO is empty, so one status check is enough
-  // before filling up to the 16550 FIFO's 16-byte capacity.
-  if (!is_transmit_empty())
-    return;
+  spinlock_acquire(&serial_lock);
+  serial_drain_fifo_locked();
+  spinlock_release(&serial_lock);
+}
 
-  int max_drain = 16;
-  while (serial_tail != serial_head && max_drain-- > 0) {
-    outb(COM1, serial_buf[serial_tail]);
-    serial_tail = (serial_tail + 1) % SERIAL_BUF_SIZE;
+// Synchronously drain the entire ring buffer until empty.
+// Safe for panics and shutdown; includes timeout to prevent infinite hangs.
+void serial_flush_sync(void) {
+  spinlock_acquire(&serial_lock);
+
+  while (serial_tail != serial_head) {
+    uint32_t timeout = 1000000;
+    while (!is_transmit_empty() && --timeout > 0) {
+      __asm__ volatile("pause" ::: "memory");
+    }
+    if (timeout == 0) {
+      // Hardware unresponsive, drop remaining buffer to avoid hang
+      break;
+    }
+
+    int max_drain = 16;
+    uint32_t tail = serial_tail;
+    uint32_t head = serial_head;
+    while (tail != head && max_drain-- > 0) {
+      outb(COM1, serial_buf[tail]);
+      tail = (tail + 1) & SERIAL_BUF_MASK;
+    }
+    serial_tail = tail;
   }
+
+  spinlock_release(&serial_lock);
 }
 
 void serial_putchar(char c) {
+  spinlock_acquire(&serial_lock);
   if (c == '\n')
-    serial_enqueue('\r');
-  serial_enqueue(c);
-  // Opportunistic drain — send what we can without blocking
-  serial_flush();
+    serial_enqueue_locked('\r');
+  serial_enqueue_locked(c);
+  serial_drain_fifo_locked();
+  spinlock_release(&serial_lock);
 }
 
 void serial_write(const char *data, size_t length) {
-  if (!data)
+  if (!data || length == 0)
     return;
 
+  spinlock_acquire(&serial_lock);
+
+  uint32_t head = serial_head;
+  uint32_t tail = serial_tail;
+  bool was_empty = (head == tail);
+  uint32_t free_space = (tail - head - 1) & SERIAL_BUF_MASK;
+
   for (size_t i = 0; i < length; i++) {
-    if (data[i] == '\n')
-      serial_enqueue('\r');
-    serial_enqueue(data[i]);
+    if (free_space == 0)
+      break; // Buffer full: drop remainder without port I/O stall
+
+    char c = data[i];
+    if (c == '\n') {
+      if (free_space < 2)
+        break;
+      serial_buf[head] = '\r';
+      head = (head + 1) & SERIAL_BUF_MASK;
+      free_space--;
+    }
+
+    serial_buf[head] = c;
+    head = (head + 1) & SERIAL_BUF_MASK;
+    free_space--;
   }
 
-  // Check/drain the UART once for the whole write instead of once per byte.
-  serial_flush();
+  serial_head = head;
+
+  while (is_transmit_empty() && serial_tail != serial_head) {
+    int max_drain = 16;
+    uint32_t t = serial_tail;
+    uint32_t h = serial_head;
+    while (t != h && max_drain-- > 0) {
+      outb(COM1, serial_buf[t]);
+      t = (t + 1) & SERIAL_BUF_MASK;
+    }
+    serial_tail = t;
+  }
+
+  spinlock_release(&serial_lock);
+}
+
+// Direct synchronous write bypassing the ring buffer (ideal for early boot or panic)
+void serial_putchar_sync(char c) {
+  if (c == '\n')
+    serial_putchar_sync('\r');
+
+  uint32_t timeout = 1000000;
+  while (!is_transmit_empty() && --timeout > 0) {
+    __asm__ volatile("pause" ::: "memory");
+  }
+  outb(COM1, c);
+}
+
+void serial_write_sync(const char *data, size_t length) {
+  if (!data || length == 0)
+    return;
+  for (size_t i = 0; i < length; i++) {
+    serial_putchar_sync(data[i]);
+  }
 }
 
 int serial_received(void) { return inb(COM1 + 5) & 1; }
 
 char serial_get_char(void) {
-  while (serial_received() == 0)
-    ;
+  while (serial_received() == 0) {
+    __asm__ volatile("pause" ::: "memory");
+  }
   return inb(COM1);
 }

@@ -22,9 +22,13 @@
 #define FUTEX_WAIT_PRIVATE 128 // FUTEX_WAIT | FUTEX_PRIVATE_FLAG
 #define FUTEX_WAKE_PRIVATE 129 // FUTEX_WAKE | FUTEX_PRIVATE_FLAG
 #define FUTEX_PRIVATE_FLAG 128
+#define FUTEX_CLOCK_REALTIME 256
 #define FUTEX_REQUEUE      3
 #define FUTEX_WAKE_OP      5
+#define FUTEX_WAIT_BITSET  9
+#define FUTEX_WAKE_BITSET  10
 #define FUTEX_CMD_MASK     127
+#define FUTEX_BITSET_MATCH_ANY 0xffffffff
 
 // FUTEX_WAKE_OP encoded field widths (val3 argument)
 #define FUTEX_OP_OP_SHIFT    28
@@ -52,6 +56,7 @@
 #define FUTEX_OP_CMP_GE     5
 
 // Error codes
+#define EINTR 4
 #define EFAULT 14
 #define EINVAL 22
 #define EAGAIN 11
@@ -75,6 +80,7 @@ struct futex_key {
 struct futex_waiter {
   struct futex_key key;
   struct thread *thread; // Blocked thread
+  uint32_t bitset;
   struct futex_waiter *next;
 };
 
@@ -172,7 +178,7 @@ static int futex_get_key(uint32_t *uaddr, bool private,
 // Returns -ETIMEDOUT if timeout expired.
 static uint64_t futex_wait(uint32_t *uaddr, uint32_t val,
                            const uint64_t *timeout_ts, bool private,
-                           bool is_abs) {
+                           bool is_abs, uint32_t bitset) {
   struct futex_key key;
   int error = futex_get_key(uaddr, private, &key);
   if (error)
@@ -185,6 +191,7 @@ static uint64_t futex_wait(uint32_t *uaddr, uint32_t val,
   struct futex_waiter waiter;
   waiter.key = key;
   waiter.thread = sched_get_current();
+  waiter.bitset = bitset;
   waiter.next = NULL;
 
   if (!waiter.thread)
@@ -263,6 +270,10 @@ static uint64_t futex_wait(uint32_t *uaddr, uint32_t val,
 
   spinlock_release(&futex_hash[final_bucket].lock);
 
+  if (thread_has_pending_signal(waiter.thread) && !was_woken) {
+    return (uint64_t)(-(int64_t)EINTR);
+  }
+
   // Check if we timed out: if a timeout was set, and we removed ourselves from the
   // list (meaning futex_wake didn't wake us up), return -ETIMEDOUT.
   if (timeout_ts && !was_woken) {
@@ -272,7 +283,7 @@ static uint64_t futex_wait(uint32_t *uaddr, uint32_t val,
   return 0;
 }
 
-static uint64_t futex_wake_key(struct futex_key key, uint32_t val) {
+static uint64_t futex_wake_key(struct futex_key key, uint32_t val, uint32_t bitset) {
   uint32_t bucket = futex_hash_key(key);
   uint32_t woken = 0;
   spinlock_acquire(&futex_hash[bucket].lock);
@@ -280,6 +291,10 @@ static uint64_t futex_wake_key(struct futex_key key, uint32_t val) {
   while (*pp && woken < val) {
     struct futex_waiter *w = *pp;
     if (futex_key_equal(w->key, key)) {
+      if ((w->bitset & bitset) == 0) {
+        pp = &w->next;
+        continue;
+      }
       if (w->thread && w->thread->state == THREAD_BLOCKED) {
         sched_wakeup(w->thread);
         woken++;
@@ -302,7 +317,16 @@ static uint64_t futex_wake(uint32_t *uaddr, uint32_t val, bool private) {
   if (error)
     return (uint64_t)(int64_t)error;
 
-  return futex_wake_key(key, val);
+  return futex_wake_key(key, val, FUTEX_BITSET_MATCH_ANY);
+}
+
+static uint64_t futex_wake_bitset(uint32_t *uaddr, uint32_t val, uint32_t bitset, bool private) {
+  struct futex_key key;
+  int error = futex_get_key(uaddr, private, &key);
+  if (error)
+    return (uint64_t)(int64_t)error;
+
+  return futex_wake_key(key, val, bitset);
 }
 
 // FUTEX_REQUEUE
@@ -319,7 +343,7 @@ static uint64_t futex_requeue(uint32_t *uaddr1, uint32_t val, uint32_t val2,
     return (uint64_t)(int64_t)error;
 
   if (futex_key_equal(key1, key2))
-    return futex_wake_key(key1, val);
+    return futex_wake_key(key1, val, FUTEX_BITSET_MATCH_ANY);
 
   uint32_t bucket1 = futex_hash_key(key1);
   uint32_t bucket2 = futex_hash_key(key2);
@@ -462,12 +486,26 @@ static uint64_t sys_futex(uint64_t uaddr_val, uint64_t op_val, uint64_t val_arg,
   case FUTEX_WAIT: {
     const uint64_t *timeout =
         timeout_ptr ? (const uint64_t *)timeout_ptr : NULL;
-    bool is_abs = (op_val & 256) != 0; // FUTEX_CLOCK_REALTIME = 256
-    return futex_wait(uaddr, val, timeout, private, is_abs);
+    bool is_abs = (op_val & FUTEX_CLOCK_REALTIME) != 0;
+    return futex_wait(uaddr, val, timeout, private, is_abs, FUTEX_BITSET_MATCH_ANY);
+  }
+
+  case FUTEX_WAIT_BITSET: {
+    if (val3 == 0)
+      return (uint64_t)(-(int64_t)EINVAL);
+    const uint64_t *timeout =
+        timeout_ptr ? (const uint64_t *)timeout_ptr : NULL;
+    bool is_abs = true; // FUTEX_WAIT_BITSET timeout is absolute
+    return futex_wait(uaddr, val, timeout, private, is_abs, (uint32_t)val3);
   }
 
   case FUTEX_WAKE:
     return futex_wake(uaddr, val, private);
+
+  case FUTEX_WAKE_BITSET:
+    if (val3 == 0)
+      return (uint64_t)(-(int64_t)EINVAL);
+    return futex_wake_bitset(uaddr, val, (uint32_t)val3, private);
 
   case FUTEX_REQUEUE:
     return futex_requeue(uaddr, val, (uint32_t)timeout_ptr,

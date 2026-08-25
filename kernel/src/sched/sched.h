@@ -315,7 +315,8 @@ int alloc_fd(struct thread *t);
  */
 static inline bool thread_has_pending_signal(struct thread *t) {
   if (!t) return false;
-  return (t->pending_signals & ~t->signal_mask) != 0;
+  uint64_t unmaskable = (1ULL << (SIGKILL - 1)) | (1ULL << (SIGSTOP - 1));
+  return (t->pending_signals & (~t->signal_mask | unmaskable)) != 0;
 }
 
 // Userspace Management

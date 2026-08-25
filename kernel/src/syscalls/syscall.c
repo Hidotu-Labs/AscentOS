@@ -1,6 +1,7 @@
 #include "syscall.h"
 #include "../console/klog.h"
 #include "../cpu/msr.h"
+#include "../lib/string.h"
 #include "../sched/sched.h"
 #include <stdint.h>
 
@@ -399,38 +400,20 @@ const char *syscall_get_name(uint64_t num) {
 
 static void log_unimplemented_syscall(struct syscall_regs *regs, struct thread *t) {
   const char *name = syscall_get_name(regs->rax);
-
-  klog_puts(KLOG_CLR_YELLOW "[WARN] Unimplemented syscall: " KLOG_CLR_RESET);
-  klog_uint64(regs->rax);
-  if (name) {
-    klog_puts(" (");
-    klog_puts(name);
-    klog_puts(")");
-  }
-  if (t) {
-    klog_puts(" [comm: '");
-    klog_puts(t->comm[0] ? t->comm : "unknown");
-    klog_puts("', pid: ");
-    klog_uint64(t->tgid);
-    klog_puts(", tid: ");
-    klog_uint64(t->tid);
-    klog_puts("]");
-  }
-  klog_puts(" rip: ");
-  klog_hex64(regs->rip);
-  klog_puts(" args: (");
-  klog_hex64(regs->rdi);
-  klog_puts(", ");
-  klog_hex64(regs->rsi);
-  klog_puts(", ");
-  klog_hex64(regs->rdx);
-  klog_puts(", ");
-  klog_hex64(regs->r10);
-  klog_puts(", ");
-  klog_hex64(regs->r8);
-  klog_puts(", ");
-  klog_hex64(regs->r9);
-  klog_puts(")\n");
+  klogf(KLOG_CLR_YELLOW "[WARN] Unimplemented syscall: " KLOG_CLR_RESET
+        "%llu (%s) [comm: '%s', pid: %u, tid: %u] rip: 0x%016llx args: (0x%llx, 0x%llx, 0x%llx, 0x%llx, 0x%llx, 0x%llx)\n",
+        (unsigned long long)regs->rax,
+        name ? name : "unknown",
+        (t && t->comm[0]) ? t->comm : "unknown",
+        t ? t->tgid : 0,
+        t ? t->tid : 0,
+        (unsigned long long)regs->rip,
+        (unsigned long long)regs->rdi,
+        (unsigned long long)regs->rsi,
+        (unsigned long long)regs->rdx,
+        (unsigned long long)regs->r10,
+        (unsigned long long)regs->r8,
+        (unsigned long long)regs->r9);
 }
 
 void syscall_dispatcher(struct syscall_regs *regs) {
@@ -457,6 +440,7 @@ void syscall_dispatcher(struct syscall_regs *regs) {
 
   uint64_t syscall_num = regs->rax; 
   syscall_handler_t handler = syscall_table[syscall_num];
+
   regs->rax =
       handler(regs->rdi, regs->rsi, regs->rdx, regs->r10, regs->r8, regs->r9);
 

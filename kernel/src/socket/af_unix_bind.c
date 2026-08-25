@@ -84,10 +84,10 @@ static int unix_bind_fs(unix_sock_t *usk, struct sockaddr_un *sun, int addrlen) 
   if (ret < 0)
     return ret;
 
-  usk->parent->node = vfs_finddir(parent, name);
-  if (!usk->parent->node)
+  vfs_node_t *fs_node = vfs_finddir(parent, name);
+  if (!fs_node)
     return -2; // ENOENT
-  vfs_chown(usk->parent->node, current_thread->fsuid,
+  vfs_chown(fs_node, current_thread->fsuid,
             current_thread->fsgid);
 
   memcpy(&usk->addr, sun, addrlen);

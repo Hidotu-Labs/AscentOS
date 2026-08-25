@@ -171,19 +171,9 @@ void process_do_exit(uint64_t status) __attribute__((noreturn));
 void process_do_exit(uint64_t status) {
   struct thread *current = sched_get_current();
   if (current && current->is_forked_child) {
-    klog_puts("[PROC] exit tid=");
-    klog_uint64(current->tid);
-    klog_puts(" tgid=");
-    klog_uint64(current->tgid);
-    if (current->clone_flags & CLONE_THREAD)
-      klog_puts(" kind=thread");
-    else
-      klog_puts(" kind=process");
-    klog_puts(" comm=");
-    klog_puts(current->comm);
-    klog_puts(" status=");
-    klog_uint64(status);
-    klog_puts("\n");
+    klog_proc_exit(current->tid, current->tgid,
+                   (current->clone_flags & CLONE_THREAD) != 0,
+                   current->comm, status);
   }
   if (current && current->tid_address) {
     uint32_t *tidptr = (uint32_t *)current->tid_address;
@@ -942,11 +932,7 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
   }
 
   if (current->is_forked_child) {
-    klog_puts("[PROC] exec tid=");
-    klog_uint64(current->tid);
-    klog_puts(" path=");
-    klog_puts(path);
-    klog_puts("\n");
+    klog_proc_exec(current->tid, path);
   }
 
   // Store the full executable path for /proc/self/exe
@@ -1325,11 +1311,8 @@ uint64_t sys_clone(struct syscall_regs *regs) {
   uint64_t ctid = regs->r10;
   uint64_t newtls = regs->r8;
 
-  klog_puts("[CLONE] flags=");
-  klog_uint64(flags);
-  klog_puts(" stack=");
-  klog_uint64(child_stack);
-  klog_puts("\n");
+  klog_debugf("[CLONE] flags=%llu stack=0x%llx\n",
+              (unsigned long long)flags, (unsigned long long)child_stack);
 
   return sys_clone_internal(regs, flags, child_stack, ptid, ctid, newtls);
 }
@@ -1450,6 +1433,18 @@ static uint64_t sys_prctl(uint64_t option, uint64_t arg2, uint64_t arg3,
     return (uint64_t)-1;
 
   switch (option) {
+  case 1: // PR_SET_PDEATHSIG
+    return 0;
+  case 2: // PR_GET_PDEATHSIG
+    if (arg2 && vmm_is_user_addr_range_writable(arg2, sizeof(int))) {
+      *(int *)arg2 = 0;
+      return 0;
+    }
+    return (uint64_t)-14;
+  case 3: // PR_GET_DUMPABLE
+    return 1;
+  case 4: // PR_SET_DUMPABLE
+    return 0;
   case PR_SET_NAME: {
     if (!arg2 || !vmm_is_user_addr_range_valid(arg2, 1))
       return (uint64_t)-14; // EFAULT
@@ -1468,8 +1463,20 @@ static uint64_t sys_prctl(uint64_t option, uint64_t arg2, uint64_t arg3,
     strncpy(out, current->comm, 16);
     return 0;
   }
+  case 36: // PR_SET_CHILD_SUBREAPER
+    return 0;
+  case 37: // PR_GET_CHILD_SUBREAPER
+    if (arg2 && vmm_is_user_addr_range_writable(arg2, sizeof(int))) {
+      *(int *)arg2 = 0;
+      return 0;
+    }
+    return (uint64_t)-14;
+  case 38: // PR_SET_NO_NEW_PRIVS
+    return 0;
+  case 39: // PR_GET_NO_NEW_PRIVS
+    return 0;
   default:
-    return 0; // Success stub for everything else
+    return (uint64_t)-22; // EINVAL
   }
 }
 
@@ -1776,11 +1783,11 @@ static uint64_t sys_getsid(uint64_t pid, uint64_t a1, uint64_t a2, uint64_t a3,
   if (!current)
     return (uint64_t)-3; // ESRCH
   if (pid == 0)
-    return (uint64_t)current->sid;
+    return (uint64_t)(current->sid ? current->sid : (current->tgid ? current->tgid : 1));
   struct thread *target = sched_get_thread_by_tid((uint32_t)pid);
   if (!target)
     return (uint64_t)-3; // ESRCH
-  return (uint64_t)target->sid;
+  return (uint64_t)(target->sid ? target->sid : (target->tgid ? target->tgid : 1));
 }
 
 // sys_getpgrp
@@ -1817,9 +1824,7 @@ static uint64_t sys_setsid(struct syscall_regs *regs) {
   current->pgid = current->tid;
   current->ctty = NULL; // Clear controlling terminal
 
-  klog_puts("[SETSID] New session created: ");
-  klog_uint64(current->sid);
-  klog_puts("\n");
+  klog_debugf("[SETSID] New session created: %llu\n", (unsigned long long)current->sid);
 
   return (uint64_t)current->sid;
 }
