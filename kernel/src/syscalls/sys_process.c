@@ -2101,7 +2101,7 @@ static uint64_t sys_sched_yield(uint64_t a0, uint64_t a1, uint64_t a2,
   (void)a3;
   (void)a4;
   (void)a5;
-  sched_yield();
+  sched_yield_user();
   return 0;
 }
 

@@ -67,6 +67,7 @@ typedef struct {
 #define AT_FLAGS 8     // Flags
 #define AT_RANDOM 25   // Address of 16 random bytes
 #define AT_EXECFN 31   // Executable filename string address
+#define AT_SYSINFO_EHDR 33 // vDSO ELF header address
 
 // ELF metadata passed from loader to stack builder
 typedef struct {

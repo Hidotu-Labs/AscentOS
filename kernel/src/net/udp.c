@@ -181,6 +181,7 @@ ssize_t udp_recvfrom(struct udp_socket *s, void *buf, size_t len,
     uint64_t deadline = 0;
     if (timeout_ms > 0)
         deadline = lapic_timer_get_ticks() + (uint32_t)timeout_ms;
+    struct thread *self = sched_get_current();
 
     for (;;) {
         spinlock_acquire(&table_lock);
@@ -200,19 +201,24 @@ ssize_t udp_recvfrom(struct udp_socket *s, void *buf, size_t len,
         if (timeout_ms > 0 && lapic_timer_get_ticks() >= deadline) return -11;
 
         if (s->wait_queue) {
-            struct thread *self = sched_get_current();
             wait_queue_t *wq = (wait_queue_t *)s->wait_queue;
             wait_queue_entry_t entry = { .thread = self, .next = NULL };
             wait_queue_add(wq, &entry);
             spinlock_acquire(&table_lock);
             bool empty = s->q_head == s->q_tail;
-            if (empty) self->state = THREAD_BLOCKED;
+            if (empty && self) self->state = THREAD_BLOCKED;
             spinlock_release(&table_lock);
             if (!empty) wait_queue_wake_one(wq);
+            if (timeout_ms > 0 && self)
+                self->wakeup_ticks = deadline;
             sched_yield();
+            if (self) self->wakeup_ticks = 0;
             wait_queue_remove(wq, &entry);
         } else {
+            if (timeout_ms > 0 && self)
+                self->wakeup_ticks = deadline;
             sched_yield();
+            if (self) self->wakeup_ticks = 0;
         }
     }
 }

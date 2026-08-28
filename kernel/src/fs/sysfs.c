@@ -73,14 +73,13 @@ static vfs_node_t *sysfs_mkdir(vfs_node_t *parent, const char *name) {
 
 // Symlink read callback — target stored in node->ptr (cast to char *)
 static int sysfs_readlink_cb(vfs_node_t *node, char *buf, uint32_t size) {
-  if (!node->ptr)
+  if (!node || !node->ptr || !buf || size == 0)
     return -1;
   const char *target = (const char *)node->ptr;
   uint32_t len = (uint32_t)strlen(target);
-  if (len >= size)
-    len = size - 1;
+  if (len > size)
+    len = size;
   memcpy(buf, target, len);
-  buf[len] = '\0';
   return (int)len;
 }
 

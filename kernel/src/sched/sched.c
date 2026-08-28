@@ -192,12 +192,33 @@ __attribute__((optimize("O3"))) void sched_enqueue_thread(struct thread *t, stru
   struct cpu_info *target_cpu = explicit_cpu;
 
   if (!target_cpu) {
-    struct cpu_info *self = cpu_get_current();
-    if (self && self->status != CPU_STATUS_OFFLINE &&
-        (t->cpu_affinity & (1ULL << self->cpu_id)) &&
-        self->runnable_count == 0) {
-      target_cpu = self;
-    } else {
+    struct cpu_info *prev_cpu = cpu_get_info(t->cpu_index);
+
+    // 1. Strong preference for the previous CPU (cache/TLB warm).
+    //    Accept it unconditionally if it is online and within affinity —
+    //    unless it is heavily overloaded (≥3 extra tasks vs the least-loaded
+    //    peer).  This prevents gears and Xorg from migrating on every IPC
+    //    round-trip which would otherwise thrash L1/L2 and cause TLB flushes
+    //    on every socket send/recv cycle.
+    if (prev_cpu && prev_cpu->status != CPU_STATUS_OFFLINE &&
+        (t->cpu_affinity & (1ULL << prev_cpu->cpu_id))) {
+      // Find min load first so we can check the overload threshold
+      uint32_t min_threads = 0xFFFFFFFF;
+      uint32_t count = cpu_get_count();
+      for (uint32_t i = 0; i < count; i++) {
+        struct cpu_info *c = cpu_get_info(i);
+        if (!c || c->status == CPU_STATUS_OFFLINE) continue;
+        if (!(t->cpu_affinity & (1ULL << i))) continue;
+        if (c->runnable_count < min_threads) min_threads = c->runnable_count;
+      }
+      // Stay on prev_cpu unless it is ≥3 tasks more loaded than the minimum
+      if (prev_cpu->runnable_count <= min_threads + 2) {
+        target_cpu = prev_cpu;
+      }
+    }
+
+    // 2. Fallback: Search for the least-loaded CPU
+    if (!target_cpu) {
       uint32_t min_threads = 0xFFFFFFFF;
       uint32_t count = cpu_get_count();
 
@@ -438,17 +459,47 @@ __attribute__((optimize("O3"))) static void sched_schedule(bool voluntary_yield)
     cpu->stack_top = (next_t->stack_base + next_t->stack_size) & ~0xFULL;
     tss_set_rsp0(cpu->stack_top);
 
-    uint64_t target_cr3 = next_t->cr3 ? next_t->cr3 : cpu->kernel_cr3;
-    uint64_t current_cr3;
-    __asm__ volatile("mov %%cr3, %0" : "=r"(current_cr3));
-    if (target_cr3 != current_cr3) {
-      __asm__ volatile("mov %0, %%cr3" ::"r"(target_cr3) : "memory");
+    /* Lazy CR3 + PCID-aware context switch:
+     *
+     * Case 1: next_t is a kernel/idle thread (cr3 == 0).
+     *   Keep whatever CR3 is loaded.  There is no user TLB to flush and
+     *   reloading kernel_cr3 would pointlessly evict every cached user
+     *   translation, causing a full TLB miss burst on the next user switch.
+     *
+     * Case 2: next_t is a user process with the *same* CR3 as prev.
+     *   Nothing to do — already using the right page tables.
+     *
+     * Case 3: Different user CR3.
+     *   If PCID is available and this CPU already has the PCID entry warm,
+     *   use CR3_NOFLUSH (bit 63) to avoid evicting all translations for
+     *   this address space from the TLB.  Otherwise flush and mark cached.
+     */
+    if (next_t->cr3) {
+      uint64_t current_cr3;
+      __asm__ volatile("mov %%cr3, %0" : "=r"(current_cr3));
+      uint64_t cur_base = current_cr3 & CR3_ADDR_MASK;
+      uint64_t nxt_base = next_t->cr3  & CR3_ADDR_MASK;
+      if (cur_base != nxt_base) {
+        if (cpu_has_pcid() && next_t->mm && next_t->mm->pcid) {
+          uint16_t pcid = next_t->mm->pcid;
+          uint64_t cr3_val = nxt_base | pcid;
+          if (cpu_pcid_is_cached(cpu, pcid)) {
+            /* PCID already warm on this CPU — suppress TLB flush */
+            cr3_val |= CR3_NOFLUSH;
+          } else {
+            /* First time running this PCID on this CPU — flushing load */
+            cpu_pcid_mark_cached(cpu, pcid);
+          }
+          __asm__ volatile("mov %0, %%cr3" ::"r"(cr3_val) : "memory");
+        } else {
+          /* No PCID support — plain flushing CR3 load */
+          __asm__ volatile("mov %0, %%cr3" ::"r"(nxt_base) : "memory");
+        }
+      }
     }
-
-    if (prev->fs_base != next_t->fs_base)
-      wrmsr(0xC0000100, next_t->fs_base);
-    if (prev->gs_base != next_t->gs_base)
-      wrmsr(0xC0000102, next_t->gs_base);
+    /* Set TLS base for the incoming thread */
+    wrmsr(0xC0000100, next_t->fs_base);
+    wrmsr(0xC0000102, next_t->gs_base);
 
     spinlock_release(&cpu->queue_lock);
     switch_context(prev, next_t);
@@ -461,6 +512,10 @@ __attribute__((optimize("O3"))) static void sched_schedule(bool voluntary_yield)
 }
 
 __attribute__((optimize("O3"))) void sched_yield(void) {
+  sched_schedule(false);
+}
+
+__attribute__((optimize("O3"))) void sched_yield_user(void) {
   sched_schedule(true);
 }
 
@@ -474,18 +529,24 @@ __attribute__((optimize("O3"))) void sched_tick(struct registers *regs) {
     cpu->ticks = now;
 
     if (cpu == cpu_get_bsp()) {
-      spinlock_acquire(&tid_lock);
-      for (struct thread *t = global_thread_list; t; t = t->global_next) {
+      /* Walk the global thread list without holding tid_lock the entire time.
+       * We snapshot each thread pointer with a relaxed load; threads are only
+       * removed from the list under tid_lock in an unrelated path, so the
+       * worst case is we miss a timer for one tick — acceptable jitter. */
+      struct thread *t = __atomic_load_n(&global_thread_list, __ATOMIC_ACQUIRE);
+      while (t) {
         if (t->it_real_next && now >= t->it_real_next) {
           signal_send(t, SIGALRM);
           if (t->it_real_interval) {
             t->it_real_next = now + t->it_real_interval;
             lapic_timer_rearm_if_earlier(t->it_real_next);
+          } else {
+            t->it_real_next = 0;
+            t->it_real_value = 0;
           }
-          else { t->it_real_next = 0; t->it_real_value = 0; }
         }
+        t = __atomic_load_n(&t->global_next, __ATOMIC_RELAXED);
       }
-      spinlock_release(&tid_lock);
     }
 
     hal_irq_state_t flags = hal_irq_save();
@@ -638,20 +699,14 @@ __attribute__((optimize("O3"))) void sched_wakeup(struct thread *t) {
   struct cpu_info *prev_cpu = cpu_get_info(t->cpu_index);
   struct cpu_info *target = prev_cpu;
 
-  /* Wake-Affinity: If the current CPU is allowed by affinity and is not heavily
-   * overloaded, wake the thread locally on the caller's CPU. This keeps the
-   * communicating processes (e.g. X11 client/server, pipe/socket producer/consumer)
-   * on the same core, keeping L1/L2 caches hot and eliminating cross-core IPI VM-Exits. */
-  if (self && self->status != CPU_STATUS_OFFLINE &&
-      (t->cpu_affinity & (1ULL << self->cpu_id))) {
-    if (!prev_cpu || prev_cpu->status == CPU_STATUS_OFFLINE ||
-        self->runnable_count <= prev_cpu->runnable_count + 1) {
+  /* Preserve thread CPU parallelism: keep the thread on its previously assigned CPU (prev_cpu)
+   * so parallel worker threads stay distributed across separate cores rather than stacking on one. */
+  if (!target || target->status == CPU_STATUS_OFFLINE || !(t->cpu_affinity & (1ULL << target->cpu_id))) {
+    if (self && self->status != CPU_STATUS_OFFLINE && (t->cpu_affinity & (1ULL << self->cpu_id))) {
       target = self;
+    } else {
+      target = cpu_get_bsp();
     }
-  }
-
-  if (!target || target->status == CPU_STATUS_OFFLINE) {
-    target = cpu_get_bsp();
   }
 
   if (target && target->status != CPU_STATUS_OFFLINE) {
@@ -679,11 +734,14 @@ __attribute__((optimize("O3"))) void sched_wakeup(struct thread *t) {
         t->on_runqueue = true;
         target->runnable_count++;
 
+        struct thread *running = target->current_thread;
+        bool should_kick = !running || running->is_idle || running == target->idle_thread ||
+                           eevfd_check_preempt(&target->eevfd, &running->se, &t->se);
+
         if (target->apic_id != self->apic_id) {
-          send_ipi = true;
-        } else if (self->current_thread &&
-                   (self->current_thread->is_idle ||
-                    eevfd_check_preempt(&self->eevfd, &self->current_thread->se, &t->se))) {
+          if (should_kick)
+            send_ipi = true;
+        } else if (should_kick) {
           rearm_local = true;
         }
       } else {
@@ -692,9 +750,9 @@ __attribute__((optimize("O3"))) void sched_wakeup(struct thread *t) {
     }
     spinlock_release(&target->queue_lock);
 
-    if (send_ipi) {
+    if (send_ipi && lapic_is_ready()) {
       lapic_send_ipi(target->apic_id, IPI_VECTOR_RESCHEDULE);
-    } else if (rearm_local) {
+    } else if (rearm_local && lapic_is_ready()) {
       lapic_timer_rearm_if_earlier(lapic_timer_get_ms() + 1);
     }
   } else {

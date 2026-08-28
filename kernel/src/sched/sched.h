@@ -139,7 +139,7 @@ struct thread {
   uint64_t rsp; // Must be first field (offset 0) for optimal assembly
   uint32_t tid;
   uint32_t tgid; // Thread group ID (== tid for group leader)
-  uint8_t fpu_state[512] __attribute__((aligned(16))); // Saved SSE/FPU state
+  uint8_t fpu_state[4096] __attribute__((aligned(64))); // Saved XSAVE/FPU state (at offset 64)
   uint64_t stack_base;
   uint64_t stack_size;
   thread_state_t state;
@@ -202,6 +202,8 @@ struct thread {
   struct k_sigaction signal_handlers[64];
   uint64_t pending_signals;
   uint64_t signal_mask;
+  uint64_t fault_addr;
+  uint32_t fault_code;
 
   // Alternate signal stack (sigaltstack)
   uint64_t ss_sp;   // Base of alternate signal stack
@@ -265,7 +267,7 @@ struct thread *sched_create_kernel_thread(void (*entry_point)(void),
                                           bool enqueue);
 
 void sched_tick(struct registers *regs);
-void sched_yield(void);
+void sched_yield_user(void);
 
 // Returns the current thread *for the CPU currently executing this code*
 struct thread *sched_get_current(void);

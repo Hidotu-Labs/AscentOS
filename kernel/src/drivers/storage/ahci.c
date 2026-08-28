@@ -219,8 +219,6 @@ static int ahci_io(ahci_port_t *port, uint64_t lba, uint32_t count, void *buf,
 
   if (is_write) {
     memcpy(bounce_virt, buf, (size_t)bytes);
-  } else {
-    memset(bounce_virt, 0, (size_t)bytes);
   }
 
   cmdtbl->prdt_entry[0].dba = (uint32_t)(uint64_t)bounce_phys;

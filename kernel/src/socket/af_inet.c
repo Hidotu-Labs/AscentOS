@@ -115,15 +115,17 @@ static int inet_connect(socket_t *sock, struct sockaddr *addr, int addrlen) {
         int r=tcp_active_open(isk->tcp,sa_addr(sin),sa_port(sin)); if(r<0)return r;
         if(socket_is_nonblocking(sock))return -115; /* EINPROGRESS */
         /* Block on wait queue until established, error, or timeout */
-        uint64_t deadline = lapic_timer_get_ticks() + 10000;
+        uint64_t deadline = lapic_timer_get_ticks() + 3000;
         struct thread *self = sched_get_current();
         wait_queue_entry_t wqe = { .thread = self, .next = NULL };
         while (isk->tcp->state == TCP_SYN_SENT) {
             tcp_timer_tick(lapic_timer_get_ticks());
             if (lapic_timer_get_ticks() >= deadline) break;
             wait_queue_add(&isk->wait, &wqe);
+            self->wakeup_ticks = lapic_timer_get_ticks() + 100;
             self->state = THREAD_BLOCKED;
             sched_yield();
+            self->wakeup_ticks = 0;
             wait_queue_remove(&isk->wait, &wqe);
             self->state = THREAD_RUNNING;
         }

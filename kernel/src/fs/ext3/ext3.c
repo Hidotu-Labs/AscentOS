@@ -156,7 +156,7 @@ int ext3_journal_block(ext2_mount_t *mnt, uint32_t block_nr, const void *data) {
 
   ext2_write_block(mnt, phys_pos, safe_data);
 
-  int cache_idx = block_nr % 32;
+  int cache_idx = block_nr % EXT2_CACHE_SIZE;
   spinlock_acquire(&mnt->cache_lock);
   if (!mnt->cache[cache_idx].data)
     mnt->cache[cache_idx].data = kmalloc(mnt->block_size);

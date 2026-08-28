@@ -5,6 +5,7 @@
 #include "../lib/string.h"
 #include "../sched/sched.h"
 #include "pmm.h"
+#include "tlb_shootdown.h"
 #include "vma.h"
 #include "vmm.h"
 #include <stddef.h>
@@ -77,7 +78,7 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
     if (*pte & PAGE_FLAG_RW) {
       // Stale TLB: Another thread in this process already broke CoW on this
       // page.
-      vmm_flush_tlb(virt);
+      tlb_shootdown_page(virt);
       return 0;
     }
 
@@ -108,7 +109,7 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
 
         *pte = ((uint64_t)new_phys & PAGE_MASK) |
                (*pte & ~PAGE_MASK & ~PAGE_FLAG_COW) | PAGE_FLAG_RW;
-        vmm_flush_tlb(virt);
+        tlb_shootdown_page(virt);
         return 0; // zero page CoW broken with fresh zeroed page
       }
 
@@ -133,7 +134,7 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
         *pte |= PAGE_FLAG_RW;
       }
 
-      vmm_flush_tlb(virt);
+      tlb_shootdown_page(virt);
       return 0; // fault handled
     }
 
@@ -153,9 +154,46 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
     }
   }
 
-  // If we reach here for a PRESENT page, it means it's an unhandled protection
-  // fault (e.g. executing a non-executable page, or a kernel RO violation).
+  // If we reach here for a PRESENT page, check if the VMA permissions allow this
+  // access (e.g. if the page was previously PROT_NONE or missing USER/RW bits).
   if (present_bit) {
+    spinlock_acquire(&current->mm->lock);
+    struct vma *v = vma_find(&current->mm->vmas, cr2);
+    if (v && v->prot != PROT_NONE) {
+      bool allowed = true;
+      if (write_fault && !(v->prot & PROT_WRITE)) allowed = false;
+      if (exec_fault && !(v->prot & PROT_EXEC)) allowed = false;
+      if (!write_fault && !exec_fault && !(v->prot & PROT_READ)) allowed = false;
+
+      if (allowed) {
+        uint64_t *pml4 = (uint64_t *)PHYS_TO_VIRT(target_cr3);
+        uint64_t virt = cr2 & PAGE_MASK;
+        if (pml4[(virt >> 39) & 511] & PAGE_FLAG_PRESENT) {
+          uint64_t *pdpt = (uint64_t *)PHYS_TO_VIRT(pml4[(virt >> 39) & 511] & PAGE_MASK);
+          if ((pdpt[(virt >> 30) & 511] & PAGE_FLAG_PRESENT) && !(pdpt[(virt >> 30) & 511] & PAGE_FLAG_PS)) {
+            uint64_t *pd = (uint64_t *)PHYS_TO_VIRT(pdpt[(virt >> 30) & 511] & PAGE_MASK);
+            if ((pd[(virt >> 21) & 511] & PAGE_FLAG_PRESENT) && !(pd[(virt >> 21) & 511] & PAGE_FLAG_PS)) {
+              uint64_t *pt = (uint64_t *)PHYS_TO_VIRT(pd[(virt >> 21) & 511] & PAGE_MASK);
+              uint64_t *pte = &pt[(virt >> 12) & 511];
+              if (*pte & PAGE_FLAG_PRESENT) {
+                uint64_t flags = PAGE_FLAG_PRESENT | PAGE_FLAG_USER;
+                if (v->prot & PROT_WRITE) flags |= PAGE_FLAG_RW;
+                if (!(v->prot & PROT_EXEC)) flags |= PAGE_FLAG_NX;
+                *pte = (*pte & PAGE_MASK) | flags;
+                pml4[(virt >> 39) & 511] |= (PAGE_FLAG_USER | (flags & PAGE_FLAG_RW));
+                pdpt[(virt >> 30) & 511] |= (PAGE_FLAG_USER | (flags & PAGE_FLAG_RW));
+                pd[(virt >> 21) & 511] |= (PAGE_FLAG_USER | (flags & PAGE_FLAG_RW));
+                vmm_flush_tlb(virt);
+                spinlock_release(&current->mm->lock);
+                return 0; // Recovered PTE permissions from VMA
+              }
+            }
+          }
+        }
+      }
+    }
+    spinlock_release(&current->mm->lock);
+
     if (user_mode) {
       klog_puts("[VMM] Protection fault on present page at CR2=");
       klog_hex64(cr2);
@@ -167,10 +205,6 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
     }
     return -1;
   }
-
-  // A present page with no CoW flag → real protection violation.
-  if (present_bit)
-    return -1;
 
   // ---- VMA-based demand paging --------------------------------------------
 
@@ -242,14 +276,20 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
   if (!vma) {
     // No VMA covers this address — genuine segfault.
     if (user_mode) {
-      klog_puts("[VMM] No VMA for CR2=");
-      klog_hex64(cr2);
-      klog_puts(" RIP=");
-      klog_hex64(regs->rip);
-      klog_puts(" tid=");
-      klog_uint64(current->tid);
-      klog_puts("\n[VMM] Active VMAs:\n");
-      vma_dump(&current->mm->vmas);
+      void *handler = (void *)current->signal_handlers[10].sa_handler;
+      bool has_custom_handler = (handler != NULL && handler != (void *)1);
+      if (!has_custom_handler) {
+        klog_puts("[VMM] No VMA for CR2=");
+        klog_hex64(cr2);
+        klog_puts(" RIP=");
+        klog_hex64(regs->rip);
+        klog_puts(" process '");
+        klog_puts(current->comm);
+        klog_puts("' (tid=");
+        klog_uint64(current->tid);
+        klog_puts(")\n[VMM] Active VMAs:\n");
+        vma_dump(&current->mm->vmas);
+      }
       return -1;
     }
 
@@ -321,15 +361,11 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
 
   // PROT_NONE enforcement — reserves address space but forbids all access.
   if (vma_prot == PROT_NONE) {
-    if (user_mode)
-      klog_puts("[VMM] PROT_NONE access violation\n");
     return -1;
   }
 
   // Write to read-only VMA.
   if (write_fault && !(vma_prot & PROT_WRITE)) {
-    if (user_mode)
-      klog_puts("[VMM] Write to read-only VMA\n");
     return -1;
   }
 

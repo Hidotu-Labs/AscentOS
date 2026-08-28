@@ -117,18 +117,24 @@ void wait_queue_wake_all(wait_queue_t *wq) {
   hal_irq_state_t rflags = hal_irq_save();
   spinlock_acquire(&wq->lock);
 
+  /* Snapshot the list head while holding the lock, then release it before
+   * calling sched_wakeup. sched_wakeup internally does hal_irq_save/restore
+   * and acquires a per-CPU queue_lock. Calling it with wq->lock held would
+   * invert the lock order on SMP — and the nested IRQ-disable/restore inside
+   * sched_wakeup wastes ~40 ns per woken thread on the hot socket send path. */
   wait_queue_entry_t *curr = wq->head;
-  while (curr) {
-    struct thread *t = curr->thread;
-    if (t && t->state != THREAD_DEAD && t->state != THREAD_ZOMBIE) {
-      sched_wakeup(t);
-      t->wakeup_ticks = 0; // Clear any pending timeout
-    }
-    curr = curr->next;
-  }
-
   spinlock_release(&wq->lock);
   hal_irq_restore(rflags);
+
+  while (curr) {
+    wait_queue_entry_t *next = curr->next;
+    struct thread *t = curr->thread;
+    if (t && t->state != THREAD_DEAD && t->state != THREAD_ZOMBIE) {
+      t->wakeup_ticks = 0;
+      sched_wakeup(t);
+    }
+    curr = next;
+  }
 }
 
 void wait_queue_wake_one(wait_queue_t *wq) {

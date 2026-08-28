@@ -20,6 +20,7 @@ void isr_handler(struct registers *regs);
 
 void isr_init_exceptions(void);
 void signal_deliver(struct registers *regs);
+void isr_report_user_fault(struct registers *regs, int sig, uint64_t addr);
 
 // Switch ISR EOI routing from legacy PIC to Local APIC mode.
 void isr_set_apic_mode(bool enabled);

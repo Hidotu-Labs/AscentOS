@@ -36,6 +36,24 @@ bool cpu_has_invpcid(void) {
 }
 
 
+bool cpu_has_xsave(void) {
+  uint32_t eax = 0, ebx = 0, ecx = 0, edx = 0;
+  cpuid(1, 0, &eax, &ebx, &ecx, &edx);
+  return (ecx & (1U << 26)) != 0; // CPUID.01H:ECX.XSAVE[bit 26]
+}
+
+bool cpu_has_avx(void) {
+  uint32_t eax = 0, ebx = 0, ecx = 0, edx = 0;
+  cpuid(1, 0, &eax, &ebx, &ecx, &edx);
+  return (ecx & (1U << 28)) != 0; // CPUID.01H:ECX.AVX[bit 28]
+}
+
+static inline void __attribute__((unused)) xsetbv(uint32_t index, uint64_t value) {
+  uint32_t eax = (uint32_t)value;
+  uint32_t edx = (uint32_t)(value >> 32);
+  __asm__ volatile("xsetbv" : : "c"(index), "a"(eax), "d"(edx) : "memory");
+}
+
 // Set up PAT (Page Attribute Table) to define memory types.
 // We configure PA7 to be Write-Combining (01h).
 static void cpu_pat_init(void) {
@@ -47,7 +65,9 @@ static void cpu_pat_init(void) {
   wrmsr(IA32_PAT_MSR, pat);
 }
 
-// Enable SSE/SSE2 and PCID for long mode execution.
+bool cpu_has_xsave_flag = false;
+
+// Enable SSE/SSE2, PCID, and AVX/XSAVE for long mode execution.
 void cpu_features_init(void) {
   uint64_t cr0;
   __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
@@ -65,7 +85,22 @@ void cpu_features_init(void) {
     cr4 |= (1ULL << 17); // CR4.PCIDE (bit 17)
   }
 
+  // Enable OSXSAVE if supported by CPU (required for AVX / AVX2 / XSAVE)
+  if (cpu_has_xsave()) {
+    cr4 |= (1ULL << 18); // CR4.OSXSAVE (bit 18)
+    cpu_has_xsave_flag = true;
+  }
+
   __asm__ volatile("mov %0, %%cr4" : : "r"(cr4) : "memory");
+
+  // Initialize XCR0 with x87, SSE, and AVX state components
+  if (cpu_has_xsave()) {
+    uint64_t xcr0 = 1ULL | 2ULL; // x87 (bit 0) | SSE (bit 1)
+    if (cpu_has_avx()) {
+      xcr0 |= 4ULL; // AVX (bit 2)
+    }
+    xsetbv(0, xcr0);
+  }
 
   __asm__ volatile("fninit");
   cpu_pat_init();

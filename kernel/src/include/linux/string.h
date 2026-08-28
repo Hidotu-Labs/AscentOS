@@ -98,27 +98,6 @@ static inline void *memchr(const void *s, int c, size_t n)
 }
 
 /*
- * memmove — overlapping-safe memory copy.
- */
-static inline void *memmove(void *dst, const void *src, size_t n)
-{
-    unsigned char *d = (unsigned char *)dst;
-    const unsigned char *s = (const unsigned char *)src;
-    if (d == s || n == 0)
-        return dst;
-    if (d < s || d >= s + n) {
-        /* No overlap, or dst is before src: forward copy */
-        for (size_t i = 0; i < n; i++)
-            d[i] = s[i];
-    } else {
-        /* Overlap with dst after src: backward copy */
-        for (size_t i = n; i > 0; i--)
-            d[i - 1] = s[i - 1];
-    }
-    return dst;
-}
-
-/*
  * memzero_explicit — zero memory in a way the compiler won't optimize away.
  * Used for clearing sensitive buffers (keys, passwords).
  */

@@ -209,11 +209,6 @@ static int ata_pio_write(struct block_device *dev, uint64_t lba, uint32_t count,
     // Write 256 words (512 bytes)
     outsw(io + ATA_REG_DATA, ptr, 256);
     ptr += 512;
-
-    // Flush the write cache
-    outb(io + ATA_REG_COMMAND, ATA_CMD_FLUSH);
-    if (ata_wait_bsy(io) < 0)
-      return -1;
   }
 
   return 0;

@@ -11,6 +11,7 @@
 #include "../mm/pcid.h"
 #include "../mm/pmm.h"
 #include "../mm/vmm.h"
+#include "../cpu/features.h"
 #include "../smp/cpu.h"
 
 uint32_t next_tid = 1;
@@ -131,20 +132,22 @@ struct thread *sched_create_kernel_thread(void (*entry)(void),
 
   t->rsp = stack_top;
 
-  // Initialize FPU state
-  memset(t->fpu_state, 0, 512);
+  // Initialize FPU/XSAVE state
+  memset(t->fpu_state, 0, sizeof(t->fpu_state));
 
-  // We can't easily call fninit here for the child buffer without clobbering
-  // current FPU state. However, we can just let switch_context handle it
-  // if we ensure it's zeroed (most CPUs treat zero as okay) or use a static
-  // init.
   static uint8_t fpu_init_done = 0;
-  static uint8_t initial_fpu_state[512] __attribute__((aligned(16)));
+  static uint8_t initial_fpu_state[4096] __attribute__((aligned(64)));
   if (!fpu_init_done) {
-    __asm__ volatile("fninit; fxsave64 %0" : "=m"(initial_fpu_state));
+    memset(initial_fpu_state, 0, sizeof(initial_fpu_state));
+    if (cpu_has_xsave()) {
+      uint32_t eax = 0xFFFFFFFF, edx = 0xFFFFFFFF;
+      __asm__ volatile("fninit; xsave64 %0" : "=m"(initial_fpu_state) : "a"(eax), "d"(edx));
+    } else {
+      __asm__ volatile("fninit; fxsave64 %0" : "=m"(initial_fpu_state));
+    }
     fpu_init_done = 1;
   }
-  memcpy(t->fpu_state, initial_fpu_state, 512);
+  memcpy(t->fpu_state, initial_fpu_state, sizeof(t->fpu_state));
 
   /* Publish only after all allocations and context initialization succeed. */
   spinlock_acquire(&tid_lock);

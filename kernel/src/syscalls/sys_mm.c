@@ -690,17 +690,29 @@ static uint64_t sys_mremap(uint64_t old_addr, uint64_t old_size,
 }
 
 // Linux madvise advice values
-#define MADV_HUGEPAGE   14
-#define MADV_NOHUGEPAGE 15
+#define MADV_NORMAL      0
+#define MADV_RANDOM      1
+#define MADV_SEQUENTIAL  2
+#define MADV_WILLNEED    3
+#define MADV_DONTNEED    4
+#define MADV_FREE        8
+#define MADV_REMOVE      9
+#define MADV_DONTFORK    10
+#define MADV_DOFORK      11
+#define MADV_MERGEABLE   12
+#define MADV_UNMERGEABLE 13
+#define MADV_HUGEPAGE    14
+#define MADV_NOHUGEPAGE  15
+#define MADV_DONTDUMP    16
+#define MADV_DODUMP      17
+#define MADV_WIPEONFORK  18
+#define MADV_KEEPONFORK  19
+#define MADV_COLD        20
+#define MADV_PAGEOUT     21
 
 static uint64_t sys_madvise(uint64_t addr, uint64_t len, uint64_t advice,
                             uint64_t a3, uint64_t a4, uint64_t a5) {
   (void)a3; (void)a4; (void)a5;
-
-  // Only handle MADV_HUGEPAGE and MADV_NOHUGEPAGE — everything else is
-  // advisory and safe to silently accept (Linux behaviour).
-  if (advice != MADV_HUGEPAGE && advice != MADV_NOHUGEPAGE)
-    return 0;
 
   if (addr & (PAGE_SIZE - 1))
     return (uint64_t)-22; // EINVAL — must be page-aligned
@@ -716,6 +728,23 @@ static uint64_t sys_madvise(uint64_t addr, uint64_t len, uint64_t advice,
     return 0;
 
   spinlock_acquire(&current->mm->lock);
+
+  // MADV_DONTNEED / MADV_FREE / MADV_REMOVE:
+  // Discard physical pages in the address range so that subsequent accesses
+  // yield fresh zero-filled pages for anonymous mappings, as required by POSIX/Linux.
+  if (advice == MADV_DONTNEED || advice == MADV_FREE || advice == MADV_REMOVE) {
+    uint64_t *pml4 = (uint64_t *)current->cr3;
+    if (!pml4)
+      pml4 = vmm_get_active_pml4();
+    teardown_range(pml4, current, addr, aligned_len, "madvise DONTNEED");
+    spinlock_release(&current->mm->lock);
+    return 0;
+  }
+
+  if (advice != MADV_HUGEPAGE && advice != MADV_NOHUGEPAGE) {
+    spinlock_release(&current->mm->lock);
+    return 0; // Silently succeed for other advisory hints
+  }
 
   // Walk the range page-by-page, jumping by VMA end boundaries to avoid
   // redundant tree lookups inside the same VMA.

@@ -551,14 +551,13 @@ static int tmpfs_symlink(vfs_node_t *node, char *name, char *target) {
 }
 
 static int tmpfs_readlink(vfs_node_t *node, char *buf, uint32_t size) {
-    if (!node || !node->device || !buf)
+    if (!node || !node->device || !buf || size == 0)
         return -1;
     tmpfs_symlink_t *sl  = (tmpfs_symlink_t *)node->device;
     uint32_t         len = (uint32_t)strlen(sl->target);
-    if (len >= size)
-        len = size - 1;
+    if (len > size)
+        len = size;
     memcpy(buf, sl->target, len);
-    buf[len] = '\0';
     return (int)len;
 }
 

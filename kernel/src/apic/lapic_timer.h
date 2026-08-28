@@ -9,7 +9,7 @@
 #define LAPIC_TIMER_VECTOR 48
 
 // Runnable-thread quantum. The LAPIC itself operates in one-shot mode.
-#define LAPIC_SCHED_QUANTUM_MS 10
+#define LAPIC_SCHED_QUANTUM_MS 2
 
 // Public API
 

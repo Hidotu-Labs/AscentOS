@@ -24,6 +24,9 @@
 #define FUTEX_PRIVATE_FLAG 128
 #define FUTEX_CLOCK_REALTIME 256
 #define FUTEX_REQUEUE      3
+#define FUTEX_CMP_REQUEUE  4
+#define FUTEX_WAIT_REQUEUE_PI 11
+#define FUTEX_CMP_REQUEUE_PI  12
 #define FUTEX_WAKE_OP      5
 #define FUTEX_WAIT_BITSET  9
 #define FUTEX_WAKE_BITSET  10
@@ -67,8 +70,8 @@
 // spinlock.  We key on the physical address so that two processes mapping the
 // same physical page see the same bucket.
 
-#define FUTEX_HASH_BITS 6
-#define FUTEX_HASH_SIZE (1 << FUTEX_HASH_BITS) // 64 buckets
+#define FUTEX_HASH_BITS 8
+#define FUTEX_HASH_SIZE (1 << FUTEX_HASH_BITS) // 256 buckets
 
 struct futex_key {
   // Zero selects a shared, physical-address key. Private futexes use the
@@ -249,7 +252,8 @@ static uint64_t futex_wait(uint32_t *uaddr, uint32_t val,
   spinlock_release(&futex_hash[bucket].lock);
 
   // Yield the CPU — we'll be rescheduled when woken by FUTEX_WAKE or timeout
-  sched_yield();
+  if (waiter.thread->state == THREAD_BLOCKED)
+    sched_yield();
 
   // We're back!  Remove ourselves from the hash bucket
   // The waiter might have been requeued to a different bucket.
@@ -394,7 +398,81 @@ static uint64_t futex_requeue(uint32_t *uaddr1, uint32_t val, uint32_t val2,
   if (bucket2 != bucket1)
     spinlock_release(&futex_hash[bucket2].lock);
 
-  return (uint64_t)total_woken;
+  return (uint64_t)(total_woken + total_requeued);
+}
+
+// FUTEX_CMP_REQUEUE (4)
+static uint64_t futex_cmp_requeue(uint32_t *uaddr1, uint32_t val, uint32_t val2,
+                                  uint32_t *uaddr2, uint32_t val3, bool private) {
+  struct futex_key key1, key2;
+  int error = futex_get_key(uaddr1, private, &key1);
+  if (error)
+    return (uint64_t)(int64_t)error;
+  error = futex_get_key(uaddr2, private, &key2);
+  if (error)
+    return (uint64_t)(int64_t)error;
+
+  uint32_t bucket1 = futex_hash_key(key1);
+  uint32_t bucket2 = futex_hash_key(key2);
+
+  // Always acquire locks in bucket order to avoid deadlocks
+  if (bucket1 == bucket2) {
+    spinlock_acquire(&futex_hash[bucket1].lock);
+  } else if (bucket1 < bucket2) {
+    spinlock_acquire(&futex_hash[bucket1].lock);
+    spinlock_acquire(&futex_hash[bucket2].lock);
+  } else {
+    spinlock_acquire(&futex_hash[bucket2].lock);
+    spinlock_acquire(&futex_hash[bucket1].lock);
+  }
+
+  uint32_t cur = __atomic_load_n(uaddr1, __ATOMIC_RELAXED);
+  if (cur != val3) {
+    spinlock_release(&futex_hash[bucket1].lock);
+    if (bucket2 != bucket1)
+      spinlock_release(&futex_hash[bucket2].lock);
+    return (uint64_t)(-(int64_t)EAGAIN);
+  }
+
+  if (futex_key_equal(key1, key2)) {
+    spinlock_release(&futex_hash[bucket1].lock);
+    if (bucket2 != bucket1)
+      spinlock_release(&futex_hash[bucket2].lock);
+    return futex_wake_key(key1, val, FUTEX_BITSET_MATCH_ANY);
+  }
+
+  uint32_t total_woken = 0;
+  uint32_t total_requeued = 0;
+
+  struct futex_waiter **pp = &futex_hash[bucket1].head;
+  while (*pp) {
+    struct futex_waiter *w = *pp;
+    if (futex_key_equal(w->key, key1)) {
+      if (total_woken < val) {
+        if (w->thread && w->thread->state == THREAD_BLOCKED) {
+          sched_wakeup(w->thread);
+          total_woken++;
+        }
+        *pp = w->next;
+      } else if (total_requeued < val2) {
+        *pp = w->next;
+        w->key = key2;
+        w->next = futex_hash[bucket2].head;
+        futex_hash[bucket2].head = w;
+        total_requeued++;
+      } else {
+        pp = &w->next;
+      }
+    } else {
+      pp = &w->next;
+    }
+  }
+
+  spinlock_release(&futex_hash[bucket1].lock);
+  if (bucket2 != bucket1)
+    spinlock_release(&futex_hash[bucket2].lock);
+
+  return (uint64_t)(total_woken + total_requeued);
 }
 
 // FUTEX_WAKE_OP
@@ -510,6 +588,18 @@ static uint64_t sys_futex(uint64_t uaddr_val, uint64_t op_val, uint64_t val_arg,
   case FUTEX_REQUEUE:
     return futex_requeue(uaddr, val, (uint32_t)timeout_ptr,
                          (uint32_t *)uaddr2_val, private);
+
+  case FUTEX_CMP_REQUEUE:
+  case FUTEX_CMP_REQUEUE_PI:
+    return futex_cmp_requeue(uaddr, val, (uint32_t)timeout_ptr,
+                             (uint32_t *)uaddr2_val, (uint32_t)val3, private);
+
+  case FUTEX_WAIT_REQUEUE_PI: {
+    const uint64_t *timeout =
+        timeout_ptr ? (const uint64_t *)timeout_ptr : NULL;
+    bool is_abs = (op_val & FUTEX_CLOCK_REALTIME) != 0;
+    return futex_wait(uaddr, val, timeout, private, is_abs, FUTEX_BITSET_MATCH_ANY);
+  }
 
   case FUTEX_WAKE_OP:
     return futex_wake_op(uaddr, val, (uint32_t)timeout_ptr,

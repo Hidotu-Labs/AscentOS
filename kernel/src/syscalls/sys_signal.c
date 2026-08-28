@@ -2,6 +2,7 @@
 #include "../apic/lapic_timer.h"
 #include "../console/klog.h"
 #include "../cpu/fpu.h"
+#include "../cpu/isr.h"
 #include "../fs/vfs.h"
 #include "../lib/string.h"
 #include "../lock/spinlock.h"
@@ -103,9 +104,12 @@ static void fill_signal_context(struct sigframe *frame, int sig,
 
   info->si_signo = sig;
   info->si_code = 128; /* SI_KERNEL */
-  if (sig == SIGSEGV || sig == SIGBUS || sig == SIGILL || sig == SIGFPE) {
-    uint64_t fault_address = 0;
-    __asm__ volatile("mov %%cr2, %0" : "=r"(fault_address));
+  if (sig == SIGSEGV || sig == SIGBUS) {
+    uint64_t fault_address = current->fault_addr;
+    info->si_code = (current->fault_code & 1) ? 2 /* SEGV_ACCERR */ : 1 /* SEGV_MAPERR */;
+    memcpy(info->data, &fault_address, sizeof(fault_address));
+  } else if (sig == SIGILL || sig == SIGFPE) {
+    uint64_t fault_address = frame->regs.rip;
     info->si_code = 1;
     memcpy(info->data, &fault_address, sizeof(fault_address));
   }
@@ -138,7 +142,7 @@ static void fill_signal_context(struct sigframe *frame, int sig,
   g[20] = frame->regs.int_no;
   g[21] = current->signal_mask;
   if (sig == SIGSEGV || sig == SIGBUS)
-    __asm__ volatile("mov %%cr2, %0" : "=r"(g[22]));
+    g[22] = current->fault_addr;
   uc->uc_sigmask[0] = current->signal_mask;
   uc->uc_mcontext.fpregs = (uint64_t)&uc->fpregs_mem[0];
   /* With lazy FPU, hardware registers may belong to a different thread.
@@ -176,11 +180,14 @@ static uint64_t sys_rt_sigaction(uint64_t signum, uint64_t act_ptr,
     if (signum == SIGKILL || signum == SIGSTOP)
       return (uint64_t)-22;
     extern struct thread *global_thread_list;
+    extern spinlock_t tid_lock;
+    spinlock_acquire(&tid_lock);
     for (struct thread *t = global_thread_list; t; t = t->global_next) {
       if (t->tgid == current->tgid) {
         t->signal_handlers[idx] = *new;
       }
     }
+    spinlock_release(&tid_lock);
   }
   return 0;
 }
@@ -404,9 +411,10 @@ void signal_deliver(struct registers *regs) {
     klog_uint64(sig);
     klog_puts("\n");
 
-    // DUMP CORE for relevant signals
+    // Print full registers, backtrace, and memory inspection only for fatal crash signals
     if (sig == SIGQUIT || sig == SIGILL || sig == SIGTRAP || sig == SIGABRT ||
         sig == SIGFPE || sig == SIGSEGV || sig == SIGBUS || sig == SIGSYS) {
+      isr_report_user_fault(regs, sig, 0);
       process_dump_core(current, regs, sig);
     }
 

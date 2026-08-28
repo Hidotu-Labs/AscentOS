@@ -17,6 +17,7 @@ char *strstr(const char *haystack, const char *needle);
 void *memset(void *s, int c, size_t n);
 
 void *memcpy(void *dest, const void *src, size_t n);
+void *memmove(void *dest, const void *src, size_t n);
 /* Copy WB memory to WC memory. Caller must sfence after the copy batch. */
 void *memcpy_to_wc(void *dest, const void *src, size_t n);
 int memcmp(const void *s1, const void *s2, size_t n);

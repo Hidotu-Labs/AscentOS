@@ -8,9 +8,9 @@
 
 #define PHYS_TO_VIRT(p) ((void *)((uint64_t)(p) + pmm_get_hhdm_offset()))
 
-static spinlock_t vmm_lock = SPINLOCK_INIT;
+static rawspinlock_t vmm_lock = RAWSPINLOCK_INIT;
 
-spinlock_t *vmm_get_lock(void) { return &vmm_lock; }
+rawspinlock_t *vmm_get_lock(void) { return &vmm_lock; }
 
 // ---------------------------------------------------------------------------
 // Internal helpers (no locking — caller must hold vmm_lock)
@@ -161,20 +161,20 @@ static bool vmm_page_present_nolock(uint64_t *pml4, uint64_t virtual_addr) {
 
 bool vmm_map_page(uint64_t *pml4, uint64_t virtual_addr, uint64_t physical_addr,
                   uint64_t flags) {
-  spinlock_acquire(&vmm_lock);
+  rawspinlock_acquire(&vmm_lock);
   // A brand-new PTE cannot have a stale TLB translation on another CPU.
   // Replacing any present mapping (including changing flags on the same
   // physical page) still requires the normal synchronous shootdown.
   bool replacing = vmm_page_present_nolock(pml4, virtual_addr);
   bool ok = vmm_map_page_nolock(pml4, virtual_addr, physical_addr, flags,
                                 replacing);
-  spinlock_release(&vmm_lock);
+  rawspinlock_release(&vmm_lock);
   return ok;
 }
 
 bool vmm_map_huge_page(uint64_t *pml4, uint64_t virtual_addr,
                        uint64_t physical_addr, uint64_t flags) {
-  spinlock_acquire(&vmm_lock);
+  rawspinlock_acquire(&vmm_lock);
   bool success = false;
 
   size_t pml4_index = (virtual_addr >> 39) & 0x1FF;
@@ -200,7 +200,7 @@ bool vmm_map_huge_page(uint64_t *pml4, uint64_t virtual_addr,
   success = true;
 
 unlock:
-  spinlock_release(&vmm_lock);
+  rawspinlock_release(&vmm_lock);
   return success;
 }
 
@@ -227,7 +227,7 @@ bool vmm_map_range(uint64_t *pml4, uint64_t virtual_addr,
   if (pages == 0)
     return true;
 
-  spinlock_acquire(&vmm_lock);
+  rawspinlock_acquire(&vmm_lock);
 
   for (size_t i = 0; i < pages; i++) {
     // flush_tlb=false: these are fresh (non-present → present) mappings.
@@ -236,12 +236,12 @@ bool vmm_map_range(uint64_t *pml4, uint64_t virtual_addr,
                              virtual_addr  + (i * 4096),
                              physical_addr + (i * 4096),
                              flags, false)) {
-      spinlock_release(&vmm_lock);
+      rawspinlock_release(&vmm_lock);
       return false;
     }
   }
 
-  spinlock_release(&vmm_lock);
+  rawspinlock_release(&vmm_lock);
   return true;
 }
 
@@ -313,7 +313,7 @@ void vmm_free_empty_tables(uint64_t *pml4, uint64_t virtual_addr) {
 }
 
 void vmm_unmap_page(uint64_t *pml4, uint64_t virtual_addr) {
-  spinlock_acquire(&vmm_lock);
+  rawspinlock_acquire(&vmm_lock);
 
   size_t pml4_index = (virtual_addr >> 39) & 0x1FF;
   size_t pdpt_index = (virtual_addr >> 30) & 0x1FF;
@@ -345,7 +345,7 @@ void vmm_unmap_page(uint64_t *pml4, uint64_t virtual_addr) {
     uint64_t huge_phys = pd_entry & 0xFFFFFFFE00000ULL;
     pd_virt[pd_index] = 0;
     tlb_shootdown_page(virtual_addr & ~0x1FFFFFULL);
-    spinlock_release(&vmm_lock);
+    rawspinlock_release(&vmm_lock);
     pmm_free_pages((void *)huge_phys, 512);
     return;
   }
@@ -360,7 +360,7 @@ void vmm_unmap_page(uint64_t *pml4, uint64_t virtual_addr) {
   }
 
 unlock:
-  spinlock_release(&vmm_lock);
+  rawspinlock_release(&vmm_lock);
 }
 
 

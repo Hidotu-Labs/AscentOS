@@ -859,6 +859,10 @@ static uint64_t sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,
   case F_SETLK:
   case F_SETLKW:
     return 0;
+  case 1031: // F_SETPIPE_SZ
+    return (uint64_t)(arg > 0 ? arg : 65536);
+  case 1032: // F_GETPIPE_SZ
+    return 65536;
   case 1033: { // F_ADD_SEALS
     vfs_node_t *node = t->fds[fd];
     if ((node->flags & FS_TYPE_MASK) != FS_FILE)
@@ -927,7 +931,7 @@ static uint64_t sys_fallocate(uint64_t fd, uint64_t mode, uint64_t offset,
   klog_uint64((uint64_t)(int64_t)ret);
   klog_puts("\n");
   if (ret != 0)
-    return ret == -1 ? (uint64_t)-1 : (uint64_t)ret;
+    return ret == -1 ? (uint64_t)-95 : (uint64_t)ret; // -95 = -EOPNOTSUPP
   return 0;
 }
 

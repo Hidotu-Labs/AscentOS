@@ -594,147 +594,159 @@ static void klog_dump_ptr(const char *reg_name, uint64_t val) {
     }
 }
 
-static void isr_report_user_fault(struct registers *regs, int sig,
-                                  uint64_t addr) {
+void isr_report_user_fault(struct registers *regs, int sig,
+                           uint64_t addr) {
   struct thread *current = sched_get_current();
   if (current) {
-    // 1. Log detailed report to kernel console
-    klog_puts("\n" KLOG_CLR_RED "################################################################################" KLOG_CLR_RESET "\n");
-    klog_puts(KLOG_CLR_RED "[ USER FAULT ]" KLOG_CLR_RESET " process '");
-    klog_puts(current->comm);
-    klog_puts("' (tid=");
-    klog_uint64(current->tid);
-    klog_puts(", tgid=");
-    klog_uint64(current->tgid);
-    klog_puts(") signal ");
-    klog_uint64(sig);
-    klog_puts("\n");
-    
-    klog_puts("  RIP: "); klog_hex64(regs->rip);
-    klog_puts("  CR2: "); klog_hex64(addr);
-    klog_puts("  ERR: "); klog_hex64(regs->err_code);
-    klog_puts("  CS: "); klog_hex64(regs->cs);
-    klog_puts("\n");
-
-    klog_rflags_decoded(regs->rflags);
-
-    // Print all General Purpose Registers
-    klog_puts("REGISTERS:\n");
-    klog_puts("  RAX="); klog_hex64(regs->rax); klog_puts(" RBX="); klog_hex64(regs->rbx);
-    klog_puts(" RCX="); klog_hex64(regs->rcx); klog_puts(" RDX="); klog_hex64(regs->rdx);
-    klog_puts("\n  RSI="); klog_hex64(regs->rsi); klog_puts(" RDI="); klog_hex64(regs->rdi);
-    klog_puts(" RBP="); klog_hex64(regs->rbp); klog_puts(" RSP="); klog_hex64(regs->rsp);
-    klog_puts("\n  R8 ="); klog_hex64(regs->r8);  klog_puts(" R9 ="); klog_hex64(regs->r9);
-    klog_puts(" R10="); klog_hex64(regs->r10); klog_puts(" R11="); klog_hex64(regs->r11);
-    klog_puts("\n  R12="); klog_hex64(regs->r12); klog_puts(" R13="); klog_hex64(regs->r13);
-    klog_puts(" R14="); klog_hex64(regs->r14); klog_puts(" R15="); klog_hex64(regs->r15);
-    klog_puts("\n  FS_BASE="); klog_hex64(current->fs_base);
-    klog_puts(" GS_BASE="); klog_hex64(current->gs_base);
-    if (current->mm) {
-        klog_puts(" BRK="); klog_hex64(current->mm->brk_current);
-    }
-    klog_puts("\n  CR3="); klog_hex64((uint64_t)vmm_get_active_pml4());
-    klog_puts("\n");
-
-    // Pointer-like register inspection
-    klog_puts("REGISTER MEMORY INSPECTION:\n");
-    klog_dump_ptr("RAX", regs->rax);
-    klog_dump_ptr("RBX", regs->rbx);
-    klog_dump_ptr("RCX", regs->rcx);
-    klog_dump_ptr("RDX", regs->rdx);
-    klog_dump_ptr("RSI", regs->rsi);
-    klog_dump_ptr("RDI", regs->rdi);
-    klog_dump_ptr("RBP", regs->rbp);
-    klog_dump_ptr("R8 ", regs->r8);
-    klog_dump_ptr("R9 ", regs->r9);
-    klog_dump_ptr("R10", regs->r10);
-    klog_dump_ptr("R11", regs->r11);
-    klog_dump_ptr("R12", regs->r12);
-    klog_dump_ptr("R13", regs->r13);
-    klog_dump_ptr("R14", regs->r14);
-    klog_dump_ptr("R15", regs->r15);
-
-    // Hex dump of code at RIP
-    uint64_t *pml4 = vmm_get_active_pml4();
-    klog_puts("CODE AT RIP: ");
-    for (int i = -8; i < 24; i++) {
-        uint64_t vaddr = regs->rip + i;
-        uint64_t phys = vmm_virt_to_phys(pml4, vaddr);
-        if (phys) {
-            uint8_t b = *(uint8_t*)(phys + pmm_get_hhdm_offset());
-            if (i == 0) klog_puts(KLOG_CLR_GREEN ">");
-            const char *_h = "0123456789ABCDEF";
-            klog_putchar(_h[(b >> 4) & 0xF]);
-            klog_putchar(_h[b & 0xF]);
-            if (i == 0) klog_puts("<" KLOG_CLR_RESET);
-            klog_putchar(' ');
-        } else {
-            klog_puts("?? ");
-        }
-    }
-    klog_puts("\n");
-
-    // Stack Snapshot
-    klog_puts("USER STACK (RSP):\n");
-    for (int i = 0; i < 16; i++) {
-        uint64_t saddr = regs->rsp + (i * 8);
-        uint64_t phys = vmm_virt_to_phys(pml4, saddr);
-        klog_puts("  ["); klog_hex64(saddr); klog_puts("] = ");
-        if (phys != 0) {
-            uint64_t val = *(uint64_t*)(phys + pmm_get_hhdm_offset());
-            klog_hex64(val);
-            // Try to find if it corresponds to any VMA or is a string
-            struct vma *sv = vma_find(&current->mm->vmas, val);
-            if (sv) {
-                klog_puts(" (VMA: "); klog_hex64(sv->start); klog_puts(")");
-            }
-        } else {
-            klog_puts("<unmapped>");
-        }
-        klog_puts("\n");
-    }
-    
-    // Simple Userland Backtrace (RBP-based)
-    klog_puts("USER BACKTRACE (RBP):\n");
-    uint64_t curr_rbp = regs->rbp;
-    for (int i = 0; i < 16; i++) {
-        if (curr_rbp < 0x1000 || curr_rbp >= 0x0000800000000000ULL) break;
-        uint64_t phys_rbp = vmm_virt_to_phys(pml4, curr_rbp);
-        if (!phys_rbp) break;
-        
-        uint64_t *rbp_ptr = (uint64_t*)(phys_rbp + pmm_get_hhdm_offset());
-        // [0] = old RBP, [1] = return address
-        uint64_t next_rbp = rbp_ptr[0];
-        uint64_t ret_addr = rbp_ptr[1];
-        
-        klog_puts("  #"); klog_uint64(i); klog_puts(": "); klog_hex64(ret_addr);
-        struct vma *rv = vma_find(&current->mm->vmas, ret_addr);
-        if (rv) {
-            klog_puts(" (VMA: "); klog_hex64(rv->start); klog_puts(")");
-        }
-        klog_puts("\n");
-        
-        if (next_rbp <= curr_rbp) break; // Avoid infinite loops
-        curr_rbp = next_rbp;
+    bool has_custom_handler = false;
+    if (sig >= 1 && sig <= 64) {
+      void *handler = (void *)current->signal_handlers[sig - 1].sa_handler;
+      if (handler != NULL && handler != (void *)1) {
+        has_custom_handler = true;
+      }
     }
 
-    // Process context extra info
-    klog_puts("\nPROCESS EXTRA INFO:\n");
-    klog_puts("  CWD: "); klog_puts(current->cwd_path); klog_puts("\n");
-    klog_puts("  UID/GID: "); klog_uint64(current->uid); klog_puts("/"); klog_uint64(current->gid);
-    klog_puts("  Pending Signals: "); klog_hex64(current->pending_signals);
-    klog_puts("  Signal Mask: "); klog_hex64(current->signal_mask);
-    klog_puts("\n");
+    if (!has_custom_handler) {
+      // 1. Log detailed report to kernel console
+      klog_puts("\n" KLOG_CLR_RED "################################################################################" KLOG_CLR_RESET "\n");
+      klog_puts(KLOG_CLR_RED "[ USER FAULT ]" KLOG_CLR_RESET " process '");
+      klog_puts(current->comm);
+      klog_puts("' (tid=");
+      klog_uint64(current->tid);
+      klog_puts(", tgid=");
+      klog_uint64(current->tgid);
+      klog_puts(") signal ");
+      klog_uint64(sig);
+      klog_puts("\n");
+      
+      klog_puts("  RIP: "); klog_hex64(regs->rip);
+      klog_puts("  CR2: "); klog_hex64(addr);
+      klog_puts("  ERR: "); klog_hex64(regs->err_code);
+      klog_puts("  CS: "); klog_hex64(regs->cs);
+      klog_puts("\n");
 
-    // Virtual Memory Area (VMA) Dump
-    klog_puts("PROCESS VMAs:\n");
-    vma_dump(&current->mm->vmas);
-    klog_puts(KLOG_CLR_RED "################################################################################" KLOG_CLR_RESET "\n");
+      klog_rflags_decoded(regs->rflags);
+
+      // Print all General Purpose Registers
+      klog_puts("REGISTERS:\n");
+      klog_puts("  RAX="); klog_hex64(regs->rax); klog_puts(" RBX="); klog_hex64(regs->rbx);
+      klog_puts(" RCX="); klog_hex64(regs->rcx); klog_puts(" RDX="); klog_hex64(regs->rdx);
+      klog_puts("\n  RSI="); klog_hex64(regs->rsi); klog_puts(" RDI="); klog_hex64(regs->rdi);
+      klog_puts(" RBP="); klog_hex64(regs->rbp); klog_puts(" RSP="); klog_hex64(regs->rsp);
+      klog_puts("\n  R8 ="); klog_hex64(regs->r8);  klog_puts(" R9 ="); klog_hex64(regs->r9);
+      klog_puts(" R10="); klog_hex64(regs->r10); klog_puts(" R11="); klog_hex64(regs->r11);
+      klog_puts("\n  R12="); klog_hex64(regs->r12); klog_puts(" R13="); klog_hex64(regs->r13);
+      klog_puts(" R14="); klog_hex64(regs->r14); klog_puts(" R15="); klog_hex64(regs->r15);
+      klog_puts("\n  FS_BASE="); klog_hex64(current->fs_base);
+      klog_puts(" GS_BASE="); klog_hex64(current->gs_base);
+      if (current->mm) {
+          klog_puts(" BRK="); klog_hex64(current->mm->brk_current);
+      }
+      klog_puts("\n  CR3="); klog_hex64((uint64_t)vmm_get_active_pml4());
+      klog_puts("\n");
+
+      // Pointer-like register inspection
+      klog_puts("REGISTER MEMORY INSPECTION:\n");
+      klog_dump_ptr("RAX", regs->rax);
+      klog_dump_ptr("RBX", regs->rbx);
+      klog_dump_ptr("RCX", regs->rcx);
+      klog_dump_ptr("RDX", regs->rdx);
+      klog_dump_ptr("RSI", regs->rsi);
+      klog_dump_ptr("RDI", regs->rdi);
+      klog_dump_ptr("RBP", regs->rbp);
+      klog_dump_ptr("R8 ", regs->r8);
+      klog_dump_ptr("R9 ", regs->r9);
+      klog_dump_ptr("R10", regs->r10);
+      klog_dump_ptr("R11", regs->r11);
+      klog_dump_ptr("R12", regs->r12);
+      klog_dump_ptr("R13", regs->r13);
+      klog_dump_ptr("R14", regs->r14);
+      klog_dump_ptr("R15", regs->r15);
+
+      // Hex dump of code at RIP
+      uint64_t *pml4 = vmm_get_active_pml4();
+      klog_puts("CODE AT RIP: ");
+      for (int i = -8; i < 24; i++) {
+          uint64_t vaddr = regs->rip + i;
+          uint64_t phys = vmm_virt_to_phys(pml4, vaddr);
+          if (phys) {
+              uint8_t b = *(uint8_t*)(phys + pmm_get_hhdm_offset());
+              if (i == 0) klog_puts(KLOG_CLR_GREEN ">");
+              const char *_h = "0123456789ABCDEF";
+              klog_putchar(_h[(b >> 4) & 0xF]);
+              klog_putchar(_h[b & 0xF]);
+              if (i == 0) klog_puts("<" KLOG_CLR_RESET);
+              klog_putchar(' ');
+          } else {
+              klog_puts("?? ");
+          }
+      }
+      klog_puts("\n");
+
+      // Stack Snapshot
+      klog_puts("USER STACK (RSP):\n");
+      for (int i = 0; i < 16; i++) {
+          uint64_t saddr = regs->rsp + (i * 8);
+          uint64_t phys = vmm_virt_to_phys(pml4, saddr);
+          klog_puts("  ["); klog_hex64(saddr); klog_puts("] = ");
+          if (phys != 0) {
+              uint64_t val = *(uint64_t*)(phys + pmm_get_hhdm_offset());
+              klog_hex64(val);
+              // Try to find if it corresponds to any VMA or is a string
+              struct vma *sv = vma_find(&current->mm->vmas, val);
+              if (sv) {
+                  klog_puts(" (VMA: "); klog_hex64(sv->start); klog_puts(")");
+              }
+          } else {
+              klog_puts("<unmapped>");
+          }
+          klog_puts("\n");
+      }
+      
+      // Simple Userland Backtrace (RBP-based)
+      klog_puts("USER BACKTRACE (RBP):\n");
+      uint64_t curr_rbp = regs->rbp;
+      for (int i = 0; i < 16; i++) {
+          if (curr_rbp < 0x1000 || curr_rbp >= 0x0000800000000000ULL) break;
+          uint64_t phys_rbp = vmm_virt_to_phys(pml4, curr_rbp);
+          if (!phys_rbp) break;
+          
+          uint64_t *rbp_ptr = (uint64_t*)(phys_rbp + pmm_get_hhdm_offset());
+          // [0] = old RBP, [1] = return address
+          uint64_t next_rbp = rbp_ptr[0];
+          uint64_t ret_addr = rbp_ptr[1];
+          
+          klog_puts("  #"); klog_uint64(i); klog_puts(": "); klog_hex64(ret_addr);
+          struct vma *rv = vma_find(&current->mm->vmas, ret_addr);
+          if (rv) {
+              klog_puts(" (VMA: "); klog_hex64(rv->start); klog_puts(")");
+          }
+          klog_puts("\n");
+          
+          if (next_rbp <= curr_rbp) break; // Avoid infinite loops
+          curr_rbp = next_rbp;
+      }
+
+      // Process context extra info
+      klog_puts("\nPROCESS EXTRA INFO:\n");
+      klog_puts("  CWD: "); klog_puts(current->cwd_path); klog_puts("\n");
+      klog_puts("  UID/GID: "); klog_uint64(current->uid); klog_puts("/"); klog_uint64(current->gid);
+      klog_puts("  Pending Signals: "); klog_hex64(current->pending_signals);
+      klog_puts("  Signal Mask: "); klog_hex64(current->signal_mask);
+      klog_puts("\n");
+
+      // Virtual Memory Area (VMA) Dump
+      klog_puts("PROCESS VMAs:\n");
+      vma_dump(&current->mm->vmas);
+      klog_puts(KLOG_CLR_RED "################################################################################" KLOG_CLR_RESET "\n");
+    }
 
     // 2. Add to /dev/faults for userland monitors
     fault_log_add(regs, sig, addr);
 
-    // 3. Mark signal for delivery
+    // 3. Mark signal for delivery and record fault address
+    current->fault_addr = addr;
+    current->fault_code = (uint32_t)regs->err_code;
     current->pending_signals |= (1ULL << (sig - 1));
   } else {
     isr_panic(regs, "User fault with no thread context");
@@ -745,9 +757,14 @@ static void page_fault_handler(struct registers *regs) {
   uint64_t cr2;
   __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
 
+  struct thread *current = sched_get_current();
+  if (current) {
+    current->fault_addr = cr2;
+    current->fault_code = (uint32_t)regs->err_code;
+  }
+
   if (vmm_handle_page_fault(cr2, regs->err_code, regs) != 0) {
     if ((regs->cs & 0x3) == 0x3) {
-      klog_puts("[VMM] User-mode fault could not be handled by paging engine.\n");
       isr_report_user_fault(regs, SIGSEGV, cr2);
     } else {
       if (extable_fixup(regs)) {
@@ -761,7 +778,7 @@ static void page_fault_handler(struct registers *regs) {
 
 static void gpf_handler(struct registers *regs) {
   if ((regs->cs & 0x3) == 0x3) {
-    isr_report_user_fault(regs, SIGSEGV, 0);
+    isr_report_user_fault(regs, SIGSEGV, regs->rip);
   } else {
     isr_panic(regs, "Unhandled General Protection Fault");
   }
@@ -769,7 +786,7 @@ static void gpf_handler(struct registers *regs) {
 
 static void invalid_opcode_handler(struct registers *regs) {
   if ((regs->cs & 0x3) == 0x3) {
-    isr_report_user_fault(regs, SIGILL, 0);
+    isr_report_user_fault(regs, SIGILL, regs->rip);
   } else {
     isr_panic(regs, "Unhandled Invalid Opcode");
   }
@@ -777,7 +794,7 @@ static void invalid_opcode_handler(struct registers *regs) {
 
 static void stack_fault_handler(struct registers *regs) {
   if ((regs->cs & 0x3) == 0x3) {
-    isr_report_user_fault(regs, SIGSTKFLT, 0);
+    isr_report_user_fault(regs, SIGSTKFLT, regs->rsp);
   } else {
     isr_panic(regs, "Unhandled Stack Fault");
   }

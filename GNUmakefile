@@ -8,9 +8,6 @@ QEMUFLAGS := -m 2G \
 	-device virtio-vga,xres=1280,yres=800 \
 	-display gtk,zoom-to-fit=off
 
-
-
-
 override IMAGE_NAME := avoryos-$(ARCH)
 
 AVORYD_CONFIG_FILES := \
@@ -216,7 +213,7 @@ run-x86_64: edk2-ovmf $(IMAGE_NAME).iso disk.img
 		-M q35,pcspk-audiodev=snd0 \
 		-drive if=pflash,unit=0,format=raw,file=edk2-ovmf/ovmf-code-$(ARCH).fd,readonly=on \
 		-cdrom $(IMAGE_NAME).iso \
-		-drive file=disk.img,format=raw,if=ide \
+		-drive file=disk.img,format=raw,if=none,id=disk0 -device ide-hd,drive=disk0,bus=ide.0 \
 		-smp 4 \
 		-serial stdio \
 		-audiodev pa,id=snd0,timer-period=2000,out.frequency=48000,out.channels=2,out.format=s16,out.buffer-length=500000,out.latency=500000 \
@@ -234,7 +231,7 @@ run-kvm: edk2-ovmf $(IMAGE_NAME).iso disk.img
 		-M q35,pcspk-audiodev=snd0 \
 		-drive if=pflash,unit=0,format=raw,file=edk2-ovmf/ovmf-code-$(ARCH).fd,readonly=on \
 		-cdrom $(IMAGE_NAME).iso \
-		-drive file=disk.img,format=raw,if=ide \
+		-drive file=disk.img,format=raw,if=none,id=disk0 -device ide-hd,drive=disk0,bus=ide.0 \
 		-cpu host -enable-kvm \
 		-smp 4 \
 		-serial stdio \
@@ -448,12 +445,6 @@ disk.img: userland/test_heap_smp.elf
 disk.img: userland/test_dcache.elf
 disk.img: userland/test_uaccess_bench.elf
 disk.img: userland/proc_bench.elf
-
-
-
-
-
-
 
 
 disk.img: $(BASH_STAMP) $(COREUTILS_STAMP) $(ALPINE_STAMP) $(QUAKE2_BUNDLE_FILES)
@@ -927,12 +918,6 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 		echo "set_inode_field home/avory uid 1000"; \
 		echo "set_inode_field home/avory gid 1000"; \
 	} | debugfs -w ./part.img >/dev/null 2>&1 || true
-
-
-
-
-
-
 
 	@echo "Creating partitioned disk image (MBR)..."
 	dd if=/dev/zero of=disk.img bs=1M count=2048

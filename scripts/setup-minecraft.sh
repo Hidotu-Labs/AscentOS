@@ -109,6 +109,12 @@ find_java() {
 find_java
 if [ -z "${JAVA_HOME_ROOTFS}" ]; then
     echo "[*] OpenJDK 17 not found in rootfs. Installing now..."
+    install_apk_mc "mesa-gl" "main"
+    install_apk_mc "mesa-glapi" "main"
+    install_apk_mc "mesa-gles" "main"
+    install_apk_mc "mesa-egl" "main"
+    install_apk_mc "freeglut" "community"
+    install_apk_mc "jemalloc" "main"
     install_apk_mc "java-common"            "community"
     install_apk_mc "openjdk17-jre-headless" "community"
     install_apk_mc "openjdk17-jre"          "community"
@@ -232,43 +238,123 @@ echo "=== [3/4] Writing launcher + desktop entries ==="
 mkdir -p "${ROOTFS_DIR}/usr/bin"
 cat > "${ROOTFS_DIR}/usr/bin/minecraft" << LAUNCHER_EOF
 #!/bin/sh
-# Minecraft Alpha 1.0 launcher for AvoryOS
+# Minecraft Alpha 1.0 / Release launcher for AvoryOS
 
 export DISPLAY="\${DISPLAY:-:0}"
 
 # Software GL (no GPU driver on AvoryOS)
 export LIBGL_ALWAYS_SOFTWARE=1
 export GALLIUM_DRIVER=llvmpipe
+export LP_NUM_THREADS="\${LP_NUM_THREADS:-3}"
+export LP_PERF=no_linear
 export MESA_GL_VERSION_OVERRIDE=2.1
 export MESA_GLSL_VERSION_OVERRIDE=120
 export LIBGL_DRI3_DISABLE=1
+# Disable Mesa on-disk shader cache to prevent fallocate crash in kernel
+export MESA_SHADER_CACHE_DISABLE=true
+export MESA_GLSL_CACHE_DISABLE=true
+# llvmpipe still honors vblank waits, which caps fps at whatever refresh
+# rate Mesa assumes for a headless/virtual output (often 60). Uncap it.
+export vblank_mode=0
+# Disable glthread on software rasterizers to avoid thread thrashing
+export mesa_glthread="\${MESA_GLTHREAD:-false}"
+# Mesa LLVMpipe performance tweaks
+export MESA_NO_DITHER=1
 
 JAVA_HOME="${JAVA_HOME_GUEST}"
 export PATH="\${JAVA_HOME}/bin:\${PATH}"
 # libjli.so and other JVM internals live in JAVA_HOME/lib — must be on LD_LIBRARY_PATH
 export LD_LIBRARY_PATH="\${JAVA_HOME}/lib:\${JAVA_HOME}/lib/server:/usr/lib:/lib:\${LD_LIBRARY_PATH:-}"
 
+MC_PRELOAD=""
+[ -f /usr/lib/libjemalloc.so.2 ] && MC_PRELOAD="/usr/lib/libjemalloc.so.2"
+
 MC_USER="\${MC_USER:-${MC_USERNAME}}"
+MC_RAM="\${MC_RAM:-512m}"
 MC_HOME="\${HOME}/.minecraft"
 mkdir -p "\${MC_HOME}/saves" "\${MC_HOME}/texturepacks"
 [ -f /opt/minecraft/terrain.png ] && [ ! -f "\${MC_HOME}/terrain.png" ] && cp /opt/minecraft/terrain.png "\${MC_HOME}/terrain.png" 2>/dev/null || true
 
-echo "[minecraft] Starting Minecraft Alpha 1.0 as '\${MC_USER}'..."
+# Always enforce high-performance options.txt for software rendering stability
+cat > "\${MC_HOME}/options.txt" << 'OPT_EOF'
+music:0.0
+sound:0.0
+invertYMouse:false
+mouseSensitivity:0.5
+fov:0.0
+gamma:1.0
+viewDistance:3
+guiScale:0
+particles:2
+bobView:false
+anaglyph3d:false
+advancedOpengl:false
+fpsLimit:0
+difficulty:1
+fancyGraphics:false
+ao:0
+clouds:false
+skin:Default
+lastServer:
+chatVisibility:0
+chatColors:true
+chatLinks:false
+chatLinksPrompt:false
+chatOpacity:1.0
+serverTextures:false
+snooperEnabled:false
+fullscreen:false
+enableVsync:false
+hideServerAddress:false
+advancedItemTooltips:false
+pauseOnLostFocus:true
+showCape:false
+touchscreen:false
+overrideWidth:0
+overrideHeight:0
+heldItemTooltips:true
+chatHeightFocused:1.0
+chatHeightUnfocused:0.44366196
+chatScale:1.0
+chatWidth:1.0
+OPT_EOF
+
+echo "[minecraft] Starting Minecraft as '\${MC_USER}' (Heap: \${MC_RAM})..."
+LD_PRELOAD="\${MC_PRELOAD}\${LD_PRELOAD:+:\$LD_PRELOAD}" \
+MALLOC_CONF="background_thread:true,metadata_thp:auto,dirty_decay_ms:5000,muzzy_decay_ms:5000" \
 exec "\${JAVA_HOME}/bin/java" \
-    -Xmx256m -Xms64m \
-    -Xint \
+    -Xms256m -Xmx"\${MC_RAM}" \
+    -Xss512k \
+    -Djdk.lang.Process.launchMechanism=fork \
+    -Dorg.lwjgl.opengl.Display.allowSoftwareOpenGL=true \
+    -Dsun.java2d.opengl=false \
+    -Dsun.java2d.d3d=false \
+    -Dsun.java2d.noddraw=true \
+    -Dsun.awt.noerasebackground=true \
+    -Dhttp.keepAlive=false \
+    -Dsun.net.client.defaultConnectTimeout=2000 \
+    -Dsun.net.client.defaultReadTimeout=2000 \
+    -XX:+TieredCompilation \
+    -XX:CICompilerCount=2 \
+    -XX:Tier4InvocationThreshold=500 \
+    -XX:Tier4MinInvocationThreshold=100 \
+    -XX:Tier4CompileThreshold=1000 \
+    -XX:ReservedCodeCacheSize=64m \
+    -XX:InitialCodeCacheSize=32m \
+    -XX:+DoEscapeAnalysis \
+    -XX:+EliminateLocks \
     -XX:+UseSerialGC \
+    -XX:+AlwaysPreTouch \
+    -XX:+UnlockDiagnosticVMOptions \
+    -XX:-ImplicitNullChecks \
     -Xshare:off \
     -XX:-UsePerfData \
     -Dos.name=Linux \
-    -XX:+UnlockDiagnosticVMOptions \
-    -XX:-ImplicitNullChecks \
     -Djava.library.path=/opt/minecraft/natives \
     -Dminecraft.applet.TargetDirectory="\${MC_HOME}" \
     -cp /opt/minecraft/minecraft.jar:/opt/minecraft/lwjgl.jar:/opt/minecraft/lwjgl_util.jar \
     net.minecraft.client.Minecraft "\${MC_USER}" ""
 LAUNCHER_EOF
-
 
 chmod +x "${ROOTFS_DIR}/usr/bin/minecraft"
 echo "[+] Wrote /usr/bin/minecraft"
@@ -340,9 +426,9 @@ rm -f "${PART_IMG}"
 
 echo ""
 echo "╔══════════════════════════════════════════════════════════════════╗"
-echo "║  [SUCCESS] Minecraft Alpha 1.0 is ready in AvoryOS!             ║"
+echo "║  [SUCCESS] Minecraft Release 1.0 is ready in AvoryOS!             ║"
 echo "╠══════════════════════════════════════════════════════════════════╣"
 echo "║  Boot AvoryOS → open a terminal → type:  minecraft              ║"
 echo "║  Custom username:  MC_USER=YourName minecraft                    ║"
-echo "║  More RAM:         edit -Xmx512m in /usr/bin/minecraft           ║"
+echo "║  Custom RAM:       MC_RAM=1536m minecraft                        ║"
 echo "╚══════════════════════════════════════════════════════════════════╝"

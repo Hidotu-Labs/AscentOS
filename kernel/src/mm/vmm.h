@@ -124,7 +124,7 @@ void vmm_update_vdso_data(void);
 #include "../lock/spinlock.h"
 
 // Returns a pointer to the VMM spinlock owned by vmm_map.c.
-spinlock_t *vmm_get_lock(void);
+rawspinlock_t *vmm_get_lock(void);
 
 // Returns the physical address of the permanent kernel PML4.
 uint64_t *vmm_get_kernel_pml4(void);

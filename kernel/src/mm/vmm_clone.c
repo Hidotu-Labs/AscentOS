@@ -121,12 +121,12 @@ static uint64_t *clone_table_vma(uint64_t *src_table_phys, int level,
 }
 
 uint64_t vmm_clone_user_mappings(uint64_t *src_pml4_phys) {
-  spinlock_t *lock = vmm_get_lock();
-  spinlock_acquire(lock);
+  rawspinlock_t *lock = vmm_get_lock();
+  rawspinlock_acquire(lock);
 
   void *new_pml4_phys = pmm_alloc();
   if (!new_pml4_phys) {
-    spinlock_release(lock);
+    rawspinlock_release(lock);
     return 0;
   }
 
@@ -146,7 +146,7 @@ uint64_t vmm_clone_user_mappings(uint64_t *src_pml4_phys) {
     uint64_t *child_src_phys = (uint64_t *)(src_pml4_virt[i] & PAGE_MASK);
     uint64_t *child_new_phys = clone_table(child_src_phys, 3, 0, 512);
     if (!child_new_phys) {
-      spinlock_release(lock);
+      rawspinlock_release(lock);
       return 0;
     }
 
@@ -158,18 +158,18 @@ uint64_t vmm_clone_user_mappings(uint64_t *src_pml4_phys) {
   for (size_t i = 256; i < 512; i++)
     new_pml4_virt[i] = src_pml4_virt[i];
 
-  spinlock_release(lock);
+  rawspinlock_release(lock);
   return (uint64_t)new_pml4_phys;
 }
 
 uint64_t vmm_clone_user_mappings_vma(uint64_t *src_pml4_phys,
                                      struct vma_list *vmas) {
-  spinlock_t *lock = vmm_get_lock();
-  spinlock_acquire(lock);
+  rawspinlock_t *lock = vmm_get_lock();
+  rawspinlock_acquire(lock);
 
   void *new_pml4_phys = pmm_alloc();
   if (!new_pml4_phys) {
-    spinlock_release(lock);
+    rawspinlock_release(lock);
     return 0;
   }
 
@@ -197,7 +197,7 @@ uint64_t vmm_clone_user_mappings_vma(uint64_t *src_pml4_phys,
     uint64_t *child_new_phys =
         clone_table_vma(child_src_phys, 3, 0, 512, vmas, base_addr, &cow_count);
     if (!child_new_phys) {
-      spinlock_release(lock);
+      rawspinlock_release(lock);
       return 0;
     }
 
@@ -215,18 +215,18 @@ uint64_t vmm_clone_user_mappings_vma(uint64_t *src_pml4_phys,
     tlb_shootdown_all();
   }
 
-  spinlock_release(lock);
+  rawspinlock_release(lock);
   return (uint64_t)new_pml4_phys;
 }
 
 
 uint64_t *vmm_create_pml4(void) {
-  spinlock_t *lock = vmm_get_lock();
-  spinlock_acquire(lock);
+  rawspinlock_t *lock = vmm_get_lock();
+  rawspinlock_acquire(lock);
 
   void *new_pml4_phys = pmm_alloc();
   if (!new_pml4_phys) {
-    spinlock_release(lock);
+    rawspinlock_release(lock);
     return NULL;
   }
 
@@ -242,6 +242,6 @@ uint64_t *vmm_create_pml4(void) {
   for (size_t i = 256; i < 512; i++)
     new_pml4_virt[i] = src_pml4_virt[i];
 
-  spinlock_release(lock);
+  rawspinlock_release(lock);
   return (uint64_t *)new_pml4_phys;
 }

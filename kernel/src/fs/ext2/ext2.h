@@ -135,6 +135,8 @@ typedef struct {
   spinlock_t lock;
 } ext3_journal_state_t;
 
+#define EXT2_CACHE_SIZE 2048
+
 typedef struct {
   struct block_device *dev;
   ext2_superblock_t sb;
@@ -147,7 +149,7 @@ typedef struct {
   struct {
     uint32_t num;
     uint8_t *data;
-  } cache[32];
+  } cache[EXT2_CACHE_SIZE];
   spinlock_t cache_lock;
   ext3_journal_state_t journal;
 } ext2_mount_t;

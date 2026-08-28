@@ -96,4 +96,59 @@ static inline bool spinlock_is_locked(spinlock_t *lock) {
   return serving != next;
 }
 
+// ---------------------------------------------------------------------------
+// rawspinlock_t — ticket spinlock WITHOUT IRQ disable
+//
+// Use this for locks that:
+//   1. Can be held while another CPU sends TLB shootdown IPIs (e.g. vmm_lock)
+//   2. Are never acquired from an IRQ handler
+//   3. Can be held for longer durations (page table walks, etc.)
+//
+// Spinning CPUs remain interruptible so they can handle IPIs. This prevents
+// the deadlock where CPU A holds a lock, sends a TLB shootdown IPI to CPU B,
+// but CPU B is spinning on that same lock with IRQs disabled and cannot ack.
+// ---------------------------------------------------------------------------
+typedef struct {
+  union {
+    uint32_t val;
+    struct {
+      uint16_t now_serving;
+      uint16_t next_ticket;
+    };
+  };
+} rawspinlock_t;
+
+#define RAWSPINLOCK_INIT { .val = 0 }
+
+static inline void rawspinlock_init(rawspinlock_t *lock) {
+  lock->val = 0;
+}
+
+static inline void rawspinlock_acquire(rawspinlock_t *lock) {
+  uint16_t my_ticket = __atomic_fetch_add(&lock->next_ticket, 1, __ATOMIC_RELAXED);
+  while (__atomic_load_n(&lock->now_serving, __ATOMIC_ACQUIRE) != my_ticket)
+    __asm__ volatile("pause" ::: "memory");
+}
+
+static inline void rawspinlock_release(rawspinlock_t *lock) {
+  uint16_t serving = lock->now_serving + 1;
+  __atomic_store_n(&lock->now_serving, serving, __ATOMIC_RELEASE);
+}
+
+static inline bool rawspinlock_try_acquire(rawspinlock_t *lock) {
+  uint32_t current = __atomic_load_n(&lock->val, __ATOMIC_RELAXED);
+  uint16_t serving = (uint16_t)(current & 0xFFFF);
+  uint16_t next    = (uint16_t)(current >> 16);
+  if (serving != next)
+    return false;
+  uint32_t updated = ((uint32_t)(next + 1) << 16) | serving;
+  return __atomic_compare_exchange_n(&lock->val, &current, updated, false,
+                                     __ATOMIC_ACQUIRE, __ATOMIC_RELAXED);
+}
+
+static inline bool rawspinlock_is_locked(rawspinlock_t *lock) {
+  uint32_t current = __atomic_load_n(&lock->val, __ATOMIC_RELAXED);
+  return (uint16_t)(current & 0xFFFF) != (uint16_t)(current >> 16);
+}
+
 #endif

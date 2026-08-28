@@ -68,10 +68,9 @@ static int pci_readlink(vfs_node_t *node, char *buf, uint32_t size) {
     return -1;
   const char *target = (const char *)node->ptr;
   uint32_t len = (uint32_t)strlen(target);
-  if (len >= size)
-    len = size - 1;
+  if (len > size)
+    len = size;
   memcpy(buf, target, len);
-  buf[len] = '\0';
   return (int)len;
 }
 

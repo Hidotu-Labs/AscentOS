@@ -287,6 +287,7 @@ static uint64_t sys_getdents64(uint64_t fd, uint64_t dirp, uint64_t count,
         if (written + entry_size > count) break;
 
         struct linux_dirent64 *entry = (struct linux_dirent64 *)(buf + written);
+        memset(buf + written, 0, entry_size);
         entry->d_ino    = de->ino;
         entry->d_off    = (uint64_t)(index + 1);
         entry->d_reclen = (uint16_t)entry_size;
@@ -340,11 +341,11 @@ static uint64_t sys_getdents(uint64_t fd, uint64_t dirp, uint64_t count,
         if (written + entry_size > count) break;
 
         struct linux_dirent *entry = (struct linux_dirent *)(buf + written);
+        memset(buf + written, 0, entry_size);
         entry->d_ino    = de->ino;
         entry->d_off    = (uint64_t)(index + 1);
         entry->d_reclen = (uint16_t)entry_size;
         strcpy(entry->d_name, de->name);
-        buf[written + entry_size - 1] = 0;
         written += entry_size;
         index++;
     }

@@ -166,6 +166,9 @@ uint64_t ext2_mmap_impl(vfs_node_t *node, uint64_t addr, uint64_t length,
 }
 
 int ext2_readlink_impl(vfs_node_t *node, char *buf, uint32_t size) {
+  if (!node || !buf || size == 0)
+    return -1;
+
   ext2_mount_t *mnt = (ext2_mount_t *)node->device;
   if (!mnt)
     return -1;
@@ -181,16 +184,13 @@ int ext2_readlink_impl(vfs_node_t *node, char *buf, uint32_t size) {
   if (link_len == 0)
     return -1;
 
+  uint32_t copy_len = (link_len < size) ? link_len : size;
   if (inode.i_blocks == 0 && link_len <= 60) {
-    uint32_t copy_len = (link_len < size - 1) ? link_len : size - 1;
     memcpy(buf, (const char *)inode.i_block, copy_len);
-    buf[copy_len] = '\0';
     return (int)copy_len;
   }
 
-  uint32_t copy_len  = (link_len < size - 1) ? link_len : size - 1;
   uint32_t bytes_read = ext2_read_impl(node, 0, copy_len, (uint8_t *)buf);
-  buf[bytes_read] = '\0';
   return (int)bytes_read;
 }
 
