@@ -341,6 +341,9 @@ bool elf_load(const char *path, uint64_t *pml4, elf_info_t *out_info) {
   if (current_thread && current_thread->mm) {
     vma_add(&current_thread->mm->vmas, stack_bottom, stack_top, 0x3,
             0x22 | MAP_GROWSDOWN, -1, 0, NULL, 0);
+    vma_add(&current_thread->mm->vmas, VDSO_USER_BASE,
+            VDSO_USER_BASE + PAGE_SIZE, 0x5, MAP_PRIVATE | MAP_ANONYMOUS, -1,
+            0, NULL, 0);
 
     current_thread->mm->brk_base =
         (current_thread->mm->brk_base + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
@@ -377,27 +380,29 @@ uint64_t process_build_initial_stack(uint64_t stack_top, const char *path,
   }
 
   int argc = 0;
-  while (argv && argv[argc])
-    argc++;
-
   int envc = 0;
-  while (envp && envp[envc])
-    envc++;
-
-  // 1. Calculate total string size (including AT_RANDOM and AT_PLATFORM)
   size_t string_bytes = 0;
-  for (int i = 0; i < argc; i++)
-    string_bytes += strlen(argv[i]) + 1;
-  for (int i = 0; i < envc; i++)
-    string_bytes += strlen(envp[i]) + 1;
 
-  // Space for AT_RANDOM (16 bytes) and AT_PLATFORM ("x86_64\0", 8 bytes)
-  // Add extra padding to ensure alignment can be satisfied
-  string_bytes += 32 + 32;
+  if (argv) {
+    while (argv[argc] != NULL) {
+      string_bytes += strlen(argv[argc]) + 1;
+      argc++;
+    }
+  }
+
+  if (envp) {
+    while (envp[envc] != NULL) {
+      string_bytes += strlen(envp[envc]) + 1;
+      envc++;
+    }
+  }
+
+  // Add extra padding to ensure alignment can be satisfied + AT_RANDOM (16) + AT_PLATFORM (8)
+  string_bytes += 16 + 8 + 64;
 
   // 2. Determine number of stack entries (argc, argv ptrs, envp ptrs, auxv
-  // pairs) Auxv entries (18 real pairs + 1 NULL pair)
-  size_t auxv_pairs = elf_info ? 18 : 1;
+  // pairs) Auxv entries (19 real pairs + 1 NULL pair)
+  size_t auxv_pairs = elf_info ? 19 : 1;
   size_t stack_entry_count =
       1 + (size_t)argc + 1 + (size_t)envc + 1 + auxv_pairs * 2;
   size_t pointer_bytes = stack_entry_count * sizeof(uint64_t);
@@ -512,6 +517,8 @@ uint64_t process_build_initial_stack(uint64_t stack_top, const char *path,
     stack_entries[idx++] = 0;
     stack_entries[idx++] = AT_CLKTCK;
     stack_entries[idx++] = 100;
+    stack_entries[idx++] = AT_SYSINFO_EHDR;
+    stack_entries[idx++] = VDSO_USER_BASE;
     stack_entries[idx++] = AT_EXECFN;
     stack_entries[idx++] = argv_ptrs[0];
   }

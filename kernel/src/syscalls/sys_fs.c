@@ -393,6 +393,94 @@ static uint64_t sys_rename(uint64_t oldpath_ptr, uint64_t newpath_ptr,
     return (uint64_t)-18; // EXDEV
 }
 
+static uint64_t sys_renameat(uint64_t olddfd, uint64_t oldname_ptr,
+                             uint64_t newdfd, uint64_t newname_ptr,
+                             uint64_t a4, uint64_t a5) {
+    (void)a4; (void)a5;
+    const char *oldname = (const char *)oldname_ptr;
+    const char *newname = (const char *)newname_ptr;
+    if (!oldname || !newname) return (uint64_t)-14;
+
+    struct thread *t = sched_get_current();
+    if (!t) return (uint64_t)-1;
+
+    vfs_node_t *old_base = fs_root;
+    if (oldname[0] != '/') {
+        if ((int64_t)olddfd == AT_FDCWD) {
+            old_base = (t->cwd_node ? t->cwd_node : fs_root);
+        } else if (olddfd < MAX_FDS && t->fds[olddfd]) {
+            old_base = t->fds[olddfd];
+        } else {
+            return (uint64_t)-9; // EBADF
+        }
+    }
+
+    vfs_node_t *new_base = fs_root;
+    if (newname[0] != '/') {
+        if ((int64_t)newdfd == AT_FDCWD) {
+            new_base = (t->cwd_node ? t->cwd_node : fs_root);
+        } else if (newdfd < MAX_FDS && t->fds[newdfd]) {
+            new_base = t->fds[newdfd];
+        } else {
+            return (uint64_t)-9; // EBADF
+        }
+    }
+
+    char old_bn[128], new_bn[128];
+    const char *old_slash = strrchr(oldname, '/');
+    vfs_node_t *old_parent = old_base;
+    if (old_slash) {
+        char old_pdir[256];
+        size_t plen = (size_t)(old_slash - oldname);
+        if (plen == 0) {
+            old_parent = fs_root;
+        } else {
+            if (plen >= sizeof(old_pdir)) return (uint64_t)-14;
+            memcpy(old_pdir, oldname, plen);
+            old_pdir[plen] = '\0';
+            old_parent = vfs_resolve_path_at(old_base, old_pdir);
+        }
+        strncpy(old_bn, old_slash + 1, sizeof(old_bn) - 1);
+    } else {
+        strncpy(old_bn, oldname, sizeof(old_bn) - 1);
+    }
+
+    const char *new_slash = strrchr(newname, '/');
+    vfs_node_t *new_parent = new_base;
+    if (new_slash) {
+        char new_pdir[256];
+        size_t plen = (size_t)(new_slash - newname);
+        if (plen == 0) {
+            new_parent = fs_root;
+        } else {
+            if (plen >= sizeof(new_pdir)) return (uint64_t)-14;
+            memcpy(new_pdir, newname, plen);
+            new_pdir[plen] = '\0';
+            new_parent = vfs_resolve_path_at(new_base, new_pdir);
+        }
+        strncpy(new_bn, new_slash + 1, sizeof(new_bn) - 1);
+    } else {
+        strncpy(new_bn, newname, sizeof(new_bn) - 1);
+    }
+
+    if (!old_parent || !new_parent) return (uint64_t)-2; // ENOENT
+    vfs_node_t *old_node = vfs_finddir(old_parent, old_bn);
+    if (!old_node) return (uint64_t)-2;
+
+    if (old_parent == new_parent || old_parent->inode == new_parent->inode) {
+        return vfs_rename(old_parent, old_bn, new_bn) == 0 ? 0 : (uint64_t)-1;
+    }
+
+    return (uint64_t)-18; // EXDEV
+}
+
+static uint64_t sys_renameat2(uint64_t olddfd, uint64_t oldname_ptr,
+                              uint64_t newdfd, uint64_t newname_ptr,
+                              uint64_t flags, uint64_t a5) {
+    (void)flags; (void)a5;
+    return sys_renameat(olddfd, oldname_ptr, newdfd, newname_ptr, 0, 0);
+}
+
 // ---------------------------------------------------------------------------
 // symlink / readlink / readlinkat
 // ---------------------------------------------------------------------------
@@ -417,6 +505,13 @@ static uint64_t sys_symlink(uint64_t target_ptr, uint64_t linkpath_ptr,
     strcpy(target_buf, target);
 
     return vfs_symlink(parent, link_name, target_buf) == 0 ? 0 : (uint64_t)-1;
+}
+
+static uint64_t sys_symlinkat(uint64_t target_ptr, uint64_t newdirfd,
+                              uint64_t linkpath_ptr, uint64_t a3, uint64_t a4,
+                              uint64_t a5) {
+    (void)newdirfd; (void)a3; (void)a4; (void)a5;
+    return sys_symlink(target_ptr, linkpath_ptr, 0, 0, 0, 0);
 }
 
 static uint64_t sys_readlink(uint64_t pathname_ptr, uint64_t buf_ptr,
@@ -940,7 +1035,10 @@ void syscall_register_fs(void) {
     syscall_register(SYS_UNLINKAT,   sys_unlinkat);
     syscall_register(SYS_RMDIR,      sys_rmdir);
     syscall_register(SYS_RENAME,     sys_rename);
+    syscall_register(SYS_RENAMEAT,   sys_renameat);
+    syscall_register(SYS_RENAMEAT2,  sys_renameat2);
     syscall_register(SYS_SYMLINK,    sys_symlink);
+    syscall_register(SYS_SYMLINKAT,  sys_symlinkat);
     syscall_register(SYS_READLINK,   sys_readlink);
     syscall_register(SYS_READLINKAT, sys_readlinkat);
     syscall_register(SYS_LINK,       sys_link);

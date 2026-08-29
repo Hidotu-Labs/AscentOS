@@ -62,9 +62,13 @@ void vmm_free_user_pages(uint64_t cr3) {
         uint64_t  pt_phys = pd_virt[k] & PAGE_MASK;
         uint64_t *pt_virt = (uint64_t *)(hhdm + pt_phys);
 
+        uint64_t vdso_phys = vmm_get_vsyscall_page_phys();
         for (size_t l = 0; l < 512; l++) {
-          if (pt_virt[l] & PAGE_FLAG_PRESENT)
-            pmm_free_page((void *)(pt_virt[l] & PAGE_MASK));
+          if (pt_virt[l] & PAGE_FLAG_PRESENT) {
+            uint64_t frame = pt_virt[l] & PAGE_MASK;
+            if (frame != vdso_phys)
+              pmm_free_page((void *)frame);
+          }
         }
         pmm_free_page((void *)pt_phys);
       }
@@ -94,6 +98,7 @@ void vmm_free_user_pages_vma(uint64_t cr3, struct vma_list *vmas) {
 
   uint64_t  hhdm     = pmm_get_hhdm_offset();
   uint64_t *pml4_virt = (uint64_t *)(hhdm + cr3);
+  uint64_t  vdso_phys = vmm_get_vsyscall_page_phys();
 
   for (size_t i = 0; i < 256; i++) {
     if (!(pml4_virt[i] & PAGE_FLAG_PRESENT))
@@ -138,6 +143,10 @@ void vmm_free_user_pages_vma(uint64_t cr3, struct vma_list *vmas) {
           if (!(pt_virt[l] & PAGE_FLAG_PRESENT))
             continue;
 
+          uint64_t frame = pt_virt[l] & PAGE_MASK;
+          if (frame == vdso_phys)
+            continue;
+
           uint64_t va = ((uint64_t)i << 39) | ((uint64_t)j << 30) |
                         ((uint64_t)k << 21) | ((uint64_t)l << 12);
           struct vma *v = vma_find(vmas, va);
@@ -154,7 +163,7 @@ void vmm_free_user_pages_vma(uint64_t cr3, struct vma_list *vmas) {
             continue;
           }
 
-          pmm_free_page((void *)(pt_virt[l] & PAGE_MASK));
+          pmm_free_page((void *)frame);
         }
         pmm_free_page((void *)pt_phys);
       }

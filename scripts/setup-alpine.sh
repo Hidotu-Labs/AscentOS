@@ -407,7 +407,8 @@ fi
 # an explicit "-I qt" duplicates the Qt interface (two windows + privacy dialogs).
 # libmad MP3 decoding fails on AvoryOS (bad main_data_begin); use ffmpeg avcodec.
 exec /usr/bin/vlc.bin --one-instance --no-qt-privacy-ask --aout=alsa \
-    --codec=avcodec --clock-synchro=0 "$@"
+    --alsa-audio-device=hw:0,0 --codec=avcodec --clock-synchro=0 \
+    --file-caching=50 --network-caching=50 --disc-caching=50 --live-caching=50 "$@"
 EOF
 chmod +x "${ROOTFS_DIR}/usr/bin/vlc"
 
@@ -415,7 +416,7 @@ chmod +x "${ROOTFS_DIR}/usr/bin/vlc"
 mkdir -p "${ROOTFS_DIR}/etc/vlc" "${ROOTFS_DIR}/root/.config/vlc"
 cat > "${ROOTFS_DIR}/etc/vlc/vlcrc" <<'VLCRC_EOF'
 [alsa]
-alsa-audio-device=default
+alsa-audio-device=hw:0,0
 
 [qt]
 qt-privacy-ask=0
@@ -425,6 +426,15 @@ codec=avcodec
 
 [clock]
 clock-synchro=0
+
+[file]
+file-caching=50
+
+[network]
+network-caching=50
+
+[disc]
+disc-caching=50
 VLCRC_EOF
 cp "${ROOTFS_DIR}/etc/vlc/vlcrc" "${ROOTFS_DIR}/root/.config/vlc/vlcrc"
 

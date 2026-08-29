@@ -72,7 +72,11 @@
 #define SYS_WAITID 247
 #define SYS_KILL 62
 #define SYS_UNAME 63
+#define SYS_SEMGET 64
+#define SYS_SEMOP 65
+#define SYS_SEMCTL 66
 #define SYS_SHMDT 67
+#define SYS_SEMTIMEDOP 220
 #define SYS_FCNTL 72
 #define SYS_FLOCK 73
 #define SYS_FSYNC 74
@@ -189,7 +193,10 @@
 #define SYS_MEMFD_CREATE 319
 #define SYS_MEMBARRIER 324
 #define SYS_STATX 332
+#define SYS_RENAMEAT 264
+#define SYS_SYMLINKAT 266
 #define SYS_SET_ROBUST_LIST 273
+#define SYS_RENAMEAT2 316
 #define SYS_RSEQ 334
 #define SYS_MOUNT 165
 #define SYS_REBOOT 169
@@ -256,6 +263,7 @@ void syscall_register_socket(void);
 void syscall_register_epoll(void);
 void syscall_register_poll(void);
 void syscall_register_shm(void);
+void syscall_register_sem(void);
 void syscall_register_futex(void);
 
 const char *syscall_get_name(uint64_t num);

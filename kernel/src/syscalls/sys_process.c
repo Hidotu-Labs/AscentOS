@@ -2164,17 +2164,19 @@ static uint64_t sys_sched_getaffinity(uint64_t pid, uint64_t len,
   }
 
   if (len < sizeof(uint64_t)) {
-    // Linux returns bytes written, or EINVAL if len is zero.
-    // If len is smaller than the mask size but non-zero, it might truncate?
-    // Let's just return EINVAL for now if too small to be safe.
     return (uint64_t)-22; // EINVAL
   }
 
-  if (!vmm_is_user_addr_range_valid(user_mask_ptr, sizeof(uint64_t)))
-    return (uint64_t)-14;
+  size_t copy_bytes = len;
+  if (copy_bytes > 128)
+    copy_bytes = 128; // Standard Linux cpuset max 1024 bits
 
+  if (!vmm_is_user_addr_range_writable(user_mask_ptr, copy_bytes))
+    return (uint64_t)-14; // EFAULT
+
+  memset((void *)user_mask_ptr, 0, copy_bytes);
   *(uint64_t *)user_mask_ptr = mask;
-  return sizeof(uint64_t);
+  return copy_bytes;
 }
 
 static uint64_t sys_sched_setparam(uint64_t pid, uint64_t param_ptr,

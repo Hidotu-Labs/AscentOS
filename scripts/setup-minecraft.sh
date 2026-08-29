@@ -154,64 +154,168 @@ cp -f "${JAVA_HOME_ROOTFS}/lib/server/libjvm.so" "${ROOTFS_DIR}/usr/lib/server/l
 echo "[+] Copied server/libjvm.so → /usr/lib/server/"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. Download LWJGL 2.9.4 Linux x86_64 natives
-#    MIT licensed — https://github.com/LWJGL/lwjgl/releases/tag/lwjgl-2.9.4
+# 1. Download Minecraft 1.8.9 libraries from Mojang + Maven Central
 # ─────────────────────────────────────────────────────────────────────────────
 echo ""
-echo "=== [1/4] Fetching LWJGL 2.9.1 Linux natives (Maven Central) ==="
+echo "=== [1/4] Fetching Minecraft 1.8.9 libraries ==="
 
-# Maven Central hosts the LWJGL 2 natives JAR reliably.
-# The JAR is a plain ZIP with .so files at its root.
-LWJGL_VERSION="2.9.1"
-LWJGL_ZIP="${BUILD_DIR}/lwjgl-platform-${LWJGL_VERSION}-natives-linux.jar"
-LWJGL_NATIVES_DIR="${BUILD_DIR}/lwjgl-natives"
-LWJGL_ZIP_URL="https://repo1.maven.org/maven2/org/lwjgl/lwjgl/lwjgl-platform/${LWJGL_VERSION}/lwjgl-platform-${LWJGL_VERSION}-natives-linux.jar"
+LIBS_DIR="${BUILD_DIR}/mc189-libs"
+NATIVES_BUILD_DIR="${BUILD_DIR}/mc189-natives"
+MC_LIBS_ROOTFS="${ROOTFS_DIR}/opt/minecraft/libs"
+MC_NATIVES_ROOTFS="${ROOTFS_DIR}/opt/minecraft/natives"
+mkdir -p "${LIBS_DIR}" "${NATIVES_BUILD_DIR}" "${MC_LIBS_ROOTFS}" "${MC_NATIVES_ROOTFS}"
 
-if [ ! -f "${LWJGL_ZIP}" ]; then
-    echo "[*] Downloading LWJGL ${LWJGL_VERSION}..."
-    curl -L "${LWJGL_ZIP_URL}" -o "${LWJGL_ZIP}"
-fi
-
-if [ ! -d "${LWJGL_NATIVES_DIR}" ] || [ -z "$(ls -A "${LWJGL_NATIVES_DIR}" 2>/dev/null)" ]; then
-    echo "[*] Extracting LWJGL Linux natives..."
-    mkdir -p "${LWJGL_NATIVES_DIR}"
-    # The natives JAR has .so files directly at the root (no subdirectory)
-    unzip -o "${LWJGL_ZIP}" "*.so" -d "${LWJGL_NATIVES_DIR}" 2>/dev/null || true
-fi
-
-NATIVES_COUNT=$(find "${LWJGL_NATIVES_DIR}" -name '*.so' | wc -l)
-echo "[+] LWJGL natives found: ${NATIVES_COUNT} .so file(s)"
-[ "${NATIVES_COUNT}" -eq 0 ] && {
-    echo "[!] No LWJGL .so files extracted. Check the zip layout." >&2
-    exit 1
+# Helper: download a file if not already cached
+dl() {
+    local url="$1" dest="$2"
+    if [ ! -f "${dest}" ]; then
+        echo "[*] Downloading $(basename "${dest}")..."
+        curl -sSL --retry 3 "${url}" -o "${dest}" || { echo "[!] FAILED: ${url}" >&2; return 1; }
+    fi
 }
 
-MC_NATIVES_ROOTFS="${ROOTFS_DIR}/opt/minecraft/natives"
-mkdir -p "${MC_NATIVES_ROOTFS}"
-cp "${LWJGL_NATIVES_DIR}/"*.so "${MC_NATIVES_ROOTFS}/"
-echo "[+] Staged natives → /opt/minecraft/natives/"
+# Convert Maven coordinate to Mojang libraries CDN URL
+# e.g.  org.lwjgl.lwjgl:lwjgl:2.9.4-nightly-20150209
+#    -> https://libraries.minecraft.net/org/lwjgl/lwjgl/lwjgl/2.9.4-nightly-20150209/lwjgl-2.9.4-nightly-20150209.jar
+maven_url() {
+    local coord="$1"          # group:artifact:version
+    local classifier="${2:-}" # optional: natives-linux etc.
+    local base="https://libraries.minecraft.net"
+    local IFS=':' parts
+    read -r -a parts <<< "${coord}"
+    local group="${parts[0]//\.//}"
+    local artifact="${parts[1]}"
+    local version="${parts[2]}"
+    local fname="${artifact}-${version}${classifier:+-${classifier}}.jar"
+    echo "${base}/${group}/${artifact}/${version}/${fname}"
+}
 
-# Also download lwjgl.jar (the Java API — contains org.lwjgl.* classes needed at runtime)
-LWJGL_JAR="${BUILD_DIR}/lwjgl-${LWJGL_VERSION}.jar"
-LWJGL_JAR_URL="https://repo1.maven.org/maven2/org/lwjgl/lwjgl/lwjgl/${LWJGL_VERSION}/lwjgl-${LWJGL_VERSION}.jar"
-if [ ! -f "${LWJGL_JAR}" ]; then
-    echo "[*] Downloading lwjgl.jar (Java classes)..."
-    curl -L "${LWJGL_JAR_URL}" -o "${LWJGL_JAR}"
-fi
-cp "${LWJGL_JAR}" "${ROOTFS_DIR}/opt/minecraft/lwjgl.jar"
-echo "[+] Staged lwjgl.jar → /opt/minecraft/"
+maven_central_url() {
+    local coord="$1"
+    local base="https://repo1.maven.org/maven2"
+    local IFS=':' parts
+    read -r -a parts <<< "${coord}"
+    local group="${parts[0]//\.//}"
+    local artifact="${parts[1]}"
+    local version="${parts[2]}"
+    local fname="${artifact}-${version}.jar"
+    echo "${base}/${group}/${artifact}/${version}/${fname}"
+}
 
-# Also download lwjgl_util.jar (applet + utility classes some MC versions need)
-LWJGL_UTIL_JAR="${BUILD_DIR}/lwjgl_util-${LWJGL_VERSION}.jar"
-LWJGL_UTIL_URL="https://repo1.maven.org/maven2/org/lwjgl/lwjgl/lwjgl_util/${LWJGL_VERSION}/lwjgl_util-${LWJGL_VERSION}.jar"
-if [ ! -f "${LWJGL_UTIL_JAR}" ]; then
-    echo "[*] Downloading lwjgl_util.jar..."
-    curl -L "${LWJGL_UTIL_URL}" -o "${LWJGL_UTIL_JAR}" 2>/dev/null || true
+# ── All JARs needed by Minecraft 1.8.9 on the classpath ─────────────────────
+declare -a MC189_LIBS=(
+    # LWJGL 2.9.4
+    "org.lwjgl.lwjgl:lwjgl:2.9.4-nightly-20150209"
+    "org.lwjgl.lwjgl:lwjgl_util:2.9.4-nightly-20150209"
+
+    # Mojang authlib & realms
+    "com.mojang:authlib:1.5.21"
+    "com.mojang:realms:1.7.59"
+    "com.mojang:netty:1.8.8"
+
+    # Logging
+    "org.apache.logging.log4j:log4j-api:2.0-beta9"
+    "org.apache.logging.log4j:log4j-core:2.0-beta9"
+
+    # Google
+    "com.google.code.gson:gson:2.2.4"
+    "com.google.guava:guava:17.0"
+
+    # Apache Commons
+    "commons-codec:commons-codec:1.9"
+    "commons-io:commons-io:2.4"
+    "commons-lang:commons-lang:2.6"
+    "org.apache.commons:commons-lang3:3.3.2"
+    "commons-logging:commons-logging:1.1.3"
+    "org.apache.commons:commons-compress:1.8.1"
+
+    # HTTP
+    "org.apache.httpcomponents:httpclient:4.3.3"
+    "org.apache.httpcomponents:httpcore:4.3.2"
+
+    # Netty
+    "io.netty:netty-all:4.0.23.Final"
+
+    # JInput & JUtils
+    "net.java.jinput:jinput:2.0.5"
+    "net.java.jutils:jutils:1.0.0"
+
+    # CLI args & ICU
+    "net.sf.jopt-simple:jopt-simple:4.6"
+    "com.ibm.icu:icu4j-core-mojang:51.2"
+
+    # System info & Twitch
+    "net.java.dev.jna:jna:3.4.0"
+    "net.java.dev.jna:platform:3.4.0"
+    "oshi-project:oshi-core:1.1"
+    "tv.twitch:twitch:6.5"
+
+    # Paul's SoundSystem
+    "com.paulscode:codecjorbis:20101023"
+    "com.paulscode:codecwav:20101023"
+    "com.paulscode:libraryjavasound:20101123"
+    "com.paulscode:librarylwjglopenal:20100824"
+    "com.paulscode:soundsystem:20120107"
+)
+
+# Try Mojang CDN first, fall back to Maven Central
+dl_lib() {
+    local coord="$1"
+    local IFS=':' parts
+    read -r -a parts <<< "${coord}"
+    local artifact="${parts[1]}"
+    local version="${parts[2]}"
+    local fname="${artifact}-${version}.jar"
+    local dest="${LIBS_DIR}/${fname}"
+    if [ -f "${dest}" ]; then return 0; fi
+    local url1; url1=$(maven_url "${coord}")
+    local url2; url2=$(maven_central_url "${coord}")
+    if curl -sSLf --retry 2 "${url1}" -o "${dest}" 2>/dev/null; then
+        echo "[+] ${fname} (Mojang CDN)"
+    elif curl -sSLf --retry 2 "${url2}" -o "${dest}" 2>/dev/null; then
+        echo "[+] ${fname} (Maven Central)"
+    else
+        echo "[!] Could not download ${coord}" >&2
+        rm -f "${dest}"
+        return 1
+    fi
+}
+
+for lib in "${MC189_LIBS[@]}"; do
+    dl_lib "${lib}" || true
+done
+
+# ── Linux natives JAR (LWJGL 2.9.4 + jinput) ────────────────────────────────
+LWJGL_NAT_JAR="${LIBS_DIR}/lwjgl-platform-2.9.4-nightly-20150209-natives-linux.jar"
+LWJGL_NAT_URL="https://libraries.minecraft.net/org/lwjgl/lwjgl/lwjgl-platform/2.9.4-nightly-20150209/lwjgl-platform-2.9.4-nightly-20150209-natives-linux.jar"
+dl "${LWJGL_NAT_URL}" "${LWJGL_NAT_JAR}"
+
+JINPUT_NAT_JAR="${LIBS_DIR}/jinput-platform-2.0.5-natives-linux.jar"
+JINPUT_NAT_URL="https://libraries.minecraft.net/net/java/jinput/jinput-platform/2.0.5/jinput-platform-2.0.5-natives-linux.jar"
+dl "${JINPUT_NAT_URL}" "${JINPUT_NAT_JAR}"
+
+# Extract all .so files from native JARs into the natives directory
+echo "[*] Extracting Linux native .so files..."
+for nat_jar in "${LWJGL_NAT_JAR}" "${JINPUT_NAT_JAR}"; do
+    if [ -f "${nat_jar}" ]; then
+        unzip -oj "${nat_jar}" "*.so" -d "${MC_NATIVES_ROOTFS}" 2>/dev/null || true
+    fi
+done
+
+# Replace legacy glibc libopenal with Alpine's musl openal-soft
+if [ -f "${ROOTFS_DIR}/usr/lib/libopenal.so.1" ]; then
+    cp -f "${ROOTFS_DIR}/usr/lib/libopenal.so.1" "${MC_NATIVES_ROOTFS}/libopenal64.so"
+    cp -f "${ROOTFS_DIR}/usr/lib/libopenal.so.1" "${MC_NATIVES_ROOTFS}/libopenal.so"
+    echo "[+] Overwrote legacy OpenAL with Alpine openal-soft"
 fi
-if [ -f "${LWJGL_UTIL_JAR}" ]; then
-    cp "${LWJGL_UTIL_JAR}" "${ROOTFS_DIR}/opt/minecraft/lwjgl_util.jar"
-    echo "[+] Staged lwjgl_util.jar → /opt/minecraft/"
-fi
+
+# Copy all library JARs into rootfs
+cp -f "${LIBS_DIR}"/*.jar "${MC_LIBS_ROOTFS}/" 2>/dev/null || true
+
+NATIVES_COUNT=$(find "${MC_NATIVES_ROOTFS}" -name '*.so' | wc -l)
+LIBS_COUNT=$(find "${MC_LIBS_ROOTFS}" -name '*.jar' | wc -l)
+echo "[+] Staged ${LIBS_COUNT} library JARs → /opt/minecraft/libs/"
+echo "[+] Staged ${NATIVES_COUNT} native .so files → /opt/minecraft/natives/"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. Stage minecraft.jar
@@ -223,48 +327,34 @@ mkdir -p "${ROOTFS_DIR}/opt/minecraft"
 cp "${MC_JAR_SRC}" "${ROOTFS_DIR}/opt/minecraft/minecraft.jar"
 echo "[+] Staged minecraft.jar → /opt/minecraft/"
 
-if [ -f "${ROOT_DIR}/userland/terrain.png" ]; then
-    cp "${ROOT_DIR}/userland/terrain.png" "${ROOTFS_DIR}/opt/minecraft/terrain.png"
-    echo "[+] Staged terrain.png"
-fi
-
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. Launcher script + desktop entries
 # ─────────────────────────────────────────────────────────────────────────────
 echo ""
 echo "=== [3/4] Writing launcher + desktop entries ==="
 
-# /usr/bin/minecraft
 mkdir -p "${ROOTFS_DIR}/usr/bin"
 cat > "${ROOTFS_DIR}/usr/bin/minecraft" << LAUNCHER_EOF
 #!/bin/sh
-# Minecraft Alpha 1.0 / Release launcher for AvoryOS
+# Minecraft 1.8.9 Launcher for AvoryOS
 
 export DISPLAY="\${DISPLAY:-:0}"
 
-# Software GL (no GPU driver on AvoryOS)
+# Software GL (Max Performance llvmpipe)
 export LIBGL_ALWAYS_SOFTWARE=1
 export GALLIUM_DRIVER=llvmpipe
-export LP_NUM_THREADS="\${LP_NUM_THREADS:-3}"
-export LP_PERF=no_linear
+export LP_NUM_THREADS="${LP_NUM_THREADS:-2}"
+export LP_PERF=no_linear,no_mipmap
 export MESA_GL_VERSION_OVERRIDE=2.1
 export MESA_GLSL_VERSION_OVERRIDE=120
-export LIBGL_DRI3_DISABLE=1
-# Disable Mesa on-disk shader cache to prevent fallocate crash in kernel
+export MESA_NO_DITHER=1
+export vblank_mode=0
 export MESA_SHADER_CACHE_DISABLE=true
 export MESA_GLSL_CACHE_DISABLE=true
-# llvmpipe still honors vblank waits, which caps fps at whatever refresh
-# rate Mesa assumes for a headless/virtual output (often 60). Uncap it.
-export vblank_mode=0
-# Disable glthread on software rasterizers to avoid thread thrashing
-export mesa_glthread="\${MESA_GLTHREAD:-false}"
-# Mesa LLVMpipe performance tweaks
-export MESA_NO_DITHER=1
 
 JAVA_HOME="${JAVA_HOME_GUEST}"
 export PATH="\${JAVA_HOME}/bin:\${PATH}"
-# libjli.so and other JVM internals live in JAVA_HOME/lib — must be on LD_LIBRARY_PATH
-export LD_LIBRARY_PATH="\${JAVA_HOME}/lib:\${JAVA_HOME}/lib/server:/usr/lib:/lib:\${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="/opt/minecraft/natives:/usr/lib:\${JAVA_HOME}/lib:\${JAVA_HOME}/lib/server:\${LD_LIBRARY_PATH:-}"
 
 MC_PRELOAD=""
 [ -f /usr/lib/libjemalloc.so.2 ] && MC_PRELOAD="/usr/lib/libjemalloc.so.2"
@@ -272,43 +362,48 @@ MC_PRELOAD=""
 MC_USER="\${MC_USER:-${MC_USERNAME}}"
 MC_RAM="\${MC_RAM:-512m}"
 MC_HOME="\${HOME}/.minecraft"
-mkdir -p "\${MC_HOME}/saves" "\${MC_HOME}/texturepacks"
-[ -f /opt/minecraft/terrain.png ] && [ ! -f "\${MC_HOME}/terrain.png" ] && cp /opt/minecraft/terrain.png "\${MC_HOME}/terrain.png" 2>/dev/null || true
+mkdir -p "\${MC_HOME}/saves" "\${MC_HOME}/resourcepacks"
 
-# Always enforce high-performance options.txt for software rendering stability
+# Build classpath: minecraft.jar + all libs
+MC_CP="/opt/minecraft/minecraft.jar"
+for jar in /opt/minecraft/libs/*.jar; do
+    MC_CP="\${MC_CP}:\${jar}"
+done
+
+# Write 1.8.9-compatible options.txt (Max FPS Profile)
 cat > "\${MC_HOME}/options.txt" << 'OPT_EOF'
-music:0.0
-sound:0.0
+version:1343
 invertYMouse:false
 mouseSensitivity:0.5
 fov:0.0
 gamma:1.0
-viewDistance:3
+renderDistance:2
 guiScale:0
 particles:2
 bobView:false
 anaglyph3d:false
-advancedOpengl:false
-fpsLimit:0
+clouds:0
+fancyGraphics:true
+ambientocclusion:0
+useVbo:true
+mipmapLevels:0
+entityShadows:false
+fboEnable:false
+showCape:false
 difficulty:1
-fancyGraphics:false
-ao:0
-clouds:false
-skin:Default
-lastServer:
+resourcePacks:[]
+lang:en_US
 chatVisibility:0
 chatColors:true
 chatLinks:false
 chatLinksPrompt:false
 chatOpacity:1.0
-serverTextures:false
 snooperEnabled:false
 fullscreen:false
 enableVsync:false
 hideServerAddress:false
 advancedItemTooltips:false
 pauseOnLostFocus:true
-showCape:false
 touchscreen:false
 overrideWidth:0
 overrideHeight:0
@@ -317,43 +412,48 @@ chatHeightFocused:1.0
 chatHeightUnfocused:0.44366196
 chatScale:1.0
 chatWidth:1.0
+showInventoryAchievementHint:false
+soundCategory_master:1.0
+soundCategory_music:0.5
+soundCategory_record:1.0
+soundCategory_weather:1.0
+soundCategory_block:1.0
+soundCategory_hostile:1.0
+soundCategory_neutral:1.0
+soundCategory_player:1.0
+soundCategory_ambient:1.0
+soundCategory_voice:1.0
 OPT_EOF
 
-echo "[minecraft] Starting Minecraft as '\${MC_USER}' (Heap: \${MC_RAM})..."
+echo "[minecraft] Starting Minecraft 1.8.9 as '\${MC_USER}' (Heap: \${MC_RAM}, Max FPS Profile)..."
 LD_PRELOAD="\${MC_PRELOAD}\${LD_PRELOAD:+:\$LD_PRELOAD}" \
-MALLOC_CONF="background_thread:true,metadata_thp:auto,dirty_decay_ms:5000,muzzy_decay_ms:5000" \
 exec "\${JAVA_HOME}/bin/java" \
+    -server \
     -Xms256m -Xmx"\${MC_RAM}" \
-    -Xss512k \
-    -Djdk.lang.Process.launchMechanism=fork \
-    -Dorg.lwjgl.opengl.Display.allowSoftwareOpenGL=true \
-    -Dsun.java2d.opengl=false \
-    -Dsun.java2d.d3d=false \
-    -Dsun.java2d.noddraw=true \
-    -Dsun.awt.noerasebackground=true \
-    -Dhttp.keepAlive=false \
-    -Dsun.net.client.defaultConnectTimeout=2000 \
-    -Dsun.net.client.defaultReadTimeout=2000 \
     -XX:+TieredCompilation \
-    -XX:CICompilerCount=2 \
-    -XX:Tier4InvocationThreshold=500 \
-    -XX:Tier4MinInvocationThreshold=100 \
-    -XX:Tier4CompileThreshold=1000 \
-    -XX:ReservedCodeCacheSize=64m \
-    -XX:InitialCodeCacheSize=32m \
+    -XX:ReservedCodeCacheSize=48m \
     -XX:+DoEscapeAnalysis \
     -XX:+EliminateLocks \
-    -XX:+UseSerialGC \
-    -XX:+AlwaysPreTouch \
-    -XX:+UnlockDiagnosticVMOptions \
-    -XX:-ImplicitNullChecks \
-    -Xshare:off \
     -XX:-UsePerfData \
+    --add-opens java.base/java.lang=ALL-UNNAMED \
+    --add-opens java.base/java.nio=ALL-UNNAMED \
+    --add-opens java.base/java.lang.reflect=ALL-UNNAMED \
     -Dos.name=Linux \
+    -Dorg.lwjgl.opengl.Display.allowSoftwareOpenGL=true \
+    -DLWJGL_DISABLE_XRANDR=true \
     -Djava.library.path=/opt/minecraft/natives \
-    -Dminecraft.applet.TargetDirectory="\${MC_HOME}" \
-    -cp /opt/minecraft/minecraft.jar:/opt/minecraft/lwjgl.jar:/opt/minecraft/lwjgl_util.jar \
-    net.minecraft.client.Minecraft "\${MC_USER}" ""
+    -Dorg.lwjgl.librarypath=/opt/minecraft/natives \
+    -cp "\${MC_CP}" \
+    net.minecraft.client.main.Main \
+    --username "\${MC_USER}" \
+    --version "1.8.9" \
+    --gameDir "\${MC_HOME}" \
+    --assetsDir "/opt/minecraft/assets" \
+    --assetIndex "1.8" \
+    --uuid "00000000-0000-0000-0000-000000000000" \
+    --accessToken "0" \
+    --userType "legacy" \
+    "\$@"
 LAUNCHER_EOF
 
 chmod +x "${ROOTFS_DIR}/usr/bin/minecraft"
@@ -364,21 +464,21 @@ mkdir -p "${ROOTFS_DIR}/usr/share/applications"
 cat > "${ROOTFS_DIR}/usr/share/applications/minecraft-alpha.desktop" << DESKTOP_EOF
 [Desktop Entry]
 Type=Application
-Name=Minecraft Alpha 1.0
+Name=Minecraft 1.8.9
 GenericName=Block Game
-Comment=Minecraft Alpha 1.0 Java Edition
+Comment=Minecraft 1.8.9 Java Edition
 Exec=minecraft
 Icon=minecraft-alpha
 Terminal=false
 Categories=Game;
-Keywords=minecraft;alpha;blocks;survival;
+Keywords=minecraft;blocks;survival;
 DESKTOP_EOF
-echo "[+] Wrote minecraft-alpha.desktop"
+echo "[+] Wrote minecraft-1.8.9.desktop"
 
 # Openbox menu entry
 OPENBOX_MENU="${ROOTFS_DIR}/etc/xdg/openbox/menu.xml"
 if [ -f "${OPENBOX_MENU}" ] && ! grep -q 'minecraft' "${OPENBOX_MENU}"; then
-    sed -i 's|<separator/>|<item label="Minecraft Alpha 1.0">\n      <action name="Execute"><execute>st -e minecraft</execute></action>\n    </item>\n    <separator/>|' \
+    sed -i 's|<separator/>|<item label="Minecraft 1.8.9">\n      <action name="Execute"><execute>st -e minecraft</execute></action>\n    </item>\n    <separator/>|' \
         "${OPENBOX_MENU}"
     echo "[+] Patched Openbox menu.xml"
 fi

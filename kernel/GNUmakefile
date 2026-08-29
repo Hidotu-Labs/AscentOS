@@ -106,7 +106,7 @@ override LDFLAGS += \
 override SRCFILES := $(shell find -L src cc-runtime/src -type f -not -path 'src/arch/*' 2>/dev/null | LC_ALL=C sort)
 override SRCFILES += $(shell find -L src/arch/$(ARCH) -type f 2>/dev/null | LC_ALL=C sort)
 
-override CFILES := $(filter %.c,$(SRCFILES))
+override CFILES := $(filter-out src/syscalls/vdso.c,$(filter %.c,$(SRCFILES)))
 override ASFILES := $(filter %.S,$(SRCFILES))
 ifeq ($(ARCH),x86_64)
 override NASMFILES := $(filter %.asm,$(SRCFILES))
@@ -121,6 +121,13 @@ override HEADER_DEPS := $(addprefix obj-$(ARCH)/,$(CFILES:.c=.c.d) $(ASFILES:.S=
 all: bin-$(ARCH)/$(OUTPUT)
 
 -include $(HEADER_DEPS)
+
+src/syscalls/vdso.so: src/syscalls/vdso.c src/syscalls/vdso.lds src/syscalls/vdso.version
+	gcc -shared -nostdlib -fPIC -fno-stack-protector -O2 -Wl,-T,src/syscalls/vdso.lds -Wl,-soname=linux-vdso.so.1 -Wl,--version-script=src/syscalls/vdso.version -Wl,--hash-style=both -Wl,-Bsymbolic -Wl,-z,max-page-size=4096 -o $@ $<
+
+obj-$(ARCH)/src/syscalls/vdso_blob.asm.o: src/syscalls/vdso_blob.asm src/syscalls/vdso.so GNUmakefile
+	mkdir -p "$(dir $@)"
+	nasm -I src/syscalls/ $(NASMFLAGS) $< -o $@
 
 bin-$(ARCH)/$(OUTPUT): GNUmakefile linker-scripts/$(ARCH).lds $(OBJ)
 	mkdir -p "$(dir $@)"

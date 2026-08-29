@@ -52,6 +52,9 @@ bool vmm_map_huge_page(uint64_t *pml4, uint64_t virtual_addr,
 // Unmap a virtual page
 void vmm_unmap_page(uint64_t *pml4, uint64_t virtual_addr);
 
+// Returns true if the address is mapped with a huge page (PS bit set on PD/PDPT)
+bool vmm_is_huge_page(uint64_t *pml4, uint64_t virtual_addr);
+
 // Frees empty page tables (PT, PD, PDPT) upwards if they contain no valid
 // entries
 void vmm_free_empty_tables(uint64_t *pml4, uint64_t virtual_addr);
@@ -110,12 +113,13 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
 bool vmm_is_user_addr_range_valid(uint64_t addr, size_t size);
 bool vmm_is_user_addr_range_writable(uint64_t addr, size_t size);
 
-// Maps the signal return trampoline page into a PML4 at the canonical
-// user-space stub address.
+#define VDSO_USER_BASE 0x700000000000ULL
+
 void vmm_map_signal_trampoline(uint64_t *pml4);
 void vmm_init_vsyscall_page(void);
 void vmm_map_vsyscall_page(uint64_t *pml4);
 void vmm_update_vdso_data(void);
+uint64_t vmm_get_vsyscall_page_phys(void);
 
 
 // ---- Internal helpers used across vmm_*.c modules -----------------------

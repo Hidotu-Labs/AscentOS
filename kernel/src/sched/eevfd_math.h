@@ -7,12 +7,12 @@
 #define EEVFD_NICE_0_WEIGHT    1024U
 #define EEVFD_NICE_0_WMULT     4194304U /* 2^22 */
 
-#define EEVFD_BASE_SLICE_NS     4000000ULL  /* 4 ms default scheduling slice (Linux 6.6+ default) */
-#define EEVFD_MIN_SLICE_NS      1000000ULL  /* 1.0 ms minimum slice */
+#define EEVFD_BASE_SLICE_NS     1000000ULL  /* 1.0 ms default scheduling slice for ultra-low latency rendering */
+#define EEVFD_MIN_SLICE_NS       500000ULL  /* 0.5 ms minimum slice */
 #define EEVFD_MAX_SLICE_NS     20000000ULL  /* 20 ms maximum slice */
-#define EEVFD_LATENCY_SLICE_NS  1000000ULL  /* 1.0 ms for interactive/low-latency */
-#define EEVFD_MIN_GRANULARITY_NS    1000000ULL  /* 1.0 ms minimum execution floor */
-#define EEVFD_WAKEUP_GRANULARITY_NS 1000000ULL  /* 1.0 ms wakeup preemption threshold */
+#define EEVFD_LATENCY_SLICE_NS   500000ULL  /* 0.5 ms for interactive/low-latency */
+#define EEVFD_MIN_GRANULARITY_NS    500000ULL  /* 0.5 ms minimum execution floor */
+#define EEVFD_WAKEUP_GRANULARITY_NS 500000ULL  /* 0.5 ms wakeup preemption threshold */
 
 /* Nice range is [-20, 19], mapped to index [0, 39] */
 #define NICE_TO_INDEX(nice) ((int)((nice) + 20))

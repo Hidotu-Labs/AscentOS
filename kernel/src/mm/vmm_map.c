@@ -98,7 +98,7 @@ static bool vmm_map_page_nolock(uint64_t *pml4, uint64_t virtual_addr,
   size_t pd_index   = (virtual_addr >> 21) & 0x1FF;
   size_t pt_index   = (virtual_addr >> 12) & 0x1FF;
 
-  uint64_t *pml4_virt      = (uint64_t *)PHYS_TO_VIRT((uint64_t)pml4);
+  uint64_t *pml4_virt      = (uint64_t *)PHYS_TO_VIRT((uint64_t)pml4 & PAGE_MASK);
   uint64_t  propagate_flags = flags & (PAGE_FLAG_USER | PAGE_FLAG_RW);
 
   uint64_t *pdpt_virt = get_next_level(pml4_virt, pml4_index, true, 4);
@@ -144,7 +144,7 @@ static bool vmm_page_present_nolock(uint64_t *pml4, uint64_t virtual_addr) {
   size_t pd_index = (virtual_addr >> 21) & 0x1FF;
   size_t pt_index = (virtual_addr >> 12) & 0x1FF;
 
-  uint64_t *pml4_virt = (uint64_t *)PHYS_TO_VIRT((uint64_t)pml4);
+  uint64_t *pml4_virt = (uint64_t *)PHYS_TO_VIRT((uint64_t)pml4 & PAGE_MASK);
   uint64_t *pdpt = get_next_level(pml4_virt, pml4_index, false, 4);
   if (!pdpt) return false;
   if (pdpt[pdpt_index] & PAGE_FLAG_PS) return true;
@@ -181,7 +181,7 @@ bool vmm_map_huge_page(uint64_t *pml4, uint64_t virtual_addr,
   size_t pdpt_index = (virtual_addr >> 30) & 0x1FF;
   size_t pd_index   = (virtual_addr >> 21) & 0x1FF;
 
-  uint64_t *pml4_virt      = (uint64_t *)PHYS_TO_VIRT((uint64_t)pml4);
+  uint64_t *pml4_virt      = (uint64_t *)PHYS_TO_VIRT((uint64_t)pml4 & PAGE_MASK);
   uint64_t  propagate_flags = flags & (PAGE_FLAG_USER | PAGE_FLAG_RW);
 
   uint64_t *pdpt_virt = get_next_level(pml4_virt, pml4_index, true, 4);
@@ -250,7 +250,7 @@ void vmm_free_empty_tables(uint64_t *pml4, uint64_t virtual_addr) {
   size_t pdpt_index = (virtual_addr >> 30) & 0x1FF;
   size_t pd_index   = (virtual_addr >> 21) & 0x1FF;
 
-  uint64_t *pml4_virt = (uint64_t *)PHYS_TO_VIRT((uint64_t)pml4);
+  uint64_t *pml4_virt = (uint64_t *)PHYS_TO_VIRT((uint64_t)pml4 & PAGE_MASK);
   if (!(pml4_virt[pml4_index] & PAGE_FLAG_PRESENT))
     return;
 
@@ -320,7 +320,7 @@ void vmm_unmap_page(uint64_t *pml4, uint64_t virtual_addr) {
   size_t pd_index   = (virtual_addr >> 21) & 0x1FF;
   size_t pt_index   = (virtual_addr >> 12) & 0x1FF;
 
-  uint64_t *pml4_virt = (uint64_t *)PHYS_TO_VIRT((uint64_t)pml4);
+  uint64_t *pml4_virt = (uint64_t *)PHYS_TO_VIRT((uint64_t)pml4 & PAGE_MASK);
 
   if (!(pml4_virt[pml4_index] & PAGE_FLAG_PRESENT))
     goto unlock;
@@ -370,7 +370,7 @@ uint64_t vmm_virt_to_phys(uint64_t *pml4_phys, uint64_t virtual_addr) {
   size_t pd_index   = (virtual_addr >> 21) & 0x1FF;
   size_t pt_index   = (virtual_addr >> 12) & 0x1FF;
 
-  uint64_t *pml4_virt = (uint64_t *)PHYS_TO_VIRT((uint64_t)pml4_phys);
+  uint64_t *pml4_virt = (uint64_t *)PHYS_TO_VIRT((uint64_t)pml4_phys & PAGE_MASK);
   uint64_t  entry;
 
   entry = pml4_virt[pml4_index];
@@ -397,3 +397,31 @@ uint64_t vmm_virt_to_phys(uint64_t *pml4_phys, uint64_t virtual_addr) {
     return 0;
   return (entry & PAGE_MASK) | (virtual_addr & 0xFFFULL);
 }
+
+bool vmm_is_huge_page(uint64_t *pml4_phys, uint64_t virtual_addr) {
+  if (!pml4_phys)
+    return false;
+
+  size_t pml4_index = (virtual_addr >> 39) & 0x1FF;
+  size_t pdpt_index = (virtual_addr >> 30) & 0x1FF;
+  size_t pd_index   = (virtual_addr >> 21) & 0x1FF;
+
+  uint64_t *pml4_virt = (uint64_t *)PHYS_TO_VIRT((uint64_t)pml4_phys & PAGE_MASK);
+  uint64_t  entry = pml4_virt[pml4_index];
+  if (!(entry & PAGE_FLAG_PRESENT))
+    return false;
+
+  uint64_t *pdpt_virt = (uint64_t *)PHYS_TO_VIRT(entry & PAGE_MASK);
+  entry = pdpt_virt[pdpt_index];
+  if (!(entry & PAGE_FLAG_PRESENT))
+    return false;
+  if (entry & PAGE_FLAG_PS)
+    return true; // 1 GB huge page
+
+  uint64_t *pd_virt = (uint64_t *)PHYS_TO_VIRT(entry & PAGE_MASK);
+  entry = pd_virt[pd_index];
+  if (!(entry & PAGE_FLAG_PRESENT))
+    return false;
+  return (entry & PAGE_FLAG_PS) != 0; // 2 MB huge page
+}
+

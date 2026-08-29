@@ -13,6 +13,7 @@
 #include "cpu/pic.h"
 #include "cpu/tsc.h"
 #include "drivers/audio/ac97.h"
+#include "drivers/audio/alsa_emu.h"
 #include "drivers/audio/audio_dsp.h"
 #include "drivers/audio/hda.h"
 #include "drivers/audio/sb16.h"
@@ -547,6 +548,7 @@ mount_fail:
   ac97_register_vfs();
   hda_register_vfs();
   audio_dsp_register_vfs();
+  alsa_emu_register_vfs();
 
   net_core_init();
   rtl8139_phase1_init();

@@ -143,20 +143,20 @@ void futex_remove_thread_waiters(struct thread *thread) {
 /* Build a futex identity. Process-private futexes are only meaningful within
  * one mm, so (mm, uaddr) is sufficient and avoids vmm_virt_to_phys() on every
  * Mesa/LLVM worker wait and wake. Shared futexes retain physical identities. */
-static int futex_get_key(uint32_t *uaddr, bool private,
-                         struct futex_key *key) {
+static inline int futex_get_key(uint32_t *uaddr, bool private,
+                                struct futex_key *key) {
   struct thread *t = sched_get_current();
-  if (!t || !key)
+  if (__builtin_expect(!t || !key, 0))
     return -EFAULT;
 
   uint64_t vaddr = (uint64_t)uaddr;
-  if ((vaddr & (sizeof(uint32_t) - 1)) != 0)
+  if (__builtin_expect((vaddr & (sizeof(uint32_t) - 1)) != 0, 0))
     return -EINVAL;
-  if (!vmm_is_user_addr_range_valid(vaddr, sizeof(uint32_t)))
+  if (__builtin_expect(!vmm_is_user_addr_range_valid(vaddr, sizeof(uint32_t)), 0))
     return -EFAULT;
 
-  if (private) {
-    if (!t->mm)
+  if (__builtin_expect(private, 1)) {
+    if (__builtin_expect(!t->mm, 0))
       return -EFAULT;
     key->space = (uint64_t)t->mm;
     key->address = vaddr;
@@ -287,8 +287,13 @@ static uint64_t futex_wait(uint32_t *uaddr, uint32_t val,
   return 0;
 }
 
-static uint64_t futex_wake_key(struct futex_key key, uint32_t val, uint32_t bitset) {
+static inline uint64_t futex_wake_key(struct futex_key key, uint32_t val, uint32_t bitset) {
   uint32_t bucket = futex_hash_key(key);
+
+  // Fast path: if no waiters exist in this hash bucket, skip spinlock acquisition
+  if (__builtin_expect(!futex_hash[bucket].head, 1))
+    return 0;
+
   uint32_t woken = 0;
   spinlock_acquire(&futex_hash[bucket].lock);
   struct futex_waiter **pp = &futex_hash[bucket].head;

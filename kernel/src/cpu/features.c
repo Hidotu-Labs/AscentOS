@@ -36,6 +36,17 @@ bool cpu_has_invpcid(void) {
 }
 
 
+bool cpu_has_fsgsbase(void) {
+  uint32_t max_leaf = 0, ebx = 0, ecx = 0, edx = 0;
+  cpuid(0, 0, &max_leaf, &ebx, &ecx, &edx);
+  if (max_leaf < 7)
+    return false;
+
+  uint32_t eax = 0;
+  cpuid(7, 0, &eax, &ebx, &ecx, &edx);
+  return (ebx & (1U << 0)) != 0; // CPUID.(EAX=07H,ECX=0H):EBX.FSGSBASE[bit 0]
+}
+
 bool cpu_has_xsave(void) {
   uint32_t eax = 0, ebx = 0, ecx = 0, edx = 0;
   cpuid(1, 0, &eax, &ebx, &ecx, &edx);
@@ -67,7 +78,7 @@ static void cpu_pat_init(void) {
 
 bool cpu_has_xsave_flag = false;
 
-// Enable SSE/SSE2, PCID, and AVX/XSAVE for long mode execution.
+// Enable SSE/SSE2, PCID, FSGSBASE, and AVX/XSAVE for long mode execution.
 void cpu_features_init(void) {
   uint64_t cr0;
   __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
@@ -79,6 +90,11 @@ void cpu_features_init(void) {
   __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
   cr4 |= (1ULL << 9);  // OSFXSR — allow FXSAVE/FXRSTOR + SSE in user mode
   cr4 |= (1ULL << 10); // OSXMMEXCPT — #XF for unmasked SIMD exceptions
+
+  // Enable FSGSBASE (wrfsbase / rdfsbase) if supported by the CPU
+  if (cpu_has_fsgsbase()) {
+    cr4 |= (1ULL << 16); // CR4.FSGSBASE (bit 16)
+  }
 
   // Enable PCID (Process-Context Identifiers) if supported by the CPU
   if (cpu_has_pcid()) {

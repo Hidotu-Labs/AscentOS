@@ -637,11 +637,17 @@ void vmm_init_vsyscall_page(void) {
 }
 
 
+uint64_t vmm_get_vsyscall_page_phys(void) {
+  return vsyscall_page_phys;
+}
+
 void vmm_map_vsyscall_page(uint64_t *pml4) {
   if (vsyscall_page_phys == 0)
     return;
-  // Map as user-accessible, readable, executable (no RW, no NX)
+  // Map legacy vsyscall page (0xFFFFFFFFFF600000) for HotSpot getcpu stub
   vmm_map_page(pml4, VSYSCALL_BASE, vsyscall_page_phys, PAGE_FLAG_USER);
+  // Map standard ELF vDSO page (0x700000000000) for musl/glibc dynamic linker
+  vmm_map_page(pml4, VDSO_USER_BASE, vsyscall_page_phys, PAGE_FLAG_USER);
 }
 
 

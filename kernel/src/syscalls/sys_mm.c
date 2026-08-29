@@ -96,7 +96,7 @@ static void teardown_range(uint64_t *pml4, struct thread *t, uint64_t base,
     // all 512 pages via pmm_free_pages in one shot. Skip the remaining 511
     // sub-page VAs inside this huge mapping to avoid redundant work.
 #define HUGE_2MB (2ULL * 1024 * 1024)
-    if ((va & (HUGE_2MB - 1)) == 0 && (phys & (HUGE_2MB - 1)) == 0) {
+    if ((va & (HUGE_2MB - 1)) == 0 && vmm_is_huge_page(pml4, va)) {
       // 2 MB PS-bit huge page. vmm_unmap_page clears the PDE and frees all
       // 512 constituent frames via pmm_free_pages in one shot. Skip forward
       // past the remaining 511 sub-page VAs inside this huge mapping.

@@ -1,133 +1,132 @@
-#ifndef DRIVERS_AUDIO_HDA_H
-#define DRIVERS_AUDIO_HDA_H
+#ifndef AUDIO_HDA_H
+#define AUDIO_HDA_H
 
-#include "../../fs/vfs.h"
 #include <stdbool.h>
 #include <stdint.h>
+#include "../../fs/vfs.h"
 
-// Register Offsets (HDA Spec 1.0a, Section 3.3)
-#define HDA_GCAP 0x00       // Global Capabilities (2 bytes)
-#define HDA_VMIN 0x02       // Minor Version (1 byte)
-#define HDA_VMAJ 0x03       // Major Version (1 byte)
-#define HDA_OUTPAY 0x04     // Output Payload Capability (2 bytes)
-#define HDA_INPAY 0x06      // Input Payload Capability (2 bytes)
-#define HDA_GCTL 0x08       // Global Control (4 bytes)
-#define HDA_WAKEEN 0x0C     // Wake Enable (2 bytes)
-#define HDA_STATESTS 0x0E   // State Status (2 bytes)
-#define HDA_GSTS 0x10       // Global Status (2 bytes)
-#define HDA_OUTSTRMPAY 0x18 // Output Stream Payload Cap (2 bytes)
-#define HDA_INSTRMPAY 0x1A  // Input Stream Payload Cap (2 bytes)
-#define HDA_INTCTL 0x20     // Interrupt Control (4 bytes)
-#define HDA_INTSTS 0x24     // Interrupt Status (4 bytes)
-#define HDA_WALCLK 0x30     // Wall Clock Counter (4 bytes)
-#define HDA_SSYNC 0x38      // Stream Synchronization (4 bytes)
+// Intel High Definition Audio (HDA) Controller Registers (BAR0 MMIO)
+#define HDA_REG_GCAP        0x00 // Global Capabilities (16-bit)
+#define HDA_REG_VMIN        0x02 // Minor Version (8-bit)
+#define HDA_REG_VMAJ        0x03 // Major Version (8-bit)
+#define HDA_REG_OUTPAY      0x04 // Output Payload Capability (16-bit)
+#define HDA_REG_INPAY       0x06 // Input Payload Capability (16-bit)
+#define HDA_REG_GCTL        0x08 // Global Control (32-bit)
+#define HDA_REG_WAKEEN      0x0C // Wake Enable (16-bit)
+#define HDA_REG_STATESTS    0x0E // State Change Status (16-bit)
+#define HDA_REG_GSTS        0x10 // Global Status (16-bit)
+#define HDA_REG_INTCTL      0x20 // Interrupt Control (32-bit)
+#define HDA_REG_INTSTS      0x24 // Interrupt Status (32-bit)
+#define HDA_REG_WALCLK      0x30 // Wall Clock Counter (32-bit)
+#define HDA_REG_SSYNC       0x38 // Stream Synchronization (32-bit)
 
-// CORB Registers
-#define HDA_CORBLBASE 0x40 // CORB Lower Base Address (4 bytes)
-#define HDA_CORBUBASE 0x44 // CORB Upper Base Address (4 bytes)
-#define HDA_CORBWP 0x48    // CORB Write Pointer (2 bytes)
-#define HDA_CORBRP 0x4A    // CORB Read Pointer (2 bytes)
-#define HDA_CORBCTL 0x4C   // CORB Control (1 byte)
-#define HDA_CORBSTS 0x4D   // CORB Status (1 byte)
-#define HDA_CORBSIZE 0x4E  // CORB Size (1 byte)
+// Immediate Command Registers
+#define HDA_REG_IC          0x60 // Immediate Command Output (32-bit)
+#define HDA_REG_IR          0x64 // Immediate Response Input (32-bit)
+#define HDA_REG_ICS         0x68 // Immediate Command Status (16-bit)
 
-// RIRB Registers
-#define HDA_RIRBLBASE 0x50 // RIRB Lower Base Address (4 bytes)
-#define HDA_RIRBUBASE 0x54 // RIRB Upper Base Address (4 bytes)
-#define HDA_RIRBWP 0x58    // RIRB Write Pointer (2 bytes)
-#define HDA_RINTCNT 0x5A   // Response Interrupt Count (2 bytes)
-#define HDA_RIRBCTL 0x5C   // RIRB Control (1 byte)
-#define HDA_RIRBSTS 0x5D   // RIRB Status (1 byte)
-#define HDA_RIRBSIZE 0x5E  // RIRB Size (1 byte)
+// Global Control Register Bits
+#define HDA_GCTL_CRST       (1 << 0) // Controller Reset (1 = Operational, 0 = Reset)
 
-// Immediate Command Registers (Fallback if CORB/RIRB not used)
-#define HDA_ICO 0x60 // Immediate Command Output (4 bytes)
-#define HDA_IRI 0x64 // Immediate Response Input (4 bytes)
-#define HDA_ICS 0x68 // Immediate Command Status (2 bytes)
+// Immediate Command Status Bits
+#define HDA_ICS_ICB         (1 << 0) // Immediate Command Busy
+#define HDA_ICS_IRV         (1 << 1) // Immediate Result Valid
 
-// DPLBASE (DMA Position Lower Base)
-#define HDA_DPLBASE 0x70
-#define HDA_DPUBASE 0x74
+// Interrupt Control Bits
+#define HDA_INTCTL_GIE      (1U << 31) // Global Interrupt Enable
+#define HDA_INTCTL_CIE      (1U << 30) // Controller Interrupt Enable
+#define HDA_INTCTL_SIE(s)   (1U << (s)) // Stream Interrupt Enable
 
-// CORB/RIRB Constants
-#define HDA_CORB_ENTRIES 256
-#define HDA_RIRB_ENTRIES 256
+// Stream Descriptor Registers (Offset: 0x80 + stream_index * 0x20)
+#define HDA_SD_BASE         0x80
+#define HDA_SD_SIZE         0x20
 
-// Parameters
-#define HDA_PARAM_VENDOR_ID 0x00
-#define HDA_PARAM_REVISION_ID 0x02
-#define HDA_PARAM_NODE_COUNT 0x04
-#define HDA_PARAM_FG_TYPE 0x05
-#define HDA_PARAM_CAPS 0x09
-#define HDA_PARAM_WIDGET_CAPS 0x09
-#define HDA_PARAM_BEEP_CAPS 0x0A
+#define HDA_SD_CTL          0x00 // Stream Control (24-bit / 32-bit)
+#define HDA_SD_STS          0x03 // Stream Status (8-bit)
+#define HDA_SD_LPIB         0x04 // Link Position in Buffer (32-bit)
+#define HDA_SD_CBL          0x08 // Cyclic Buffer Length (32-bit)
+#define HDA_SD_LVI          0x0C // Last Valid Index (16-bit)
+#define HDA_SD_FIFOS        0x0E // FIFO Size (16-bit)
+#define HDA_SD_FMT          0x12 // Stream Format (16-bit)
+#define HDA_SD_BDLPL        0x18 // Buffer Descriptor List Pointer Lower (32-bit)
+#define HDA_SD_BDLPU        0x1C // Buffer Descriptor List Pointer Upper (32-bit)
 
-// Widget Types
-#define HDA_WIDGET_AUDIO_OUT 0x0
-#define HDA_WIDGET_AUDIO_IN 0x1
-#define HDA_WIDGET_AUDIO_MIX 0x2
-#define HDA_WIDGET_AUDIO_SEL 0x3
-#define HDA_WIDGET_PIN_COMPLEX 0x4
-#define HDA_WIDGET_POWER 0x5
-#define HDA_WIDGET_VOL_KNOB 0x6
-#define HDA_WIDGET_BEEP_GEN 0x7
-#define HDA_WIDGET_VENDOR 0xF
+// Stream Control Register Bits
+#define HDA_SD_CTL_SRST     (1 << 0) // Stream Reset
+#define HDA_SD_CTL_RUN      (1 << 1) // Stream Run (DMA Enable)
+#define HDA_SD_CTL_IOCE     (1 << 2) // Interrupt On Completion Enable
+#define HDA_SD_CTL_FEIE     (1 << 3) // FIFO Error Interrupt Enable
+#define HDA_SD_CTL_DEIE     (1 << 4) // Descriptor Error Interrupt Enable
+#define HDA_SD_CTL_STRIPE(s) (((s) & 0x3) << 16)
+#define HDA_SD_CTL_STREAM(s) (((s) & 0xF) << 20) // Stream ID Tag (1-15)
 
-// Verbs
-#define HDA_VERB_GET_PARAM 0xF00
-#define HDA_VERB_GET_CONN_LIST 0xF02
-#define HDA_VERB_SET_BEEP 0x70A
-#define HDA_VERB_SET_FORMAT 0x200
-#define HDA_VERB_SET_AMP_MUTE 0x300
-#define HDA_VERB_SET_PIN_CTL 0x707
-#define HDA_VERB_GET_PIN_CTL 0xF07
-#define HDA_VERB_SET_STREAM_ID 0x706
+// Stream Status Register Bits
+#define HDA_SD_STS_BCIS     (1 << 2) // Buffer Completion Interrupt Status
+#define HDA_SD_STS_FIFOE    (1 << 3) // FIFO Error
+#define HDA_SD_STS_DESE     (1 << 4) // Descriptor Error
 
-// Stream Descriptor Registers (Start at 0x80, each is 0x20 bytes)
-#define HDA_SD_BASE 0x80
-#define HDA_SD_CTL 0x00   // Control (3 bytes or 4 bytes?)
-#define HDA_SD_CTL 0x00   // Control (3 bytes)
-#define HDA_SD_STS 0x03   // Status
-#define HDA_SD_LPIB 0x04  // Link Position In Buffer
-#define HDA_SD_CBL 0x08   // Cyclic Buffer Length
-#define HDA_SD_LVI 0x0C   // Last Valid Index
-#define HDA_SD_FIFOS 0x10 // FIFO Size
-#define HDA_SD_FMT 0x12   // Format
-#define HDA_SD_BDPL 0x18  // BDL Lower Address
-#define HDA_SD_BDPU 0x1C  // BDL Upper Address
+// Audio Formats (SD_FMT)
+// 48 kHz, 16-bit, 2 channels (stereo) = (0 << 14) | (0 << 11) | (0 << 8) | (1 << 4) | (1 << 0) = 0x0011
+#define HDA_FMT_48KHZ_16BIT_STEREO 0x0011
+// 44.1 kHz, 16-bit, 2 channels (stereo) = (1 << 14) | (0 << 11) | (0 << 8) | (1 << 4) | (1 << 0) = 0x4011
+#define HDA_FMT_44KHZ_16BIT_STEREO 0x4011
 
-// SD_CTL bits
-#define HDA_SD_CTL_SRST (1 << 0)
-#define HDA_SD_CTL_RUN (1 << 1)
-#define HDA_SD_CTL_IOCE (1 << 2) // Interrupt on Completion Enable
-
-// BDL Entry (16 bytes)
+// Buffer Descriptor List (BDL) Entry
 struct hda_bdl_entry {
-  uint32_t addr_low;
-  uint32_t addr_high;
-  uint32_t length;
-  uint32_t flags; // Bit 0: IOC
+    uint32_t addr_low;   // Lower 32 bits of physical address
+    uint32_t addr_high;  // Upper 32 bits of physical address
+    uint32_t length;     // Length of buffer in bytes
+    uint32_t flags;      // Bit 0: IOC (Interrupt On Completion)
 } __attribute__((packed));
 
-// Register Bits
-#define HDA_GCTL_CRST (1 << 0) // Controller Reset
+#define HDA_BDL_FLAG_IOC    (1 << 0)
 
-#define HDA_CORBCTL_RUN (1 << 1)
-#define HDA_RIRBCTL_RUN (1 << 1)
+// Codec Verbs & Parameters
+#define HDA_VERB_GET_PARAM             0xF00
+#define HDA_VERB_SET_CONV_STREAM_CHAN  0x706
+#define HDA_VERB_SET_PIN_WIDGET_CTRL   0x707
+#define HDA_VERB_SET_UNSOLICITED_ENABLE 0x708
+#define HDA_VERB_SET_EAPD_BTLENABLE    0x70C
+#define HDA_VERB_SET_POWER_STATE       0x705
+#define HDA_VERB_SET_AMP_GAIN_MUTE     0x300
+#define HDA_VERB_SET_CONV_FMT          0x200
+#define HDA_VERB_GET_CONFIG_DEFAULT    0xF1C
+#define HDA_VERB_SET_CONNECT_SEL       0x701
 
-// Driver Interface
+// Parameter IDs
+#define HDA_PARAM_VENDOR_ID            0x00
+#define HDA_PARAM_REVISION_ID          0x02
+#define HDA_PARAM_SUB_NODE_COUNT       0x04
+#define HDA_PARAM_FUNC_GROUP_TYPE      0x05
+#define HDA_PARAM_AUDIO_WIDGET_CAP     0x09
+#define HDA_PARAM_PCM_SIZE_RATE        0x0A
+#define HDA_PARAM_STREAM_FORMATS       0x0B
+#define HDA_PARAM_PIN_CAP              0x0C
+#define HDA_PARAM_INPUT_AMP_CAP        0x0D
+#define HDA_PARAM_OUTPUT_AMP_CAP       0x12
+
+// Widget Types
+#define HDA_WIDGET_AUDIO_OUTPUT        0x0
+#define HDA_WIDGET_AUDIO_INPUT         0x1
+#define HDA_WIDGET_AUDIO_MIXER         0x2
+#define HDA_WIDGET_AUDIO_SELECTOR      0x3
+#define HDA_WIDGET_PIN_COMPLEX         0x4
+#define HDA_WIDGET_POWER_WIDGET        0x5
+#define HDA_WIDGET_VOLUME_KNOB         0x6
+#define HDA_WIDGET_BEEP_GENERATOR      0x7
+
+// Public Driver API
 void hda_init(void);
 void hda_register_vfs(void);
-void hda_phase1_test(void);
-void hda_phase2_test(void);
-void hda_phase3_test(void);
-void hda_beep_test(void);
-void hda_phase4_test(void);
+bool hda_is_present(void);
 
-// Send a verb and get response
-uint32_t hda_send_verb(uint8_t codec, uint8_t node, uint32_t verb,
-                       uint16_t payload);
-uint32_t hda_send_verb_immediate(uint8_t codec, uint8_t node, uint32_t verb,
-                                 uint16_t payload);
+// Audio playback routines
+uint32_t hda_write_pcm(const void *buffer, uint32_t bytes, uint32_t rate, uint8_t channels, uint8_t bits);
+int hda_ioctl_handler(uint32_t request, uint64_t arg);
+int hda_poll_handler(int events);
+uint32_t hda_get_ring_count(void);
+uint64_t hda_get_played_bytes(void);
+void *hda_get_wait_queue(void);
+void hda_reset_stream(void);
 
-#endif
+#endif // AUDIO_HDA_H

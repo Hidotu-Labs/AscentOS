@@ -47,6 +47,8 @@ static volatile uint32_t ring_head = 0;
 static volatile uint32_t ring_tail = 0;
 static volatile uint32_t ring_count = 0;
 static volatile bool ac97_is_playing = false;
+static volatile uint64_t total_played_bytes = 0;
+static volatile uint32_t total_played_blocks = 0;
 
 // Register Access
 
@@ -135,6 +137,8 @@ static void ac97_pump_audio(void) {
       ring_tail = rem;
     }
     ring_count -= chunk;
+    total_played_bytes += chunk;
+    total_played_blocks = (uint32_t)(total_played_bytes / AC97_BUFFER_SIZE);
 
     // Update BDL entry length (AC97 length is in samples, 1 sample = 2 bytes)
     ac97_bdl[next].length = (uint16_t)(chunk / 2);
@@ -341,13 +345,42 @@ int ac97_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
   {
     hal_irq_disable();
     ring_head = ring_tail = ring_count = 0;
+    total_played_bytes = 0;
+    total_played_blocks = 0;
     ac97_is_playing = false;
     ac97_nabm_write8(AC97_PO_CR, 0);
     hal_irq_enable();
     return 0;
   }
   case 0xC004500A: // SNDCTL_DSP_SETFRAGMENT
-    return 0; // Dummy success
+  case 0x5001: // SNDCTL_DSP_SYNC
+  case 0x5008: // SNDCTL_DSP_POST
+  case 0x500B: // SNDCTL_DSP_NONBLOCK (legacy)
+  case 0x500E: // SNDCTL_DSP_NONBLOCK
+  case 0xC0045009: // SNDCTL_DSP_SUBDIVIDE
+    return 0; // Success
+  case 0x8004500B: // SNDCTL_DSP_GETFMTS
+  {
+    int *mask = (int *)arg;
+    if (!mask) return -14;
+    *mask = AFMT_S16_LE | AFMT_U8;
+    return 0;
+  }
+  case 0x8004500F: // SNDCTL_DSP_GETCAPS
+  {
+    int *caps = (int *)arg;
+    if (!caps) return -14;
+    *caps = 0x00001000 | 0x00000100 | 0x00000200 | 0x00020000 | 0x00010000; // TRIGGER | DUPLEX | REALTIME | OUTPUT | INPUT
+    return 0;
+  }
+  case 0x80045004: // SOUND_PCM_READ_BLKSIZE
+  case 0xC0045004: // SNDCTL_DSP_GETBLKSIZE
+  {
+    int *blksize = (int *)arg;
+    if (!blksize) return -14;
+    *blksize = AC97_BUFFER_SIZE;
+    return 0;
+  }
   case 0x8010500C: // SNDCTL_DSP_GETOSPACE
   {
     struct {
@@ -361,6 +394,89 @@ int ac97_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     info->fragstotal = AC97_RING_SIZE / AC97_BUFFER_SIZE;
     info->bytes = AC97_RING_SIZE - ring_count;
     info->fragments = info->bytes / info->fragsize;
+    return 0;
+  }
+  case 0x8010500D: // SNDCTL_DSP_GETISPACE
+  {
+    struct {
+      int fragments;
+      int fragstotal;
+      int fragsize;
+      int bytes;
+    } *info = (void *)arg;
+    if (!info) return -14;
+    info->fragsize = AC97_BUFFER_SIZE;
+    info->fragstotal = AC97_RING_SIZE / AC97_BUFFER_SIZE;
+    info->bytes = 0;
+    info->fragments = 0;
+    return 0;
+  }
+  case 0x800C5012: // SNDCTL_DSP_GETOPTR
+  case 0x80105012:
+  case 0x80045012:
+  case 0x00005012:
+  case 0x800C5007:
+  case 0x80045007:
+  {
+    struct {
+      int bytes;
+      int blocks;
+      int ptr;
+    } *info = (void *)arg;
+    if (!info) return -14;
+    hal_irq_disable();
+    info->bytes = (int)(total_played_bytes & 0x7FFFFFFF);
+    info->blocks = (int)(total_played_blocks & 0x7FFFFFFF);
+    info->ptr = (int)ring_tail;
+    hal_irq_enable();
+    return 0;
+  }
+  case 0x800C5011: // SNDCTL_DSP_GETIPTR
+  case 0x80105011:
+  case 0x80045011:
+  case 0x00005011:
+  {
+    struct {
+      int bytes;
+      int blocks;
+      int ptr;
+    } *info = (void *)arg;
+    if (!info) return -14;
+    hal_irq_disable();
+    info->bytes = (int)(total_played_bytes & 0x7FFFFFFF);
+    info->blocks = (int)(total_played_blocks & 0x7FFFFFFF);
+    info->ptr = (int)ring_tail;
+    hal_irq_enable();
+    return 0;
+  }
+  case 0x40045010: // SNDCTL_DSP_SETTRIGGER
+  case 0xC0045010:
+  case 0x00005010:
+  {
+    int *trig = (int *)arg;
+    if (!trig) return -14;
+    hal_irq_disable();
+    if (*trig & 0x02) { // PCM_ENABLE_OUTPUT
+      if (!ac97_is_playing) {
+        ac97_pump_audio();
+        ac97_nabm_write8(AC97_PO_CR, AC97_CR_RPBM | AC97_CR_IOCE | AC97_CR_LVBIE);
+      }
+    } else if (*trig == 0) {
+      if (ac97_is_playing) {
+        ac97_nabm_write8(AC97_PO_CR, 0);
+        ac97_is_playing = false;
+      }
+    }
+    hal_irq_enable();
+    return 0;
+  }
+  case 0x80045010: // SNDCTL_DSP_GETTRIGGER
+  {
+    int *trig = (int *)arg;
+    if (!trig) return -14;
+    hal_irq_disable();
+    *trig = ac97_is_playing ? 0x02 : 0x00;
+    hal_irq_enable();
     return 0;
   }
   case SNDCTL_DSP_SPEED: {

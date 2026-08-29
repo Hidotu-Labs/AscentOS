@@ -27,13 +27,18 @@ static uint64_t *clone_table(uint64_t *src_table_phys, int level, size_t start,
       continue; // skip kernel / Limine mappings
 
     if (level == 1) {
+      uint64_t phys = src_virt[i] & PAGE_MASK;
+      if (phys == vmm_get_vsyscall_page_phys()) {
+        new_virt[i] = src_virt[i];
+        continue;
+      }
       // Leaf: allocate a fresh page and copy content.
       void *new_page_phys = pmm_alloc();
       if (!new_page_phys)
         return NULL;
 
       uint64_t *dst64 = (uint64_t *)PHYS_TO_VIRT((uint64_t)new_page_phys);
-      uint64_t *src64 = (uint64_t *)PHYS_TO_VIRT(src_virt[i] & PAGE_MASK);
+      uint64_t *src64 = (uint64_t *)PHYS_TO_VIRT(phys);
       for (size_t w = 0; w < 512; w++)
         dst64[w] = src64[w];
 
@@ -83,13 +88,13 @@ static uint64_t *clone_table_vma(uint64_t *src_table_phys, int level,
 
     if (level == 1) {
       uint64_t page_vaddr = base_addr | (i << 12);
+      uint64_t phys = src_virt[i] & PAGE_MASK;
 
-      if (is_shared_vma(vmas, page_vaddr)) {
-        // Shared: alias the physical frame.
+      if (phys == vmm_get_vsyscall_page_phys() || is_shared_vma(vmas, page_vaddr)) {
+        // Shared/vDSO: alias the physical frame.
         new_virt[i] = src_virt[i];
       } else {
         // Private: CoW — mark both sides read-only and bump the refcount.
-        uint64_t phys = src_virt[i] & PAGE_MASK;
         if (pmm_is_managed(phys)) {
           if (src_virt[i] & PAGE_FLAG_RW) {
             src_virt[i] &= ~PAGE_FLAG_RW;

@@ -500,6 +500,7 @@ void syscall_init(void) {
   syscall_register_epoll();
   syscall_register_poll();
   syscall_register_shm();
+  syscall_register_sem();
   syscall_register_futex();
   syscall_register_aio();
 

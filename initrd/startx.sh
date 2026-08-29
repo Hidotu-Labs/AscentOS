@@ -69,8 +69,7 @@ if command -v dbus-daemon >/dev/null 2>&1 && [ ! -S /run/dbus/system_bus_socket 
     # The bus can bind its socket and then abort during initialization.  Give
     # it a moment so a failed launch is visible before XFCE depends on it.
     sleep 0.1
-    if [ ! -S /run/dbus/system_bus_socket ] ||
-       ! kill -0 "$SYSTEM_DBUS_PID" 2>/dev/null; then
+    if [ ! -S /run/dbus/system_bus_socket ] || ! kill -0 "$SYSTEM_DBUS_PID" 2>/dev/null; then
         echo "[startx] Warning: system D-Bus did not stay running."
         [ -s /tmp/ascent-system-dbus.log ] && cat /tmp/ascent-system-dbus.log
     fi

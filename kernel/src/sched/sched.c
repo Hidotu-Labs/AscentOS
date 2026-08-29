@@ -497,9 +497,17 @@ __attribute__((optimize("O3"))) static void sched_schedule(bool voluntary_yield)
         }
       }
     }
-    /* Set TLS base for the incoming thread */
-    wrmsr(0xC0000100, next_t->fs_base);
-    wrmsr(0xC0000102, next_t->gs_base);
+    /* Set TLS base for the incoming thread with hardware FSGSBASE fast-path */
+    if (prev->fs_base != next_t->fs_base) {
+      if (cpu_has_fsgsbase()) {
+        wrfsbase(next_t->fs_base);
+      } else {
+        wrmsr(0xC0000100, next_t->fs_base);
+      }
+    }
+    if (prev->gs_base != next_t->gs_base) {
+      wrmsr(0xC0000102, next_t->gs_base);
+    }
 
     spinlock_release(&cpu->queue_lock);
     switch_context(prev, next_t);

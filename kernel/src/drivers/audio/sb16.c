@@ -319,7 +319,34 @@ int sb16_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     return 0;
   }
   case 0xC004500A: // SNDCTL_DSP_SETFRAGMENT
+  case 0x5001: // SNDCTL_DSP_SYNC
+  case 0x5008: // SNDCTL_DSP_POST
+  case 0x500B: // SNDCTL_DSP_NONBLOCK (legacy)
+  case 0x500E: // SNDCTL_DSP_NONBLOCK
+  case 0xC0045009: // SNDCTL_DSP_SUBDIVIDE
     return 0;
+  case 0x8004500B: // SNDCTL_DSP_GETFMTS
+  {
+    int *mask = (int *)arg;
+    if (!mask) return -14;
+    *mask = AFMT_S16_LE | AFMT_U8;
+    return 0;
+  }
+  case 0x8004500F: // SNDCTL_DSP_GETCAPS
+  {
+    int *caps = (int *)arg;
+    if (!caps) return -14;
+    *caps = 0x00000002 | 0x00000008 | 0x00000010 | 0x00000020;
+    return 0;
+  }
+  case 0x80045004: // SOUND_PCM_READ_BLKSIZE
+  case 0xC0045004: // SNDCTL_DSP_GETBLKSIZE
+  {
+    int *blksize = (int *)arg;
+    if (!blksize) return -14;
+    *blksize = 2048;
+    return 0;
+  }
   case 0x8010500C: // SNDCTL_DSP_GETOSPACE
   {
     struct {
