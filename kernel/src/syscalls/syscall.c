@@ -1,5 +1,6 @@
 #include "syscall.h"
 #include "../console/klog.h"
+#include "../cpu/ktrack.h"
 #include "../cpu/msr.h"
 #include "../lib/string.h"
 #include "../sched/sched.h"
@@ -449,10 +450,27 @@ static void log_unimplemented_syscall(struct syscall_regs *regs, struct thread *
 
 void syscall_dispatcher(struct syscall_regs *regs) {
   struct thread *t = sched_get_current();
+  if (t) {
+    t->last_syscall_num = regs->rax;
+    t->last_syscall_args[0] = regs->rdi;
+    t->last_syscall_args[1] = regs->rsi;
+    t->last_syscall_args[2] = regs->rdx;
+    t->last_syscall_args[3] = regs->r10;
+    t->last_syscall_args[4] = regs->r8;
+    t->last_syscall_args[5] = regs->r9;
+    t->last_subsystem = KSUBSYS_SYSCALL;
+    t->last_kernel_file = "syscall.c";
+    t->last_kernel_line = __LINE__;
+    t->last_kernel_func = syscall_get_name(regs->rax);
+  }
 
   if (regs->rax >= MAX_SYSCALL) {
     log_unimplemented_syscall(regs, t);
     regs->rax = (uint64_t)-38; // ENOSYS
+    if (t) {
+      t->last_syscall_ret = (int64_t)-38;
+      t->last_error_code = -38;
+    }
     return;
   }
 
@@ -463,12 +481,22 @@ void syscall_dispatcher(struct syscall_regs *regs) {
     log_syscall_entry(regs, t);
 #endif
     regs->rax = raw_handler(regs);
+    if (t) {
+      t->last_syscall_ret = (int64_t)regs->rax;
+      if ((int64_t)regs->rax < 0 && (int64_t)regs->rax >= -4095) {
+        t->last_error_code = (int64_t)regs->rax;
+      }
+    }
     return;
   }
 
   if (!syscall_table[regs->rax]) {
     log_unimplemented_syscall(regs, t);
     regs->rax = (uint64_t)-38; // ENOSYS
+    if (t) {
+      t->last_syscall_ret = (int64_t)-38;
+      t->last_error_code = -38;
+    }
     return;
   }
 
@@ -481,6 +509,13 @@ void syscall_dispatcher(struct syscall_regs *regs) {
 
   regs->rax =
       handler(regs->rdi, regs->rsi, regs->rdx, regs->r10, regs->r8, regs->r9);
+
+  if (t) {
+    t->last_syscall_ret = (int64_t)regs->rax;
+    if ((int64_t)regs->rax < 0 && (int64_t)regs->rax >= -4095) {
+      t->last_error_code = (int64_t)regs->rax;
+    }
+  }
 
   /* Signal frame conversion copies the complete register set. Keep it off the
    * syscall hot path unless this thread can actually deliver a signal. */

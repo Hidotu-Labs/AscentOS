@@ -49,20 +49,11 @@ int unix_getpeername_impl(socket_t *sock, struct sockaddr *addr, int *addrlen) {
     return -22; // EINVAL
 
   unix_sock_t *usk = (unix_sock_t *)sock->sk;
-  socket_t *peer_sock = NULL;
 
   spinlock_acquire(&sock->lock);
   unix_sock_t *peer = usk->peer;
-  if (peer && peer->parent && socket_try_get(peer->parent))
-    peer_sock = peer->parent;
-  spinlock_release(&sock->lock);
-
-  if (!peer_sock)
-    return -107; // ENOTCONN
-
-  peer = (unix_sock_t *)peer_sock->sk;
   if (!peer) {
-    socket_put(peer_sock);
+    spinlock_release(&sock->lock);
     return -107; // ENOTCONN
   }
 
@@ -71,7 +62,7 @@ int unix_getpeername_impl(socket_t *sock, struct sockaddr *addr, int *addrlen) {
     memcpy(addr, &peer->addr, (size_t)copy);
     *addrlen = peer->addr_len;
   } else {
-    // Peer is unbound (e.g. anonymous socketpair end).
+    // Peer is unbound (e.g. anonymous socketpair end or connect() client).
     struct sockaddr_un *sun = (struct sockaddr_un *)addr;
     int copy = (int)sizeof(sa_family_t) < *addrlen
                    ? (int)sizeof(sa_family_t)
@@ -81,7 +72,7 @@ int unix_getpeername_impl(socket_t *sock, struct sockaddr *addr, int *addrlen) {
     *addrlen = (int)sizeof(sa_family_t);
   }
 
-  socket_put(peer_sock);
+  spinlock_release(&sock->lock);
   return 0;
 }
 

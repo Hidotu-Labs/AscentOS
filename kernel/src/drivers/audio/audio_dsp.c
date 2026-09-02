@@ -164,6 +164,9 @@ void audio_dsp_register_vfs(void) {
     dsp_node->write = dsp_vfs_write;
     dsp_node->ioctl = dsp_vfs_ioctl;
     dsp_node->poll = dsp_vfs_poll;
+    if (hda_available) {
+      dsp_node->wait_queue = hda_get_wait_queue();
+    }
     fb_register_device_node("dsp", dsp_node);
   }
 
@@ -178,6 +181,9 @@ void audio_dsp_register_vfs(void) {
     audio_node->write = dsp_vfs_write;
     audio_node->ioctl = dsp_vfs_ioctl;
     audio_node->poll = dsp_vfs_poll;
+    if (hda_available) {
+      audio_node->wait_queue = hda_get_wait_queue();
+    }
     fb_register_device_node("audio", audio_node);
   }
 

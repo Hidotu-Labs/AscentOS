@@ -20,6 +20,7 @@ rm -f "${ROOTFS_DIR}/etc/shadow" "${ROOTFS_DIR}/etc/shadow-" \
 chmod 0644 "${ROOTFS_DIR}/etc/passwd" "${ROOTFS_DIR}/etc/group"
 chmod 0755 "${ROOTFS_DIR}/home"
 rm -rf "${ROOTFS_DIR}/root"
+mkdir -p "${ROOTFS_DIR}/root/.config/alacritty" "${ROOTFS_DIR}/root/.cache"
 
 if ! grep -q "^avory:" "${ROOTFS_DIR}/etc/group"; then
     echo "avory:x:1000:" >> "${ROOTFS_DIR}/etc/group"
@@ -33,7 +34,14 @@ fi
 if ! grep -q "^messagebus:" "${ROOTFS_DIR}/etc/passwd"; then
     echo "messagebus:!:86:86:D-Bus Message Bus User:/var/run/dbus:/bin/false" >> "${ROOTFS_DIR}/etc/passwd"
 fi
-mkdir -p "${ROOTFS_DIR}/home/avory"
+if ! grep -q "^lightdm:" "${ROOTFS_DIR}/etc/group"; then
+    echo "lightdm:x:620:" >> "${ROOTFS_DIR}/etc/group"
+fi
+if ! grep -q "^lightdm:" "${ROOTFS_DIR}/etc/passwd"; then
+    echo "lightdm:!:620:620:LightDM daemon:/var/lib/lightdm:/sbin/nologin" >> "${ROOTFS_DIR}/etc/passwd"
+fi
+mkdir -p "${ROOTFS_DIR}/home/avory" "${ROOTFS_DIR}/var/lib/lightdm" "${ROOTFS_DIR}/var/log/lightdm" "${ROOTFS_DIR}/run/lightdm"
+chown -R 620:620 "${ROOTFS_DIR}/var/lib/lightdm" "${ROOTFS_DIR}/var/log/lightdm" "${ROOTFS_DIR}/run/lightdm" 2>/dev/null || true
 cp -a "${ROOTFS_DIR}/etc/skel/." "${ROOTFS_DIR}/home/avory/" 2>/dev/null || true
 chmod 0700 "${ROOTFS_DIR}/home/avory"
 

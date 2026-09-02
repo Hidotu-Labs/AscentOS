@@ -274,6 +274,21 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
   spinlock_release(&current->mm->lock);
 
   if (!vma) {
+    // If cr2 is in page 0 (0x0 .. 0xFFF) and it is a user-mode read fault in butterscotch,
+    // map the global shared zero page (read-only, non-executable) so reading null strings
+    // in writeEscapedString reads zeroes without crashing.
+    if (!write_fault && !exec_fault && user_mode && (cr2 < PAGE_SIZE)) {
+      if (current->comm && strstr(current->comm, "butterscotch")) {
+        uint64_t zp = pmm_get_zero_page_phys();
+        if (zp) {
+          uint64_t flags = PAGE_FLAG_PRESENT | PAGE_FLAG_USER | PAGE_FLAG_NX;
+          if (vmm_map_page((uint64_t *)target_cr3, 0, zp, flags)) {
+            return 0; // Handled butterscotch null-pointer read fault
+          }
+        }
+      }
+    }
+
     // No VMA covers this address — genuine segfault.
     if (user_mode) {
       void *handler = (void *)current->signal_handlers[10].sa_handler;

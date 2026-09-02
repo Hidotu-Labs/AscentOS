@@ -30,7 +30,16 @@ struct kernel_siginfo {
   int32_t si_errno;
   int32_t si_code;
   int32_t __pad0;
-  uint8_t data[112];
+  union {
+    struct {
+      uint32_t si_pid;
+      uint32_t si_uid;
+    } _kill;
+    struct {
+      uint64_t si_addr;
+    } _sigfault;
+    uint8_t data[112];
+  };
 } __attribute__((packed));
 
 struct kernel_sigaltstack {
@@ -103,15 +112,23 @@ static void fill_signal_context(struct sigframe *frame, int sig,
   memset(uc, 0, sizeof(*uc));
 
   info->si_signo = sig;
-  info->si_code = 128; /* SI_KERNEL */
+  uint32_t sender_pid = current->signal_sender_pid[sig - 1];
+  if (sender_pid) {
+    info->si_code = 0; /* SI_USER */
+    info->_kill.si_pid = sender_pid;
+    info->_kill.si_uid = 0;
+  } else {
+    info->si_code = 128; /* SI_KERNEL */
+  }
+
   if (sig == SIGSEGV || sig == SIGBUS) {
     uint64_t fault_address = current->fault_addr;
     info->si_code = (current->fault_code & 1) ? 2 /* SEGV_ACCERR */ : 1 /* SEGV_MAPERR */;
-    memcpy(info->data, &fault_address, sizeof(fault_address));
+    info->_sigfault.si_addr = fault_address;
   } else if (sig == SIGILL || sig == SIGFPE) {
     uint64_t fault_address = frame->regs.rip;
     info->si_code = 1;
-    memcpy(info->data, &fault_address, sizeof(fault_address));
+    info->_sigfault.si_addr = fault_address;
   }
 
   uc->uc_stack.ss_sp = current->ss_sp;
@@ -140,10 +157,11 @@ static void fill_signal_context(struct sigframe *frame, int sig,
   g[18] = frame->regs.cs;
   g[19] = frame->regs.err_code;
   g[20] = frame->regs.int_no;
-  g[21] = current->signal_mask;
+  uint64_t saved_mask = current->has_saved_signal_mask ? current->saved_signal_mask : current->signal_mask;
+  g[21] = saved_mask;
   if (sig == SIGSEGV || sig == SIGBUS)
     g[22] = current->fault_addr;
-  uc->uc_sigmask[0] = current->signal_mask;
+  uc->uc_sigmask[0] = saved_mask;
   uc->uc_mcontext.fpregs = (uint64_t)&uc->fpregs_mem[0];
   /* With lazy FPU, hardware registers may belong to a different thread.
      Ensure this thread's FPU state is live in hardware before saving. */
@@ -337,6 +355,80 @@ static uint64_t sys_rt_sigprocmask(uint64_t how, uint64_t set_ptr,
   return 0;
 }
 
+// rt_sigsuspend: Temporarily replace signal mask and suspend execution until signal
+static uint64_t sys_rt_sigsuspend(uint64_t unewset, uint64_t sigsetsize,
+                                  uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+
+  if (sigsetsize != 8)
+    return (uint64_t)-22; // EINVAL
+  if (!unewset || !vmm_is_user_addr_range_valid(unewset, 8))
+    return (uint64_t)-14; // EFAULT
+
+  struct thread *current = sched_get_current();
+  if (!current)
+    return (uint64_t)-1;
+
+  uint64_t newset = *(uint64_t *)unewset;
+  newset &= ~((1ULL << (SIGKILL - 1)) | (1ULL << (SIGSTOP - 1)));
+
+  current->saved_signal_mask = current->signal_mask;
+  current->has_saved_signal_mask = true;
+  current->signal_mask = newset;
+
+  for (;;) {
+    if (current->pending_signals & ~current->signal_mask) {
+      break;
+    }
+
+    current->state = THREAD_BLOCKED;
+    current->wakeup_ticks = 0;
+    if (current->pending_signals & ~current->signal_mask) {
+      current->state = THREAD_RUNNING;
+      break;
+    }
+    sched_yield();
+    current->state = THREAD_RUNNING;
+  }
+
+  return (uint64_t)-4; // -EINTR
+}
+
+// pause: Suspend execution until any unblocked signal arrives
+static uint64_t sys_pause(uint64_t a0, uint64_t a1, uint64_t a2,
+                          uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a0;
+  (void)a1;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+
+  struct thread *current = sched_get_current();
+  if (!current)
+    return (uint64_t)-1;
+
+  for (;;) {
+    if (current->pending_signals & ~current->signal_mask) {
+      break;
+    }
+
+    current->state = THREAD_BLOCKED;
+    current->wakeup_ticks = 0;
+    if (current->pending_signals & ~current->signal_mask) {
+      current->state = THREAD_RUNNING;
+      break;
+    }
+    sched_yield();
+    current->state = THREAD_RUNNING;
+  }
+
+  return (uint64_t)-4; // -EINTR
+}
+
 // sigreturn
 static uint64_t sys_rt_sigreturn(struct syscall_regs *sregs) {
   struct thread *current = sched_get_current();
@@ -392,7 +484,16 @@ void signal_deliver(struct registers *regs) {
   if (!sig)
     return;
 
-  current->pending_signals &= ~(1ULL << (sig - 1));
+  uint64_t bit = (1ULL << (sig - 1));
+  extern struct thread *global_thread_list;
+  extern spinlock_t tid_lock;
+  spinlock_acquire(&tid_lock);
+  for (struct thread *t = global_thread_list; t; t = t->global_next) {
+    if (t->tgid == current->tgid) {
+      t->pending_signals &= ~bit;
+    }
+  }
+  spinlock_release(&tid_lock);
   struct k_sigaction *sa = &current->signal_handlers[sig - 1];
 
   if (sa->sa_handler == (void *)SIG_IGN)
@@ -450,8 +551,10 @@ void signal_deliver(struct registers *regs) {
 
   struct sigframe *frame = (struct sigframe *)rsp;
   frame->regs = *regs;
-  frame->mask = current->signal_mask;
+  uint64_t mask_to_save = current->has_saved_signal_mask ? current->saved_signal_mask : current->signal_mask;
+  frame->mask = mask_to_save;
   fill_signal_context(frame, sig, current);
+  current->has_saved_signal_mask = false;
 
   regs->rip = (uint64_t)sa->sa_handler;
   regs->rdi = sig;
@@ -557,8 +660,9 @@ static uint64_t sys_tgkill(uint64_t tgid, uint64_t tid, uint64_t sig,
     return 0;
 
   // Queue the signal on the target thread
+  struct thread *sender = sched_get_current();
+  uint32_t sender_pid = sender ? (sender->tgid ? sender->tgid : sender->tid) : 0;
   if (sig == SIGKILL) {
-    struct thread *sender = sched_get_current();
     klog_puts("[SIGNAL] tgkill sender=");
     klog_uint64(sender ? sender->tid : 0);
     klog_puts(" target=");
@@ -568,6 +672,7 @@ static uint64_t sys_tgkill(uint64_t tgid, uint64_t tid, uint64_t sig,
     klog_puts("\n");
   }
   target->pending_signals |= (1ULL << (sig - 1));
+  target->signal_sender_pid[sig - 1] = sender_pid;
   signal_notify_thread(target, (int)sig);
 
   return 0;
@@ -656,7 +761,10 @@ static uint64_t __attribute__((unused)) sys_sigprocmask(uint64_t how, uint64_t s
 void signal_send(struct thread *t, int sig) {
   if (!t || sig <= 0 || sig > 64)
     return;
+  struct thread *sender = sched_get_current();
+  uint32_t sender_pid = sender ? (sender->tgid ? sender->tgid : sender->tid) : 0;
   t->pending_signals |= (1ULL << (sig - 1));
+  t->signal_sender_pid[sig - 1] = sender_pid;
   signal_notify_thread(t, sig);
 }
 
@@ -669,12 +777,15 @@ void signal_send_pgid(uint32_t pgid, int sig) {
   extern spinlock_t tid_lock;
   spinlock_acquire(&tid_lock);
 
+  struct thread *sender = sched_get_current();
+  uint32_t sender_pid = sender ? (sender->tgid ? sender->tgid : sender->tid) : 0;
+
   struct thread *t = global_thread_list;
   while (t) {
-    struct thread *sender = sched_get_current();
     if (t->pgid == pgid && (!sender || sender->euid == 0 ||
         sender->uid == t->uid || sender->euid == t->uid)) {
       t->pending_signals |= (1ULL << (sig - 1));
+      t->signal_sender_pid[sig - 1] = sender_pid;
       signal_notify_thread(t, sig);
     }
     t = t->global_next;
@@ -747,28 +858,31 @@ static uint64_t sys_kill(uint64_t pid_val, uint64_t sig, uint64_t a2,
   extern spinlock_t tid_lock;
   spinlock_acquire(&tid_lock);
   struct thread *t = global_thread_list;
+  bool found = false;
+  uint32_t sender_pid = current ? (current->tgid ? current->tgid : current->tid) : 0;
+  klog_puts("[SIGNAL] sys_kill sender=");
+  klog_uint64(sender_pid);
+  klog_puts(" target=");
+  klog_uint64(pid);
+  klog_puts(" sig=");
+  klog_uint64(sig);
+  klog_puts("\n");
   while (t) {
-    if (t->tid == (uint32_t)pid) {
+    if (t->tgid == (uint32_t)pid || t->tid == (uint32_t)pid) {
       if (current && current->euid != 0 && current->uid != t->uid &&
           current->euid != t->uid) {
         spinlock_release(&tid_lock);
         return (uint64_t)-1;
       }
-      if (sig == SIGKILL) {
-        klog_puts("[SIGNAL] kill sender=");
-        klog_uint64(current ? current->tid : 0);
-        klog_puts(" target=");
-        klog_uint64(t->tid);
-        klog_puts("\n");
-      }
+      found = true;
       t->pending_signals |= (1ULL << (sig - 1));
+      t->signal_sender_pid[sig - 1] = sender_pid;
       signal_notify_thread(t, (int)sig);
-      break;
     }
     t = t->global_next;
   }
   spinlock_release(&tid_lock);
-  return 0;
+  return found ? 0 : (uint64_t)-3;
 }
 
 typedef struct {
@@ -797,6 +911,53 @@ struct signalfd_siginfo {
   uint8_t __pad[46];
 };
 
+static uint64_t get_pending_signals_tgid(struct thread *curr, uint64_t mask) {
+  uint64_t pending = curr->pending_signals & mask;
+  if (pending)
+    return pending;
+
+  extern struct thread *global_thread_list;
+  extern spinlock_t tid_lock;
+  spinlock_acquire(&tid_lock);
+  struct thread *t = global_thread_list;
+  while (t) {
+    if (t->tgid == curr->tgid && (t->pending_signals & mask)) {
+      pending = t->pending_signals & mask;
+      break;
+    }
+    t = t->global_next;
+  }
+  spinlock_release(&tid_lock);
+  return pending;
+}
+
+static bool consume_signal_tgid(struct thread *curr, int sig, uint32_t *out_sender_pid) {
+  uint64_t bit = (1ULL << (sig - 1));
+  uint32_t sender = 0;
+  bool consumed = false;
+
+  extern struct thread *global_thread_list;
+  extern spinlock_t tid_lock;
+  spinlock_acquire(&tid_lock);
+  struct thread *t = global_thread_list;
+  while (t) {
+    if (t->tgid == curr->tgid && (t->pending_signals & bit)) {
+      t->pending_signals &= ~bit;
+      if (!sender && t->signal_sender_pid[sig - 1]) {
+        sender = t->signal_sender_pid[sig - 1];
+        t->signal_sender_pid[sig - 1] = 0;
+      }
+      consumed = true;
+    }
+    t = t->global_next;
+  }
+  spinlock_release(&tid_lock);
+
+  if (consumed && out_sender_pid)
+    *out_sender_pid = sender;
+  return consumed;
+}
+
 static uint32_t signalfd_read(vfs_node_t *node, uint32_t offset, uint32_t size,
                               uint8_t *buffer) {
   (void)offset;
@@ -813,7 +974,7 @@ static uint32_t signalfd_read(vfs_node_t *node, uint32_t offset, uint32_t size,
   struct thread *t = sched_get_current();
 
   while (1) {
-    uint64_t pending = t->pending_signals & ctx->mask;
+    uint64_t pending = get_pending_signals_tgid(t, ctx->mask);
     if (pending) {
       int sig = 0;
       for (int i = 0; i < 64; i++) {
@@ -822,13 +983,17 @@ static uint32_t signalfd_read(vfs_node_t *node, uint32_t offset, uint32_t size,
           break;
         }
       }
-      if (sig) {
-        // Consume the signal
-        t->pending_signals &= ~(1ULL << (sig - 1));
-
+      uint32_t sender_pid = 0;
+      if (sig && consume_signal_tgid(t, sig, &sender_pid)) {
+        klog_puts("[SIGNALFD] read sig=");
+        klog_uint64(sig);
+        klog_puts(" from sender_pid=");
+        klog_uint64(sender_pid);
+        klog_puts("\n");
         struct signalfd_siginfo info;
         memset(&info, 0, sizeof(info));
         info.ssi_signo = sig;
+        info.ssi_pid = sender_pid;
         memcpy(buffer, &info, sizeof(info));
         return sizeof(info);
       }
@@ -840,7 +1005,7 @@ static uint32_t signalfd_read(vfs_node_t *node, uint32_t offset, uint32_t size,
     wait_queue_add(&ctx->wq, &entry);
     t->state = THREAD_BLOCKED;
 
-    if (t->pending_signals & ctx->mask) {
+    if (get_pending_signals_tgid(t, ctx->mask)) {
       t->state = THREAD_RUNNING;
       wait_queue_remove(&ctx->wq, &entry);
       continue;
@@ -857,7 +1022,7 @@ static int signalfd_poll(vfs_node_t *node, int events) {
   struct thread *t = sched_get_current();
   int revents = 0;
 
-  if (t->pending_signals & ctx->mask)
+  if (get_pending_signals_tgid(t, ctx->mask))
     revents |= POLLIN;
 
   return revents & events;
@@ -985,7 +1150,10 @@ static uint64_t sys_tkill(uint64_t tid, uint64_t sig, uint64_t a2, uint64_t a3,
     if (!target)
       return (uint64_t)-3; /* ESRCH */
   }
+  struct thread *sender = sched_get_current();
+  uint32_t sender_pid = sender ? (sender->tgid ? sender->tgid : sender->tid) : 0;
   target->pending_signals |= (1ULL << (sig - 1));
+  target->signal_sender_pid[sig - 1] = sender_pid;
   signal_notify_thread(target, (int)sig);
   return 0;
 }
@@ -993,8 +1161,10 @@ static uint64_t sys_tkill(uint64_t tid, uint64_t sig, uint64_t a2, uint64_t a3,
 void syscall_register_signal(void) {
   syscall_register(SYS_RT_SIGACTION, sys_rt_sigaction);
   syscall_register(SYS_RT_SIGPROCMASK, sys_rt_sigprocmask);
+  syscall_register(SYS_RT_SIGSUSPEND, sys_rt_sigsuspend);
   syscall_register(SYS_RT_SIGTIMEDWAIT, sys_rt_sigtimedwait);
   syscall_register_raw(SYS_RT_SIGRETURN, sys_rt_sigreturn);
+  syscall_register(SYS_PAUSE, sys_pause);
   syscall_register(SYS_SIGALTSTACK, sys_sigaltstack);
   syscall_register(SYS_TKILL, sys_tkill);
   syscall_register(SYS_TGKILL, sys_tgkill);

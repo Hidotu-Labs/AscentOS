@@ -21,6 +21,7 @@ static int ioctl_arg_is_scalar(uint32_t request) {
   switch (request) {
   case 0x40044590: // EVIOCGRAB: _IOW('E', 0x90, int)
   case 0x40044591: // EVIOCREVOKE: _IOW('E', 0x91, int)
+  case 0x80045705: // WDIOC_KEEPALIVE: _IOR('W', 5, int)
     return 1;
   default:
     return 0;
@@ -89,21 +90,7 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
     }
 
     if (node->ioctl) {
-      if (request & 0xC0000000) {
-        size_t sz = (request >> 16) & 0x3FFF;
-        if (sz > 0 && !ioctl_arg_is_scalar((uint32_t)request) &&
-            !vmm_is_user_addr_range_valid(arg, sz)) {
-          klog_puts(
-              "[SYSCALL] ioctl: invalid arg pointer for encoded request\n");
-          return (uint64_t)-14;
-        }
-      }
       uint64_t res = (uint64_t)node->ioctl(node, (uint32_t)request, arg);
-#if IOCTL_DEBUG_LOGGING
-      klog_puts("[SYSCALL] ioctl: node handler returned 0x");
-      klog_hex64(res);
-      klog_puts("\n");
-#endif
       if (res != (uint64_t)-25)
         return res;
     }
@@ -274,17 +261,6 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
     break;
   }
   default:
-#if IOCTL_DEBUG_LOGGING
-    klog_puts("[IOCTL] ENOTTY fd=");
-    klog_uint64(fd);
-    klog_puts(" request=0x");
-    klog_hex32((uint32_t)request);
-    if (t && fd < MAX_FDS && t->fds[fd]) {
-      klog_puts(" node=");
-      klog_puts(t->fds[fd]->name);
-    }
-    klog_puts("\n");
-#endif
     ret = (uint64_t)-25; // ENOTTY
     break;
   }

@@ -536,6 +536,8 @@ mount_success:
   random_register_vfs();
   extern void pty_register_devices(void);
   pty_register_devices();
+  extern void watchdog_init(void);
+  watchdog_init();
   procfs_init();
 
 mount_fail:

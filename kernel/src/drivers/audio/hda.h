@@ -128,5 +128,6 @@ uint32_t hda_get_ring_count(void);
 uint64_t hda_get_played_bytes(void);
 void *hda_get_wait_queue(void);
 void hda_reset_stream(void);
+void hda_set_format(uint32_t rate, uint8_t channels, uint8_t bits);
 
 #endif // AUDIO_HDA_H

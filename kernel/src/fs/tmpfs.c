@@ -225,6 +225,40 @@ static uint32_t tmpfs_write(vfs_node_t *node, uint32_t offset, uint32_t size,
     return done;
 }
 
+static int tmpfs_truncate(vfs_node_t *node, uint32_t new_len);
+
+static int tmpfs_fallocate(vfs_node_t *node, int mode, uint32_t offset, uint32_t len) {
+    if (!node || (node->flags & FS_TYPE_MASK) != FS_FILE || !node->device)
+        return -1;
+
+    if (len == 0)
+        return 0;
+
+    uint64_t needed64 = (uint64_t)offset + (uint64_t)len;
+    if (needed64 > UINT32_MAX)
+        return -1;
+    uint32_t needed = (uint32_t)needed64;
+
+    tmpfs_file_t *file = (tmpfs_file_t *)node->device;
+
+    if (mode & 0x01) { // FALLOC_FL_KEEP_SIZE
+        if (needed <= node->length)
+            return 0;
+        uint32_t first_page = offset / PAGE_SIZE;
+        uint32_t last_page  = (needed - 1) / PAGE_SIZE;
+        for (uint32_t i = first_page; i <= last_page; i++) {
+            if (!tmpfs_get_or_alloc_page(file, i))
+                return -1;
+        }
+        return 0;
+    }
+
+    if (needed <= node->length)
+        return 0;
+
+    return tmpfs_truncate(node, needed);
+}
+
 static int tmpfs_truncate(vfs_node_t *node, uint32_t new_len) {
     if (!node || (node->flags & FS_TYPE_MASK) != FS_FILE || !node->device)
         return -1;
@@ -458,6 +492,7 @@ static vfs_node_t *tmpfs_make_node(tmpfs_sb_t *sb, const char *name,
         n->read     = tmpfs_read;
         n->write    = tmpfs_write;
         n->truncate = tmpfs_truncate;
+        n->fallocate = tmpfs_fallocate;
     } else if (type == FS_DIRECTORY) {
         tmpfs_dir_t *d = kmalloc(sizeof(tmpfs_dir_t));
         if (!d) {

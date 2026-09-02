@@ -90,6 +90,8 @@ static int unix_bind_fs(unix_sock_t *usk, struct sockaddr_un *sun, int addrlen) 
   vfs_chown(fs_node, current_thread->fsuid,
             current_thread->fsgid);
 
+  usk->bound_vnode = fs_node;
+
   memcpy(&usk->addr, sun, addrlen);
   usk->addr_len = addrlen;
   usk->is_abstract = false;

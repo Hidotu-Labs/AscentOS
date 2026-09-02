@@ -27,38 +27,55 @@ int unix_listen_impl(socket_t *sock, int backlog) {
 }
 
 int unix_connect_impl(socket_t *sock, struct sockaddr *addr, int addrlen) {
-  if (!sock || !addr)
+  KTRACK(KSUBSYS_AF_UNIX);
+  if (!sock || !addr) {
+    KTRACK_ERR(KSUBSYS_AF_UNIX, -22);
     return -22; // EINVAL
+  }
 
   unix_sock_t *usk = (unix_sock_t *)sock->sk;
-  if (!usk)
+  if (!usk) {
+    KTRACK_ERR(KSUBSYS_AF_UNIX, -22);
     return -22;
+  }
 
-  if (sock->state == SS_CONNECTED)
+  if (sock->state == SS_CONNECTED) {
+    KTRACK_ERR(KSUBSYS_AF_UNIX, -106);
     return -106; // EISCONN
-  if (sock->state == SS_LISTENING)
+  }
+  if (sock->state == SS_LISTENING) {
+    KTRACK_ERR(KSUBSYS_AF_UNIX, -22);
     return -22; // EINVAL
+  }
 
   struct sockaddr_un *sun = (struct sockaddr_un *)addr;
 
   unix_sock_t *dusk = unix_find_socket_by_addr_ref(sun, addrlen);
   if (!dusk) {
-    klog_puts("[WARN] unix_connect: destination not found\n");
+    klog_puts("[WARN] unix_connect: destination not found: \"");
+    if (sun->sun_path[0] == '\0') {
+      klog_puts("@");
+      klog_puts(sun->sun_path + 1);
+    } else {
+      klog_puts(sun->sun_path);
+    }
+    klog_puts("\"\n");
+    KTRACK_ERR(KSUBSYS_AF_UNIX, -111);
     return -111; // ECONNREFUSED
   }
 
   socket_t *listener_sock = dusk->parent;
-  if (!listener_sock || listener_sock->closing) {
-    if (listener_sock)
-      socket_put(listener_sock);
-    klog_puts("[WARN] unix_connect: destination is closing\n");
+  if (!af_unix_sock_live(dusk, &listener_sock) || listener_sock->closing) {
+    socket_put(listener_sock);
+    klog_puts("[WARN] unix_connect: destination is closing or stale\n");
+    KTRACK_ERR(KSUBSYS_AF_UNIX, -111);
     return -111; // ECONNREFUSED
   }
-
 
   if (listener_sock->state != SS_LISTENING) {
     klog_puts("[WARN] unix_connect: destination is not listening\n");
     socket_put(listener_sock);
+    KTRACK_ERR(KSUBSYS_AF_UNIX, -111);
     return -111; // ECONNREFUSED
   }
 
@@ -68,6 +85,7 @@ int unix_connect_impl(socket_t *sock, struct sockaddr *addr, int addrlen) {
       socket_create(sock->domain, sock->type, sock->protocol);
   if (!server_sock) {
     socket_put(listener_sock);
+    KTRACK_ERR(KSUBSYS_AF_UNIX, -12);
     return -12; // ENOMEM
   }
 

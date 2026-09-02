@@ -68,6 +68,8 @@ typedef struct unix_sock {
   int rcvtimeo_ms; // SO_RCVTIMEO - receive timeout in ms
   int sndtimeo_ms; // SO_SNDTIMEO - send timeout in ms
 
+  struct vfs_node *bound_vnode; // Filesystem socket inode, if bound to a path
+
   struct vfs_node *scm_nodes[16];   // Pending FDs to be received
   int scm_count;                    // Number of pending nodes
   bool scm_cred_pending;            // Sender credentials for SO_PASSCRED

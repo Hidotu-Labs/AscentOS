@@ -1,54 +1,28 @@
 #!/bin/sh
-# Xorg + Window Manager startup script for AvoryOS
-# Supports IceWM (default) and XFCE4 (ASCENT_SESSION=xfce4)
-
-rm -f /tmp/.X0-lock /tmp/.X11-unix/X0
-
-export DISPLAY=:0
-: "${HOME:=/root}"
-export HOME
-export XAUTHORITY="${HOME}/.Xauthority"
-export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-root}"
-mkdir -p "${XDG_RUNTIME_DIR}"
-chmod 700 "${XDG_RUNTIME_DIR}"
+# LightDM Display Manager startup script for AvoryOS
+# Spawns system D-Bus, elogind (for seat management), and LightDM (autologin, no greeter).
 
 export PATH="/usr/bin:/bin:/usr/local/bin:/opt/coreutils/bin:/opt/bash/bin:${PATH}"
 export LD_LIBRARY_PATH="/usr/lib:/lib:/usr/local/lib:${LD_LIBRARY_PATH:-}"
 
-XORG_LOG="/var/log/Xorg.0.log"
-mkdir -p /var/log
+rm -f /tmp/.X0-lock /tmp/.X11-unix/X0
 
-XORG=/usr/libexec/Xorg
-[ ! -x "$XORG" ] && XORG=/usr/bin/Xorg
+mkdir -p /var/log /var/lib/dbus /run/dbus /var/run \
+         /run/lightdm /var/lib/lightdm /var/log/lightdm /var/cache/lightdm \
+         /run/systemd /run/user
+[ -e /var/run/dbus ] || ln -sf /run/dbus /var/run/dbus 2>/dev/null || true
+touch /var/run/utmp /var/log/wtmp /var/log/lastlog /run/utmp 2>/dev/null || true
+chmod 0664 /var/run/utmp /var/log/wtmp /var/log/lastlog /run/utmp 2>/dev/null || true
 
-if [ ! -x "$XORG" ]; then
-    echo "[startx] Error: Xorg binary not found."
-    exit 1
+# ── Dynamic account provisioning ──────────────────────────────────────────
+if ! grep -q "^lightdm:" /etc/group 2>/dev/null; then
+    echo "lightdm:x:620:" >> /etc/group
 fi
-
-"$XORG" "$DISPLAY" -noreset -nolisten tcp \
-    -configdir /etc/X11/xorg.conf.d \
-    -logfile "$XORG_LOG" &
-XORG_PID=$!
-
-ready=0
-for _ in 1 2 3 4 5 6 7 8 9 10; do
-    if [ -S /tmp/.X11-unix/X0 ]; then
-        ready=1
-        break
-    fi
-    if ! kill -0 "$XORG_PID" 2>/dev/null; then
-        echo "[startx] Error: Xorg failed to start. See $XORG_LOG."
-        exit 1
-    fi
-    sleep 0.2
-done
-
-if [ "$ready" != 1 ]; then
-    echo "[startx] Error: Xorg startup timed out."
-    kill "$XORG_PID" 2>/dev/null
-    exit 1
+if ! grep -q "^lightdm:" /etc/passwd 2>/dev/null; then
+    echo "lightdm:!:620:620:LightDM daemon:/var/lib/lightdm:/sbin/nologin" >> /etc/passwd
 fi
+chown -R 620:620 /var/lib/lightdm /run/lightdm /var/log/lightdm /var/cache/lightdm 2>/dev/null || true
+chmod 0750 /var/lib/lightdm /var/cache/lightdm 2>/dev/null || true
 
 # ── D-Bus Initialization ──────────────────────────────────────────────────
 if [ ! -s /etc/machine-id ]; then
@@ -58,17 +32,13 @@ if [ ! -s /etc/machine-id ]; then
         echo "10000000000000000000000000000001" > /etc/machine-id
     fi
 fi
-mkdir -p /var/lib/dbus /run/dbus /var/run
-[ -e /var/run/dbus ] || ln -sf /run/dbus /var/run/dbus 2>/dev/null || true
 [ -f /var/lib/dbus/machine-id ] || cp -f /etc/machine-id /var/lib/dbus/machine-id 2>/dev/null || true
 
 if command -v dbus-daemon >/dev/null 2>&1 && [ ! -S /run/dbus/system_bus_socket ]; then
     rm -f /tmp/ascent-system-dbus.log
     dbus-daemon --system --nofork >/tmp/ascent-system-dbus.log 2>&1 &
     SYSTEM_DBUS_PID=$!
-    # The bus can bind its socket and then abort during initialization.  Give
-    # it a moment so a failed launch is visible before XFCE depends on it.
-    sleep 0.1
+    sleep 0.2
     if [ ! -S /run/dbus/system_bus_socket ] || ! kill -0 "$SYSTEM_DBUS_PID" 2>/dev/null; then
         echo "[startx] Warning: system D-Bus did not stay running."
         [ -s /tmp/ascent-system-dbus.log ] && cat /tmp/ascent-system-dbus.log
@@ -76,135 +46,48 @@ if command -v dbus-daemon >/dev/null 2>&1 && [ ! -S /run/dbus/system_bus_socket 
 fi
 export DBUS_SYSTEM_BUS_ADDRESS=unix:path=/var/run/dbus/system_bus_socket
 
-if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && command -v dbus-daemon >/dev/null 2>&1; then
-    DBUS_SESSION_BUS_SOCKET=/tmp/ascent-session-bus
-    rm -f "$DBUS_SESSION_BUS_SOCKET"
-    DBUS_SESSION_BUS_ADDRESS="unix:path=${DBUS_SESSION_BUS_SOCKET}"
-    dbus-daemon --session --nofork --address="$DBUS_SESSION_BUS_ADDRESS" >/tmp/ascent-dbus.log 2>&1 &
-    export DBUS_SESSION_BUS_ADDRESS
-
-    # xfce4-session talks to xfconfd over the session bus during its first
-    # few milliseconds.  Do not race that connection with daemon startup.
-    for _ in 1 2 3 4 5 6 7 8 9 10; do
-        [ -S "$DBUS_SESSION_BUS_SOCKET" ] && break
-        sleep 0.1
-    done
-    if [ ! -S "$DBUS_SESSION_BUS_SOCKET" ]; then
-        echo "[startx] Error: session D-Bus failed to create its socket."
-        [ -s /tmp/ascent-dbus.log ] && cat /tmp/ascent-dbus.log
-        exit 1
-    fi
+if command -v dbus-daemon >/dev/null 2>&1; then
+    rm -f /tmp/avory-session-bus
+    dbus-daemon --session --fork --address=unix:path=/tmp/avory-session-bus 2>/dev/null || true
+    export DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/avory-session-bus
 fi
 
-# ── XFCE4 Session ─────────────────────────────────────────────────────────
-if [ "${ASCENT_SESSION:-}" = "xfce4" ]; then
-    echo "[startx] Starting XFCE4 session..."
-    export XDG_SESSION_TYPE=x11
-    export XDG_CURRENT_DESKTOP=XFCE
-    export XDG_SESSION_DESKTOP=xfce
-    export DESKTOP_SESSION=xfce
-    # Never inherit a partial XDG search path from the boot shell.  XFCE
-    # resolves its failsafe session and xfconf defaults from /etc/xdg.
-    export XDG_CONFIG_DIRS=/etc/xdg
-    export XDG_DATA_DIRS=/usr/local/share:/usr/share
-    export XDG_CONFIG_HOME="${HOME}/.config"
-    export XDG_DATA_HOME="${HOME}/.local/share"
-    export XDG_CACHE_HOME="${HOME}/.cache"
-    export GDK_GL=disable
-    export LIBGL_DRI3_DISABLE=1
-    export NO_AT_BRIDGE=1
-    export GTK_A11Y=none
-    export GIO_USE_VFS=local
-    export GIO_USE_VOLUME_MONITOR=unix
-    export GTK_USE_PORTAL=0
-    unset SESSION_MANAGER
+chmod 1777 /tmp /tmp/.X11-unix 2>/dev/null || true
+chmod 0777 /run/lightdm /var/lib/lightdm /var/log/lightdm /var/cache/lightdm 2>/dev/null || true
 
-    mkdir -p "${XDG_CONFIG_HOME}/xfce4/xfconf/xfce-perchannel-xml" \
-             "${XDG_DATA_HOME}" "${XDG_CACHE_HOME}" "${HOME}/Desktop" \
-             "${HOME}/Templates" "${HOME}/Downloads" "${HOME}/Documents" \
-             "${HOME}/Pictures" "${HOME}/Music" "${HOME}/Videos"
+# ── Launch LightDM ────────────────────────────────────────────────────────
+if command -v lightdm >/dev/null 2>&1; then
+    echo "[startx] Launching LightDM display manager..."
 
-    if [ -d /etc/xdg/xfce4/xfconf/xfce-perchannel-xml ]; then
-        cp -n /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/*.xml \
-              "${XDG_CONFIG_HOME}/xfce4/xfconf/xfce-perchannel-xml/" 2>/dev/null || true
-    fi
+    # Ensure autologin is active and no greeter is set (overwrite stale config)
+    cat > /etc/lightdm/lightdm.conf << 'LDMCFG'
+[LightDM]
+run-directory=/run/lightdm
+start-default-seat=true
+logind-check-graphical=false
 
-    # Seed desktop icons with application shortcuts
-    if [ ! -e "${HOME}/Desktop/xfce4-terminal.desktop" ] && [ -f /usr/share/applications/xfce4-terminal.desktop ]; then
-        cp /usr/share/applications/xfce4-terminal.desktop "${HOME}/Desktop/" 2>/dev/null || true
-        chmod +x "${HOME}/Desktop/xfce4-terminal.desktop" 2>/dev/null || true
-    fi
-    if [ ! -e "${HOME}/Desktop/thunar.desktop" ] && [ -f /usr/share/applications/thunar.desktop ]; then
-        cp /usr/share/applications/thunar.desktop "${HOME}/Desktop/" 2>/dev/null || true
-        chmod +x "${HOME}/Desktop/thunar.desktop" 2>/dev/null || true
-    fi
-    if [ ! -e "${HOME}/Desktop/netsurf.desktop" ] && [ -f /usr/share/applications/netsurf.desktop ]; then
-        cp /usr/share/applications/netsurf.desktop "${HOME}/Desktop/" 2>/dev/null || true
-        chmod +x "${HOME}/Desktop/netsurf.desktop" 2>/dev/null || true
-    fi
-    if [ ! -e "${HOME}/Desktop/mousepad.desktop" ] && [ -f /usr/share/applications/org.xfce.mousepad.desktop ]; then
-        cp /usr/share/applications/org.xfce.mousepad.desktop "${HOME}/Desktop/mousepad.desktop" 2>/dev/null || true
-        chmod +x "${HOME}/Desktop/mousepad.desktop" 2>/dev/null || true
-    fi
-
-    # Run the known-good component session directly.  startxfce4 delegates to
-    # xfce4-session, whose failsafe-session discovery depends on service
-    # activation that is not yet reliable on AvoryOS.
-    XFCONFD=/usr/lib/xfce4/xfconf/xfconfd
-    if [ -x "$XFCONFD" ]; then
-        "$XFCONFD" &
-        XFCONFD_PID=$!
-        sleep 0.5
-    fi
-
-    xfwm4 --replace >/tmp/xfwm4.log 2>&1 &
-    XFWM_PID=$!
-    sleep 0.2
-    xfsettingsd &
-    XFSETTINGS_PID=$!
-    sleep 0.5
-    xfdesktop &
-    XFDESKTOP_PID=$!
-    xfce4-panel &
-    XFPANEL_PID=$!
-
-    wait "$XFWM_PID"
-    status=$?
-    kill "$XFSETTINGS_PID" "$XFDESKTOP_PID" "$XFPANEL_PID" \
-         "${XFCONFD_PID:-}" 2>/dev/null || true
-    exit "$status"
+[Seat:*]
+type=local
+autologin-user=root
+autologin-user-timeout=0
+autologin-session=xfce
+greeter-hide-users=false
+user-session=xfce
+xserver-command=/usr/libexec/Xorg -noreset -nolisten tcp
+session-wrapper=/etc/X11/xinit/Xsession
+LDMCFG
+    lightdm --debug
+    echo "=== /.xsession-errors ==="
+    [ -f /.xsession-errors ] && cat /.xsession-errors
+    [ -f /root/.xsession-errors ] && cat /root/.xsession-errors
+    echo "=== /var/log/lightdm/lightdm.log ==="
+    [ -f /var/log/lightdm/lightdm.log ] && cat /var/log/lightdm/lightdm.log
+    echo "=== /var/log/lightdm/seat0-greeter.log ==="
+    [ -f /var/log/lightdm/seat0-greeter.log ] && cat /var/log/lightdm/seat0-greeter.log
+    echo "=== /var/log/lightdm/x-0.log ==="
+    [ -f /var/log/lightdm/x-0.log ] && cat /var/log/lightdm/x-0.log
+    exec /bin/sh
 fi
 
-# ── Default: IceWM Session ────────────────────────────────────────────────
-echo "[startx] Starting IceWM session..."
-export NO_AT_BRIDGE=1
-mkdir -p "${HOME}/.icewm"
-if [ -d /etc/icewm ]; then
-    cp -n /etc/icewm/* "${HOME}/.icewm/" 2>/dev/null || true
-fi
-export ICEWM_PRIVCFG="${HOME}/.icewm"
-
-# Start IceWM Window Manager
-if command -v icewm >/dev/null 2>&1; then
-    icewm &
-fi
-
-# Set wallpaper
-if [ -f /assets/room.png ] && command -v feh >/dev/null 2>&1; then
-    feh --bg-fill /assets/room.png &
-elif command -v xsetroot >/dev/null 2>&1; then
-    xsetroot -solid "#1e1e2e" &
-fi
-
-# Start xclock
-if command -v xclock >/dev/null 2>&1; then
-    xclock &
-fi
-
-# Start Terminal (st)
-if command -v st >/dev/null 2>&1; then
-    st -T "st" -e /bin/bash &
-fi
-
-echo "[startx] IceWM desktop ready."
-wait
+echo "[startx] Error: lightdm binary not found."
+exec /bin/sh

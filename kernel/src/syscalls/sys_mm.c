@@ -146,15 +146,13 @@ uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot, uint64_t flags,
     return E_INVAL;
   }
 
-  bool is_shared = (flags & MAP_SHARED) != 0;
-  bool is_private = (flags & MAP_PRIVATE) != 0;
+  uint32_t map_type = (uint32_t)(flags & 0x0F);
+  if (map_type != MAP_SHARED && map_type != MAP_PRIVATE && map_type != 0x03 /* MAP_SHARED_VALIDATE */) {
+    return E_INVAL;
+  }
 
-  if (!is_shared && !is_private) {
-    return E_INVAL;
-  }
-  if (is_shared && is_private) {
-    return E_INVAL;
-  }
+  bool is_shared = (map_type == MAP_SHARED || map_type == 0x03);
+  bool is_private = (map_type == MAP_PRIVATE);
   if (length == 0) {
     return E_INVAL;
   }
@@ -202,12 +200,37 @@ uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot, uint64_t flags,
         vaddr = vma_find_gap(&current_thread->mm->vmas, aligned_len,
                              MMAP_REGION_BASE, MMAP_REGION_LIMIT);
       }
+
+      if (vaddr == 0) {
+        vaddr = mm_alloc_mmap_region(aligned_len);
+      }
+
+      if (vaddr == 0 || vaddr + aligned_len > MMAP_REGION_LIMIT) {
+        spinlock_release(&current_thread->mm->lock);
+        return E_NOMEM;
+      }
+
+      if (flags & MAP_ANONYMOUS) {
+        uint64_t vma_flags = flags;
+        if (flags & MAP_HUGETLB)
+          vma_flags |= MAP_HUGEPAGE;
+        int vma_idx = vma_add(&current_thread->mm->vmas, vaddr, vaddr + aligned_len,
+                              prot, vma_flags, -1, 0, NULL, 0);
+        if (vma_idx < 0) {
+          spinlock_release(&current_thread->mm->lock);
+          return E_NOMEM;
+        }
+        current_thread->mm->mmap_next_addr =
+            MAX(current_thread->mm->mmap_next_addr, vaddr + aligned_len);
+        spinlock_release(&current_thread->mm->lock);
+        return vaddr;
+      }
+
       spinlock_release(&current_thread->mm->lock);
     }
 
     if (vaddr == 0) {
-      // Fallback to legacy allocator if AVL gap finding fails or thread context
-      // missing
+      // Fallback to legacy allocator if AVL gap finding fails or thread context missing
       vaddr = mm_alloc_mmap_region(aligned_len);
     }
 
@@ -251,27 +274,9 @@ uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot, uint64_t flags,
     return E_BADF;
   }
 
-  // Anonymous mapping
-  // (Address determination already handled above)
-
-  // PROT_NONE shortcut
-  // On x86-64 there is no "read-disable" bit; any PRESENT page is readable.
-  // For a true PROT_NONE mapping we must NOT create any PTEs.  We only
-  // record the VMA so the address range is reserved, but leave the pages
-  // non-present.  Any access will page-fault, which is the correct
-  // PROT_NONE behaviour.
-
-  // Demand Paging: register VMA only, no physical allocation
-  // For anonymous mappings we simply record the VMA.  Physical frames are
-  // allocated lazily by vmm_handle_page_fault() on first access.  This
-  // dramatically reduces memory consumption for large mappings that are
-  // only partially touched (e.g. musl's mmap-backed malloc arenas).
-
-  // Register VMA
+  // Anonymous mapping (Fixed path or legacy fallback)
   if (current_thread && current_thread->mm) {
     spinlock_acquire(&current_thread->mm->lock);
-    // Translate the Linux MAP_HUGETLB user flag to our kernel-internal
-    // MAP_HUGEPAGE marker so the page-fault handler knows to use 2 MB pages.
     uint64_t vma_flags = flags;
     if (flags & MAP_HUGETLB)
       vma_flags |= MAP_HUGEPAGE;
@@ -282,9 +287,6 @@ uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot, uint64_t flags,
       return E_NOMEM;
     }
 
-
-    // Update the mmap bump pointer if we were using the old-style allocator
-    // range
     current_thread->mm->mmap_next_addr =
         MAX(current_thread->mm->mmap_next_addr, vaddr + aligned_len);
     spinlock_release(&current_thread->mm->lock);
@@ -454,6 +456,14 @@ static uint64_t sys_mprotect(uint64_t addr, uint64_t len, uint64_t prot,
       // Omitting PAGE_FLAG_USER means any ring-3 access will #PF, which is
       // the correct PROT_NONE semantics on x86-64.
       new_flags = PAGE_FLAG_PRESENT | PAGE_FLAG_NX;
+    } else if (prot & PROT_WRITE) {
+      struct vma *v = vma_find(&current->mm->vmas, va);
+      if (PAGE_ALIGN_DOWN(phys) == pmm_get_zero_page_phys() ||
+          (v && (v->flags & MAP_PRIVATE) && v->file_node != NULL)) {
+        // Shared page cache frame or zero page made writable:
+        // Must stay read-only and marked COW so subsequent writes allocate a private frame.
+        new_flags = (new_flags & ~PAGE_FLAG_RW) | PAGE_FLAG_COW;
+      }
     }
     if (!vmm_map_page(pml4, va, PAGE_ALIGN_DOWN(phys), new_flags)) {
       spinlock_release(&current->mm->lock);

@@ -5,6 +5,8 @@
 /edk2-ovmf/
 /AetherDE/
 /assets/minecraft.jar
+/assets/game.unx
+/assets/assets
 *.d
 *.elf
 *.o

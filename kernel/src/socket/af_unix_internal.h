@@ -6,6 +6,7 @@
 
 #include "af_unix.h"
 #include "../console/klog.h"
+#include "../cpu/ktrack.h"
 #include "../fs/vfs.h"
 #include "../lib/list.h"
 #include "../lib/string.h"
@@ -15,6 +16,7 @@
 #include "epoll.h"
 #include "socket.h"
 #include "socket_internal.h"
+#include "../include/arch/uaccess.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -27,6 +29,7 @@ extern spinlock_t       unix_bound_lock;
 // af_unix_addr.c
 unix_sock_t *unix_find_socket_by_addr(struct sockaddr_un *addr, int addrlen);
 unix_sock_t *unix_find_socket_by_addr_ref(struct sockaddr_un *addr, int addrlen);
+bool af_unix_sock_live(unix_sock_t *usk, socket_t **sock_out);
 
 // af_unix_bind.c  (unix_bind is the public ops entry — kept static there)
 

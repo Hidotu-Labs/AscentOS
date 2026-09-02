@@ -38,6 +38,7 @@
 void klog_putchar(char c);
 void klog_puts(const char *s);
 void klog_uint64(uint64_t num);
+void klog_int64(int64_t num);
 void klog_hex64(uint64_t num);
 void klog_hex32(uint32_t num);
 void klogf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));

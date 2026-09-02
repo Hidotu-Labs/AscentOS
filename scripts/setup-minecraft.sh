@@ -336,14 +336,14 @@ echo "=== [3/4] Writing launcher + desktop entries ==="
 mkdir -p "${ROOTFS_DIR}/usr/bin"
 cat > "${ROOTFS_DIR}/usr/bin/minecraft" << LAUNCHER_EOF
 #!/bin/sh
-# Minecraft 1.8.9 Launcher for AvoryOS
+# Minecraft 1.8.9 launcher for AvoryOS
 
 export DISPLAY="\${DISPLAY:-:0}"
 
 # Software GL (Max Performance llvmpipe)
 export LIBGL_ALWAYS_SOFTWARE=1
 export GALLIUM_DRIVER=llvmpipe
-export LP_NUM_THREADS="${LP_NUM_THREADS:-2}"
+export LP_NUM_THREADS="${LP_NUM_THREADS:-4}"
 export LP_PERF=no_linear,no_mipmap
 export MESA_GL_VERSION_OVERRIDE=2.1
 export MESA_GLSL_VERSION_OVERRIDE=120
@@ -351,10 +351,12 @@ export MESA_NO_DITHER=1
 export vblank_mode=0
 export MESA_SHADER_CACHE_DISABLE=true
 export MESA_GLSL_CACHE_DISABLE=true
+export ALSOFT_DRIVERS="oss,alsa"
+export ALSOFT_CONF="drivers=oss,alsa;mmap=false"
 
 JAVA_HOME="${JAVA_HOME_GUEST}"
 export PATH="\${JAVA_HOME}/bin:\${PATH}"
-export LD_LIBRARY_PATH="/opt/minecraft/natives:/usr/lib:\${JAVA_HOME}/lib:\${JAVA_HOME}/lib/server:\${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="\${JAVA_HOME}/lib:\${JAVA_HOME}/lib/server:/usr/lib:/lib:\${LD_LIBRARY_PATH:-}"
 
 MC_PRELOAD=""
 [ -f /usr/lib/libjemalloc.so.2 ] && MC_PRELOAD="/usr/lib/libjemalloc.so.2"
@@ -370,7 +372,7 @@ for jar in /opt/minecraft/libs/*.jar; do
     MC_CP="\${MC_CP}:\${jar}"
 done
 
-# Write 1.8.9-compatible options.txt (Max FPS Profile)
+# Write 1.8.9-compatible options.txt (sound enabled)
 cat > "\${MC_HOME}/options.txt" << 'OPT_EOF'
 version:1343
 invertYMouse:false
@@ -427,22 +429,40 @@ OPT_EOF
 
 echo "[minecraft] Starting Minecraft 1.8.9 as '\${MC_USER}' (Heap: \${MC_RAM}, Max FPS Profile)..."
 LD_PRELOAD="\${MC_PRELOAD}\${LD_PRELOAD:+:\$LD_PRELOAD}" \
+MALLOC_CONF="background_thread:false,dirty_decay_ms:5000,muzzy_decay_ms:5000" \
 exec "\${JAVA_HOME}/bin/java" \
     -server \
     -Xms256m -Xmx"\${MC_RAM}" \
+    -Xss512k \
+    -XX:+UseParallelGC \
+    -XX:ParallelGCThreads=2 \
+    -XX:CICompilerCount=2 \
     -XX:+TieredCompilation \
     -XX:ReservedCodeCacheSize=48m \
     -XX:+DoEscapeAnalysis \
     -XX:+EliminateLocks \
     -XX:-UsePerfData \
-    --add-opens java.base/java.lang=ALL-UNNAMED \
+    -XX:+UnlockDiagnosticVMOptions \
+    -XX:-ImplicitNullChecks \
     --add-opens java.base/java.nio=ALL-UNNAMED \
+    --add-opens java.base/java.lang=ALL-UNNAMED \
     --add-opens java.base/java.lang.reflect=ALL-UNNAMED \
-    -Dos.name=Linux \
+    --add-opens java.base/java.util=ALL-UNNAMED \
+    --add-opens java.base/sun.nio.ch=ALL-UNNAMED \
+    --add-exports java.base/jdk.internal.misc=ALL-UNNAMED \
+    --add-exports java.base/sun.security.action=ALL-UNNAMED \
+    -Dio.netty.eventLoopThreads=2 \
+    -Dhttp.keepAlive=false \
+    -Dsun.net.client.defaultConnectTimeout=3000 \
+    -Dsun.net.client.defaultReadTimeout=3000 \
+    -Djdk.lang.Process.launchMechanism=posix_spawn \
     -Dorg.lwjgl.opengl.Display.allowSoftwareOpenGL=true \
     -DLWJGL_DISABLE_XRANDR=true \
-    -Djava.library.path=/opt/minecraft/natives \
     -Dorg.lwjgl.librarypath=/opt/minecraft/natives \
+    -Dnet.java.games.input.librarypath=/opt/minecraft/natives \
+    -Djava.library.path=/opt/minecraft/natives \
+    -Dos.name=Linux \
+    -Dminecraft.applet.TargetDirectory="\${MC_HOME}" \
     -cp "\${MC_CP}" \
     net.minecraft.client.main.Main \
     --username "\${MC_USER}" \
@@ -452,8 +472,7 @@ exec "\${JAVA_HOME}/bin/java" \
     --assetIndex "1.8" \
     --uuid "00000000-0000-0000-0000-000000000000" \
     --accessToken "0" \
-    --userType "legacy" \
-    "\$@"
+    --userType "legacy"
 LAUNCHER_EOF
 
 chmod +x "${ROOTFS_DIR}/usr/bin/minecraft"

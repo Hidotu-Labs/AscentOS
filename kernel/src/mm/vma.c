@@ -646,9 +646,9 @@ static void vma_dump_recursive(struct vma *node) {
   // Inorder traversal to print in address order
   vma_dump_recursive(node->left);
 
-  klog_puts("  0x");
+  klog_puts("  ");
   klog_hex64(node->start);
-  klog_puts(" - 0x");
+  klog_puts(" - ");
   klog_hex64(node->end);
   klog_puts(" ");
 
@@ -671,7 +671,7 @@ static void vma_dump_recursive(struct vma *node) {
   if (node->fd != -1) {
     klog_puts("fd=");
     klog_uint64((uint64_t)node->fd);
-    klog_puts(" off=0x");
+    klog_puts(" off=");
     klog_hex64(node->offset);
   }
 

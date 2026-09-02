@@ -154,8 +154,10 @@ static uint64_t sys_mkdir(uint64_t pathname, uint64_t mode, uint64_t a2,
         strcpy(dir_name, clean_path);
     }
 
-    if (!parent || (parent->flags & FS_TYPE_MASK) != FS_DIRECTORY)
-        return (uint64_t)-20;
+    if (!parent)
+        return (uint64_t)-2; // ENOENT
+    if ((parent->flags & FS_TYPE_MASK) != FS_DIRECTORY)
+        return (uint64_t)-20; // ENOTDIR
     vfs_node_t *existing = vfs_finddir(parent, dir_name);
     if (existing) return (uint64_t)-17;
     if (!vfs_access(parent, 3)) return (uint64_t)-13;
@@ -221,8 +223,10 @@ static uint64_t sys_mkdirat(uint64_t dirfd, uint64_t pathname, uint64_t mode,
         strcpy(dir_name, path);
     }
 
-    if (!parent || (parent->flags & FS_TYPE_MASK) != FS_DIRECTORY)
-        return (uint64_t)-20;
+    if (!parent)
+        return (uint64_t)-2; // ENOENT
+    if ((parent->flags & FS_TYPE_MASK) != FS_DIRECTORY)
+        return (uint64_t)-20; // ENOTDIR
     vfs_node_t *existing = vfs_finddir(parent, dir_name);
     if (existing) return (uint64_t)-17;
     if (!vfs_access(parent, 3)) return (uint64_t)-13;
@@ -583,8 +587,10 @@ static uint64_t sys_link(uint64_t oldpath_ptr, uint64_t newpath_ptr,
     vfs_node_t *parent =
         resolve_parent_and_name(newpath, file_name, sizeof(file_name));
 
-    if (!parent || (parent->flags & FS_TYPE_MASK) != FS_DIRECTORY)
-        return (uint64_t)-20;
+    if (!parent)
+        return (uint64_t)-2; // ENOENT
+    if ((parent->flags & FS_TYPE_MASK) != FS_DIRECTORY)
+        return (uint64_t)-20; // ENOTDIR
     if (!vfs_access(parent, 3)) return (uint64_t)-13;
     if (vfs_finddir(parent, file_name)) return (uint64_t)-17;
     if (vfs_create(parent, file_name, src->mask & 0777) != 0)
@@ -710,7 +716,9 @@ static uint64_t sys_linkat(uint64_t olddirfd, uint64_t oldpath_ptr,
     if (blen == 0 || blen >= sizeof(file_name)) return (uint64_t)-36;
     memcpy(file_name, basename, blen + 1);
 
-    if (!new_parent || (new_parent->flags & FS_TYPE_MASK) != FS_DIRECTORY)
+    if (!new_parent)
+        return (uint64_t)-2; // ENOENT
+    if ((new_parent->flags & FS_TYPE_MASK) != FS_DIRECTORY)
         return (uint64_t)-20; // ENOTDIR
     if (!vfs_access(new_parent, 3)) return (uint64_t)-13;  // EACCES
     if (vfs_finddir(new_parent, file_name)) return (uint64_t)-17; // EEXIST
@@ -940,8 +948,15 @@ static uint64_t do_sys_access(int dirfd, const char *path, uint64_t mode,
     }
     if (!node) return (uint64_t)-2;
 
-    if (mode & ~7) return (uint64_t)-22;
-    if (mode && !vfs_access(node, (uint32_t)mode)) return (uint64_t)-13;
+    if (mode & ~7) {
+        vfs_close(node);
+        return (uint64_t)-22;
+    }
+    if (mode && !vfs_access(node, (uint32_t)mode)) {
+        vfs_close(node);
+        return (uint64_t)-13;
+    }
+    vfs_close(node);
     return 0;
 }
 
@@ -949,6 +964,13 @@ static uint64_t sys_access(uint64_t pathname_ptr, uint64_t mode, uint64_t a2,
                             uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a2; (void)a3; (void)a4; (void)a5;
     return do_sys_access(AT_FDCWD, (const char *)pathname_ptr, mode, 0);
+}
+
+static uint64_t sys_faccessat(uint64_t dirfd, uint64_t pathname_ptr,
+                              uint64_t mode, uint64_t a3, uint64_t a4,
+                              uint64_t a5) {
+    (void)a3; (void)a4; (void)a5;
+    return do_sys_access((int)dirfd, (const char *)pathname_ptr, mode, 0);
 }
 
 static uint64_t sys_faccessat2(uint64_t dirfd, uint64_t pathname_ptr,
@@ -1052,6 +1074,7 @@ void syscall_register_fs(void) {
     syscall_register(SYS_FCHMODAT2,  sys_fchmodat2);
     syscall_register(SYS_FCHOWNAT,   sys_fchownat);
     syscall_register(SYS_ACCESS,     sys_access);
+    syscall_register(SYS_FACCESSAT,  sys_faccessat);
     syscall_register(SYS_FACCESSAT2, sys_faccessat2);
     syscall_register(SYS_FCHDIR,     sys_fchdir);
     syscall_register(SYS_UTIMENSAT,  sys_utimensat);

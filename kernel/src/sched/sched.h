@@ -201,7 +201,10 @@ struct thread {
   // Signal state
   struct k_sigaction signal_handlers[64];
   uint64_t pending_signals;
+  uint32_t signal_sender_pid[64];
   uint64_t signal_mask;
+  uint64_t saved_signal_mask;
+  bool has_saved_signal_mask;
   uint64_t fault_addr;
   uint32_t fault_code;
 
@@ -232,6 +235,16 @@ struct thread {
   char comm[16];          // Executable name (basename, max 15 chars + NUL)
   char exe_path[256];     // Full path of the current executable (for /proc/self/exe)
   uint64_t cpu_affinity;  // Bitmask of allowed CPUs
+
+  // Subsystem & Site Diagnostics
+  const char *last_subsystem;
+  const char *last_kernel_file;
+  uint32_t last_kernel_line;
+  const char *last_kernel_func;
+  int64_t last_error_code;
+  uint64_t last_syscall_num;
+  uint64_t last_syscall_args[6];
+  int64_t last_syscall_ret;
 };
 
 /*

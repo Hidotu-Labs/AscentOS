@@ -30,6 +30,28 @@ void fault_log_add(struct registers *regs, int sig, uint64_t cr2) {
   rec->cr2 = cr2;
   rec->err_code = regs->err_code;
   memcpy(rec->comm, t->comm, 16);
+  if (t->last_subsystem) {
+    strncpy(rec->subsystem, t->last_subsystem, sizeof(rec->subsystem) - 1);
+    rec->subsystem[sizeof(rec->subsystem) - 1] = '\0';
+  } else {
+    rec->subsystem[0] = '\0';
+  }
+  if (t->last_kernel_file) {
+    strncpy(rec->kernel_file, t->last_kernel_file, sizeof(rec->kernel_file) - 1);
+    rec->kernel_file[sizeof(rec->kernel_file) - 1] = '\0';
+  } else {
+    rec->kernel_file[0] = '\0';
+  }
+  rec->kernel_line = t->last_kernel_line;
+  if (t->last_kernel_func) {
+    strncpy(rec->kernel_func, t->last_kernel_func, sizeof(rec->kernel_func) - 1);
+    rec->kernel_func[sizeof(rec->kernel_func) - 1] = '\0';
+  } else {
+    rec->kernel_func[0] = '\0';
+  }
+  rec->error_code = t->last_error_code;
+  rec->last_syscall_num = t->last_syscall_num;
+  rec->last_syscall_ret = t->last_syscall_ret;
   memcpy(&rec->regs, regs, sizeof(struct registers));
 
   fault_head = (fault_head + 1) % FAULT_BUFFER_SIZE;

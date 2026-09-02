@@ -66,6 +66,8 @@ void lapic_timer_handler(struct registers *regs) {
     extern void timerfd_tick(void);
     timerfd_tick();
     if (cpu == cpu_get_bsp()) {
+        extern void watchdog_tick(void);
+        watchdog_tick();
         xhci_msix_watchdog();
         serial_flush();
     }

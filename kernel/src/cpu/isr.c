@@ -5,10 +5,13 @@
 #include "../mm/vma.h"
 #include "../mm/vmm.h"
 #include "../sched/sched.h"
+#include "../socket/socket.h"
+#include "../syscalls/syscall.h"
 #include "apic/lapic.h"
 #include "arch/x86_64/extable.h"
 #include "fault.h"
 #include "fpu.h"
+#include "ktrack.h"
 #include "msr.h"
 #include "pic.h"
 #include "../drivers/serial.h"
@@ -594,6 +597,29 @@ static void klog_dump_ptr(const char *reg_name, uint64_t val) {
     }
 }
 
+static const char *get_signal_name(int sig) {
+  switch (sig) {
+    case 1: return "SIGHUP";
+    case 2: return "SIGINT";
+    case 3: return "SIGQUIT";
+    case 4: return "SIGILL";
+    case 5: return "SIGTRAP";
+    case 6: return "SIGABRT";
+    case 7: return "SIGBUS";
+    case 8: return "SIGFPE";
+    case 9: return "SIGKILL";
+    case 10: return "SIGUSR1";
+    case 11: return "SIGSEGV";
+    case 12: return "SIGUSR2";
+    case 13: return "SIGPIPE";
+    case 14: return "SIGALRM";
+    case 15: return "SIGTERM";
+    case 16: return "SIGSTKFLT";
+    case 31: return "SIGSYS";
+    default: return "UNKNOWN";
+  }
+}
+
 void isr_report_user_fault(struct registers *regs, int sig,
                            uint64_t addr) {
   struct thread *current = sched_get_current();
@@ -617,13 +643,148 @@ void isr_report_user_fault(struct registers *regs, int sig,
       klog_uint64(current->tgid);
       klog_puts(") signal ");
       klog_uint64(sig);
-      klog_puts("\n");
+      klog_puts(" (");
+      klog_puts(get_signal_name(sig));
+      klog_puts(")\n");
       
+      // Fault Reason
+      klog_puts("  Fault Reason: ");
+      if (sig == 11) {
+        if (addr < 0x1000) {
+          klog_puts(KLOG_CLR_YELLOW "Null / near-null pointer dereference" KLOG_CLR_RESET);
+        } else if (addr >= 0x0000800000000000ULL && addr < 0xFFFF800000000000ULL) {
+          klog_puts(KLOG_CLR_YELLOW "Non-canonical memory access" KLOG_CLR_RESET);
+        } else if (regs->err_code & 16) {
+          klog_puts(KLOG_CLR_YELLOW "Execute non-executable page (NX)" KLOG_CLR_RESET);
+        } else if (regs->err_code & 1) {
+          klog_puts(KLOG_CLR_YELLOW "Page protection violation (page present)" KLOG_CLR_RESET);
+        } else {
+          klog_puts(KLOG_CLR_YELLOW "Page fault on unmapped address" KLOG_CLR_RESET);
+        }
+      } else if (sig == 4) {
+        klog_puts(KLOG_CLR_YELLOW "Illegal instruction / invalid opcode" KLOG_CLR_RESET);
+      } else if (sig == 8) {
+        klog_puts(KLOG_CLR_YELLOW "Floating-point / arithmetic exception" KLOG_CLR_RESET);
+      } else if (sig == 7) {
+        klog_puts(KLOG_CLR_YELLOW "Bus error / misaligned memory access" KLOG_CLR_RESET);
+      } else if (sig == 16) {
+        klog_puts(KLOG_CLR_YELLOW "Stack fault" KLOG_CLR_RESET);
+      } else {
+        klog_puts(KLOG_CLR_YELLOW "Signal delivered to thread" KLOG_CLR_RESET);
+      }
+      klog_puts("\n");
+
       klog_puts("  RIP: "); klog_hex64(regs->rip);
+      if (current->mm) {
+        struct vma *rvma = vma_find(&current->mm->vmas, regs->rip);
+        if (rvma) {
+          klog_puts(" (VMA: "); klog_hex64(rvma->start); klog_puts(" - "); klog_hex64(rvma->end);
+          klog_puts(", offset +"); klog_hex64(regs->rip - rvma->start); klog_puts(")");
+        }
+      }
+      klog_puts("\n");
       klog_puts("  CR2: "); klog_hex64(addr);
       klog_puts("  ERR: "); klog_hex64(regs->err_code);
       klog_puts("  CS: "); klog_hex64(regs->cs);
       klog_puts("\n");
+
+      // Subsystem context
+      if (current->last_subsystem || current->last_kernel_file) {
+        klog_puts(KLOG_CLR_CYAN "LAST KERNEL SUBSYSTEM CONTEXT:\n" KLOG_CLR_RESET);
+        klog_puts("  Subsystem:  [");
+        klog_puts(current->last_subsystem ? current->last_subsystem : "UNKNOWN");
+        klog_puts("]\n");
+        klog_puts("  Location:   ");
+        klog_puts(current->last_kernel_file ? current->last_kernel_file : "<unknown>");
+        klog_puts(":");
+        klog_uint64(current->last_kernel_line);
+        if (current->last_kernel_func) {
+          klog_puts(" (");
+          klog_puts(current->last_kernel_func);
+          klog_puts(")");
+        }
+        klog_puts("\n");
+        if (current->last_error_code != 0) {
+          klog_puts("  Last Error: ");
+          klog_int64(current->last_error_code);
+          klog_puts("\n");
+        }
+      }
+
+      // Syscall context
+      const char *sc_name = syscall_get_name(current->last_syscall_num);
+      klog_puts(KLOG_CLR_CYAN "LAST SYSCALL CONTEXT:\n" KLOG_CLR_RESET);
+      klog_puts("  Syscall:    ");
+      klog_puts(sc_name ? sc_name : "unknown");
+      klog_puts(" (");
+      klog_uint64(current->last_syscall_num);
+      klog_puts(") -> returned: ");
+      klog_int64(current->last_syscall_ret);
+      klog_puts(" (");
+      klog_hex64((uint64_t)current->last_syscall_ret);
+      klog_puts(")\n");
+      klog_puts("  Arguments:  [0]=");
+      klog_hex64(current->last_syscall_args[0]);
+      klog_puts(", [1]=");
+      klog_hex64(current->last_syscall_args[1]);
+      klog_puts(", [2]=");
+      klog_hex64(current->last_syscall_args[2]);
+      klog_puts(", [3]=");
+      klog_hex64(current->last_syscall_args[3]);
+      klog_puts("\n              [4]=");
+      klog_hex64(current->last_syscall_args[4]);
+      klog_puts(", [5]=");
+      klog_hex64(current->last_syscall_args[5]);
+      klog_puts("\n");
+
+      // Active file descriptors / sockets
+      if (current->files) {
+        klog_puts(KLOG_CLR_CYAN "OPEN DESCRIPTORS (FDS):\n" KLOG_CLR_RESET);
+        int fd_count = 0;
+        for (int fd = 0; fd < MAX_FDS && fd_count < 16; fd++) {
+          vfs_node_t *node = current->files->fds[fd];
+          if (node) {
+            fd_count++;
+            klog_puts("  fd["); klog_uint64(fd); klog_puts("]: ");
+            if (current->files->fd_paths[fd] && current->files->fd_paths[fd]->value[0]) {
+              klog_puts(current->files->fd_paths[fd]->value);
+            } else if (node->name[0]) {
+              klog_puts(node->name);
+            } else if ((node->flags & FS_TYPE_MASK) == FS_SOCKET) {
+              socket_t *s = (socket_t *)node->device;
+              if (s) {
+                if (s->domain == 1) { // AF_UNIX
+                  klog_puts("socket:[unix");
+                  if (s->state == SS_CONNECTED) klog_puts(",connected");
+                  else if (s->state == SS_LISTENING) klog_puts(",listening");
+                  else if (s->state == SS_CONNECTING) klog_puts(",connecting");
+                  else if (s->state == SS_DISCONNECTING) klog_puts(",disconnecting");
+                  else if (s->state == SS_UNCONNECTED) klog_puts(",unconnected");
+                  klog_puts("]");
+                } else if (s->domain == 2) {
+                  klog_puts("socket:[inet]");
+                } else if (s->domain == 16) {
+                  klog_puts("socket:[netlink]");
+                } else {
+                  klog_puts("socket");
+                }
+              } else {
+                klog_puts("socket");
+              }
+            } else if ((node->flags & FS_TYPE_MASK) == FS_PIPE) {
+              klog_puts("pipe");
+            } else if ((node->flags & FS_TYPE_MASK) == FS_CHARDEV) {
+              klog_puts("chardev");
+            } else {
+              klog_puts("<vfs_node>");
+            }
+            klog_puts(" (flags="); klog_hex64(current->files->fd_flags[fd]); klog_puts(")\n");
+          }
+        }
+        if (fd_count == 0) {
+          klog_puts("  <none>\n");
+        }
+      }
 
       klog_rflags_decoded(regs->rflags);
 

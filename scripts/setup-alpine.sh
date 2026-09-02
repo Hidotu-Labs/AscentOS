@@ -138,6 +138,11 @@ install_apk "hwdata-pci" "main"
 echo "[*] Installing IceWM window manager..."
 install_apk "icewm" "community"
 install_apk "libxinerama" "main"
+
+# OpenAL audio library for native games/apps
+echo "[*] Installing OpenAL Soft..."
+install_apk "openal-soft" "community"
+install_apk "openal-soft-dev" "community"
 install_apk "libxrandr" "main"
 install_apk "libxpm" "main"
 install_apk "libjpeg" "main"
@@ -148,9 +153,6 @@ install_apk "imlib2" "main"
 install_apk "libstdc++" "main"
 
 # Openbox window manager (LXDE base) and dependencies
-echo "[*] Installing Openbox window manager..."
-install_apk "openbox" "community"
-install_apk "openbox-libs" "community"
 install_apk "libxml2" "main"
 install_apk "startup-notification" "community"
 install_apk "libxcomposite" "main"
@@ -345,15 +347,15 @@ ln -sf /etc/machine-id "${ROOTFS_DIR}/var/lib/dbus/machine-id"
 
 # Allow VLC execution as root. LD_PRELOAD UID spoofing breaks D-Bus EXTERNAL auth
 # (libdbus sends fake uid 1000 while the kernel reports uid 0), so patch the one
-# geteuid()==0 early-exit in vlc.bin instead.
-if [ -f "${ROOTFS_DIR}/usr/bin/vlc" ] && [ ! -f "${ROOTFS_DIR}/usr/bin/vlc.bin" ]; then
-    mv "${ROOTFS_DIR}/usr/bin/vlc" "${ROOTFS_DIR}/usr/bin/vlc.bin"
+# geteuid()==0 early-exit in vlc instead.
+if [ -f "${ROOTFS_DIR}/usr/bin/vlc.bin" ]; then
+    mv -f "${ROOTFS_DIR}/usr/bin/vlc.bin" "${ROOTFS_DIR}/usr/bin/vlc"
 fi
 rm -f "${ROOTFS_DIR}/lib/libvlc_root_fix.so"
-if [ -f "${ROOTFS_DIR}/usr/bin/vlc.bin" ]; then
+if [ -f "${ROOTFS_DIR}/usr/bin/vlc" ]; then
     python3 - <<PY
 from pathlib import Path
-path = Path("${ROOTFS_DIR}/usr/bin/vlc.bin")
+path = Path("${ROOTFS_DIR}/usr/bin/vlc")
 data = bytearray(path.read_bytes())
 
 WANT   = bytes.fromhex("0f842f010000")  # je +0x12f  (root-guard branch)
@@ -362,7 +364,7 @@ HINT   = 0x109c                         # known offset for current Alpine VLC
 
 # 1. Check if already patched at the hint offset – nothing to do.
 if data[HINT:HINT + 6] == NOP6:
-    print("[OK] vlc.bin root guard already patched, skipping")
+    print("[OK] vlc root guard already patched, skipping")
     raise SystemExit(0)
 
 # 2. Try the known offset first.
@@ -373,48 +375,30 @@ else:
     off = data.find(WANT)
     if off == -1:
         raise SystemExit(
-            f"vlc.bin root guard: pattern not found and offset 0x{HINT:x} "
+            f"vlc root guard: pattern not found and offset 0x{HINT:x} "
             f"has unexpected bytes: {data[HINT:HINT + 6].hex()}"
         )
-    print(f"[~] vlc.bin root guard found at 0x{off:x} (hint was 0x{HINT:x})")
+    print(f"[~] vlc root guard found at 0x{off:x} (hint was 0x{HINT:x})")
 
 data[off:off + 6] = NOP6
 path.write_bytes(data)
-print(f"[OK] patched vlc.bin root guard at 0x{off:x}")
+print(f"[OK] patched vlc root guard at 0x{off:x}")
 PY
+    chmod +x "${ROOTFS_DIR}/usr/bin/vlc"
 fi
 
-cat <<'EOF' > "${ROOTFS_DIR}/usr/bin/vlc"
-#!/bin/sh
-export DISPLAY=${DISPLAY:-:0}
-export QT_QPA_PLATFORM=xcb
-export PULSE_SERVER=""
-export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/tmp/runtime-avory}
-mkdir -p "$XDG_RUNTIME_DIR"
-chmod 700 "$XDG_RUNTIME_DIR"
-
-# Reuse the session bus started by initrd/startx.sh; never spawn a second daemon
-# when the socket already exists (that race produced two VLC windows).
-if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && [ -S /tmp/avory-session-bus ]; then
-    export DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/avory-session-bus
-fi
-
-if [ -f /lib/libgcompat.so.0 ]; then
-    export LD_PRELOAD="/lib/libgcompat.so.0${LD_PRELOAD:+:${LD_PRELOAD}}"
-fi
-
-# Do not pass "-I qt": vlc.bin already auto-selects Qt when DISPLAY is set, and
-# an explicit "-I qt" duplicates the Qt interface (two windows + privacy dialogs).
-# libmad MP3 decoding fails on AvoryOS (bad main_data_begin); use ffmpeg avcodec.
-exec /usr/bin/vlc.bin --one-instance --no-qt-privacy-ask --aout=alsa \
-    --alsa-audio-device=hw:0,0 --codec=avcodec --clock-synchro=0 \
-    --file-caching=50 --network-caching=50 --disc-caching=50 --live-caching=50 "$@"
-EOF
-chmod +x "${ROOTFS_DIR}/usr/bin/vlc"
-
-# Seed VLC defaults: ALSA output, no duplicate Qt/privacy prompts.
+# Seed VLC defaults: ALSA output, no duplicate Qt/privacy prompts, no dbus control.
 mkdir -p "${ROOTFS_DIR}/etc/vlc" "${ROOTFS_DIR}/root/.config/vlc"
 cat > "${ROOTFS_DIR}/etc/vlc/vlcrc" <<'VLCRC_EOF'
+[core]
+control=
+dbus=0
+mpris=0
+
+[dbus]
+control=0
+mpris=0
+
 [alsa]
 alsa-audio-device=hw:0,0
 
@@ -457,27 +441,27 @@ cat > "${ROOTFS_DIR}/etc/ld-musl-x86_64.path" <<'EOF'
 /usr/local/lib
 /usr/lib
 EOF
-if [ -f "${ROOTFS_DIR}/usr/lib/libucontext.so.1" ]; then
-    cp "${ROOTFS_DIR}/usr/lib/libucontext.so.1" "${ROOTFS_DIR}/lib/libucontext.so.1"
-fi
-if [ -f "${ROOTFS_DIR}/usr/lib/libucontext_posix.so.1" ]; then
-    cp "${ROOTFS_DIR}/usr/lib/libucontext_posix.so.1" "${ROOTFS_DIR}/lib/libucontext_posix.so.1"
-fi
+safe_cp() {
+    local src="$1"
+    local dst="$2"
+    [ -f "$src" ] || return 0
+    if [ -e "$dst" ]; then
+        [ "$(realpath "$src" 2>/dev/null)" = "$(realpath "$dst" 2>/dev/null)" ] && return 0
+    fi
+    cp -f "$src" "$dst" 2>/dev/null || true
+}
+
+safe_cp "${ROOTFS_DIR}/usr/lib/libucontext.so.1" "${ROOTFS_DIR}/lib/libucontext.so.1"
+safe_cp "${ROOTFS_DIR}/usr/lib/libucontext_posix.so.1" "${ROOTFS_DIR}/lib/libucontext_posix.so.1"
 
 # glibc-linked tools such as /opt/coreutils/bin/ls search lib64 paths.
 mkdir -p "${ROOTFS_DIR}/lib64" "${ROOTFS_DIR}/usr/lib64"
-if [ -f "${ROOTFS_DIR}/lib/libc.musl-x86_64.so.1" ]; then
-    cp "${ROOTFS_DIR}/lib/libc.musl-x86_64.so.1" "${ROOTFS_DIR}/lib64/libc.musl-x86_64.so.1"
-    cp "${ROOTFS_DIR}/lib/libc.musl-x86_64.so.1" "${ROOTFS_DIR}/usr/lib64/libc.musl-x86_64.so.1"
-fi
-if [ -f "${ROOTFS_DIR}/usr/lib/libucontext.so.1" ]; then
-    cp "${ROOTFS_DIR}/usr/lib/libucontext.so.1" "${ROOTFS_DIR}/lib64/libucontext.so.1"
-    cp "${ROOTFS_DIR}/usr/lib/libucontext.so.1" "${ROOTFS_DIR}/usr/lib64/libucontext.so.1"
-fi
-if [ -f "${ROOTFS_DIR}/usr/lib/libucontext_posix.so.1" ]; then
-    cp "${ROOTFS_DIR}/usr/lib/libucontext_posix.so.1" "${ROOTFS_DIR}/lib64/libucontext_posix.so.1"
-    cp "${ROOTFS_DIR}/usr/lib/libucontext_posix.so.1" "${ROOTFS_DIR}/usr/lib64/libucontext_posix.so.1"
-fi
+safe_cp "${ROOTFS_DIR}/lib/libc.musl-x86_64.so.1" "${ROOTFS_DIR}/lib64/libc.musl-x86_64.so.1"
+safe_cp "${ROOTFS_DIR}/lib/libc.musl-x86_64.so.1" "${ROOTFS_DIR}/usr/lib64/libc.musl-x86_64.so.1"
+safe_cp "${ROOTFS_DIR}/usr/lib/libucontext.so.1" "${ROOTFS_DIR}/lib64/libucontext.so.1"
+safe_cp "${ROOTFS_DIR}/usr/lib/libucontext.so.1" "${ROOTFS_DIR}/usr/lib64/libucontext.so.1"
+safe_cp "${ROOTFS_DIR}/usr/lib/libucontext_posix.so.1" "${ROOTFS_DIR}/lib64/libucontext_posix.so.1"
+safe_cp "${ROOTFS_DIR}/usr/lib/libucontext_posix.so.1" "${ROOTFS_DIR}/usr/lib64/libucontext_posix.so.1"
 
 install_apk "mesa-glapi" "main"
 install_apk "llvm19-libs" "main"
@@ -486,11 +470,9 @@ install_apk "zstd-libs" "main"
 install_apk "musl-obstack" "main"
 
 # glibc-linked coreutils also need musl-obstack in lib64 paths.
-if [ -f "${ROOTFS_DIR}/usr/lib/libobstack.so.1" ]; then
-    mkdir -p "${ROOTFS_DIR}/lib64" "${ROOTFS_DIR}/usr/lib64"
-    cp "${ROOTFS_DIR}/usr/lib/libobstack.so.1" "${ROOTFS_DIR}/lib64/libobstack.so.1"
-    cp "${ROOTFS_DIR}/usr/lib/libobstack.so.1" "${ROOTFS_DIR}/usr/lib64/libobstack.so.1"
-fi
+mkdir -p "${ROOTFS_DIR}/lib64" "${ROOTFS_DIR}/usr/lib64"
+safe_cp "${ROOTFS_DIR}/usr/lib/libobstack.so.1" "${ROOTFS_DIR}/lib64/libobstack.so.1"
+safe_cp "${ROOTFS_DIR}/usr/lib/libobstack.so.1" "${ROOTFS_DIR}/usr/lib64/libobstack.so.1"
 install_apk "libunwind" "main"
 install_apk "libva" "main"
 install_apk "xcb-util-wm" "community"
@@ -584,41 +566,7 @@ install_apk "mpc1" "main"
 install_apk "musl-dev" "main"
 install_apk "binutils" "main"
 
-# Wrap the real gcc with a script that locks the sysroot to / so that
-# cc1 always resolves #include <...> against the rootfs's musl headers
-# rather than any host glibc headers that may bleed through the VFS.
-echo "[*] Installing gcc sysroot wrapper..."
-GCC_BIN="${ROOTFS_DIR}/usr/bin/gcc"
-GCC_REAL="${ROOTFS_DIR}/usr/bin/gcc.real"
-GCC_DRIVER="${ROOTFS_DIR}/usr/bin/x86_64-alpine-linux-musl-gcc"
 
-is_elf() {
-    [ -f "$1" ] && file "$1" | grep -q 'ELF'
-}
-
-# First install: move the real driver aside. Re-runs must not clobber gcc.real
-# with the wrapper script (that causes an infinite exec loop).
-if ! is_elf "${GCC_REAL}"; then
-    if is_elf "${GCC_BIN}"; then
-        mv "${GCC_BIN}" "${GCC_REAL}"
-    elif is_elf "${GCC_DRIVER}"; then
-        cp "${GCC_DRIVER}" "${GCC_REAL}"
-    fi
-fi
-
-if is_elf "${GCC_REAL}"; then
-    cat > "${GCC_BIN}" << 'GCC_WRAP_EOF'
-#!/bin/sh
-# gcc wrapper — forces --sysroot=/ so the compiler always uses the musl
-# headers and libraries inside the AvoryOS rootfs image, not host glibc.
-exec /usr/bin/gcc.real \
-    --sysroot=/ \
-    -isystem /usr/lib/gcc/x86_64-alpine-linux-musl/14.2.0/include \
-    -isystem /usr/include \
-    "$@"
-GCC_WRAP_EOF
-    chmod +x "${GCC_BIN}"
-fi
 
 # GTK 3.0 Development headers
 echo "[*] Installing GTK 3.0 development packages..."
@@ -673,7 +621,6 @@ install_apk "acl-libs" "main"
 install_apk "elogind-common" "community"
 install_apk "elogind" "community"
 install_apk "lightdm" "community"
-install_apk "lightdm-gtk-greeter" "community"
 install_apk "lxdm" "community"
 install_apk "xinit" "community"
 ln -sf elogind/libelogind-shared-252.so "${ROOTFS_DIR}/usr/lib/libelogind-shared-252.so" 2>/dev/null || true
@@ -747,6 +694,20 @@ install_apk "sdl2_mixer-dev" "community"
 install_apk "sdl2_net" "community"
 install_apk "sdl2_net-dev" "community"
 
+# SDL3 and related libraries (required by Mocktail and modern applications)
+echo "[*] Installing SDL3 and related libraries..."
+install_apk "sdl3" "community" "edge"
+install_apk "sdl3-dev" "community" "edge"
+install_apk "sdl3_ttf" "community" "edge"
+install_apk "sdl3_ttf-dev" "community" "edge"
+# sdl3_image and sdl3_mixer are not yet packaged in Alpine edge; skip for now
+# Mocktail rendering pipeline (OpenGL/EGL backend — no Vulkan required)
+install_apk "libplacebo" "community" "edge"
+install_apk "libplacebo-dev" "community" "edge"
+# Capstone disassembly engine v5 (required by Mocktail's JIT/ABI layer)
+install_apk "capstone" "community" "edge"
+install_apk "capstone-dev" "community" "edge"
+
 # WebKitGTK (GTK 3 / libsoup 3 ABI)
 #
 # Packages are extracted manually by install_apk(), so apk cannot resolve the
@@ -804,25 +765,9 @@ install_apk "libwebpmux" "main"
 install_apk "libwebpdemux" "main"
 install_apk "webkit2gtk-4.1" "community"
 install_apk "badwolf" "community"
+install_apk "alacritty" "community"
 
-# AvoryOS does not yet provide the namespaces, seccomp, or pidfd syscalls used
-# by WebKitGTK's bubblewrap sandbox. Its DRM stack also lacks the DRI2/DRI3
-# authentication needed by WebKit accelerated compositing. Keep the packaged
-# binary intact and install a compatibility launcher at the conventional path.
-if [ -x "${ROOTFS_DIR}/usr/bin/badwolf" ] &&
-   [ ! -e "${ROOTFS_DIR}/usr/libexec/badwolf.bin" ]; then
-    mkdir -p "${ROOTFS_DIR}/usr/libexec"
-    mv "${ROOTFS_DIR}/usr/bin/badwolf" "${ROOTFS_DIR}/usr/libexec/badwolf.bin"
-fi
-cat > "${ROOTFS_DIR}/usr/bin/badwolf" <<'EOF'
-#!/bin/sh
-export WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1
-export WEBKIT_DISABLE_COMPOSITING_MODE=1
-export WEBKIT_DISABLE_DMABUF_RENDERER=1
-export LIBGL_ALWAYS_SOFTWARE=1
-exec /usr/libexec/badwolf.bin "$@"
-EOF
-chmod +x "${ROOTFS_DIR}/usr/bin/badwolf"
+
 
 # NetSurf Web Browser
 echo "[*] Installing NetSurf and dependencies..."
@@ -876,8 +821,11 @@ autospawn = no
 disable-shm = yes
 PULSE_EOF
 
-# Disable D-Bus activation for GVfs volume monitors to prevent 25s timeouts
+# Disable D-Bus activation for GVfs volume monitors to prevent 25s timeouts and abort crashes
 rm -f "${ROOTFS_DIR}"/usr/share/dbus-1/services/org.gtk.vfs.*VolumeMonitor.service 2>/dev/null || true
+rm -f "${ROOTFS_DIR}"/usr/lib/gio/modules/libgvfsdbus.so \
+      "${ROOTFS_DIR}"/usr/lib/gio/modules/libgioremote-volume-monitor.so \
+      "${ROOTFS_DIR}"/usr/lib/gio/modules/libgiognomeproxy.so 2>/dev/null || true
 
 echo "[*] Compiling GSettings schemas..."
 if [ -d "${ROOTFS_DIR}/usr/share/glib-2.0/schemas" ]; then
@@ -885,6 +833,10 @@ if [ -d "${ROOTFS_DIR}/usr/share/glib-2.0/schemas" ]; then
         glib-compile-schemas "${ROOTFS_DIR}/usr/share/glib-2.0/schemas"
     fi
 fi
+mkdir -p "${ROOTFS_DIR}/etc/glib-2.0/settings" \
+         "${ROOTFS_DIR}/root/.config/glib-2.0/settings" \
+         "${ROOTFS_DIR}/.config/glib-2.0/settings"
+touch "${ROOTFS_DIR}/etc/glib-2.0/settings/defaults"
 
 echo "[*] Updating MIME database..."
 if [ -d "${ROOTFS_DIR}/usr/share/mime" ]; then
@@ -1136,14 +1088,39 @@ cat > "${XFCE_SESSION_DIR}/xfce4-session.xml" << 'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <channel name="xfce4-session" version="1.0">
   <property name="general" type="empty">
+    <property name="FailsafeSessionName" type="string" value="Failsafe"/>
     <property name="SaveOnExit" type="bool" value="false"/>
     <property name="SessionName" type="string" value="Default"/>
+    <property name="PromptOnLogout" type="bool" value="true"/>
+    <property name="AutoSave" type="bool" value="false"/>
   </property>
   <property name="startup" type="empty">
     <property name="screensaver-delay" type="uint" value="0"/>
   </property>
   <property name="splash-screen" type="empty">
     <property name="engine" type="string" value=""/>
+  </property>
+  <property name="sessions" type="empty">
+    <property name="Failsafe" type="empty">
+      <property name="IsFailsafe" type="bool" value="true"/>
+      <property name="Count" type="int" value="4"/>
+      <property name="Client0_Command" type="array">
+        <value type="string" value="xfwm4"/>
+      </property>
+      <property name="Client0_Priority" type="int" value="15"/>
+      <property name="Client1_Command" type="array">
+        <value type="string" value="xfsettingsd"/>
+      </property>
+      <property name="Client1_Priority" type="int" value="20"/>
+      <property name="Client2_Command" type="array">
+        <value type="string" value="xfce4-panel"/>
+      </property>
+      <property name="Client2_Priority" type="int" value="25"/>
+      <property name="Client3_Command" type="array">
+        <value type="string" value="xfdesktop"/>
+      </property>
+      <property name="Client3_Priority" type="int" value="30"/>
+    </property>
   </property>
 </channel>
 EOF
@@ -1309,64 +1286,37 @@ XfdesktopIconView rubberband {
 EOF
 
 mkdir -p "${ROOTFS_DIR}/etc/lightdm" "${ROOTFS_DIR}/etc/X11/xinit"
-cat > "${ROOTFS_DIR}/etc/lightdm/lightdm-gtk-greeter.conf" << 'EOF'
-[greeter]
-background=/usr/share/backgrounds/xfce/xfce-stripes.png
-theme-name=Adwaita
-icon-theme-name=Adwaita
-font-name=Sans 10
-indicators=~host;~spacer;~clock;~spacer;~session;~power
-clock-format=%a, %b %d  %H:%M
-default-user-image=#avatar-default
-screensaver-timeout=0
-EOF
-
 cat > "${ROOTFS_DIR}/etc/lightdm/lightdm.conf" << 'EOF'
 [LightDM]
 run-directory=/run/lightdm
 start-default-seat=true
-logind-load-seats=false
 logind-check-graphical=false
 
 [Seat:*]
 type=local
-greeter-session=lightdm-gtk-greeter
+autologin-user=root
+autologin-user-timeout=0
+autologin-session=xfce
 greeter-hide-users=false
 user-session=xfce
 xserver-command=/usr/libexec/Xorg -noreset -nolisten tcp
 session-wrapper=/etc/X11/xinit/Xsession
 EOF
-rm -f "${ROOTFS_DIR}/usr/share/dbus-1/system-services/org.freedesktop.login1.service"
-
-mkdir -p "${ROOTFS_DIR}/etc/lxdm" "${ROOTFS_DIR}/etc/pam.d"
-cat > "${ROOTFS_DIR}/etc/lxdm/lxdm.conf" << 'EOF'
-[base]
-session=/usr/bin/startxfce4
-skip_password=1
-greeter=/usr/lib/lxdm/lxdm-greeter-gtk
-
-[server]
-
-[display]
-gtk_theme=Adwaita
-bg=/usr/share/backgrounds/xfce/xfce-stripes.png
-bottom_pane=1
-lang=0
-keyboard=0
-theme=Alpine
-
-[input]
-
-[userlist]
-disable=0
-EOF
-
-cat > "${ROOTFS_DIR}/etc/pam.d/lxdm" << 'EOF'
-#%PAM-1.0
-auth        include     base-auth
-account     include     base-account
-password    include     base-password
-session     include     base-session
+cat > "${ROOTFS_DIR}/etc/xprofile" << 'EOF'
+export XDG_SESSION_TYPE=x11
+export XDG_CURRENT_DESKTOP=XFCE
+export XDG_SESSION_DESKTOP=xfce
+export DESKTOP_SESSION=xfce
+export XDG_CONFIG_DIRS=/etc/xdg:/etc
+export XDG_DATA_DIRS=/usr/local/share:/usr/share
+export GDK_GL=disable
+export LIBGL_DRI3_DISABLE=1
+export NO_AT_BRIDGE=1
+export GTK_A11Y=none
+export GIO_USE_VFS=local
+export GIO_USE_VOLUME_MONITOR=unix
+export GTK_USE_PORTAL=0
+export QT_NO_PORTAL=1
 EOF
 
 # 3c. Do not patch xfce4-about in place.  Even a one-byte change in an ELF
@@ -1466,6 +1416,10 @@ fi
 if [ -f "${ROOT_DIR}/userland/gtk3_test.elf" ]; then
     cp "${ROOT_DIR}/userland/gtk3_test.elf" "${ROOTFS_DIR}/bin/gtk3_test"
     chmod +x "${ROOTFS_DIR}/bin/gtk3_test"
+fi
+if [ -f "${ROOT_DIR}/userland/sdl3_test.elf" ]; then
+    cp "${ROOT_DIR}/userland/sdl3_test.elf" "${ROOTFS_DIR}/bin/sdl3_test"
+    chmod +x "${ROOTFS_DIR}/bin/sdl3_test"
 fi
 
 # Generate caches last: no subsequent rootfs customization may make their

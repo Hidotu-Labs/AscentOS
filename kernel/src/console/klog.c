@@ -174,6 +174,15 @@ void klog_uint64(uint64_t num) {
   klog_write_dispatch(buf, (size_t)len);
 }
 
+void klog_int64(int64_t num) {
+  if (num < 0) {
+    klog_putchar('-');
+    klog_uint64((uint64_t)(-num));
+  } else {
+    klog_uint64((uint64_t)num);
+  }
+}
+
 void klog_hex64(uint64_t num) {
   char buf[20];
   const char *hex = "0123456789ABCDEF";

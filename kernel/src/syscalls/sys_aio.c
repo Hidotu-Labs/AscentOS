@@ -612,7 +612,8 @@ static uint64_t sys_pipe2(uint64_t pipefd_ptr, uint64_t flags, uint64_t a2,
     t->fds[fd_read] = read_node;
     t->fds[fd_write] = write_node;
     t->fd_offsets[fd_read]  = t->fd_offsets[fd_write]  = 0;
-    t->fd_flags[fd_read]    = t->fd_flags[fd_write]    = flags;
+    t->fd_flags[fd_read]    = (flags & ~O_ACCMODE) | O_RDONLY;
+    t->fd_flags[fd_write]   = (flags & ~O_ACCMODE) | O_WRONLY;
     pipefd[0] = fd_read;
     pipefd[1] = fd_write;
     return 0;

@@ -237,8 +237,10 @@ uint64_t sys_open_path(int dirfd, const char *path, uint64_t flags,
         strcpy(file_name, path);
       }
 
-      if (!parent || (parent->flags & FS_TYPE_MASK) != FS_DIRECTORY)
-        return (uint64_t)-20;
+      if (!parent)
+        return (uint64_t)-2; // ENOENT
+      if ((parent->flags & FS_TYPE_MASK) != FS_DIRECTORY)
+        return (uint64_t)-20; // ENOTDIR
       if (!vfs_access(parent, 3)) return (uint64_t)-13;
 
       mode &= ~t->umask;
@@ -822,6 +824,7 @@ static uint64_t sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,
     uint64_t fl = t->fd_flags[fd] & (O_ACCMODE | O_APPEND | O_NONBLOCK);
     vfs_node_t *node = t->fds[fd];
     if (node && (node->flags & FS_TYPE_MASK) == FS_SOCKET) {
+      fl = (fl & ~O_ACCMODE) | O_RDWR;
       socket_t *sock = (socket_t *)node->device;
       if (sock && (sock->flags & SOCK_NONBLOCK))
         fl |= O_NONBLOCK;
@@ -858,6 +861,12 @@ static uint64_t sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,
   case F_GETLK:
   case F_SETLK:
   case F_SETLKW:
+  case 12: // F_GETLK64
+  case 13: // F_SETLK64
+  case 14: // F_SETLKW64
+  case 36: // F_OFD_GETLK
+  case 37: // F_OFD_SETLK
+  case 38: // F_OFD_SETLKW
     return 0;
   case 1031: // F_SETPIPE_SZ
     return (uint64_t)(arg > 0 ? arg : 65536);

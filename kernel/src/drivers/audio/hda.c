@@ -645,6 +645,14 @@ void hda_reset_stream(void) {
     hal_irq_enable();
 }
 
+void hda_set_format(uint32_t rate, uint8_t channels, uint8_t bits) {
+    if (!hda_present) return;
+    current_sample_rate = rate;
+    current_channels = channels;
+    current_bits = bits;
+    hda_apply_format(rate, channels, bits);
+}
+
 // VFS Callbacks
 static uint32_t hda_vfs_write(struct vfs_node *node, uint32_t offset,
                               uint32_t size, uint8_t *buffer) {

@@ -69,17 +69,24 @@ static bool unix_ensure_recv_buf(unix_sock_t *usk) {
 }
 
 ssize_t unix_send_impl(socket_t *sock, const void *buf, size_t len, int flags) {
+  KTRACK(KSUBSYS_AF_UNIX);
   (void)flags;
-  if (!sock || !sock->sk)
+  if (!sock || !sock->sk) {
+    KTRACK_ERR(KSUBSYS_AF_UNIX, -9);
     return -9; // EBADF
+  }
 
   unix_sock_t *usk = (unix_sock_t *)sock->sk;
 
-  if (sock->closing)
+  if (sock->closing) {
+    KTRACK_ERR(KSUBSYS_AF_UNIX, -32);
     return -32; // EPIPE
+  }
 
-  if (sock->state != SS_CONNECTED && sock->state != SS_CONNECTING)
+  if (sock->state != SS_CONNECTED && sock->state != SS_CONNECTING) {
+    KTRACK_ERR(KSUBSYS_AF_UNIX, -107);
     return -107; // ENOTCONN
+  }
 
   // If still CONNECTING, block until peer is set by accept()
   while (usk->peer == NULL && sock->state == SS_CONNECTING) {
@@ -312,9 +319,19 @@ ssize_t unix_recvfrom_impl(socket_t *sock, void *buf, size_t len, int flags,
     unix_sock_t *peer = NULL;
     socket_t *peer_sock = unix_get_live_peer(sock, &peer);
     if (peer_sock && peer) {
-      int to_copy = peer->addr_len < *addrlen ? peer->addr_len : *addrlen;
-      memcpy(src_addr, &peer->addr, to_copy);
-      *addrlen = to_copy;
+      if (peer->addr_len > 0) {
+        int to_copy = peer->addr_len < *addrlen ? peer->addr_len : *addrlen;
+        memcpy(src_addr, &peer->addr, (size_t)to_copy);
+        *addrlen = peer->addr_len;
+      } else {
+        struct sockaddr_un *sun = (struct sockaddr_un *)src_addr;
+        int copy = (int)sizeof(sa_family_t) < *addrlen
+                       ? (int)sizeof(sa_family_t)
+                       : *addrlen;
+        memset(sun, 0, (size_t)copy);
+        sun->sun_family = AF_UNIX;
+        *addrlen = (int)sizeof(sa_family_t);
+      }
       socket_put(peer_sock);
     } else {
       *addrlen = 0;
@@ -457,6 +474,50 @@ ssize_t unix_sendmsg_impl(socket_t *sock, struct msghdr *msg, int flags) {
 
   socket_put(peer_sock);
   return total_sent;
+}
+
+static void unix_fill_msg_name(socket_t *sock, struct msghdr *msg) {
+  if (!msg || !msg->msg_name || msg->msg_namelen == 0)
+    return;
+
+  if (!unix_user_range_valid((uint64_t)(uintptr_t)msg->msg_name,
+                             msg->msg_namelen)) {
+    msg->msg_namelen = 0;
+    return;
+  }
+
+  unix_sock_t *usk = (unix_sock_t *)sock->sk;
+  if (!usk) {
+    msg->msg_namelen = 0;
+    return;
+  }
+
+  spinlock_acquire(&sock->lock);
+  unix_sock_t *peer = usk->peer;
+  if (!peer) {
+    spinlock_release(&sock->lock);
+    msg->msg_namelen = 0;
+    return;
+  }
+
+  if (peer->addr_len > 0) {
+    uint32_t cap = msg->msg_namelen;
+    uint32_t copy =
+        (uint32_t)peer->addr_len < cap ? (uint32_t)peer->addr_len : cap;
+    memcpy(msg->msg_name, &peer->addr, copy);
+    msg->msg_namelen = (uint32_t)peer->addr_len;
+  } else {
+    struct sockaddr_un *sun = (struct sockaddr_un *)msg->msg_name;
+    uint32_t cap = msg->msg_namelen;
+    uint32_t copy = (uint32_t)sizeof(sa_family_t) < cap
+                        ? (uint32_t)sizeof(sa_family_t)
+                        : cap;
+    memset(sun, 0, copy);
+    sun->sun_family = AF_UNIX;
+    msg->msg_namelen = (uint32_t)sizeof(sa_family_t);
+  }
+
+  spinlock_release(&sock->lock);
 }
 
 ssize_t unix_recvmsg_impl(socket_t *sock, struct msghdr *msg, int flags) {
@@ -646,10 +707,12 @@ ssize_t unix_recvmsg_impl(socket_t *sock, struct msghdr *msg, int flags) {
   }
 
   msg->msg_flags &= ~MSG_TRUNC;
+  unix_fill_msg_name(sock, msg);
   return total_received;
 
 no_data:
   msg->msg_controllen = 0;
   msg->msg_flags      = 0;
+  unix_fill_msg_name(sock, msg);
   return 0;
 }

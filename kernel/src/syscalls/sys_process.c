@@ -542,18 +542,18 @@ static uint64_t sys_wait4(uint64_t pid, uint64_t wstatus_ptr, uint64_t options,
 
 /* ── waitid (syscall 247) ──────────────────────────────────────────────────
  * int waitid(idtype_t idtype, id_t id, siginfo_t *infop, int options,
- *            struct rusage *rusage);
- *
- * idtype values (POSIX):
- *   P_ALL  = 0  – wait for any child
- *   P_PID  = 1  – wait for specific pid
- *   P_PGID = 2  – wait for any child in process group `id`
+ * idtype values (POSIX / Linux):
+ *   P_ALL   = 0  – wait for any child
+ *   P_PID   = 1  – wait for specific pid
+ *   P_PGID  = 2  – wait for any child in process group `id`
+ *   P_PIDFD = 3  – wait for process referred to by pidfd
  *
  * We fill a minimal siginfo_t sufficient for glibc/musl to function.
  */
-#define P_ALL  0
-#define P_PID  1
-#define P_PGID 2
+#define P_ALL   0
+#define P_PID   1
+#define P_PGID  2
+#define P_PIDFD 3
 
 #define WEXITED   4
 #define WSTOPPED  2
@@ -584,6 +584,14 @@ static uint64_t sys_waitid(uint64_t idtype_val, uint64_t id_val,
 
   int idtype = (int)idtype_val;
   uint32_t id = (uint32_t)id_val;
+  uint32_t target_pid = id;
+
+  if (idtype == P_PIDFD) {
+    if (id >= MAX_FDS || !current->fds[id] || !current->fds[id]->device)
+      return (uint64_t)-9; // EBADF
+    struct pidfd_ctx *pctx = (struct pidfd_ctx *)current->fds[id]->device;
+    target_pid = pctx->pid;
+  }
 
   /* At least one of WEXITED/WSTOPPED must be requested */
   if (!(options & (WEXITED | WSTOPPED)))
@@ -609,9 +617,10 @@ static uint64_t sys_waitid(uint64_t idtype_val, uint64_t id_val,
       for (struct thread *t = owner->children; t; t = t->sibling_next) {
         bool matches = false;
         switch (idtype) {
-        case P_ALL:  matches = true; break;
-        case P_PID:  matches = (t->tid == id); break;
-        case P_PGID: matches = (t->pgid == id); break;
+        case P_ALL:   matches = true; break;
+        case P_PID:   matches = (t->tid == id); break;
+        case P_PGID:  matches = (t->pgid == id); break;
+        case P_PIDFD: matches = (t->tid == target_pid || t->tgid == target_pid); break;
         default:
           spinlock_release(&tid_lock);
           return (uint64_t)-22; // EINVAL
@@ -645,6 +654,20 @@ static uint64_t sys_waitid(uint64_t idtype_val, uint64_t id_val,
         break;
     }
 
+    if (idtype == P_PIDFD && !has_matching_children) {
+      /* P_PIDFD can wait on non-child processes */
+      for (struct thread *t = global_thread_list; t; t = t->global_next) {
+        if (t->tid == target_pid || t->tgid == target_pid) {
+          has_matching_children = true;
+          if (t->state == THREAD_ZOMBIE || t->state == THREAD_DEAD) {
+            zombie = t;
+            zombie_owner = t->parent;
+          }
+          break;
+        }
+      }
+    }
+
     if (!zombie && has_matching_children && !(options & WNOHANG)) {
       current->waiting_for_child = true;
       current->state = THREAD_BLOCKED;
@@ -667,7 +690,7 @@ static uint64_t sys_waitid(uint64_t idtype_val, uint64_t id_val,
         si->_pad1     = 0;
       }
 
-      if (!(options & WNOWAIT)) {
+      if (!(options & WNOWAIT) && zombie_owner && zombie_owner->tgid == current->tgid) {
         /* Consume the zombie – wait until child is truly off-CPU first */
         sched_queue_reap_and_wait(zombie);
       }
@@ -682,7 +705,11 @@ static uint64_t sys_waitid(uint64_t idtype_val, uint64_t id_val,
     }
 
     if (options & WNOHANG) {
-      /* No zombie yet; infop is left untouched per POSIX when WNOHANG */
+      /* No zombie yet; zero out siginfo_t per POSIX/Linux specification */
+      if (infop_ptr) {
+        struct k_siginfo_child *si = (struct k_siginfo_child *)infop_ptr;
+        memset(si, 0, sizeof(*si));
+      }
       current->waiting_for_child = false;
       return 0;
     }
@@ -741,26 +768,16 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
     return (uint64_t)-12;
   memcpy(path, user_path, path_len + 1);
 
-  struct thread *exec_thread = sched_get_current();
-  vfs_node_t *exec_base = (user_path[0] == 47) ? fs_root :
-      (exec_thread && exec_thread->cwd_node ? exec_thread->cwd_node : fs_root);
-  vfs_node_t *exec_node = vfs_resolve_path_at(exec_base, user_path);
-  if (!exec_node || !vfs_access(exec_node, 1)) {
-    if (exec_node) vfs_close(exec_node);
-    kfree(path);
-    return (uint64_t)-13;
-  }
-  uint32_t exec_mode = exec_node->mask;
-  uint32_t exec_uid = exec_node->uid;
-  uint32_t exec_gid = exec_node->gid;
-  vfs_close(exec_node);
-
   TSC_BEGIN(execve_arg_copy);
   int argc = 0;
   if (user_argv)
     while (user_argv[argc])
       argc++;
   char **k_argv = kmalloc((argc + 1) * sizeof(char *));
+  if (!k_argv) {
+    kfree(path);
+    return (uint64_t)-12;
+  }
   for (int i = 0; i < argc; i++) {
     size_t len = strlen(user_argv[i]);
     k_argv[i] = kmalloc(len + 1);
@@ -773,6 +790,13 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
     while (user_envp[envc])
       envc++;
   char **k_envp = kmalloc((envc + 1) * sizeof(char *));
+  if (!k_envp) {
+    kfree(path);
+    for (int i = 0; i < argc; i++)
+      kfree(k_argv[i]);
+    kfree(k_argv);
+    return (uint64_t)-12;
+  }
   for (int i = 0; i < envc; i++) {
     size_t len = strlen(user_envp[i]);
     k_envp[i] = kmalloc(len + 1);
@@ -780,6 +804,114 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
   }
   k_envp[envc] = NULL;
   TSC_END(execve_arg_copy);
+
+  // Shebang (#!) script interpretation loop (up to 4 levels of recursion)
+  struct thread *exec_thread = sched_get_current();
+  int shebang_depth = 0;
+  uint32_t exec_mode = 0, exec_uid = 0, exec_gid = 0;
+
+  while (shebang_depth < 4) {
+    vfs_node_t *exec_base = (path[0] == '/') ? fs_root :
+        (exec_thread && exec_thread->cwd_node ? exec_thread->cwd_node : fs_root);
+    vfs_node_t *exec_node = vfs_resolve_path_at(exec_base, path);
+    if (!exec_node || !vfs_access(exec_node, 1)) {
+      if (exec_node) vfs_close(exec_node);
+      kfree(path);
+      for (int i = 0; i < argc; i++) kfree(k_argv[i]);
+      kfree(k_argv);
+      for (int i = 0; i < envc; i++) kfree(k_envp[i]);
+      kfree(k_envp);
+      return (uint64_t)-13;
+    }
+    exec_mode = exec_node->mask;
+    exec_uid = exec_node->uid;
+    exec_gid = exec_node->gid;
+
+    char header[256];
+    uint32_t hlen = vfs_read(exec_node, 0, sizeof(header) - 1, (uint8_t *)header);
+    vfs_close(exec_node);
+
+    if (hlen >= 2 && header[0] == '#' && header[1] == '!') {
+      header[hlen] = '\0';
+      for (char *c = header; *c; c++) {
+        if (*c == '\n' || *c == '\r') {
+          *c = '\0';
+          break;
+        }
+      }
+
+      // Skip whitespace after '#!'
+      char *p = header + 2;
+      while (*p == ' ' || *p == '\t') p++;
+      if (*p == '\0') {
+        kfree(path);
+        for (int i = 0; i < argc; i++) kfree(k_argv[i]);
+        kfree(k_argv);
+        for (int i = 0; i < envc; i++) kfree(k_envp[i]);
+        kfree(k_envp);
+        return (uint64_t)-8; // ENOEXEC
+      }
+
+      char *interp_bin = p;
+      char *interp_arg = NULL;
+      while (*p && *p != ' ' && *p != '\t') p++;
+      if (*p != '\0') {
+        *p++ = '\0';
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p != '\0') {
+          interp_arg = p;
+          char *end = p + strlen(p) - 1;
+          while (end >= p && (*end == ' ' || *end == '\t' || *end == '\r')) {
+            *end = '\0';
+            end--;
+          }
+        }
+      }
+
+      int added = interp_arg ? 2 : 1;
+      int new_argc = argc + added;
+      char **new_k_argv = kmalloc((new_argc + 1) * sizeof(char *));
+      if (!new_k_argv) {
+        kfree(path);
+        for (int i = 0; i < argc; i++) kfree(k_argv[i]);
+        kfree(k_argv);
+        for (int i = 0; i < envc; i++) kfree(k_envp[i]);
+        kfree(k_envp);
+        return (uint64_t)-12;
+      }
+
+      new_k_argv[0] = kmalloc(strlen(interp_bin) + 1);
+      strcpy(new_k_argv[0], interp_bin);
+
+      int dst_idx = 1;
+      if (interp_arg) {
+        new_k_argv[dst_idx] = kmalloc(strlen(interp_arg) + 1);
+        strcpy(new_k_argv[dst_idx], interp_arg);
+        dst_idx++;
+      }
+      new_k_argv[dst_idx] = path; // Reuse script path buffer
+      dst_idx++;
+
+      for (int i = 1; i < argc; i++) {
+        new_k_argv[dst_idx++] = k_argv[i];
+      }
+      new_k_argv[new_argc] = NULL;
+
+      kfree(k_argv[0]);
+      kfree(k_argv);
+      k_argv = new_k_argv;
+      argc = new_argc;
+
+      path = kmalloc(strlen(interp_bin) + 1);
+      strcpy(path, interp_bin);
+
+      shebang_depth++;
+      continue;
+    }
+
+    // Binary executable verified
+    break;
+  }
 
   TSC_BEGIN(execve_pml4_create);
   uint64_t *new_pml4 = vmm_create_pml4();
@@ -897,9 +1029,14 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
   current->fs_base = 0;
   current->gs_base = 0;
 
-  // Reset signal handlers to SIG_DFL after exec (POSIX requirement).
-  memset(current->signal_handlers, 0, sizeof(current->signal_handlers));
+  // Reset custom signal handlers to SIG_DFL after exec; preserve SIG_IGN (POSIX requirement).
+  for (int i = 0; i < 64; i++) {
+    if ((uint64_t)current->signal_handlers[i].sa_handler != (uint64_t)SIG_IGN) {
+      memset(&current->signal_handlers[i], 0, sizeof(struct k_sigaction));
+    }
+  }
   current->pending_signals = 0;
+  memset(current->signal_sender_pid, 0, sizeof(current->signal_sender_pid));
 
   // We are now safely loaded into the new address space!
   uint64_t user_rsp = process_build_initial_stack(
@@ -2417,7 +2554,119 @@ static uint64_t sys_reboot(uint64_t magic1, uint64_t magic2, uint64_t cmd,
   return 0;
 }
 
+// ---------------------------------------------------------------------------
+// sys_capget (125) / sys_capset (126)
+//
+// AvoryOS runs as all-capable root and has no capability enforcement layer.
+// capget reports a full capability set so that tools (e.g. bwrap) which probe
+// capabilities before deciding whether to proceed can see a sane response.
+// capset is a silent no-op — we never take capabilities away.
+//
+// Structures mirror the Linux uapi/linux/capability.h layout (version 3 = V3).
+// ---------------------------------------------------------------------------
+
+#define _LINUX_CAPABILITY_VERSION_3 0x20080522
+#define _LINUX_CAPABILITY_U32S_3    2
+
+struct __user_cap_header {
+  uint32_t version;
+  int pid;
+};
+
+struct __user_cap_data {
+  uint32_t effective;
+  uint32_t permitted;
+  uint32_t inheritable;
+};
+
+static uint64_t sys_capget(uint64_t hdrp_arg, uint64_t datap_arg,
+                           uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+  (void)a3; (void)a4; (void)a5; (void)a6;
+
+  struct __user_cap_header *hdrp = (struct __user_cap_header *)hdrp_arg;
+  struct __user_cap_data  *datap = (struct __user_cap_data  *)datap_arg;
+
+  if (!hdrp)
+    return (uint64_t)-14; // EFAULT
+
+  if (!vmm_is_user_addr_range_valid((uint64_t)hdrp, sizeof(*hdrp)))
+    return (uint64_t)-14; // EFAULT
+
+  // Normalise version: write back V3 so the caller knows what we support.
+  uint32_t version = hdrp->version;
+  if (version != _LINUX_CAPABILITY_VERSION_3) {
+    hdrp->version = _LINUX_CAPABILITY_VERSION_3;
+    if (!datap)
+      return (uint64_t)-22; // EINVAL — caller must re-issue with correct version
+  }
+
+  if (!datap)
+    return 0;
+
+  if (!vmm_is_user_addr_range_valid((uint64_t)datap,
+                                     sizeof(*datap) * _LINUX_CAPABILITY_U32S_3))
+    return (uint64_t)-14; // EFAULT
+
+  // Grant all capabilities in both 32-bit words (caps 0-63).
+  for (int i = 0; i < _LINUX_CAPABILITY_U32S_3; i++) {
+    datap[i].effective   = 0xFFFFFFFFu;
+    datap[i].permitted   = 0xFFFFFFFFu;
+    datap[i].inheritable = 0xFFFFFFFFu;
+  }
+
+  return 0;
+}
+
+static uint64_t sys_capset(uint64_t hdrp_arg, uint64_t datap_arg,
+                           uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+  (void)hdrp_arg; (void)datap_arg;
+  (void)a3; (void)a4; (void)a5; (void)a6;
+  // No capability enforcement — accept unconditionally.
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// sys_seccomp (317)
+//
+// AvoryOS has no BPF interpreter or seccomp infrastructure.  We implement the
+// minimum needed for bwrap and WebKitGTK to proceed:
+//
+//   SECCOMP_SET_MODE_STRICT (op=0) — genuinely can't be supported without
+//     signal delivery changes; return EINVAL so callers fall back gracefully.
+//
+//   SECCOMP_SET_MODE_FILTER (op=1) — silently accept and return success.
+//     The supplied BPF program is ignored; all syscalls remain permitted.
+//     bwrap passes SECCOMP_SET_MODE_FILTER before exec-ing the sandboxed
+//     binary.  Returning 0 lets it continue; the "sandbox" is a no-op on
+//     AvoryOS, which is acceptable given that we already disabled bwrap's
+//     user-namespace isolation via WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS.
+//
+//   SECCOMP_GET_ACTION_AVAIL (op=2) — return EINVAL; not supported.
+//   Everything else                 — return EINVAL.
+// ---------------------------------------------------------------------------
+
+#define SECCOMP_SET_MODE_STRICT    0
+#define SECCOMP_SET_MODE_FILTER    1
+#define SECCOMP_GET_ACTION_AVAIL   2
+
+static uint64_t sys_seccomp(uint64_t op, uint64_t flags, uint64_t uargs,
+                             uint64_t a4, uint64_t a5, uint64_t a6) {
+  (void)flags; (void)uargs; (void)a4; (void)a5; (void)a6;
+
+  switch (op) {
+  case SECCOMP_SET_MODE_FILTER:
+    // Accept the filter program without actually installing it.
+    return 0;
+
+  case SECCOMP_SET_MODE_STRICT:
+  case SECCOMP_GET_ACTION_AVAIL:
+  default:
+    return (uint64_t)-22; // EINVAL
+  }
+}
+
 void syscall_register_process(void) {
+
   syscall_register(SYS_EXIT, sys_exit);
   syscall_register(SYS_EXIT_GROUP, sys_exit_group);
   syscall_register(SYS_SET_TID_ADDRESS, sys_set_tid_address);
@@ -2478,4 +2727,7 @@ void syscall_register_process(void) {
   syscall_register(SYS_REBOOT, sys_reboot);
   syscall_register(SYS_PIDFD_OPEN, sys_pidfd_open);
   syscall_register(SYS_GETCPU, sys_getcpu);
+  syscall_register(SYS_CAPGET, sys_capget);
+  syscall_register(SYS_CAPSET, sys_capset);
+  syscall_register(SYS_SECCOMP, sys_seccomp);
 }

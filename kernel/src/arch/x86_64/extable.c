@@ -1,4 +1,5 @@
 #include "arch/x86_64/extable.h"
+#include "../../cpu/ktrack.h"
 #include <stddef.h>
 
 extern const struct exception_table_entry __start___ex_table[];
@@ -29,6 +30,7 @@ bool extable_fixup(struct registers *regs) {
 
   while (entry < end) {
     if (entry->insn == regs->rip) {
+      KTRACK_ERR(KSUBSYS_UACCESS, -14); // EFAULT handled by fixup
       regs->rip = entry->fixup;
       return true;
     }

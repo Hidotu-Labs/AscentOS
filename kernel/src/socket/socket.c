@@ -15,6 +15,7 @@
 #include "af_inet.h"
 #include "af_inet6.h"
 #include "socket_internal.h"
+#include "../syscalls/sys_io_shared.h"
 #include <stdint.h>
 
 // Global Socket Table
@@ -507,6 +508,7 @@ int socket_alloc_fd(socket_t *sock) {
   sock->node = node;
   t->fds[fd] = node;
   t->fd_offsets[fd] = 0;
+  t->fd_flags[fd] = O_RDWR;
 
   // node->refcount = 1 (from vfs_node_init) — the fd-table's reference.
   // sock->refcount = 1 (from socket_create) — the VFS node's reference.

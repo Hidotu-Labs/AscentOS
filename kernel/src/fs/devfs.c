@@ -8,7 +8,7 @@
 // Device Node Registry
 // Keeps track of character device nodes so they persist across VFS lookups.
 
-#define MAX_DEVICES 32
+#define MAX_DEVICES 256
 
 typedef struct {
   char name[64];

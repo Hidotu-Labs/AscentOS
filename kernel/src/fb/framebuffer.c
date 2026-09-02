@@ -197,7 +197,7 @@ static void console_dev_open(struct vfs_node *node) { (void)node; }
 static void console_dev_close(struct vfs_node *node) { (void)node; }
 
 /* ── Device Registry ─────────────────────────────────────────────────────── */
-#define MAX_FB_DEVICES 64
+#define MAX_FB_DEVICES 256
 typedef struct {
     char name[64];
     vfs_node_t *node;

@@ -1,7 +1,9 @@
 // Socket Syscalls: socket, socketpair, bind, connect, listen, accept, etc.
 
 #include "../console/klog.h"
+#include "../cpu/ktrack.h"
 #include "../fs/vfs.h"
+#include "../include/arch/uaccess.h"
 #include "../lib/string.h"
 #include "../mm/heap.h"
 #include "../mm/vmm.h"
@@ -11,18 +13,44 @@
 #include "syscall.h"
 #include <stdint.h>
 
-// User-space pointer validation
-#define USER_ADDR_MAX 0x00007FFFFFFFFFFFULL
-static inline bool is_user_ptr(uint64_t addr) {
-  return addr != 0 && addr <= USER_ADDR_MAX;
-}
-
 #define SOCKET_FD_FLAGS_CLOEXEC_BIT (1u << 24)
+
+static int copy_sockaddr_out(uint64_t addr_ptr, uint64_t addrlen_ptr,
+                             const struct sockaddr *kaddr, int kaddrlen) {
+  if (!addr_ptr || !addrlen_ptr)
+    return 0;
+
+  if (!is_user_ptr(addr_ptr) || !is_user_ptr(addrlen_ptr))
+    return -14; // EFAULT
+
+  if (!vmm_is_user_addr_range_writable(addrlen_ptr, sizeof(int)))
+    return -14;
+
+  int user_len = 0;
+  if (copy_from_user(&user_len, (void *)addrlen_ptr, sizeof(int)) != 0)
+    return -14;
+  if (user_len < 0)
+    return -22; // EINVAL
+
+  int copy = kaddrlen < user_len ? kaddrlen : user_len;
+  if (copy > 0) {
+    if (!vmm_is_user_addr_range_writable(addr_ptr, (size_t)copy))
+      return -14;
+    if (copy_to_user((void *)addr_ptr, kaddr, (unsigned long)copy) != 0)
+      return -14;
+  }
+
+  if (copy_to_user((void *)addrlen_ptr, &kaddrlen, sizeof(int)) != 0)
+    return -14;
+
+  return 0;
+}
 
 // Syscall: socket(int domain, int type, int protocol)
 // ─────────────────────── Returns: file descriptor or negative error
 static uint64_t sys_socket(uint64_t domain, uint64_t type, uint64_t protocol,
                            uint64_t _arg3, uint64_t _arg4, uint64_t _arg5) {
+  KTRACK(KSUBSYS_SOCKET);
   (void)_arg3;
   (void)_arg4;
   (void)_arg5;
@@ -229,11 +257,30 @@ static uint64_t sys_accept_impl(uint64_t sockfd, uint64_t addr_ptr,
   }
 
   // Fill peer address if the caller provided a buffer
-  if (addr_ptr && addrlen_ptr && is_user_ptr(addr_ptr) && is_user_ptr(addrlen_ptr)) {
-    int *addrlen = (int *)addrlen_ptr;
-    struct sockaddr *addr = (struct sockaddr *)addr_ptr;
-    if (newsock->ops && newsock->ops->getpeername) {
-      newsock->ops->getpeername(newsock, addr, addrlen);
+  if (addr_ptr && addrlen_ptr) {
+    uint8_t kaddr_buf[128];
+    struct sockaddr *kaddr = (struct sockaddr *)kaddr_buf;
+    int kaddrlen = (int)sizeof(kaddr_buf);
+
+    if (newsock->ops && newsock->ops->getpeername &&
+        newsock->ops->getpeername(newsock, kaddr, &kaddrlen) == 0) {
+      int err = copy_sockaddr_out(addr_ptr, addrlen_ptr, kaddr, kaddrlen);
+      if (err < 0) {
+        socket_put(newsock);
+        return (uint64_t)err;
+      }
+    } else {
+      // rustix panics on addrlen > 0 with AF_UNSPEC; return anonymous unix.
+      struct sockaddr_un anon;
+      memset(&anon, 0, sizeof(anon));
+      anon.sun_family = AF_UNIX;
+      int err = copy_sockaddr_out(addr_ptr, addrlen_ptr,
+                                  (struct sockaddr *)&anon,
+                                  (int)sizeof(sa_family_t));
+      if (err < 0) {
+        socket_put(newsock);
+        return (uint64_t)err;
+      }
     }
   }
 
@@ -795,10 +842,34 @@ static uint64_t sys_getsockname(uint64_t sockfd, uint64_t addr_ptr,
     return (uint64_t)-14; // EFAULT
   }
 
-  int *addrlen = (int *)addrlen_ptr;
-  struct sockaddr *addr = (struct sockaddr *)addr_ptr;
+  if (!vmm_is_user_addr_range_writable(addrlen_ptr, sizeof(int))) {
+    socket_put(sock);
+    return (uint64_t)-14;
+  }
 
-  int ret = socket_getsockname(sock, addr, addrlen);
+  int user_addrlen = 0;
+  if (copy_from_user(&user_addrlen, (void *)addrlen_ptr, sizeof(int)) != 0) {
+    socket_put(sock);
+    return (uint64_t)-14;
+  }
+  if (user_addrlen < 0) {
+    socket_put(sock);
+    return (uint64_t)-22;
+  }
+
+  uint8_t kaddr_buf[128];
+  if (user_addrlen > (int)sizeof(kaddr_buf))
+    user_addrlen = (int)sizeof(kaddr_buf);
+
+  int kaddrlen = user_addrlen;
+  int ret = socket_getsockname(sock, (struct sockaddr *)kaddr_buf, &kaddrlen);
+  if (ret < 0) {
+    socket_put(sock);
+    return (uint64_t)ret;
+  }
+
+  ret = copy_sockaddr_out(addr_ptr, addrlen_ptr, (struct sockaddr *)kaddr_buf,
+                          kaddrlen);
   socket_put(sock);
   return (uint64_t)ret;
 }
@@ -846,10 +917,34 @@ static uint64_t sys_getpeername(uint64_t sockfd, uint64_t addr_ptr,
     return (uint64_t)-14; // EFAULT
   }
 
-  int *addrlen = (int *)addrlen_ptr;
-  struct sockaddr *addr = (struct sockaddr *)addr_ptr;
+  if (!vmm_is_user_addr_range_writable(addrlen_ptr, sizeof(int))) {
+    socket_put(sock);
+    return (uint64_t)-14;
+  }
 
-  int ret = socket_getpeername(sock, addr, addrlen);
+  int user_addrlen = 0;
+  if (copy_from_user(&user_addrlen, (void *)addrlen_ptr, sizeof(int)) != 0) {
+    socket_put(sock);
+    return (uint64_t)-14;
+  }
+  if (user_addrlen < 0) {
+    socket_put(sock);
+    return (uint64_t)-22;
+  }
+
+  uint8_t kaddr_buf[128];
+  if (user_addrlen > (int)sizeof(kaddr_buf))
+    user_addrlen = (int)sizeof(kaddr_buf);
+
+  int kaddrlen = user_addrlen;
+  int ret = socket_getpeername(sock, (struct sockaddr *)kaddr_buf, &kaddrlen);
+  if (ret < 0) {
+    socket_put(sock);
+    return (uint64_t)ret;
+  }
+
+  ret = copy_sockaddr_out(addr_ptr, addrlen_ptr, (struct sockaddr *)kaddr_buf,
+                          kaddrlen);
   socket_put(sock);
   return (uint64_t)ret;
 }

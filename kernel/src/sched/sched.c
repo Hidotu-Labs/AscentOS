@@ -705,7 +705,21 @@ __attribute__((optimize("O3"))) void sched_wakeup(struct thread *t) {
 
   struct cpu_info *self = cpu_get_current();
   struct cpu_info *prev_cpu = cpu_get_info(t->cpu_index);
-  struct cpu_info *target = prev_cpu;
+  struct cpu_info *target = NULL;
+
+  /* If the thread is currently executing on any CPU, keep it targeted on that CPU to prevent duplicate execution */
+  uint32_t count = cpu_get_count();
+  for (uint32_t i = 0; i < count; i++) {
+    struct cpu_info *c = cpu_get_info(i);
+    if (c && c->status != CPU_STATUS_OFFLINE &&
+        __atomic_load_n(&c->current_thread, __ATOMIC_ACQUIRE) == t) {
+      target = c;
+      break;
+    }
+  }
+
+  if (!target)
+    target = prev_cpu;
 
   /* Preserve thread CPU parallelism: keep the thread on its previously assigned CPU (prev_cpu)
    * so parallel worker threads stay distributed across separate cores rather than stacking on one. */

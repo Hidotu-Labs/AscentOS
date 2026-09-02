@@ -18,7 +18,6 @@ AVORYD_CONFIG_FILES := \
 	initrd/avoryd/services/x11.service
 
 QUAKE2_BUNDLE_FILES := \
-	userland/quake2-launch.sh \
 	userland/quake2/quake2 \
 	userland/quake2/ref_soft.so \
 	userland/quake2/baseq2/game.so \
@@ -38,6 +37,22 @@ $(QUAKE2_STAMP): $(ALPINE_STAMP) scripts/build-quake2.sh \
 	./scripts/build-quake2.sh && \
 		mkdir -p $(dir $(QUAKE2_STAMP)) && \
 		touch $(QUAKE2_STAMP)
+
+BUTTERSCOTCH_STAMP := build/butterscotch/.built
+
+$(BUTTERSCOTCH_STAMP): $(ALPINE_STAMP) $(MUSL_LIBC) scripts/build-butterscotch.sh
+	./scripts/build-butterscotch.sh && \
+		mkdir -p $(dir $(BUTTERSCOTCH_STAMP)) && \
+		touch $(BUTTERSCOTCH_STAMP)
+
+userland/butterscotch.elf: $(BUTTERSCOTCH_STAMP)
+
+.PHONY: butterscotch
+butterscotch: $(BUTTERSCOTCH_STAMP)
+
+.PHONY: clean-butterscotch
+clean-butterscotch:
+	./scripts/build-butterscotch.sh clean
 
 HOST_CC := cc
 HOST_CFLAGS := -g -O2 -pipe
@@ -181,6 +196,25 @@ QT5_LIBS := \
 QT5_CXXFLAGS := -fPIC -DQT_WIDGETS_LIB -DQT_GUI_LIB -DQT_CORE_LIB -DQT_NO_DEBUG
 QT5_LDFLAGS := \
 	-static-libgcc \
+	-Wl,--allow-shlib-undefined \
+	-Wl,-dynamic-linker,/lib/ld-musl-x86_64.so.1 \
+	-Wl,-rpath,/usr/lib \
+	-Wl,-rpath-link,$(ALPINE_SYSROOT)/usr/lib:$(ALPINE_SYSROOT)/lib
+
+# SDL3 test - include/lib flags
+SDL3_INCLUDES := \
+	-I$(ALPINE_SYSROOT)/usr/include \
+	-I$(ALPINE_SYSROOT)/usr/include/SDL3 \
+	-I$(ALPINE_SYSROOT)/usr/include/SDL3_ttf
+SDL3_LIBS := \
+	-L$(ALPINE_SYSROOT)/usr/lib -L$(ALPINE_SYSROOT)/lib \
+	-lSDL3 -lSDL3_ttf \
+	-lcapstone \
+	-lGL -lEGL \
+	-lm \
+	-lstdc++
+SDL3_LDFLAGS := \
+	-no-pie \
 	-Wl,--allow-shlib-undefined \
 	-Wl,-dynamic-linker,/lib/ld-musl-x86_64.so.1 \
 	-Wl,-rpath,/usr/lib \
@@ -445,13 +479,15 @@ disk.img: userland/test_heap_smp.elf
 disk.img: userland/test_dcache.elf
 disk.img: userland/test_uaccess_bench.elf
 disk.img: userland/proc_bench.elf
+disk.img: userland/test_watchdog.elf
+disk.img: userland/butterscotch.elf assets/game.unx assets/assets
 
 
 disk.img: $(BASH_STAMP) $(COREUTILS_STAMP) $(ALPINE_STAMP) $(QUAKE2_BUNDLE_FILES)
-disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets/mc9.mp3 assets/train.mp3 assets/test.bmp assets/test.tar assets/room.png assets/logo.png assets/linus.gif assets/video.mp4 userland/forkit.elf userland/forkit-launch.sh userland/about.elf userland/hello_glibc.elf userland/booter.elf userland/reboot.elf userland/shutdown.elf userland/apm.elf userland/test_cpp.elf  userland/kilo.elf  userland/ls.elf userland/lspci.elf userland/lsblk.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/asplay.elf userland/kria.elf userland/doom.elf userland/doom_x11.elf userland/gtk_test.elf userland/qt5_test.elf userland/tglgears_fb.elf userland/tglgears_drm.elf userland/tglhello_drm.elf userland/test_mem_stress.elf userland/classicube.elf userland/terrain.png userland/texpacks/classicube.zip initrd/startx.sh initrd/startw.sh initrd/weston.ini AetherDE/x11-wm/AetherWM AetherDE/aether-dock/aether-dock AetherDE/aether-panel/aether-panel AetherDE/wayland-compositor/aether-compositor AetherDE/demo-client/aether-window AetherDE/scripts/sax11.sh AetherDE/scripts/sawayland.sh userland/avoryd.elf $(AVORYD_CONFIG_FILES)
+disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets/mc9.mp3 assets/train.mp3 assets/test.bmp assets/test.tar assets/room.png assets/logo.png assets/linus.gif assets/video.mp4 userland/forkit.elf userland/about.elf userland/hello_glibc.elf userland/booter.elf userland/reboot.elf userland/shutdown.elf userland/apm.elf userland/test_cpp.elf  userland/kilo.elf  userland/ls.elf userland/lspci.elf userland/lsblk.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/asplay.elf userland/kria.elf userland/doom.elf userland/doom_x11.elf userland/gtk_test.elf userland/qt5_test.elf userland/sdl3_test.elf userland/tglgears_fb.elf userland/tglgears_drm.elf userland/tglhello_drm.elf userland/test_mem_stress.elf userland/classicube.elf userland/terrain.png userland/texpacks/classicube.zip initrd/startx.sh initrd/startw.sh initrd/weston.ini AetherDE/x11-wm/AetherWM AetherDE/aether-dock/aether-dock AetherDE/aether-panel/aether-panel AetherDE/wayland-compositor/aether-compositor AetherDE/demo-client/aether-window AetherDE/scripts/sax11.sh AetherDE/scripts/sawayland.sh userland/avoryd.elf $(AVORYD_CONFIG_FILES)
 	@echo "Creating root filesystem (ext4)..."
 	rm -f ./part.img
-	dd if=/dev/zero of=./part.img bs=1M count=2047
+	dd if=/dev/zero of=./part.img bs=1M count=4095
 	mkfs.ext4 -F -b 1024 -I 128 \
 		-O extent,filetype,has_journal,dir_index,^64bit,^metadata_csum,^flex_bg,^huge_file,^dir_nlink,^extra_isize,^metadata_csum_seed,^orphan_file \
 		./part.img
@@ -636,6 +672,8 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 		echo "write userland/test_dcache.elf bin/test_dcache"; \
 		echo "rm bin/test_uaccess_bench"; \
 		echo "write userland/test_uaccess_bench.elf bin/test_uaccess_bench"; \
+		echo "rm bin/test_watchdog"; \
+		echo "write userland/test_watchdog.elf bin/test_watchdog"; \
 		echo "rm bin/test_readahead"; \
 		echo "write userland/test_readahead.elf bin/test_readahead"; \
 		echo "rm bin/proc_bench"; \
@@ -695,7 +733,7 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 		echo "rm usr/share/forkit/assets/fonts/NotoSansMono-Bold.ttf"; \
 		echo "write build/forkit/assets/fonts/NotoSansMono-Bold.ttf usr/share/forkit/assets/fonts/NotoSansMono-Bold.ttf"; \
 		echo "rm bin/forkit"; \
-		echo "write userland/forkit-launch.sh bin/forkit"; \
+		echo "write userland/forkit.elf bin/forkit"; \
 	} | debugfs -w ./part.img >/dev/null 2>&1 || true
 	@if [ -d build/alpine/rootfs ]; then \
 		echo "Populating Alpine Linux rootfs into disk image..."; \
@@ -723,8 +761,29 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 		echo "mkdir usr"; \
 		echo "mkdir usr/bin"; \
 		echo "rm usr/bin/quake2"; \
-		echo "write userland/quake2-launch.sh usr/bin/quake2"; \
+		echo "write userland/quake2/quake2 usr/bin/quake2"; \
 		echo "set_inode_field usr/bin/quake2 mode 0100755"; \
+	} | debugfs -w ./part.img >/dev/null 2>&1 || true
+	@echo "Installing Butterscotch + Undertale audio + game.unx into disk image..."
+	@rm -rf /tmp/undertale-audio-unpack
+	@mkdir -p /tmp/undertale-audio-unpack
+	@for gz in assets/assets/*.gz; do \
+		base=$$(basename "$$gz" .gz); \
+		case "$$base" in game.unx) continue ;; esac; \
+		gunzip -c "$$gz" > "/tmp/undertale-audio-unpack/$$base"; \
+	done
+	@cp -f userland/butterscotch.elf /tmp/undertale-audio-unpack/butterscotch
+	@cp -f assets/game.unx /tmp/undertale-audio-unpack/game.unx
+	@./scripts/populate-ext2-dir.sh ./part.img /tmp/undertale-audio-unpack opt/butterscotch
+	@rm -rf /tmp/undertale-audio-unpack
+	@{ \
+		echo "cd /"; \
+		echo "mkdir usr"; \
+		echo "mkdir usr/bin"; \
+		echo "rm usr/bin/butterscotch"; \
+		echo "write userland/butterscotch.elf usr/bin/butterscotch"; \
+		echo "set_inode_field opt/butterscotch/butterscotch mode 0100755"; \
+		echo "set_inode_field usr/bin/butterscotch mode 0100755"; \
 	} | debugfs -w ./part.img >/dev/null 2>&1 || true
 	@echo "Fixing up glibc/musl library coexistence..."
 	@{ \
@@ -793,10 +852,6 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 		debugfs -w -R "write toolchain/musl-sysroot/lib/crtn.o crtn.o" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "write toolchain/musl-sysroot/opt/tcc/lib/tcc/libtcc1.a libtcc1.a" ./part.img >/dev/null 2>&1 || true; \
 	fi
-	@echo "Installing tcc-static wrapper..."
-	@debugfs -w -R "rm bin/tcc-static" ./part.img >/dev/null 2>&1 || true
-	@debugfs -w -R "write userland/tcc-static.sh bin/tcc-static" ./part.img >/dev/null 2>&1 || true
-	@debugfs -w -R "set_inode_field bin/tcc-static mode 0100755" ./part.img >/dev/null 2>&1 || true
 	@if [ -d toolchain/glibc-sysroot/opt/coreutils ]; then \
 		echo "Installing glibc coreutils into disk image..."; \
 		./scripts/populate-ext2-dir.sh ./part.img toolchain/glibc-sysroot/opt/coreutils opt/coreutils; \
@@ -884,6 +939,11 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 		debugfs -w -R "rm bin/qt5_test" ./part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "write userland/qt5_test.elf bin/qt5_test" ./part.img >/dev/null 2>&1 || true; \
 	fi
+	@if [ -f userland/sdl3_test.elf ]; then \
+		echo "Installing sdl3_test into disk image..."; \
+		debugfs -w -R "rm bin/sdl3_test" ./part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write userland/sdl3_test.elf bin/sdl3_test" ./part.img >/dev/null 2>&1 || true; \
+	fi
 
 	@echo "Fixing executable modes for directly injected launchers..."
 	@{ \
@@ -920,7 +980,7 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 	} | debugfs -w ./part.img >/dev/null 2>&1 || true
 
 	@echo "Creating partitioned disk image (MBR)..."
-	dd if=/dev/zero of=disk.img bs=1M count=2048
+	dd if=/dev/zero of=disk.img bs=1M count=4096
 	echo '2048,,L,*' | sfdisk disk.img >/dev/null 2>&1 || (parted -s disk.img mklabel msdos && parted -s disk.img mkpart primary ext3 1MiB 100% && parted -s disk.img set 1 boot on)
 	dd if=./part.img of=disk.img bs=1M seek=1 conv=notrunc
 	rm -f ./part.img
@@ -1148,8 +1208,17 @@ userland/gtk3_test.elf: userland/gtk3_test.c $(ALPINE_STAMP) $(MUSL_LIBC)
 		$(GTK3_LIBS) \
 		$(GTK3_LDFLAGS)
 
+userland/sdl3_test.elf: userland/sdl3_test.c $(ALPINE_STAMP) $(MUSL_LIBC)
+	@echo "[*] Compiling userland/sdl3_test.c (SDL3 + OpenGL + libplacebo + Capstone) ..."
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" \
+		$(MUSL_TOOLCHAIN_BIN)/x86_64-linux-musl-gcc -O2 \
+		userland/sdl3_test.c \
+		-o userland/sdl3_test.elf \
+		$(SDL3_INCLUDES) \
+		$(SDL3_LIBS) \
+		$(SDL3_LDFLAGS)
+
 userland/qt5_test.elf: userland/qt5_test.cpp $(ALPINE_STAMP) $(MUSL_LIBC)
-	@echo "[*] Compiling userland/qt5_test.cpp (Qt5) ..."
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" \
 		$(MUSL_TOOLCHAIN_BIN)/x86_64-linux-musl-g++ -O2 -std=c++14 \
 		userland/qt5_test.cpp \
@@ -1196,6 +1265,10 @@ userland/test_hugepages.elf: userland/test_hugepages.c $(MUSL_LIBC)
 userland/test_zero_page.elf: userland/test_zero_page.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/test_zero_page.c -o userland/test_zero_page.elf
+
+userland/test_watchdog.elf: userland/test_watchdog.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_watchdog.c -o userland/test_watchdog.elf
 
 userland/test_copy_user.elf: userland/test_copy_user.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \

@@ -13,6 +13,13 @@ struct user_fault_record {
     uint64_t cr2;
     uint64_t err_code;
     char comm[16];
+    char subsystem[32];
+    char kernel_file[32];
+    uint32_t kernel_line;
+    char kernel_func[32];
+    int64_t error_code;
+    uint64_t last_syscall_num;
+    int64_t last_syscall_ret;
     struct registers regs;
 };
 
