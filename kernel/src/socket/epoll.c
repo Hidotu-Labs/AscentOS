@@ -687,18 +687,24 @@ int epoll_vfs_poll(struct vfs_node *node, int events) {
 // Event Notification
 
 void epoll_notify_event(struct vfs_node *node, uint32_t events) {
-  if (!node)
+  if (!node || (uint64_t)node < 0xFFFF800000000000ULL)
     return;
 
   // Lazy-init check for node notification list
-  if (node->ep_watchers.next == NULL)
+  if (node->ep_watchers.next == NULL || (uint64_t)node->ep_watchers.next < 0xFFFF800000000000ULL)
     return;
 
   spinlock_acquire(&node->ep_lock);
   struct list_head *pos, *n;
   list_for_each_safe(pos, n, &node->ep_watchers) {
+    if ((uint64_t)pos < 0xFFFF800000000000ULL)
+      break;
     epitem_t *epi = list_entry(pos, epitem_t, ep_node_link);
+    if ((uint64_t)epi < 0xFFFF800000000000ULL)
+      continue;
     eventpoll_t *ep = epi->ep;
+    if (!ep || (uint64_t)ep < 0xFFFF800000000000ULL)
+      continue;
 
     // Skip disabled oneshot items
     if (epi->oneshot && epi->oneshot_disabled)

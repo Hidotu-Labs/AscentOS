@@ -369,6 +369,8 @@ void vfs_close(vfs_node_t *node) {
     }
     vfs_cache_sync(node);
     vfs_cache_clear(node);
+    node->ep_watchers.next = NULL;
+    node->ep_watchers.prev = NULL;
     if (!(node->flags & FS_PERSISTENT)) {
       kfree(node);
     }
@@ -523,6 +525,18 @@ int vfs_truncate(vfs_node_t *node, uint32_t size) {
 int vfs_fallocate(vfs_node_t *node, int mode, uint32_t offset, uint32_t len) {
   if (node && node->fallocate) {
     return node->fallocate(node, mode, offset, len);
+  }
+  if (node && (node->flags & FS_TYPE_MASK) == FS_FILE) {
+    // Mode 0: standard allocation (posix_fallocate)
+    if (mode == 0) {
+      uint32_t required = offset + len;
+      if (required > node->length) {
+        if (node->truncate)
+          return node->truncate(node, required);
+        node->length = required;
+      }
+      return 0;
+    }
   }
   return -1;
 }

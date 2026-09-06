@@ -35,6 +35,17 @@ struct kernel_termios {
   cc_t c_cc[KERNEL_NCCS];
 };
 
+struct termios2 {
+  tcflag_t c_iflag;
+  tcflag_t c_oflag;
+  tcflag_t c_cflag;
+  tcflag_t c_lflag;
+  cc_t c_line;
+  cc_t c_cc[KERNEL_NCCS];
+  speed_t c_ispeed;
+  speed_t c_ospeed;
+};
+
 // termios flags (x86_64 Linux/Musl compatible)
 #define ISIG 0000001
 #define ICANON 0000002
@@ -64,6 +75,10 @@ struct kernel_termios {
 #define TCSETS 0x5402
 #define TCSETSW 0x5403
 #define TCSETSF 0x5404
+#define TCGETS2 0x802c542a
+#define TCSETS2 0x402c542b
+#define TCSETSW2 0x402c542c
+#define TCSETSF2 0x402c542d
 #define TIOCGPGRP 0x540F
 #define TIOCSPGRP 0x5410
 #define TIOCGWINSZ 0x5413

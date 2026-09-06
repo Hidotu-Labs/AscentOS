@@ -525,6 +525,18 @@ uint64_t process_build_initial_stack(uint64_t stack_top, const char *path,
   stack_entries[idx++] = AT_NULL;
   stack_entries[idx++] = 0;
 
+  struct thread *cur = sched_get_current();
+  if (cur && cur->mm) {
+    size_t aux_start = 1 + argc + 1 + envc + 1;
+    size_t aux_entries = (idx > aux_start) ? (idx - aux_start) : 0;
+    if (aux_entries > 64)
+      aux_entries = 64;
+    for (size_t i = 0; i < aux_entries; i++) {
+      cur->mm->saved_auxv[i] = stack_entries[aux_start + i];
+    }
+    cur->mm->auxv_count = (uint32_t)aux_entries;
+  }
+
   // 6. Copy Pointers/Auxv to user space at final_sp
   process_copy_to_user(vmm_get_active_pml4(), final_sp, stack_entries,
                        idx * sizeof(uint64_t));

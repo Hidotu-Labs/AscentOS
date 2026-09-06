@@ -1,3 +1,4 @@
+#include "../lib/string.h"
 #include "../lock/spinlock.h"
 #include "pmm.h"
 #include "tlb_shootdown.h"
@@ -25,6 +26,39 @@ static uint64_t *clone_table(uint64_t *src_table_phys, int level, size_t start,
       continue;
     if (!(src_virt[i] & PAGE_FLAG_USER))
       continue; // skip kernel / Limine mappings
+
+    if (src_virt[i] & PAGE_FLAG_PS) {
+      // 2MB huge page at level 2: deep-copy the 2MB data instead of treating
+      // user heap memory as a page table.
+      if (level == 2) {
+        void *new_huge = pmm_alloc_huge_page();
+        if (new_huge) {
+          uint64_t src_huge_phys = src_virt[i] & PAGE_MASK;
+          memcpy(PHYS_TO_VIRT((uint64_t)new_huge),
+                 PHYS_TO_VIRT(src_huge_phys),
+                 2ULL * 1024 * 1024);
+          new_virt[i] = ((uint64_t)new_huge & PAGE_MASK) | (src_virt[i] & ~PAGE_MASK);
+        } else {
+          void *pt_phys = pmm_alloc();
+          if (!pt_phys)
+            return NULL;
+          uint64_t *pt_virt = (uint64_t *)PHYS_TO_VIRT((uint64_t)pt_phys);
+          uint64_t src_huge_phys = src_virt[i] & PAGE_MASK;
+          uint64_t pte_flags = (src_virt[i] & ~PAGE_MASK & ~PAGE_FLAG_PS) | PAGE_FLAG_PRESENT;
+          for (size_t p = 0; p < 512; p++) {
+            void *new_p = pmm_alloc();
+            if (!new_p)
+              return NULL;
+            memcpy(PHYS_TO_VIRT((uint64_t)new_p),
+                   PHYS_TO_VIRT(src_huge_phys + p * PAGE_SIZE),
+                   PAGE_SIZE);
+            pt_virt[p] = ((uint64_t)new_p & PAGE_MASK) | pte_flags;
+          }
+          new_virt[i] = ((uint64_t)pt_phys & PAGE_MASK) | PAGE_FLAG_PRESENT | PAGE_FLAG_RW | PAGE_FLAG_USER;
+        }
+      }
+      continue;
+    }
 
     if (level == 1) {
       uint64_t phys = src_virt[i] & PAGE_MASK;
@@ -85,6 +119,42 @@ static uint64_t *clone_table_vma(uint64_t *src_table_phys, int level,
       continue;
     if (!(src_virt[i] & PAGE_FLAG_USER))
       continue;
+
+    if (src_virt[i] & PAGE_FLAG_PS) {
+      if (level == 2) {
+        uint64_t child_base = base_addr | ((uint64_t)i << 21);
+        if (is_shared_vma(vmas, child_base)) {
+          new_virt[i] = src_virt[i];
+        } else {
+          void *new_huge = pmm_alloc_huge_page();
+          if (new_huge) {
+            uint64_t src_huge_phys = src_virt[i] & PAGE_MASK;
+            memcpy(PHYS_TO_VIRT((uint64_t)new_huge),
+                   PHYS_TO_VIRT(src_huge_phys),
+                   2ULL * 1024 * 1024);
+            new_virt[i] = ((uint64_t)new_huge & PAGE_MASK) | (src_virt[i] & ~PAGE_MASK);
+          } else {
+            void *pt_phys = pmm_alloc();
+            if (!pt_phys)
+              return NULL;
+            uint64_t *pt_virt = (uint64_t *)PHYS_TO_VIRT((uint64_t)pt_phys);
+            uint64_t src_huge_phys = src_virt[i] & PAGE_MASK;
+            uint64_t pte_flags = (src_virt[i] & ~PAGE_MASK & ~PAGE_FLAG_PS) | PAGE_FLAG_PRESENT;
+            for (size_t p = 0; p < 512; p++) {
+              void *new_p = pmm_alloc();
+              if (!new_p)
+                return NULL;
+              memcpy(PHYS_TO_VIRT((uint64_t)new_p),
+                     PHYS_TO_VIRT(src_huge_phys + p * PAGE_SIZE),
+                     PAGE_SIZE);
+              pt_virt[p] = ((uint64_t)new_p & PAGE_MASK) | pte_flags;
+            }
+            new_virt[i] = ((uint64_t)pt_phys & PAGE_MASK) | PAGE_FLAG_PRESENT | PAGE_FLAG_RW | PAGE_FLAG_USER;
+          }
+        }
+      }
+      continue;
+    }
 
     if (level == 1) {
       uint64_t page_vaddr = base_addr | (i << 12);

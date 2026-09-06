@@ -46,17 +46,19 @@
 #define RCR_ACCEPT_BROADCAST (1u << 3)
 #define RCR_WRAP (1u << 7)
 #define RCR_MAX_DMA (7u << 8)
+#define RCR_RBLEN_32K (2u << 11)
 #define RCR_NO_THRESHOLD (7u << 13)
 #define TCR_MAX_DMA (7u << 8)
 #define TCR_IFG96 (3u << 24)
 
-#define RX_RING_SIZE 8192u
+#define RX_RING_SIZE 32768u
 #define TX_COUNT 4u
 #define TX_BUFFER_SIZE 2048u
 #define ETH_HEADER_SIZE 14u
 #define ETH_MIN_NO_FCS 60u
 
 static spinlock_t tx_lock = SPINLOCK_INIT;
+static spinlock_t rx_lock = SPINLOCK_INIT;
 static bool tx_busy[TX_COUNT];
 static uint8_t tx_next;
 static uint32_t rx_offset;
@@ -110,6 +112,19 @@ int rtl8139_transmit(struct net_device *dev, const void *frame, size_t length) {
     }
   }
   if (!found) {
+    for (int retry = 0; retry < 5000 && !found; retry++) {
+      hal_cpu_relax();
+      reclaim_tx_locked();
+      for (uint32_t i = 0; i < TX_COUNT; i++) {
+        slot = (uint8_t)((tx_next + i) % TX_COUNT);
+        if (!tx_busy[slot]) {
+          found = true;
+          break;
+        }
+      }
+    }
+  }
+  if (!found) {
     dev->stats.tx_dropped++;
     dev->stats.queue_full++;
     spinlock_release(&tx_lock);
@@ -126,6 +141,7 @@ int rtl8139_transmit(struct net_device *dev, const void *frame, size_t length) {
   tx_next = (uint8_t)((slot + 1) % TX_COUNT);
   dev->stats.tx_bytes += wire_length;
   outl(rtl8139_io_base() + RTL_TSD0 + slot * 4, (uint32_t)wire_length);
+  reclaim_tx_locked();
   spinlock_release(&tx_lock);
   return 0;
 }
@@ -134,6 +150,7 @@ bool rtl8139_phase2_init(void) {
   if (!rtl8139_present())
     return false;
   spinlock_init(&tx_lock);
+  spinlock_init(&rx_lock);
   memset(tx_busy, 0, sizeof(tx_busy));
   tx_next = 0;
   uint16_t io = rtl8139_io_base();
@@ -152,14 +169,21 @@ static bool rx_record_valid(uint16_t status, uint16_t dma_length,
   return *frame_length >= ETH_HEADER_SIZE && *frame_length <= NET_FRAME_MAX;
 }
 
+static inline uint16_t rtl8139_capr(uint32_t offset) {
+  return (uint16_t)(offset - 16u);
+}
+
 static void recover_rx_overflow(void) {
   uint16_t io = rtl8139_io_base();
   rx_offset = inw(io + RTL_CBR) % RX_RING_SIZE;
-  outw(io + RTL_CAPR, (uint16_t)(rx_offset - 16));
+  outw(io + RTL_CAPR, rtl8139_capr(rx_offset));
 }
 
 static void drain_rx(void) {
   struct net_device *dev = rtl8139_netdev();
+  if (!dev)
+    return;
+  spinlock_acquire(&rx_lock);
   uint16_t io = rtl8139_io_base();
   uint8_t *ring = rx_virt();
   uint32_t budget = NET_PACKET_POOL_SIZE;
@@ -172,13 +196,15 @@ static void drain_rx(void) {
     if (!rx_record_valid(status, dma_length, &frame_length)) {
       dev->stats.rx_errors++;
       recover_rx_overflow();
+      spinlock_release(&rx_lock);
       return;
     }
     net_rx_submit_irq(dev, ring + offset + 4, frame_length);
     rx_offset = (offset + 4u + dma_length + 3u) & ~3u;
     rx_offset %= RX_RING_SIZE;
-    outw(io + RTL_CAPR, (uint16_t)(rx_offset - 16));
+    outw(io + RTL_CAPR, rtl8139_capr(rx_offset));
   }
+  spinlock_release(&rx_lock);
 }
 
 static void rtl8139_irq(struct registers *regs) {
@@ -187,33 +213,38 @@ static void rtl8139_irq(struct registers *regs) {
   if (!phase3_ready || !dev)
     return;
   uint16_t io = rtl8139_io_base();
-  uint16_t status = inw(io + RTL_ISR);
-  if (!status || status == 0xffff || !(status & INT_KNOWN))
-    return;
-  dev->stats.interrupts++;
-  outw(io + RTL_ISR, status & INT_KNOWN);
-  if (status & INT_RX_OK)
-    drain_rx();
-  if (status & INT_TX_OK) {
-    spinlock_acquire(&tx_lock);
-    reclaim_tx_locked();
-    spinlock_release(&tx_lock);
-  }
-  if (status & (INT_RX_ERROR | INT_RX_OVERFLOW)) {
-    dev->stats.rx_errors++;
+  int loop_limit = 32;
+  while (loop_limit-- > 0) {
+    uint16_t status = inw(io + RTL_ISR);
+    if (!status || status == 0xffff || !(status & INT_KNOWN))
+      break;
+    dev->stats.interrupts++;
+    outw(io + RTL_ISR, status & INT_KNOWN);
+    if (status & (INT_RX_OK | INT_RX_OVERFLOW))
+      drain_rx();
+    if (status & INT_TX_OK) {
+      spinlock_acquire(&tx_lock);
+      reclaim_tx_locked();
+      spinlock_release(&tx_lock);
+    }
     if (status & INT_RX_OVERFLOW)
       dev->stats.rx_overflows++;
-    recover_rx_overflow();
+    if (status & INT_RX_ERROR) {
+      dev->stats.rx_errors++;
+      spinlock_acquire(&rx_lock);
+      recover_rx_overflow();
+      spinlock_release(&rx_lock);
+    }
+    if (status & INT_TX_ERROR) {
+      spinlock_acquire(&tx_lock);
+      reclaim_tx_locked();
+      spinlock_release(&tx_lock);
+    }
+    if (status & INT_LINK_CHANGE)
+      dev->stats.link_changes++;
+    if (status & INT_TIMEOUT)
+      dev->stats.rx_errors++;
   }
-  if (status & INT_TX_ERROR) {
-    spinlock_acquire(&tx_lock);
-    reclaim_tx_locked();
-    spinlock_release(&tx_lock);
-  }
-  if (status & INT_LINK_CHANGE)
-    dev->stats.link_changes++;
-  if (status & INT_TIMEOUT)
-    dev->stats.rx_errors++;
 }
 
 bool rtl8139_phase3_init(void) {
@@ -228,8 +259,9 @@ bool rtl8139_phase3_init(void) {
   rx_offset = 0;
   outl(io + RTL_RCR, RCR_ACCEPT_PHYSICAL | RCR_ACCEPT_MULTICAST |
                          RCR_ACCEPT_BROADCAST | RCR_WRAP |
+                         RCR_RBLEN_32K |
                          RCR_MAX_DMA | RCR_NO_THRESHOLD);
-  outw(io + RTL_CAPR, (uint16_t)(rx_offset - 16));
+  outw(io + RTL_CAPR, rtl8139_capr(rx_offset));
   outw(io + RTL_ISR, 0xffff);
   outb(io + RTL_CR, CR_RX_ENABLE | CR_TX_ENABLE);
   uint16_t mask = INT_RX_OK | INT_RX_ERROR | INT_TX_OK | INT_TX_ERROR |

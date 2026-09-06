@@ -2,6 +2,7 @@
 #define FS_RAMFS_H
 
 #include "vfs.h"
+#include "../lock/spinlock.h"
 
 typedef struct child_node {
   struct vfs_node *node;

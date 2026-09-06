@@ -142,7 +142,7 @@ static int console_dev_ioctl(struct vfs_node *node, uint32_t cmd, uint64_t arg) 
         ws->ws_ypixel = (unsigned short)h;
         return 0;
     }
-    case 0x5401: { // TCGETS
+    case TCGETS: {
         struct kernel_termios *kt = (struct kernel_termios *)arg;
         if (!kt || !vmm_is_user_addr_range_valid(arg, sizeof(struct kernel_termios)))
             return -14;
@@ -154,9 +154,23 @@ static int console_dev_ioctl(struct vfs_node *node, uint32_t cmd, uint64_t arg) 
         memcpy(kt->c_cc, console_termios.c_cc, KERNEL_NCCS);
         return 0;
     }
-    case 0x5402: // TCSETS
-    case 0x5403: // TCSETSW
-    case 0x5404: { // TCSETSF
+    case TCGETS2: {
+        struct termios2 *t2 = (struct termios2 *)arg;
+        if (!t2 || !vmm_is_user_addr_range_valid(arg, sizeof(struct termios2)))
+            return -14;
+        t2->c_iflag = console_termios.c_iflag;
+        t2->c_oflag = console_termios.c_oflag;
+        t2->c_cflag = console_termios.c_cflag;
+        t2->c_lflag = console_termios.c_lflag;
+        t2->c_line = console_termios.c_line;
+        memcpy(t2->c_cc, console_termios.c_cc, KERNEL_NCCS);
+        t2->c_ispeed = 38400;
+        t2->c_ospeed = 38400;
+        return 0;
+    }
+    case TCSETS:
+    case TCSETSW:
+    case TCSETSF: {
         const struct kernel_termios *kt = (const struct kernel_termios *)arg;
         if (!kt || !vmm_is_user_addr_range_valid(arg, sizeof(struct kernel_termios)))
             return -14;
@@ -166,6 +180,34 @@ static int console_dev_ioctl(struct vfs_node *node, uint32_t cmd, uint64_t arg) 
         console_termios.c_lflag = kt->c_lflag;
         console_termios.c_line = kt->c_line;
         memcpy(console_termios.c_cc, kt->c_cc, KERNEL_NCCS);
+        return 0;
+    }
+    case TCSETS2:
+    case TCSETSW2:
+    case TCSETSF2: {
+        const struct termios2 *t2 = (const struct termios2 *)arg;
+        if (!t2 || !vmm_is_user_addr_range_valid(arg, sizeof(struct termios2)))
+            return -14;
+        console_termios.c_iflag = t2->c_iflag;
+        console_termios.c_oflag = t2->c_oflag;
+        console_termios.c_cflag = t2->c_cflag;
+        console_termios.c_lflag = t2->c_lflag;
+        console_termios.c_line = t2->c_line;
+        memcpy(console_termios.c_cc, t2->c_cc, KERNEL_NCCS);
+        return 0;
+    }
+    case TIOCGPGRP: {
+        int *pgrp = (int *)arg;
+        if (!pgrp || !vmm_is_user_addr_range_valid(arg, sizeof(int)))
+            return -14;
+        struct thread *t = sched_get_current();
+        *pgrp = t ? (int)t->pgid : 1;
+        return 0;
+    }
+    case TIOCSPGRP: {
+        int *pgrp = (int *)arg;
+        if (!pgrp || !vmm_is_user_addr_range_valid(arg, sizeof(int)))
+            return -14;
         return 0;
     }
     case KDSETMODE: {
@@ -189,7 +231,7 @@ static int console_dev_ioctl(struct vfs_node *node, uint32_t cmd, uint64_t arg) 
     case VT_DISALLOCATE:
         return 0;
     default:
-        return -22; // -EINVAL
+        return -25; // -ENOTTY
     }
 }
 

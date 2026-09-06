@@ -71,6 +71,7 @@ syscall_entry:
     o64 sysret
 
 .sigreturn_iret:
+    cli
     mov qword gs:[384], 0
 
     ; Build SS:RSP:RFLAGS:CS:RIP from struct registers.
@@ -97,6 +98,6 @@ syscall_entry:
     mov rbx, [rax + 104]
     mov rax, [rax + 112]
 
-    cli
     swapgs
     iretq
+

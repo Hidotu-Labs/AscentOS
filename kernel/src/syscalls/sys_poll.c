@@ -3,6 +3,7 @@
 #include "../console/klog.h"
 #include "../fs/vfs.h"
 #include "../lib/string.h"
+#include "../mm/heap.h"
 #include "../mm/vmm.h"
 #include "../sched/sched.h"
 #include "../sched/wait.h"
@@ -62,19 +63,37 @@ static uint64_t do_poll(struct pollfd *fds, uint64_t nfds,
                           ? lapic_timer_get_ticks() + timeout_ms
                           : (uint64_t)-1;
 
-  wait_queue_entry_t wq_entries[64];
-  wait_queue_t *wq_ptrs[64];
+  wait_queue_entry_t wq_stack[64];
+  wait_queue_t *wq_ptrs_stack[64];
+  wait_queue_entry_t *wq_entries = wq_stack;
+  wait_queue_t **wq_ptrs = wq_ptrs_stack;
+  size_t max_wq = 64;
+
+  if (nfds > 64) {
+    size_t alloc_count = (nfds > MAX_FDS) ? MAX_FDS : (size_t)nfds;
+    wait_queue_entry_t *dyn_entries = kmalloc(alloc_count * sizeof(wait_queue_entry_t));
+    wait_queue_t **dyn_ptrs = kmalloc(alloc_count * sizeof(wait_queue_t *));
+    if (dyn_entries && dyn_ptrs) {
+      wq_entries = dyn_entries;
+      wq_ptrs = dyn_ptrs;
+      max_wq = alloc_count;
+    } else {
+      if (dyn_entries) kfree(dyn_entries);
+      if (dyn_ptrs) kfree(dyn_ptrs);
+    }
+  }
 
   while (ready == 0) {
     if (thread_has_pending_signal(t)) {
-      return (uint64_t)-4; // -EINTR
+      ready = -4; // -EINTR
+      break;
     }
 
     if (deadline != (uint64_t)-1 && lapic_timer_get_ticks() >= deadline)
       break;
 
-    int wq_count = 0;
-    for (uint64_t i = 0; i < nfds && wq_count < 64; i++) {
+    size_t wq_count = 0;
+    for (uint64_t i = 0; i < nfds && wq_count < max_wq; i++) {
       int fd = fds[i].fd;
       if (fd >= 0 && fd < MAX_FDS && t->fds[fd] && t->fds[fd]->wait_queue) {
         wait_queue_t *wq = (wait_queue_t *)t->fds[fd]->wait_queue;
@@ -97,7 +116,7 @@ static uint64_t do_poll(struct pollfd *fds, uint64_t nfds,
     if (ready > 0) {
       t->state = THREAD_RUNNING;
       t->wakeup_ticks = 0;
-      for (int i = 0; i < wq_count; i++) {
+      for (size_t i = 0; i < wq_count; i++) {
         wait_queue_remove(wq_ptrs[i], &wq_entries[i]);
       }
       break;
@@ -108,15 +127,21 @@ static uint64_t do_poll(struct pollfd *fds, uint64_t nfds,
     t->state = THREAD_RUNNING;
     t->wakeup_ticks = 0;
 
-    for (int i = 0; i < wq_count; i++) {
+    for (size_t i = 0; i < wq_count; i++) {
       wait_queue_remove(wq_ptrs[i], &wq_entries[i]);
     }
 
     if (thread_has_pending_signal(t)) {
-      return (uint64_t)-4; // -EINTR
+      ready = -4; // -EINTR
+      break;
     }
 
     ready = poll_check_fds(fds, nfds, t);
+  }
+
+  if (wq_entries != wq_stack) {
+    kfree(wq_entries);
+    kfree(wq_ptrs);
   }
 
   return (uint64_t)ready;
@@ -171,9 +196,9 @@ static uint64_t sys_ppoll(uint64_t fds_ptr, uint64_t nfds, uint64_t timeout_ptr,
 static uint64_t do_pselect6(uint64_t nfds, uint64_t readfds, uint64_t writefds,
                             uint64_t exceptfds, uint64_t timeout_ms) {
   size_t set_size = (nfds + 7) / 8;
-  struct pollfd pfds[128];
+  struct pollfd pfds[MAX_FDS];
   uint64_t p_count = 0;
-  for (int fd = 0; fd < (int)nfds && p_count < 128; fd++) {
+  for (int fd = 0; fd < (int)nfds && p_count < MAX_FDS; fd++) {
     short events = 0;
     if (readfds && (((uint64_t *)readfds)[fd / 64] & (1ULL << (fd % 64))))
       events |= 0x0001;

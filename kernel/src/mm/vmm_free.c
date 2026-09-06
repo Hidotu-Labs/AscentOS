@@ -11,8 +11,11 @@ static void reclaim_unmapped_file_cache(struct vma *v) {
     return;
   reclaim_unmapped_file_cache(v->left);
   reclaim_unmapped_file_cache(v->right);
-  if (v->file_node)
-    vfs_cache_clear_unused((vfs_node_t *)v->file_node);
+  if (v->file_node) {
+    vfs_node_t *node = (vfs_node_t *)v->file_node;
+    if ((uint64_t)node >= 0xFFFF800000000000ULL && (node->flags & FS_PAGE_CACHE))
+      vfs_cache_clear_unused(node);
+  }
 }
 
 void vmm_free_user_pages(uint64_t cr3) {

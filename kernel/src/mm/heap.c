@@ -17,15 +17,7 @@
 
 // Dedicated lock for virtual memory heap space & large allocations
 static spinlock_t vmem_lock = SPINLOCK_INIT;
-static uint64_t current_heap_vaddr = KERNEL_HEAP_BASE;
 bool heap_initialized = false;
-
-#define HEAP_FREE_EXTENTS 256
-struct heap_free_extent {
-  uint64_t vaddr;
-  size_t pages;
-};
-static struct heap_free_extent free_extents[HEAP_FREE_EXTENTS];
 
 struct slab_cache;
 
@@ -77,71 +69,6 @@ struct cpu_local_slab {
 
 static struct cpu_local_slab cpu_slab_caches[MAX_CPUS][CACHE_COUNT];
 
-// Virtual address space bumper (called with vmem_lock held)
-static uint64_t allocate_virtual_space_locked(size_t pages) {
-  for (size_t i = 0; i < HEAP_FREE_EXTENTS; i++) {
-    if (free_extents[i].pages < pages)
-      continue;
-    uint64_t vaddr = free_extents[i].vaddr;
-    free_extents[i].vaddr += pages * PAGE_SIZE;
-    free_extents[i].pages -= pages;
-    if (free_extents[i].pages == 0)
-      free_extents[i].vaddr = 0;
-    return vaddr;
-  }
-
-  uint64_t vaddr = current_heap_vaddr;
-  current_heap_vaddr += pages * PAGE_SIZE;
-  return vaddr;
-}
-
-static void release_virtual_space_locked(uint64_t vaddr, size_t pages) {
-  if (!vaddr || !pages)
-    return;
-
-  if (vaddr + pages * PAGE_SIZE == current_heap_vaddr) {
-    current_heap_vaddr = vaddr;
-    bool merged;
-    do {
-      merged = false;
-      for (size_t i = 0; i < HEAP_FREE_EXTENTS; i++) {
-        if (free_extents[i].pages &&
-            free_extents[i].vaddr + free_extents[i].pages * PAGE_SIZE ==
-                current_heap_vaddr) {
-          current_heap_vaddr = free_extents[i].vaddr;
-          free_extents[i].vaddr = 0;
-          free_extents[i].pages = 0;
-          merged = true;
-          break;
-        }
-      }
-    } while (merged);
-    return;
-  }
-
-  for (size_t i = 0; i < HEAP_FREE_EXTENTS; i++) {
-    if (!free_extents[i].pages)
-      continue;
-    if (free_extents[i].vaddr + free_extents[i].pages * PAGE_SIZE == vaddr) {
-      free_extents[i].pages += pages;
-      return;
-    }
-    if (vaddr + pages * PAGE_SIZE == free_extents[i].vaddr) {
-      free_extents[i].vaddr = vaddr;
-      free_extents[i].pages += pages;
-      return;
-    }
-  }
-
-  for (size_t i = 0; i < HEAP_FREE_EXTENTS; i++) {
-    if (free_extents[i].pages == 0) {
-      free_extents[i].vaddr = vaddr;
-      free_extents[i].pages = pages;
-      return;
-    }
-  }
-}
-
 void heap_init(void) {
   for (size_t i = 0; i < CACHE_COUNT; i++) {
     spinlock_init(&caches[i].lock);
@@ -156,18 +83,7 @@ static struct slab *allocate_new_slab(struct slab_cache *c) {
   if (!frame)
     return NULL;
 
-  spinlock_acquire(&vmem_lock);
-  uint64_t vaddr = allocate_virtual_space_locked(1);
-  uint64_t *pml4 = vmm_get_active_pml4();
-
-  if (!vmm_map_page(pml4, vaddr, (uint64_t)frame,
-                    PAGE_FLAG_PRESENT | PAGE_FLAG_RW)) {
-    spinlock_release(&vmem_lock);
-    pmm_free_page(frame);
-    return NULL;
-  }
-  spinlock_release(&vmem_lock);
-
+  uint64_t vaddr = (uint64_t)frame + pmm_get_hhdm_offset();
   struct slab *s = (struct slab *)vaddr;
   memset(s, 0, PAGE_SIZE);
 
@@ -352,26 +268,17 @@ void *kmalloc(size_t size) {
   if (!blocks)
     return NULL;
 
-  spinlock_acquire(&vmem_lock);
-  uint64_t vaddr = allocate_virtual_space_locked(pages);
-  uint64_t *pml4 = vmm_get_active_pml4();
-  if (!vmm_map_range(pml4, vaddr, (uint64_t)blocks, pages,
-                     PAGE_FLAG_PRESENT | PAGE_FLAG_RW)) {
-    spinlock_release(&vmem_lock);
-    pmm_free_pages(blocks, pages);
-    return NULL;
-  }
-
+  uint64_t vaddr = (uint64_t)blocks + pmm_get_hhdm_offset();
   struct big_alloc *b = (struct big_alloc *)vaddr;
   b->magic = BIG_MAGIC;
   b->pages = pages;
 
+  spinlock_acquire(&vmem_lock);
   b->next = big_alloc_head;
   b->prev = NULL;
   if (big_alloc_head)
     big_alloc_head->prev = b;
   big_alloc_head = b;
-
   spinlock_release(&vmem_lock);
 
   return (void *)((uint8_t *)b + sizeof(struct big_alloc));
@@ -428,15 +335,8 @@ void kfree(void *ptr) {
     b->magic = 0;
     spinlock_release(&vmem_lock);
 
-    uint64_t *pml4 = vmm_get_active_pml4();
-    uint64_t phys_addr = vmm_virt_to_phys(pml4, page_base);
-    for (size_t i = 0; i < pages; i++)
-      vmm_unmap_page(pml4, page_base + i * PAGE_SIZE);
+    uint64_t phys_addr = page_base - pmm_get_hhdm_offset();
     pmm_free_pages((void *)phys_addr, pages);
-
-    spinlock_acquire(&vmem_lock);
-    release_virtual_space_locked(page_base, pages);
-    spinlock_release(&vmem_lock);
     return;
   }
 

@@ -17,9 +17,14 @@
 #define PSH     0x08
 
 #define RTO     500
-#define RETRIES 5
+#define RETRIES 8
 #define EPHEMERAL_MIN 49152
 #define EPHEMERAL_MAX 65535
+
+static inline bool seq_lt(uint32_t a, uint32_t b) { return (int32_t)(a - b) < 0; }
+static inline bool seq_le(uint32_t a, uint32_t b) { return (int32_t)(a - b) <= 0; }
+static inline bool seq_gt(uint32_t a, uint32_t b) { return (int32_t)(a - b) > 0; }
+static inline bool seq_ge(uint32_t a, uint32_t b) { return (int32_t)(a - b) >= 0; }
 
 static struct tcp_tcb tcbs[TCP_MAX_TCBS];
 static struct tcp_stats stats;
@@ -55,20 +60,30 @@ static void p32(uint8_t *p, uint32_t v)
 
 static uint16_t csum(uint32_t s, uint32_t d, const uint8_t *p, size_t n)
 {
-    uint32_t x;
+    uint64_t x;
 
     x = (s >> 16) + (s & 0xffff) +
         (d >> 16) + (d & 0xffff) +
-        6 + (uint32_t)n;
+        6 + (uint64_t)n;
 
-    while (n > 1) {
-        x += g16(p);
+    while (n >= 4) {
+        uint32_t v;
+        __builtin_memcpy(&v, p, 4);
+        x += __builtin_bswap32(v);
+        p += 4;
+        n -= 4;
+    }
+
+    if (n >= 2) {
+        uint16_t v;
+        __builtin_memcpy(&v, p, 2);
+        x += __builtin_bswap16(v);
         p += 2;
         n -= 2;
     }
 
     if (n)
-        x += (uint32_t)*p << 8;
+        x += (uint64_t)*p << 8;
 
     while (x >> 16)
         x = (x & 0xffff) + (x >> 16);
@@ -192,34 +207,48 @@ static int emit_at(
     size_t len
 )
 {
-    uint8_t segment[1480];
+    uint8_t segment[1500];
+    size_t hdr_len = 20;
 
     if (!t || len > 1460)
         return -90;
 
-    memset(segment, 0, 20 + len);
+    if (flags & SYN) {
+        hdr_len = 24; // Include 4-byte MSS option
+    }
+
+    memset(segment, 0, hdr_len + len);
 
     p16(segment,      t->local_port);
     p16(segment + 2,  t->remote_port);
     p32(segment + 4,  seq);
     p32(segment + 8,  t->rcv_nxt);
 
-    segment[12] = 0x50;
+    segment[12] = (uint8_t)((hdr_len / 4) << 4);
     segment[13] = flags;
 
-    p16(segment + 14,
-        t->rcv_wnd ? t->rcv_wnd : TCP_DEFAULT_WINDOW);
+    size_t used = t->rx_head - t->rx_tail;
+    size_t space = used < TCP_RX_BUFFER_SIZE ? (TCP_RX_BUFFER_SIZE - used) : 0;
+    uint16_t wnd = space > 65535 ? 65535 : (uint16_t)space;
+    p16(segment + 14, wnd);
+
+    if (flags & SYN) {
+        segment[20] = 0x02; // Kind = MSS
+        segment[21] = 0x04; // Length = 4
+        segment[22] = 0x05; // 1460 >> 8
+        segment[23] = 0xb4; // 1460 & 0xff
+    }
 
     if (len)
-        memcpy(segment + 20, data, len);
+        memcpy(segment + hdr_len, data, len);
 
     if (t->address_family == 6) {
         p16(segment + 16, csum6(t->local_ip6, t->remote_ip6,
-                                segment, 20 + len));
-        return ipv6_send_raw(t->remote_ip6, 6, segment, 20 + len);
+                                segment, hdr_len + len));
+        return ipv6_send_raw(t->remote_ip6, 6, segment, hdr_len + len);
     }
-    p16(segment + 16, csum(t->local_ip, t->remote_ip, segment, 20 + len));
-    return ipv4_send_raw(t->remote_ip, 6, segment, 20 + len);
+    p16(segment + 16, csum(t->local_ip, t->remote_ip, segment, hdr_len + len));
+    return ipv4_send_raw(t->remote_ip, 6, segment, hdr_len + len);
 }
 
 static int emit(struct tcp_tcb *t, uint8_t flags, const void *data, size_t len)
@@ -227,16 +256,22 @@ static int emit(struct tcp_tcb *t, uint8_t flags, const void *data, size_t len)
     return emit_at(t, t->snd_nxt, flags, data, len);
 }
 
-static int tracked(struct tcp_tcb *t, uint8_t flags, const void *data, size_t len)
+static void track_locked(struct tcp_tcb *t, uint8_t flags, const void *data, size_t len)
 {
     t->tx_seq = t->snd_nxt;
     t->tx_flags = flags;
     t->tx_length = len;
 
-    if (len)
+    if (len && data)
         memcpy(t->tx_buffer, data, len);
 
-    return emit_at(t, t->tx_seq, flags, data, len);
+    uint32_t adv = (uint32_t)len;
+    if (flags & (SYN | FIN))
+        adv += 1;
+    t->snd_nxt += adv;
+
+    t->retries = 0;
+    t->deadline = lapic_timer_get_ticks() + RTO;
 }
 
 static void wake(struct tcp_tcb *t)
@@ -244,8 +279,14 @@ static void wake(struct tcp_tcb *t)
     if (t->wait_queue)
         wait_queue_wake_all((wait_queue_t *)t->wait_queue);
 
-    if (t->vfs_node)
-        epoll_notify_event((vfs_node_t *)t->vfs_node, 0x1 | 0x4);
+    if (t->vfs_node) {
+        uint32_t ev = 0x1 | 0x4; // EPOLLIN | EPOLLOUT
+        if (t->error)
+            ev |= 0x8; // EPOLLERR
+        if (t->peer_closed || t->state == TCP_CLOSE_WAIT || t->state == TCP_CLOSED || t->state == TCP_RESET || t->state == TCP_TIME_WAIT)
+            ev |= 0x10 | 0x2000; // EPOLLHUP | EPOLLRDHUP
+        epoll_notify_event((vfs_node_t *)t->vfs_node, ev);
+    }
 }
 
 int tcp_bind(struct tcp_tcb *t, uint32_t ip, uint16_t port)
@@ -313,18 +354,25 @@ int tcp_active_open(struct tcp_tcb *t, uint32_t ip, uint16_t port)
             return -98;
     }
 
+    spinlock_acquire(&lock);
     t->snd_una = 0x90000000u + (uint32_t)(t - tcbs) * 4096u;
     t->snd_nxt = t->snd_una;
     t->state = TCP_SYN_SENT;
 
-    r = tracked(t, SYN, NULL, 0);
-    if (r < 0)
-        return r;
+    klog_puts("[TCP] active_open: dst=");
+    klog_uint64((ip >> 24) & 0xff); klog_puts(".");
+    klog_uint64((ip >> 16) & 0xff); klog_puts(".");
+    klog_uint64((ip >> 8) & 0xff); klog_puts(".");
+    klog_uint64(ip & 0xff);
+    klog_puts(":");
+    klog_uint64(port);
+    klog_puts("\n");
 
-    t->snd_nxt++;
-    t->deadline = lapic_timer_get_ticks() + RTO;
+    track_locked(t, SYN, NULL, 0);
+    uint32_t seq = t->tx_seq;
+    spinlock_release(&lock);
 
-    return 0;
+    return emit_at(t, seq, SYN, NULL, 0);
 }
 
 int tcp_active_open6(struct tcp_tcb *t, const uint8_t ip[16], uint16_t port)
@@ -332,15 +380,20 @@ int tcp_active_open6(struct tcp_tcb *t, const uint8_t ip[16], uint16_t port)
     if (!t || !ip || !port) return -22;
     const struct ipv6_config *cfg = ipv6_get_config();
     bool link = ip[0] == 0xfe && (ip[1] & 0xc0) == 0x80;
-    if (!link && !cfg->global_valid) return -101;
+    bool dest_global = (ip[0] & 0xe0) == 0x20;
+    bool cfg_global = cfg->global_valid && ((cfg->global[0] & 0xe0) == 0x20);
+    if (!link && (!cfg->global_valid || (dest_global && !cfg_global))) return -101;
+    if (!t->local_port) { t->local_port = alloc_ephemeral(); if (!t->local_port) return -98; }
+    spinlock_acquire(&lock);
     t->address_family = 6;
     memcpy(t->local_ip6, link ? cfg->link_local : cfg->global, 16);
     memcpy(t->remote_ip6, ip, 16); t->remote_port = port;
-    if (!t->local_port) { t->local_port = alloc_ephemeral(); if (!t->local_port) return -98; }
     t->snd_una = 0x98000000u + (uint32_t)(t - tcbs) * 4096u;
     t->snd_nxt = t->snd_una; t->state = TCP_SYN_SENT;
-    int r = tracked(t, SYN, NULL, 0); if (r < 0) return r;
-    t->snd_nxt++; t->deadline = lapic_timer_get_ticks() + RTO; return 0;
+    track_locked(t, SYN, NULL, 0);
+    uint32_t seq = t->tx_seq;
+    spinlock_release(&lock);
+    return emit_at(t, seq, SYN, NULL, 0);
 }
 
 bool tcp_readable(const struct tcp_tcb *t)
@@ -348,6 +401,8 @@ bool tcp_readable(const struct tcp_tcb *t)
     return t && (
         t->rx_head != t->rx_tail ||
         t->peer_closed ||
+        t->state == TCP_CLOSE_WAIT ||
+        t->state == TCP_TIME_WAIT ||
         t->error
     );
 }
@@ -356,6 +411,7 @@ bool tcp_writable(const struct tcp_tcb *t)
 {
     return t &&
            t->state == TCP_ESTABLISHED &&
+           t->tx_length == 0 &&
            !t->error;
 }
 
@@ -367,17 +423,47 @@ int tcp_send(struct tcp_tcb *t, const void *buf, size_t len)
     if (!t || !buf)
         return -22;
 
-    if (t->state != TCP_ESTABLISHED)
+    spinlock_acquire(&lock);
+
+    while (t->tx_length > 0 && t->state == TCP_ESTABLISHED && !t->error) {
+        spinlock_release(&lock);
+        if (t->wait_queue) {
+            wait_queue_t *wq = (wait_queue_t *)t->wait_queue;
+            struct thread *cur = sched_get_current();
+            wait_queue_entry_t entry = { .thread = cur, .next = NULL };
+            wait_queue_add(wq, &entry);
+            if (cur) {
+                cur->state = THREAD_BLOCKED;
+                cur->wakeup_ticks = lapic_timer_get_ticks() + 50;
+            }
+            sched_yield();
+            if (cur) cur->wakeup_ticks = 0;
+            wait_queue_remove(wq, &entry);
+        } else {
+            sched_yield();
+        }
+        spinlock_acquire(&lock);
+    }
+
+    if (t->state != TCP_ESTABLISHED) {
+        spinlock_release(&lock);
         return -107;
+    }
+    if (t->error) {
+        int err = t->error;
+        spinlock_release(&lock);
+        return -err;
+    }
 
     chunk = len > t->mss ? t->mss : len;
 
-    r = tracked(t, ACK | PSH, buf, chunk);
+    track_locked(t, ACK | PSH, buf, chunk);
+    uint32_t seq = t->tx_seq;
+    spinlock_release(&lock);
+
+    r = emit_at(t, seq, ACK | PSH, buf, chunk);
     if (r < 0)
         return r;
-
-    t->snd_nxt += (uint32_t)chunk;
-    t->deadline = lapic_timer_get_ticks() + RTO;
 
     return (int)chunk;
 }
@@ -397,25 +483,58 @@ int tcp_recv(struct tcp_tcb *t, void *buf, size_t len, bool nonblock)
         if (avail) {
             size_t count = avail < len ? avail : len;
 
-            for (size_t i = 0; i < count; i++) {
-                ((uint8_t *)buf)[i] =
-                    t->rx_buffer[(t->rx_tail + i) % TCP_RX_BUFFER_SIZE];
+            size_t off = t->rx_tail % TCP_RX_BUFFER_SIZE;
+            size_t first = TCP_RX_BUFFER_SIZE - off;
+            if (count <= first) {
+                memcpy(buf, &t->rx_buffer[off], count);
+            } else {
+                memcpy(buf, &t->rx_buffer[off], first);
+                memcpy((uint8_t *)buf + first, &t->rx_buffer[0], count - first);
             }
 
+            size_t used_before = t->rx_head - t->rx_tail;
+            size_t old_space = used_before < TCP_RX_BUFFER_SIZE ? (TCP_RX_BUFFER_SIZE - used_before) : 0;
             t->rx_tail += count;
+            size_t used_after = t->rx_head - t->rx_tail;
+
+            // Send window update or flush delayed ACK if data was read and window opened
+            bool send_ack = false;
+            size_t new_space = used_after < TCP_RX_BUFFER_SIZE ? (TCP_RX_BUFFER_SIZE - used_after) : 0;
+            if ((t->state == TCP_ESTABLISHED || t->state == TCP_CLOSE_WAIT) &&
+                (t->unacked_packets > 0 || (old_space < t->mss && new_space >= t->mss))) {
+                t->unacked_packets = 0;
+                send_ack = true;
+            }
 
             spinlock_release(&lock);
+            if (send_ack)
+                emit(t, ACK, NULL, 0);
             return (int)count;
         }
 
-        if (t->peer_closed) {
+        if (t->peer_closed || t->state == TCP_CLOSE_WAIT || t->state == TCP_TIME_WAIT) {
             spinlock_release(&lock);
             return 0;
+        }
+
+        if (t->state == TCP_CLOSED || t->state == TCP_RESET) {
+            int err = t->error ? t->error : (t->state == TCP_RESET ? 104 : 107);
+            spinlock_release(&lock);
+            return -err;
+        }
+
+        bool send_flush_ack = false;
+        if ((t->state == TCP_ESTABLISHED || t->state == TCP_CLOSE_WAIT) && t->unacked_packets > 0) {
+            t->unacked_packets = 0;
+            send_flush_ack = true;
         }
 
         int err = t->error;
 
         spinlock_release(&lock);
+
+        if (send_flush_ack)
+            emit(t, ACK, NULL, 0);
 
         if (err)
             return -err;
@@ -428,33 +547,51 @@ int tcp_recv(struct tcp_tcb *t, void *buf, size_t len, bool nonblock)
         if (cur && (cur->pending_signals & ~cur->signal_mask))
             return -4;
 
-        sched_yield();
+        if (t->wait_queue) {
+            wait_queue_t *wq = (wait_queue_t *)t->wait_queue;
+            wait_queue_entry_t entry = { .thread = cur, .next = NULL };
+            wait_queue_add(wq, &entry);
+            if (cur) {
+                cur->state = THREAD_BLOCKED;
+                cur->wakeup_ticks = lapic_timer_get_ticks() + 100;
+            }
+            sched_yield();
+            if (cur) cur->wakeup_ticks = 0;
+            wait_queue_remove(wq, &entry);
+        } else {
+            if (cur) cur->wakeup_ticks = lapic_timer_get_ticks() + 50;
+            sched_yield();
+            if (cur) cur->wakeup_ticks = 0;
+        }
     }
 }
 
 int tcp_close(struct tcp_tcb *t)
 {
-    int r;
+    int r = 0;
+    bool send_fin = false;
+    uint32_t seq = 0;
 
     if (!t)
         return -22;
 
+    spinlock_acquire(&lock);
     if (t->state == TCP_ESTABLISHED || t->state == TCP_CLOSE_WAIT) {
-        r = tracked(t, FIN | ACK, NULL, 0);
-        if (r < 0)
-            return r;
-
-        t->snd_nxt++;
-
         if (t->state == TCP_CLOSE_WAIT)
             t->state = TCP_LAST_ACK;
         else
             t->state = TCP_FIN_WAIT_1;
 
-        t->deadline = lapic_timer_get_ticks() + RTO;
+        track_locked(t, FIN | ACK, NULL, 0);
+        seq = t->tx_seq;
+        send_fin = true;
     }
+    spinlock_release(&lock);
 
-    return 0;
+    if (send_fin)
+        r = emit_at(t, seq, FIN | ACK, NULL, 0);
+
+    return r;
 }
 
 int tcp_listen(struct tcp_tcb *t, int backlog)
@@ -520,7 +657,8 @@ static void input(
     uint32_t ack,
     uint8_t flags,
     const void *payload,
-    size_t len
+    size_t len,
+    bool *send_ack
 )
 {
     if (flags & RST) {
@@ -530,23 +668,47 @@ static void input(
 
         stats.resets++;
 
+        klog_puts("[TCP] RST received: dst=");
+        klog_uint64((t->remote_ip >> 24) & 0xff); klog_puts(".");
+        klog_uint64((t->remote_ip >> 16) & 0xff); klog_puts(".");
+        klog_uint64((t->remote_ip >> 8) & 0xff); klog_puts(".");
+        klog_uint64(t->remote_ip & 0xff);
+        klog_puts(" error=");
+        klog_uint64(t->error);
+        klog_puts("\n");
+
         wake(t);
         return;
     }
 
     if (t->state == TCP_SYN_SENT) {
-        if ((flags & (SYN | ACK)) == (SYN | ACK) &&
-            ack == t->snd_nxt) {
-            t->snd_una = ack;
-            t->rcv_nxt = seq + 1;
-            t->state = TCP_ESTABLISHED;
-            t->retries = 0;
-            t->deadline = 0;
+        if ((flags & (SYN | ACK)) == (SYN | ACK)) {
+            if (ack == t->snd_nxt) {
+                t->snd_una = ack;
+                t->rcv_nxt = seq + 1;
+                t->state = TCP_ESTABLISHED;
+                t->retries = 0;
+                t->deadline = 0;
 
-            emit(t, ACK, NULL, 0);
-            wake(t);
+                klog_puts("[TCP] established with dst=");
+                klog_uint64((t->remote_ip >> 24) & 0xff); klog_puts(".");
+                klog_uint64((t->remote_ip >> 16) & 0xff); klog_puts(".");
+                klog_uint64((t->remote_ip >> 8) & 0xff); klog_puts(".");
+                klog_uint64(t->remote_ip & 0xff);
+                klog_puts(":");
+                klog_uint64(t->remote_port);
+                klog_puts("\n");
+
+                *send_ack = true;
+                wake(t);
+            } else {
+                klog_puts("[TCP] SYN_SENT ACK mismatch: got=");
+                klog_uint64(ack);
+                klog_puts(" exp=");
+                klog_uint64(t->snd_nxt);
+                klog_puts("\n");
+            }
         }
-
         return;
     }
 
@@ -569,59 +731,93 @@ static void input(
         return;
     }
 
-    if (seq < t->rcv_nxt) {
-        stats.duplicates++;
-        return;
-    }
-
-    if (seq > t->rcv_nxt) {
-        stats.out_of_order++;
-        return;
-    }
-
     if ((flags & ACK) &&
-        ack > t->snd_una &&
-        ack <= t->snd_nxt) {
+        seq_gt(ack, t->snd_una) &&
+        seq_le(ack, t->snd_nxt)) {
         t->snd_una = ack;
+        t->retries = 0;
 
-        if (ack >= t->snd_nxt) {
+        if (seq_ge(ack, t->snd_nxt)) {
             t->deadline = 0;
             t->tx_length = 0;
             t->tx_flags = 0;
+            t->retries = 0;
+
+            if (t->state == TCP_LAST_ACK) {
+                t->state = TCP_CLOSED;
+            }
 
             wake(t);
         }
     }
 
-    if (len) {
-        size_t space = TCP_RX_BUFFER_SIZE - (t->rx_head - t->rx_tail);
-        size_t count = len < space ? len : space;
+    if (seq_lt(seq, t->rcv_nxt)) {
+        uint32_t trim = t->rcv_nxt - seq;
+        if (trim >= len) {
+            stats.duplicates++;
+            *send_ack = true;
+            return;
+        }
+        payload = (const uint8_t *)payload + trim;
+        len -= trim;
+        seq = t->rcv_nxt;
+    }
 
-        for (size_t i = 0; i < count; i++) {
-            t->rx_buffer[(t->rx_head + i) % TCP_RX_BUFFER_SIZE] =
-                ((const uint8_t *)payload)[i];
+    if (seq_gt(seq, t->rcv_nxt)) {
+        stats.out_of_order++;
+        if (++t->unacked_packets <= 3) {
+            *send_ack = true;
+        }
+        return;
+    }
+
+    if (len) {
+        size_t used = t->rx_head - t->rx_tail;
+        size_t space = used < TCP_RX_BUFFER_SIZE ? (TCP_RX_BUFFER_SIZE - used) : 0;
+
+        if (len > space) {
+            *send_ack = true;
+            return;
         }
 
-        t->rx_head += count;
-        t->rcv_nxt += (uint32_t)count;
+        size_t off = t->rx_head % TCP_RX_BUFFER_SIZE;
+        size_t first = TCP_RX_BUFFER_SIZE - off;
+        if (len <= first) {
+            memcpy(&t->rx_buffer[off], payload, len);
+        } else {
+            memcpy(&t->rx_buffer[off], payload, first);
+            memcpy(&t->rx_buffer[0], (const uint8_t *)payload + first, len - first);
+        }
 
-        emit(t, ACK, NULL, 0);
+        t->rx_head += len;
+        t->rcv_nxt += (uint32_t)len;
+
+        if ((flags & (PSH | FIN)) || ++t->unacked_packets >= 2) {
+            *send_ack = true;
+            t->unacked_packets = 0;
+        }
         wake(t);
     }
 
     if (flags & FIN) {
         t->rcv_nxt++;
+        t->peer_closed = true;
 
-        if (t->state == TCP_ESTABLISHED)
+        if (t->state == TCP_ESTABLISHED) {
             t->state = TCP_CLOSE_WAIT;
-        else
+            t->deadline = 0;
+            t->retries = 0;
+        } else {
             t->state = TCP_TIME_WAIT;
+            t->deadline = lapic_timer_get_ticks() + 2 * RTO;
+        }
 
-        t->deadline = lapic_timer_get_ticks() + 2 * RTO;
-
+        *send_ack = true;
         wake(t);
     } else if (t->state == TCP_FIN_WAIT_1 && ack == t->snd_nxt) {
         t->state = TCP_FIN_WAIT_2;
+        t->deadline = 0;
+        t->retries = 0;
     }
 }
 
@@ -644,6 +840,12 @@ void tcp_input_ipv4(uint32_t s, uint32_t d, const uint8_t *p, size_t len)
 
     if (csum(s, d, p, len)) {
         stats.bad_checksum++;
+        static uint64_t last_csum_log = 0;
+        uint64_t now = lapic_timer_get_ticks();
+        if (now - last_csum_log >= 1000) {
+            last_csum_log = now;
+            klog_puts("[TCP] bad checksum!\n");
+        }
         return;
     }
 
@@ -656,14 +858,38 @@ void tcp_input_ipv4(uint32_t s, uint32_t d, const uint8_t *p, size_t len)
 
         t->snd_wnd = g16(p + 14);
 
+        if ((p[13] & SYN) && header_len > 20) {
+            size_t opt = 20;
+            while (opt < header_len) {
+                uint8_t kind = p[opt];
+                if (kind == 0) break;
+                if (kind == 1) { opt++; continue; }
+                if (opt + 1 >= header_len) break;
+                uint8_t opt_len = p[opt + 1];
+                if (opt_len < 2 || opt + opt_len > header_len) break;
+                if (kind == 2 && opt_len == 4) {
+                    uint16_t mss = g16(p + opt + 2);
+                    if (mss >= 536 && mss <= 1460)
+                        t->mss = mss;
+                }
+                opt += opt_len;
+            }
+        }
+
+        bool send_ack = false;
         input(
             t,
             g32(p + 4),
             g32(p + 8),
             p[13],
             p + header_len,
-            len - header_len
+            len - header_len,
+            &send_ack
         );
+        spinlock_release(&lock);
+        if (send_ack)
+            emit(t, ACK, NULL, 0);
+        return;
     } else if (p[13] & SYN) {
         for (size_t i = 0; i < TCP_MAX_TCBS; i++) {
             if (tcbs[i].used &&
@@ -688,10 +914,12 @@ void tcp_input_ipv4(uint32_t s, uint32_t d, const uint8_t *p, size_t len)
 
                     child->state = TCP_SYN_RECEIVED;
 
-                    tracked(child, SYN | ACK, NULL, 0);
+                    track_locked(child, SYN | ACK, NULL, 0);
+                    uint32_t seq = child->tx_seq;
+                    spinlock_release(&lock);
 
-                    child->snd_nxt++;
-                    child->deadline = lapic_timer_get_ticks() + RTO;
+                    emit_at(child, seq, SYN | ACK, NULL, 0);
+                    return;
                 }
 
                 break;
@@ -715,8 +943,13 @@ void tcp_input_ipv6(const uint8_t s[16], const uint8_t d[16],
     if (t) {
         stats.rx_segments++;
         t->snd_wnd = g16(p + 14);
+        bool send_ack = false;
         input(t, g32(p + 4), g32(p + 8), p[13],
-              p + header_len, len - header_len);
+              p + header_len, len - header_len, &send_ack);
+        spinlock_release(&lock);
+        if (send_ack)
+            emit(t, ACK, NULL, 0);
+        return;
     } else if (p[13] & SYN) {
         for (size_t i = 0; i < TCP_MAX_TCBS; i++) {
             if (!tcbs[i].used || tcbs[i].address_family != 6 ||
@@ -736,9 +969,12 @@ void tcp_input_ipv6(const uint8_t s[16], const uint8_t d[16],
                     0xa8000000u + (uint32_t)(child - tcbs) * 4096u;
                 child->snd_nxt = child->snd_una;
                 child->state = TCP_SYN_RECEIVED;
-                tracked(child, SYN | ACK, NULL, 0);
-                child->snd_nxt++;
-                child->deadline = lapic_timer_get_ticks() + RTO;
+                track_locked(child, SYN | ACK, NULL, 0);
+                uint32_t seq = child->tx_seq;
+                spinlock_release(&lock);
+
+                emit_at(child, seq, SYN | ACK, NULL, 0);
+                return;
             }
             break;
         }
@@ -753,8 +989,17 @@ void tcp_timer_tick(uint64_t now)
 
     for (size_t i = 0; i < TCP_MAX_TCBS; i++) {
         struct tcp_tcb *t = &tcbs[i];
+        if (!t->used)
+            continue;
 
-        if (!t->used || !t->deadline || now < t->deadline)
+        if ((t->state == TCP_ESTABLISHED || t->state == TCP_CLOSE_WAIT) && t->unacked_packets > 0) {
+            t->unacked_packets = 0;
+            spinlock_release(&lock);
+            emit(t, ACK, NULL, 0);
+            spinlock_acquire(&lock);
+        }
+
+        if (!t->deadline || now < t->deadline)
             continue;
 
         if (t->state == TCP_TIME_WAIT) {
@@ -762,27 +1007,57 @@ void tcp_timer_tick(uint64_t now)
             continue;
         }
 
-        if (++t->retries > RETRIES) {
+        if ((t->state == TCP_ESTABLISHED || t->state == TCP_CLOSE_WAIT) &&
+            t->tx_length == 0 && !(t->tx_flags & (SYN | FIN))) {
+            t->deadline = 0;
+            continue;
+        }
+
+        uint8_t max_retries = RETRIES;
+        uint32_t rip = t->remote_ip;
+        if ((rip >> 24) == 10 || (rip >> 20) == 0xAC1 || (rip >> 16) == 0xC0A8) {
+            const struct ipv4_config *c = ipv4_get_config();
+            if (c && c->address && (rip & c->netmask) != (c->address & c->netmask)) {
+                max_retries = 2; // ~1.5s timeout for non-local RFC 1918 private IPs
+            }
+        }
+
+        if (++t->retries > max_retries) {
             t->state = TCP_CLOSED;
             t->deadline = 0;
             t->error = 110;
 
             stats.timeouts++;
 
+            klog_puts("[TCP] timeout on dst=");
+            klog_uint64((t->remote_ip >> 24) & 0xff); klog_puts(".");
+            klog_uint64((t->remote_ip >> 16) & 0xff); klog_puts(".");
+            klog_uint64((t->remote_ip >> 8) & 0xff); klog_puts(".");
+            klog_uint64(t->remote_ip & 0xff);
+            klog_puts(":");
+            klog_uint64(t->remote_port);
+            klog_puts(" retries exceeded\n");
+
             wake(t);
         } else {
-            emit_at(
-                t,
-                t->tx_seq,
-                t->tx_flags,
-                t->tx_length ? t->tx_buffer : NULL,
-                t->tx_length
-            );
+            uint32_t tx_seq = t->tx_seq;
+            uint8_t tx_flags = t->tx_flags;
+            size_t tx_len = t->tx_length;
 
             t->deadline =
                 now + ((uint64_t)RTO << (t->retries > 4 ? 4 : t->retries));
 
             stats.retransmits++;
+
+            spinlock_release(&lock);
+            emit_at(
+                t,
+                tx_seq,
+                tx_flags,
+                tx_len ? t->tx_buffer : NULL,
+                tx_len
+            );
+            spinlock_acquire(&lock);
         }
     }
 

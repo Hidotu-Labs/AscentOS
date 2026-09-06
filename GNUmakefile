@@ -3,7 +3,7 @@
 .DEFAULT_GOAL := all
 
 ARCH := x86_64
-QEMUFLAGS := -m 2G \
+QEMUFLAGS := -m 4G \
 	-vga none \
 	-device virtio-vga,xres=1280,yres=800 \
 	-display gtk,zoom-to-fit=off
@@ -548,6 +548,8 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 		echo "write toolchain/glibc-sysroot/lib/libm.so.6 lib64/libm.so.6"; \
 		echo "rm lib64/ld-linux-x86-64.so.2"; \
 		echo "write toolchain/glibc-sysroot/lib/ld-linux-x86-64.so.2 lib64/ld-linux-x86-64.so.2"; \
+		echo "rm lib64/libresolv.so.2"; \
+		echo "write toolchain/glibc-sysroot/lib/libresolv.so.2 lib64/libresolv.so.2"; \
 	} | debugfs -w ./part.img >/dev/null 2>&1 || true
 	@if [ -d AetherDE ]; then \
 		echo "Installing AetherDE into disk image (/AetherDE)..."; \

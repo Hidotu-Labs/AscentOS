@@ -179,7 +179,20 @@ void process_do_exit(uint64_t status) {
     uint32_t *tidptr = (uint32_t *)current->tid_address;
     if (vmm_is_user_addr_range_writable((uint64_t)tidptr, sizeof(*tidptr))) {
       __atomic_store_n(tidptr, 0, __ATOMIC_RELEASE);
-      futex_wake_user(tidptr, 1);
+      uint64_t woken = futex_wake_user(tidptr, 1);
+      klog_puts("[PROC] clear_child_tid tid=");
+      klog_uint64(current->tid);
+      klog_puts(" addr=");
+      klog_hex64((uint64_t)tidptr);
+      klog_puts(" woken=");
+      klog_uint64(woken);
+      klog_puts("\n");
+    } else {
+      klog_puts("[PROC] clear_child_tid tid=");
+      klog_uint64(current->tid);
+      klog_puts(" addr=");
+      klog_hex64((uint64_t)tidptr);
+      klog_puts(" NOT WRITABLE\n");
     }
     current->tid_address = NULL;
   }
@@ -219,6 +232,14 @@ void process_do_exit(uint64_t status) {
     // Arrange for the scheduler to reclaim them after this context switches
     // away; ordinary fork/clone processes remain zombies for wait4().
     if (current->clone_flags & CLONE_THREAD) {
+      spinlock_acquire(&tid_lock);
+      for (struct thread *t = global_thread_list; t; t = t->global_next) {
+        if (t != current && t->tgid == current->tgid && t->tid == current->tgid) {
+          t->exit_status = (int)status;
+          break;
+        }
+      }
+      spinlock_release(&tid_lock);
       current->state = THREAD_DEAD;
       sched_queue_reap(current);
     } else {
@@ -284,6 +305,18 @@ static uint64_t __attribute__((noreturn)) sys_exit(uint64_t status, uint64_t a1,
   (void)a3;
   (void)a4;
   (void)a5;
+  struct thread *cur = sched_get_current();
+  if (cur) {
+    klog_puts("[PROC] sys_exit: tid=");
+    klog_uint64(cur->tid);
+    klog_puts(" tgid=");
+    klog_uint64(cur->tgid);
+    klog_puts(" comm=");
+    klog_puts(cur->comm[0] ? cur->comm : "?");
+    klog_puts(" status=");
+    klog_uint64(status);
+    klog_puts("\n");
+  }
   process_do_exit((int)status);
 }
 
@@ -295,6 +328,18 @@ sys_exit_group(uint64_t status, uint64_t a1, uint64_t a2, uint64_t a3,
   (void)a3;
   (void)a4;
   (void)a5;
+  struct thread *cur = sched_get_current();
+  if (cur) {
+    klog_puts("[PROC] sys_exit_group: tid=");
+    klog_uint64(cur->tid);
+    klog_puts(" tgid=");
+    klog_uint64(cur->tgid);
+    klog_puts(" comm=");
+    klog_puts(cur->comm[0] ? cur->comm : "?");
+    klog_puts(" status=");
+    klog_uint64(status);
+    klog_puts("\n");
+  }
   sched_terminate_thread_group(sched_get_current());
   process_do_exit(status);
 }
@@ -453,7 +498,7 @@ static uint64_t sys_wait4(uint64_t pid, uint64_t wstatus_ptr, uint64_t options,
         if (target_pid == -1) {
           matches = true;
         } else if (target_pid > 0) {
-          if (t->tid == (uint32_t)target_pid)
+          if (t->tid == (uint32_t)target_pid || t->tgid == (uint32_t)target_pid)
             matches = true;
         } else if (target_pid == 0) {
           if (t->pgid == current->pgid)
@@ -618,7 +663,7 @@ static uint64_t sys_waitid(uint64_t idtype_val, uint64_t id_val,
         bool matches = false;
         switch (idtype) {
         case P_ALL:   matches = true; break;
-        case P_PID:   matches = (t->tid == id); break;
+        case P_PID:   matches = (t->tid == id || t->tgid == id); break;
         case P_PGID:  matches = (t->pgid == id); break;
         case P_PIDFD: matches = (t->tid == target_pid || t->tgid == target_pid); break;
         default:
@@ -1238,6 +1283,9 @@ uint64_t sys_fork(struct syscall_regs *regs) {
       child->mm->ref_count = 1;
       child->mm->pcid = pcid_alloc();
       spinlock_init(&child->mm->lock);
+      memcpy(child->mm->saved_auxv, parent->mm->saved_auxv,
+             sizeof(child->mm->saved_auxv));
+      child->mm->auxv_count = parent->mm->auxv_count;
     }
 
     memcpy(child->cwd_path, parent->cwd_path, sizeof(child->cwd_path));
@@ -1416,9 +1464,15 @@ static uint64_t sys_clone_internal(struct syscall_regs *regs, uint64_t flags,
   child->pgid = parent->pgid;
   memcpy(child->signal_handlers, parent->signal_handlers,
          sizeof(child->signal_handlers));
-  child->ss_sp = parent->ss_sp;
-  child->ss_size = parent->ss_size;
-  child->ss_flags = parent->ss_flags;
+  if ((flags & CLONE_VM) && !(flags & CLONE_VFORK)) {
+    child->ss_sp = 0;
+    child->ss_size = 0;
+    child->ss_flags = SS_DISABLE;
+  } else {
+    child->ss_sp = parent->ss_sp;
+    child->ss_size = parent->ss_size;
+    child->ss_flags = parent->ss_flags;
+  }
   memcpy(child->comm, parent->comm, sizeof(child->comm));
 
   if (flags & CLONE_PARENT_SETTID)
@@ -1459,6 +1513,66 @@ uint64_t sys_vfork(struct syscall_regs *regs) {
   // vfork is essentially clone with shared VM and parent blocking.
   // Standard flags: CLONE_VM | CLONE_VFORK | SIGCHLD
   return sys_clone_internal(regs, CLONE_VM | CLONE_VFORK | 17, 0, 0, 0, 0);
+}
+
+struct clone_args {
+  uint64_t flags;
+  uint64_t pidfd;
+  uint64_t child_tid;
+  uint64_t parent_tid;
+  uint64_t exit_signal;
+  uint64_t stack;
+  uint64_t stack_size;
+  uint64_t tls;
+  uint64_t set_tid;
+  uint64_t set_tid_size;
+  uint64_t cgroup;
+};
+
+// sys_clone3 (syscall 435)
+uint64_t sys_clone3(struct syscall_regs *regs) {
+  uint64_t uargs_ptr = regs->rdi;
+  size_t size = (size_t)regs->rsi;
+
+  if (size < 64 || !uargs_ptr)
+    return (uint64_t)-22; // EINVAL
+
+  if (!is_user_ptr(uargs_ptr) || !vmm_is_user_addr_range_valid(uargs_ptr, size))
+    return (uint64_t)-14; // EFAULT
+
+  struct clone_args kargs;
+  memset(&kargs, 0, sizeof(kargs));
+  size_t copy_len = size < sizeof(kargs) ? size : sizeof(kargs);
+  if (copy_from_user(&kargs, (void *)uargs_ptr, copy_len) != 0)
+    return (uint64_t)-14;
+
+  uint64_t flags = kargs.flags | (kargs.exit_signal & 0xff);
+  uint64_t child_stack = 0;
+  if (kargs.stack) {
+    child_stack = kargs.stack + kargs.stack_size;
+  }
+
+  uint64_t ptid = kargs.parent_tid;
+  uint64_t ctid = kargs.child_tid;
+  uint64_t newtls = kargs.tls;
+
+  klog_debugf("[CLONE3] flags=0x%llx stack=0x%llx size=0x%llx ptid=0x%llx ctid=0x%llx tls=0x%llx\n",
+              (unsigned long long)flags, (unsigned long long)kargs.stack,
+              (unsigned long long)kargs.stack_size, (unsigned long long)ptid,
+              (unsigned long long)ctid, (unsigned long long)newtls);
+
+  uint64_t ret = sys_clone_internal(regs, flags, child_stack, ptid, ctid, newtls);
+  if ((int64_t)ret > 0 && (flags & CLONE_PIDFD) && kargs.pidfd) {
+    if (vmm_is_user_addr_range_writable(kargs.pidfd, sizeof(int))) {
+      uint64_t pfd = sys_pidfd_open(ret, 0, 0, 0, 0, 0);
+      if ((int64_t)pfd >= 0) {
+        int ifd = (int)pfd;
+        copy_to_user((void *)kargs.pidfd, &ifd, sizeof(int));
+      }
+    }
+  }
+
+  return ret;
 }
 
 // sys_sysinfo
@@ -1637,6 +1751,32 @@ static uint64_t sys_prctl(uint64_t option, uint64_t arg2, uint64_t arg3,
     return 0;
   case 39: // PR_GET_NO_NEW_PRIVS
     return 0;
+  case 0x41555856: { // PR_GET_AUXV (Linux 6.4+)
+    if (!arg2 || !arg3)
+      return (uint64_t)-14; // EFAULT
+    if (!current->mm)
+      return 0;
+
+    static const uint64_t fallback_auxv[] = {
+        6 /* AT_PAGESZ */, 4096,
+        17 /* AT_CLKTCK */, 100,
+        33 /* AT_SYSINFO_EHDR */, 0x700000000000ULL,
+        0 /* AT_NULL */, 0
+    };
+
+    const void *src = (current->mm->auxv_count > 0)
+                          ? (const void *)current->mm->saved_auxv
+                          : (const void *)fallback_auxv;
+    size_t aux_bytes = (current->mm->auxv_count > 0)
+                           ? (current->mm->auxv_count * sizeof(uint64_t))
+                           : sizeof(fallback_auxv);
+
+    size_t to_copy = (arg3 < aux_bytes) ? (size_t)arg3 : aux_bytes;
+    if (!vmm_is_user_addr_range_writable(arg2, to_copy))
+      return (uint64_t)-14; // EFAULT
+    memcpy((void *)arg2, src, to_copy);
+    return (uint64_t)to_copy;
+  }
   default:
     return (uint64_t)-22; // EINVAL
   }
@@ -1816,6 +1956,62 @@ static uint64_t sys_setgid(struct syscall_regs *regs) {
   return 0;
 }
 
+// sys_setreuid (syscall 113)
+static uint64_t sys_setreuid(struct syscall_regs *regs) {
+  uint32_t ruid = (uint32_t)regs->rdi;
+  uint32_t euid = (uint32_t)regs->rsi;
+  struct thread *t = sched_get_current();
+  if (!t)
+    return (uint64_t)-1;
+
+  if (t->euid != 0) {
+    if (ruid != UINT32_MAX && ruid != t->uid && ruid != t->euid)
+      return (uint64_t)-1;
+    if (euid != UINT32_MAX && euid != t->uid && euid != t->euid && euid != t->suid)
+      return (uint64_t)-1;
+  }
+
+  if (ruid != UINT32_MAX) {
+    t->uid = ruid;
+  }
+  if (euid != UINT32_MAX) {
+    t->euid = euid;
+  }
+  if (ruid != UINT32_MAX || (euid != UINT32_MAX && euid != t->uid)) {
+    t->suid = t->euid;
+  }
+  t->fsuid = t->euid;
+  return 0;
+}
+
+// sys_setregid (syscall 114)
+static uint64_t sys_setregid(struct syscall_regs *regs) {
+  uint32_t rgid = (uint32_t)regs->rdi;
+  uint32_t egid = (uint32_t)regs->rsi;
+  struct thread *t = sched_get_current();
+  if (!t)
+    return (uint64_t)-1;
+
+  if (t->euid != 0) {
+    if (rgid != UINT32_MAX && rgid != t->gid && rgid != t->egid)
+      return (uint64_t)-1;
+    if (egid != UINT32_MAX && egid != t->gid && egid != t->egid && egid != t->sgid)
+      return (uint64_t)-1;
+  }
+
+  if (rgid != UINT32_MAX) {
+    t->gid = rgid;
+  }
+  if (egid != UINT32_MAX) {
+    t->egid = egid;
+  }
+  if (rgid != UINT32_MAX || (egid != UINT32_MAX && egid != t->gid)) {
+    t->sgid = t->egid;
+  }
+  t->fsgid = t->egid;
+  return 0;
+}
+
 // sys_setfsuid (syscall 122)
 static uint64_t sys_setfsuid(struct syscall_regs *regs) {
   uint32_t fsuid = (uint32_t)regs->rdi;
@@ -1964,10 +2160,12 @@ static uint64_t sys_getpgrp(struct syscall_regs *regs) {
 // sys_rseq implementation (stub)
 uint64_t sys_rseq(struct syscall_regs *regs) {
   (void)regs;
-  // glibc 2.35+ tries to use rseq for every thread. Returning 0 (success)
-  // but not actually doing anything is safer than ENOSYS for some libcs.
-  // However, we don't support the full feature yet.
-  return 0;
+  // AvoryOS does not maintain kernel restartable sequences.
+  // Returning 0 causes glibc 2.35+ / 2.42 to believe rseq is registered,
+  // but rseq_area.cpu_id remains -1 (RSEQ_CPU_ID_UNINITIALIZED), causing
+  // glibc tcache/malloc or locks to hang/spin indefinitely.
+  // Returning -ENOSYS allows glibc to cleanly disable rseq and fallback.
+  return (uint64_t)-38; // -ENOSYS
 }
 
 // sys_setsid
@@ -2665,6 +2863,19 @@ static uint64_t sys_seccomp(uint64_t op, uint64_t flags, uint64_t uargs,
   }
 }
 
+// sys_unshare (272)
+// Namespaces are unsupported in AvoryOS. Returning -ENOSYS tells bwrap,
+// container runtimes, and WebKit that unprivileged user/mount namespaces
+// are unavailable so they can fail gracefully or fallback to direct execution.
+static uint64_t sys_unshare(uint64_t flags, uint64_t a2, uint64_t a3,
+                            uint64_t a4, uint64_t a5, uint64_t a6) {
+  (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
+  klog_puts("[SYSCALL] unshare: flags=0x");
+  klog_hex64(flags);
+  klog_puts(" -> ENOSYS\n");
+  return (uint64_t)-38; // -ENOSYS
+}
+
 void syscall_register_process(void) {
 
   syscall_register(SYS_EXIT, sys_exit);
@@ -2685,6 +2896,7 @@ void syscall_register_process(void) {
   syscall_register_raw(SYS_FORK, sys_fork);
   syscall_register_raw(SYS_VFORK, sys_vfork);
   syscall_register_raw(SYS_CLONE, sys_clone);
+  syscall_register_raw(SYS_CLONE3, sys_clone3);
   syscall_register_raw(SYS_EXECVE, sys_execve);
   syscall_register_raw(SYS_UMASK, sys_umask);
   syscall_register_raw(SYS_RSEQ, sys_rseq);
@@ -2704,6 +2916,8 @@ void syscall_register_process(void) {
   syscall_register_raw(SYS_SETSID, sys_setsid);
   syscall_register_raw(SYS_SETUID, sys_setuid);
   syscall_register_raw(SYS_SETGID, sys_setgid);
+  syscall_register_raw(SYS_SETREUID, sys_setreuid);
+  syscall_register_raw(SYS_SETREGID, sys_setregid);
   syscall_register_raw(SYS_GETGROUPS, sys_getgroups);
   syscall_register_raw(SYS_SETGROUPS, sys_setgroups);
   syscall_register_raw(SYS_SETFSUID, sys_setfsuid);
@@ -2730,4 +2944,5 @@ void syscall_register_process(void) {
   syscall_register(SYS_CAPGET, sys_capget);
   syscall_register(SYS_CAPSET, sys_capset);
   syscall_register(SYS_SECCOMP, sys_seccomp);
+  syscall_register(SYS_UNSHARE, sys_unshare);
 }

@@ -113,11 +113,17 @@ static int unix_poll(socket_t *sock, int events) {
   if (sock->error)
     revents |= 0x008; // POLLERR
 
+  bool has_data = false;
   spinlock_acquire(&usk->recv_lock);
-  size_t head      = usk->recv_buf_head;
-  size_t tail      = usk->recv_buf_tail;
-  size_t size      = usk->recv_buf_size;
-  size_t available = (size > 0) ? (tail - head + size) % size : 0;
+  if (sock->type == SOCK_SEQPACKET || sock->type == SOCK_DGRAM) {
+    has_data = (usk->packet_queue_head != NULL);
+  } else {
+    size_t head      = usk->recv_buf_head;
+    size_t tail      = usk->recv_buf_tail;
+    size_t size      = usk->recv_buf_size;
+    size_t available = (size > 0) ? (tail - head + size) % size : 0;
+    has_data = (available > 0);
+  }
   spinlock_release(&usk->recv_lock);
 
   bool has_peer = false;
@@ -130,22 +136,24 @@ static int unix_poll(socket_t *sock, int events) {
   }
   spinlock_release(&sock->lock);
 
-  if (available > 0) {
+  if (has_data) {
     revents |= 0x001; // POLLIN
     revents |= 0x040; // POLLRDNORM
   }
 
-  if (sock->state == SS_DISCONNECTING || sock->state == SS_UNCONNECTED ||
-      (usk->read_shutdown && usk->write_shutdown) ||
-      (!has_peer && sock->state != SS_LISTENING)) {
+  if (sock->state == SS_DISCONNECTING ||
+      (usk->was_connected && (!has_peer || (usk->read_shutdown && usk->write_shutdown)))) {
     revents |= 0x010;  // POLLHUP
     revents |= 0x2000; // EPOLLRDHUP
     revents |= 0x001;  // POLLIN (EOF)
   }
 
-  if (has_peer && peer_write_shutdown && available == 0) {
-    revents |= 0x010;  // POLLHUP
+  if (has_peer && peer_write_shutdown) {
     revents |= 0x2000; // EPOLLRDHUP
+    if (!has_data) {
+      revents |= 0x001;  // POLLIN (EOF)
+      revents |= 0x040;  // POLLRDNORM
+    }
   }
 
   if (sock->state == SS_CONNECTED && has_peer && !usk->write_shutdown) {
@@ -173,11 +181,15 @@ static int unix_ioctl(socket_t *sock, uint32_t request, uint64_t arg) {
     if (!val)
       return -14; // EFAULT
     spinlock_acquire(&usk->recv_lock);
-    size_t head      = usk->recv_buf_head;
-    size_t tail      = usk->recv_buf_tail;
-    size_t sz        = usk->recv_buf_size;
-    size_t available = (sz > 0) ? (tail - head + sz) % sz : 0;
-    *val = (int)available;
+    if (sock->type == SOCK_SEQPACKET || sock->type == SOCK_DGRAM) {
+      *val = usk->packet_queue_head ? (int)usk->packet_queue_head->data_len : 0;
+    } else {
+      size_t head      = usk->recv_buf_head;
+      size_t tail      = usk->recv_buf_tail;
+      size_t sz        = usk->recv_buf_size;
+      size_t available = (sz > 0) ? (tail - head + sz) % sz : 0;
+      *val = (int)available;
+    }
     spinlock_release(&usk->recv_lock);
     return 0;
   }
@@ -340,7 +352,6 @@ void unix_destroy(socket_t *sock) {
       if (peer->peer == usk)
         peer->peer = NULL;
       peer_parent->state = SS_UNCONNECTED;
-      peer_parent->error = 104; // ECONNRESET
       spinlock_release(&peer_parent->lock);
 
       if (peer_parent->wait_queue)
@@ -364,13 +375,40 @@ void unix_destroy(socket_t *sock) {
     usk->accept_next = NULL;
   }
 
-  for (int i = 0; i < usk->scm_count; i++) {
-    if (usk->scm_nodes[i]) {
-      vfs_close(usk->scm_nodes[i]);
-      usk->scm_nodes[i] = NULL;
+  unix_scm_msg_t *scm_msg = usk->scm_queue_head;
+  while (scm_msg) {
+    unix_scm_msg_t *next = scm_msg->next;
+    for (int i = 0; i < scm_msg->count; i++) {
+      if (scm_msg->nodes[i]) {
+        vfs_close(scm_msg->nodes[i]);
+        scm_msg->nodes[i] = NULL;
+      }
     }
+    kfree(scm_msg);
+    scm_msg = next;
   }
-  usk->scm_count = 0;
+  usk->scm_queue_head = NULL;
+  usk->scm_queue_tail = NULL;
+
+  unix_packet_t *pkt = usk->packet_queue_head;
+  while (pkt) {
+    unix_packet_t *next = pkt->next;
+    if (pkt->scm) {
+      for (int i = 0; i < pkt->scm->count; i++) {
+        if (pkt->scm->nodes[i]) {
+          vfs_close(pkt->scm->nodes[i]);
+          pkt->scm->nodes[i] = NULL;
+        }
+      }
+      kfree(pkt->scm);
+      pkt->scm = NULL;
+    }
+    kfree(pkt);
+    pkt = next;
+  }
+  usk->packet_queue_head = NULL;
+  usk->packet_queue_tail = NULL;
+  usk->packet_queue_bytes = 0;
 
   if (usk->recv_buf) {
     kfree(usk->recv_buf);

@@ -53,32 +53,41 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
     uint64_t *pml4 = (uint64_t *)PHYS_TO_VIRT(target_cr3);
     uint64_t virt = cr2 & PAGE_MASK;
 
-    if (!(pml4[(virt >> 39) & 511] & PAGE_FLAG_PRESENT))
+    rawspinlock_acquire(vmm_get_lock());
+
+    if (!(pml4[(virt >> 39) & 511] & PAGE_FLAG_PRESENT)) {
+      rawspinlock_release(vmm_get_lock());
       return -1;
+    }
     uint64_t *pdpt =
         (uint64_t *)PHYS_TO_VIRT(pml4[(virt >> 39) & 511] & PAGE_MASK);
 
-    if (!(pdpt[(virt >> 30) & 511] & PAGE_FLAG_PRESENT))
+    if (!(pdpt[(virt >> 30) & 511] & PAGE_FLAG_PRESENT) ||
+        (pdpt[(virt >> 30) & 511] & PAGE_FLAG_PS)) {
+      rawspinlock_release(vmm_get_lock());
       return -1;
-    if (pdpt[(virt >> 30) & 511] & PAGE_FLAG_PS)
-      return -1;
+    }
 
     uint64_t *pd =
         (uint64_t *)PHYS_TO_VIRT(pdpt[(virt >> 30) & 511] & PAGE_MASK);
-    if (!(pd[(virt >> 21) & 511] & PAGE_FLAG_PRESENT))
+    if (!(pd[(virt >> 21) & 511] & PAGE_FLAG_PRESENT) ||
+        (pd[(virt >> 21) & 511] & PAGE_FLAG_PS)) {
+      rawspinlock_release(vmm_get_lock());
       return -1;
-    if (pd[(virt >> 21) & 511] & PAGE_FLAG_PS)
-      return -1;
+    }
 
     uint64_t *pt = (uint64_t *)PHYS_TO_VIRT(pd[(virt >> 21) & 511] & PAGE_MASK);
     uint64_t *pte = &pt[(virt >> 12) & 511];
-    if (!(*pte & PAGE_FLAG_PRESENT))
+    if (!(*pte & PAGE_FLAG_PRESENT)) {
+      rawspinlock_release(vmm_get_lock());
       return -1;
+    }
 
     if (*pte & PAGE_FLAG_RW) {
       // Stale TLB: Another thread in this process already broke CoW on this
       // page.
       tlb_shootdown_page(virt);
+      rawspinlock_release(vmm_get_lock());
       return 0;
     }
 
@@ -102,25 +111,32 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
 
       if (old_phys == pmm_get_zero_page_phys()) {
         void *new_phys = pmm_alloc_page();
-        if (!new_phys)
+        if (!new_phys) {
+          rawspinlock_release(vmm_get_lock());
           return -1;
+        }
 
         memset(PHYS_TO_VIRT((uint64_t)new_phys), 0, PAGE_SIZE);
 
         *pte = ((uint64_t)new_phys & PAGE_MASK) |
                (*pte & ~PAGE_MASK & ~PAGE_FLAG_COW) | PAGE_FLAG_RW;
+        pml4[(virt >> 39) & 511] |= (PAGE_FLAG_RW | PAGE_FLAG_USER);
+        pdpt[(virt >> 30) & 511] |= (PAGE_FLAG_RW | PAGE_FLAG_USER);
+        pd[(virt >> 21) & 511] |= (PAGE_FLAG_RW | PAGE_FLAG_USER);
         tlb_shootdown_page(virt);
+        rawspinlock_release(vmm_get_lock());
         return 0; // zero page CoW broken with fresh zeroed page
       }
 
       uint16_t refs = pmm_get_ref((void *)old_phys);
 
-
       if (refs > 1) {
         // Multiple owners — make a private copy.
         void *new_phys = pmm_alloc_page();
-        if (!new_phys)
+        if (!new_phys) {
+          rawspinlock_release(vmm_get_lock());
           return -1;
+        }
 
         memcpy(PHYS_TO_VIRT((uint64_t)new_phys), PHYS_TO_VIRT(old_phys),
                PAGE_SIZE);
@@ -134,9 +150,15 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
         *pte |= PAGE_FLAG_RW;
       }
 
+      pml4[(virt >> 39) & 511] |= (PAGE_FLAG_RW | PAGE_FLAG_USER);
+      pdpt[(virt >> 30) & 511] |= (PAGE_FLAG_RW | PAGE_FLAG_USER);
+      pd[(virt >> 21) & 511] |= (PAGE_FLAG_RW | PAGE_FLAG_USER);
       tlb_shootdown_page(virt);
+      rawspinlock_release(vmm_get_lock());
       return 0; // fault handled
     }
+
+    rawspinlock_release(vmm_get_lock());
 
     // Present page, write fault, no COW flag → genuine write protection
     // violation.
@@ -414,23 +436,22 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
       if (!cached) {
         // Clustered 128 KB read-ahead into VFS page cache (32 pages)
         uint32_t cluster_base = file_offset & ~0x1FFFFU;
-        uint32_t cluster_end = cluster_base + 128 * 1024;
-        if (cluster_end > node->length)
-          cluster_end = node->length;
-
-        for (uint32_t off = cluster_base; off < cluster_end; off += 4096) {
-          vfs_page_t *p = vfs_cache_get_or_create(node, off);
-          if (p)
-            vfs_cache_put(node, p);
-        }
-        cached = vfs_cache_get_or_create(node, file_offset);
+        vfs_cache_readahead(node, cluster_base, 128 * 1024);
       } else {
-        cached = vfs_cache_get_or_create(node, file_offset);
+        vfs_cache_put(node, cached);
       }
+      cached = vfs_cache_get_or_create(node, file_offset);
 
       if (cached && cached->frame_phys) {
         memcpy(priv_virt, PHYS_TO_VIRT(cached->frame_phys), valid_bytes);
         vfs_cache_put(node, cached);
+      } else {
+        if (cached)
+          vfs_cache_put(node, cached);
+        pmm_free_page(frame);
+        klogf("[VMM] File cache read failure for VMA [%016llx-%016llx] off=%u\n",
+              (unsigned long long)vma_start, (unsigned long long)vma_end, file_offset);
+        return -1;
       }
     } else {
       // 3. Shared or Read-Only file mapping (e.g. ELF .text / .rodata)
@@ -440,29 +461,22 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
       if (!cached) {
         // Clustered 64 KB read-ahead into VFS page cache
         uint32_t cluster_base = file_offset & ~0xFFFFU;
-        uint32_t cluster_end = cluster_base + 64 * 1024;
-        if (cluster_end > node->length)
-          cluster_end = node->length;
-
-        for (uint32_t off = cluster_base; off < cluster_end; off += 4096) {
-          vfs_page_t *p = vfs_cache_get_or_create(node, off);
-          if (p)
-            vfs_cache_put(node, p);
-        }
-        cached = vfs_cache_get_or_create(node, file_offset);
+        vfs_cache_readahead(node, cluster_base, 64 * 1024);
       } else {
-        cached = vfs_cache_get_or_create(node, file_offset);
+        vfs_cache_put(node, cached);
       }
+      cached = vfs_cache_get_or_create(node, file_offset);
 
       if (cached && cached->frame_phys) {
         frame = (void *)cached->frame_phys;
         pmm_incref(frame);
         vfs_cache_put(node, cached);
       } else {
-        frame = pmm_alloc_page();
-        if (!frame)
-          return -1;
-        memset(PHYS_TO_VIRT((uint64_t)frame), 0, 4096);
+        if (cached)
+          vfs_cache_put(node, cached);
+        klogf("[VMM] File cache read failure for ro VMA [%016llx-%016llx] off=%u\n",
+              (unsigned long long)vma_start, (unsigned long long)vma_end, file_offset);
+        return -1;
       }
 
       // Proactive cluster mapping: map adjacent cached pages in the 64 KB window to avoid redundant faults
@@ -479,10 +493,18 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
 
         uint32_t foff = (uint32_t)(vma_offset + (vpage - vma_start));
         vfs_page_t *p = vfs_cache_lookup(node, foff);
-        if (p && p->frame_phys) {
-          pmm_incref((void *)p->frame_phys);
-          if (!vmm_map_page((uint64_t *)target_cr3, vpage, p->frame_phys, pt_flags)) {
-            pmm_decref((void *)p->frame_phys);
+        if (p) {
+          bool ready = false;
+          spinlock_acquire(&node->pages_lock);
+          if (!p->loading && p->uptodate && p->frame_phys) {
+            ready = true;
+          }
+          spinlock_release(&node->pages_lock);
+          if (ready) {
+            pmm_incref((void *)p->frame_phys);
+            if (!vmm_map_page_if_unmapped((uint64_t *)target_cr3, vpage, p->frame_phys, pt_flags)) {
+              pmm_decref((void *)p->frame_phys);
+            }
           }
           vfs_cache_put(node, p);
         }
@@ -528,14 +550,19 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
 #undef HUGE_PAGE_SIZE
     }
 
-    // Zero-Page Sharing: If this is a read fault on a private anonymous mapping,
-    // map the global shared zero page (read-only + COW) without allocating physical RAM.
-    if (!write_fault && (vma_flags & MAP_PRIVATE)) {
+    // Zero-Page Sharing: If this is a read fault on a private anonymous mapping
+    // that is strictly read-only, map the global shared zero page (read-only + COW).
+    // Writable anonymous mappings (heap/stack) directly allocate private frames to
+    // eliminate COW overhead and race conditions between concurrent threads.
+    if (!write_fault && (vma_flags & MAP_PRIVATE) && !(vma_prot & PROT_WRITE)) {
       uint64_t zp = pmm_get_zero_page_phys();
       if (zp) {
         uint64_t flags = (dp_build_flags(vma_prot) & ~PAGE_FLAG_RW) | PAGE_FLAG_COW;
-        if (vmm_map_page((uint64_t *)target_cr3, cr2 & ~0xFFFULL, zp, flags)) {
+        if (vmm_map_page_if_unmapped((uint64_t *)target_cr3, cr2 & ~0xFFFULL, zp, flags)) {
           return 0; // Zero page mapped! No physical allocation or zeroing needed.
+        }
+        if (vmm_virt_to_phys((uint64_t *)target_cr3, cr2 & ~0xFFFULL) != 0) {
+          return 0; // Concurrently mapped by another thread
         }
       }
     }
@@ -558,9 +585,25 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
   // ---- Map the faulting page ----------------------------------------------
 
   uint64_t flags = dp_build_flags(vma_prot);
-  if (!vmm_map_page((uint64_t *)target_cr3, cr2 & ~0xFFFULL, (uint64_t)frame,
-                    flags)) {
-    pmm_free_page(frame);
+  uint64_t vpage = cr2 & ~0xFFFULL;
+  if (!vmm_map_page_if_unmapped((uint64_t *)target_cr3, vpage, (uint64_t)frame,
+                                flags)) {
+    // If another thread already mapped this page while we prepared the frame:
+    if (vmm_virt_to_phys((uint64_t *)target_cr3, vpage) != 0) {
+      if (!node) {
+        pmm_free_page(frame);
+      } else {
+        pmm_decref((void *)frame);
+      }
+      tlb_shootdown_page(vpage);
+      return 0; // Handled concurrently by another thread!
+    }
+
+    if (!node) {
+      pmm_free_page(frame);
+    } else {
+      pmm_decref((void *)frame);
+    }
     klog_puts("[VMM] Fatal PT alloc failure in paging engine\n");
     if (user_mode) {
       sched_terminate_thread(current->tid);

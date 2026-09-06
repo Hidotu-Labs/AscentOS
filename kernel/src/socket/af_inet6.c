@@ -120,11 +120,40 @@ static int inet6_bind(socket_t *sock, struct sockaddr *addr, int len) {
 }
 
 static int inet6_connect(socket_t *sock, struct sockaddr *addr, int len) {
+  struct inet6_sock *s = sock->sk;
+  if (!s) return -22;
+  if (addr && addr->sa_family == 0 /* AF_UNSPEC */ && sock->type == SOCK_DGRAM) {
+    spinlock_acquire(&udp6_lock);
+    s->connected = false;
+    memset(s->remote, 0, sizeof(s->remote));
+    s->remote_port = 0;
+    spinlock_release(&udp6_lock);
+    sock->state = SS_UNCONNECTED;
+    return 0;
+  }
   if (len < (int)sizeof(struct sockaddr_in6) || addr->sa_family != AF_INET6)
     return -22;
-  struct inet6_sock *s = sock->sk;
   struct sockaddr_in6 *a = (struct sockaddr_in6 *)addr;
+  const struct ipv6_config *cfg = ipv6_get_config();
+  const uint8_t *destination = a->sin6_addr.s6_addr;
+  bool link = link_local_addr(destination);
+  bool loop = loopback_addr(destination);
+  bool mcast = destination[0] == 0xff;
+  bool dest_global = (destination[0] & 0xe0) == 0x20;
+  bool cfg_global = cfg->global_valid && ((cfg->global[0] & 0xe0) == 0x20);
+
+  if (!link && !loop && !mcast) {
+    if (!cfg->global_valid || (dest_global && !cfg_global))
+      return -101; // ENETUNREACH
+  }
+
   if (s->tcp) {
+    if (sock->state == SS_CONNECTED || s->tcp->state == TCP_ESTABLISHED)
+      return -106;
+    if (sock->state == SS_CONNECTING || s->tcp->state == TCP_SYN_SENT || s->tcp->state == TCP_SYN_RECEIVED)
+      return -114;
+    s->tcp->vfs_node = sock->node;
+    s->tcp->wait_queue = sock->wait_queue;
     int r = tcp_active_open6(s->tcp, a->sin6_addr.s6_addr,
                              get16((uint8_t *)&a->sin6_port));
     if (r < 0) return r;
@@ -133,18 +162,25 @@ static int inet6_connect(socket_t *sock, struct sockaddr *addr, int len) {
     s->scope_id = a->sin6_scope_id;
     if (socket_is_nonblocking(sock)) { sock->state = SS_CONNECTING; return -115; }
     uint64_t deadline = lapic_timer_get_ticks() + 10000;
-    while (s->tcp->state == TCP_SYN_SENT &&
-           lapic_timer_get_ticks() < deadline)
+    struct thread *self = sched_get_current();
+    wait_queue_entry_t wqe = { .thread = self, .next = NULL };
+    while (s->tcp->state == TCP_SYN_SENT && !s->tcp->error &&
+           lapic_timer_get_ticks() < deadline) {
+      wait_queue_add(sock->wait_queue, &wqe);
+      if (self) {
+        self->wakeup_ticks = lapic_timer_get_ticks() + 50;
+        self->state = THREAD_BLOCKED;
+      }
       sched_yield();
+      if (self) self->wakeup_ticks = 0;
+      wait_queue_remove(sock->wait_queue, &wqe);
+      if (self) self->state = THREAD_RUNNING;
+    }
     if (s->tcp->state != TCP_ESTABLISHED)
       return s->tcp->error ? -s->tcp->error : -110;
     s->connected = true; sock->state = SS_CONNECTED; return 0;
   }
-  const struct ipv6_config *cfg = ipv6_get_config();
-  const uint8_t *destination = a->sin6_addr.s6_addr;
-  if (!cfg->global_valid && !link_local_addr(destination) &&
-      !loopback_addr(destination) && destination[0] != 0xff)
-    return -101;
+
   if (!s->bound) { int r = bind_port(s, 0); if (r < 0) return r; }
   memcpy(s->remote, a->sin6_addr.s6_addr, 16);
   s->remote_port = get16((uint8_t *)&a->sin6_port);
@@ -209,8 +245,9 @@ static ssize_t inet6_recvfrom(socket_t *sock, void *buf, size_t len, int flags,
     if (socket_is_nonblocking(sock) || (flags & MSG_DONTWAIT)) return -11;
     struct thread *t = sched_get_current();
     wait_queue_entry_t e = {.thread = t};
-    wait_queue_add(&s->wait, &e); t->state = THREAD_BLOCKED;
-    sched_yield(); wait_queue_remove(&s->wait, &e);
+    wait_queue_t *wq = (wait_queue_t *)(sock->wait_queue ? sock->wait_queue : &s->wait);
+    wait_queue_add(wq, &e); t->state = THREAD_BLOCKED;
+    sched_yield(); wait_queue_remove(wq, &e);
   }
 }
 
@@ -295,7 +332,8 @@ static int inet6_accept(socket_t *sock, socket_t **out) {
 
 static int inet6_shutdown(socket_t *sock, int how) {
   struct inet6_sock *s = sock->sk;
-  if (s->tcp && (how == SHUT_WR || how == SHUT_RDWR)) return tcp_close(s->tcp);
+  if (s && s->tcp && (how == SHUT_WR || how == SHUT_RDWR)) return tcp_close(s->tcp);
+  if (sock->wait_queue) wait_queue_wake_all((wait_queue_t *)sock->wait_queue);
   return 0;
 }
 
@@ -382,7 +420,7 @@ static int inet6_create(socket_t *sock, int protocol) {
     memset(s, 0, sizeof(*s)); s->used = true; s->heap_allocated = true;
     s->parent = sock; wait_queue_init(&s->wait); s->tcp = tcp_alloc();
     if (!s->tcp) { kfree(s); return -105; }
-    s->tcp->address_family = 6; s->tcp->wait_queue = &s->wait;
+    s->tcp->address_family = 6; s->tcp->wait_queue = sock->wait_queue;
     sock->sk = s; sock->ops = &inet6_ops; return 0;
   }
   if (sock->type != SOCK_DGRAM || (protocol && protocol != IPPROTO_UDP))
@@ -404,7 +442,7 @@ static void udp6_input(const uint8_t src[16], const uint8_t dst[16],
       get16(segment + 4) - 8 > UDP6_PAYLOAD ||
       !get16(segment + 6) || udp6_checksum(src, dst, segment,
                                            get16(segment + 4)) != 0)
-    return;
+      return;
   uint16_t sport = get16(segment), dport = get16(segment + 2);
   spinlock_acquire(&udp6_lock);
   for (int i = 0; i < UDP6_MAX; i++) {
@@ -419,8 +457,12 @@ static void udp6_input(const uint8_t src[16], const uint8_t dst[16],
     p->length = (uint16_t)(get16(segment + 4) - 8);
     memcpy(p->data, segment + 8, p->length);
     wait_queue_wake_all(&s->wait);
-    if (s->parent && s->parent->node)
-      epoll_notify_event(s->parent->node, EPOLLIN);
+    if (s->parent) {
+      if (s->parent->wait_queue)
+        wait_queue_wake_all((wait_queue_t *)s->parent->wait_queue);
+      if (s->parent->node)
+        epoll_notify_event(s->parent->node, EPOLLIN);
+    }
     break;
   }
   spinlock_release(&udp6_lock);

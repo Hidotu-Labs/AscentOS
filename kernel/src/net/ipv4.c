@@ -369,7 +369,12 @@ static void ethernet_receive(struct net_packet *packet) {
   const struct eth_header *header = (const struct eth_header *)packet->data;
   bool ipv6_multicast = header->destination[0] == 0x33 &&
                         header->destination[1] == 0x33;
-  if (!mac_equal(header->destination, packet->device->mac) &&
+  struct net_device *dev = packet->device;
+  if (!dev || (uintptr_t)dev < 0xFFFF800000000000ULL)
+    dev = net_device_default();
+  if (!dev)
+    return;
+  if (!mac_equal(header->destination, dev->mac) &&
       !mac_broadcast(header->destination) && !ipv6_multicast)
     return;
   const uint8_t *payload = packet->data + sizeof(*header);

@@ -41,6 +41,11 @@ uint64_t *vmm_get_active_pml4(void);
 bool vmm_map_page(uint64_t *pml4, uint64_t virtual_addr, uint64_t physical_addr,
                   uint64_t flags);
 
+// Maps a virtual page only if no present mapping already exists.
+// Returns true on successful mapping, false if already mapped or on OOM.
+bool vmm_map_page_if_unmapped(uint64_t *pml4, uint64_t virtual_addr,
+                             uint64_t physical_addr, uint64_t flags);
+
 // Maps a contiguous range of pages
 bool vmm_map_range(uint64_t *pml4, uint64_t virtual_addr,
                    uint64_t physical_addr, size_t pages, uint64_t flags);

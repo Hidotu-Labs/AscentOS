@@ -19,17 +19,36 @@ static struct net_device *devices[NET_DEVICE_MAX];
 static net_rx_handler_t rx_handler;
 static bool ready;
 
+static uint32_t free_stack[NET_PACKET_POOL_SIZE];
+static uint32_t free_top = 0;
+static bool pool_inited = false;
+
+static void init_pool_locked(void) {
+  if (pool_inited) return;
+  for (uint32_t i = 0; i < NET_PACKET_POOL_SIZE; i++) {
+    free_stack[i] = i;
+  }
+  free_top = NET_PACKET_POOL_SIZE;
+  pool_inited = true;
+}
+
 static struct net_packet *alloc_locked(void) {
-  for (uint32_t i = 0; i < NET_PACKET_POOL_SIZE; i++)
-    if (!used[i]) {
-      used[i] = true;
-      return &pool[i];
-    }
+  if (__builtin_expect(!pool_inited, 0))
+    init_pool_locked();
+  if (free_top > 0) {
+    uint32_t idx = free_stack[--free_top];
+    pool[idx].device = NULL;
+    pool[idx].length = 0;
+    return &pool[idx];
+  }
   return NULL;
 }
 static void free_locked(struct net_packet *p) {
-  if (p >= pool && p < pool + NET_PACKET_POOL_SIZE)
-    used[(size_t)(p - pool)] = false;
+  if (p >= pool && p < pool + NET_PACKET_POOL_SIZE) {
+    if (free_top < NET_PACKET_POOL_SIZE) {
+      free_stack[free_top++] = (uint32_t)(p - pool);
+    }
+  }
 }
 static bool push_locked(struct net_packet *p) {
   uint32_t next = (head + 1) % NET_PACKET_POOL_SIZE;
@@ -59,42 +78,70 @@ static void release(struct net_packet *p) {
 static void net_worker(void) {
   struct thread *self = sched_get_current();
   wait_queue_entry_t entry = {.thread = self, .next = NULL};
+  struct net_packet *batch[128];
   for (;;) {
-    struct net_packet *p;
-    while ((p = pop()) != NULL) {
-      if (rx_handler)
-        rx_handler(p);
-      release(p);
+    size_t count = 0;
+    for (;;) {
+      spinlock_acquire(&lock);
+      if (count > 0) {
+        for (size_t i = 0; i < count; i++)
+          free_locked(batch[i]);
+      }
+      count = 0;
+      while (count < 128 && tail != head) {
+        batch[count++] = queue[tail];
+        tail = (tail + 1) % NET_PACKET_POOL_SIZE;
+      }
+      spinlock_release(&lock);
+
+      if (count == 0)
+        break;
+
+      for (size_t i = 0; i < count; i++) {
+        if (rx_handler)
+          rx_handler(batch[i]);
+      }
     }
+
     tcp_timer_tick(lapic_timer_get_ticks());
     wait_queue_add(&worker_wait, &entry);
     spinlock_acquire(&lock);
-    bool empty = head == tail;
-    if (empty)
+    bool empty = (head == tail);
+    if (empty) {
       self->state = THREAD_BLOCKED;
+      self->wakeup_ticks = lapic_timer_get_ticks() + 50;
+    }
     spinlock_release(&lock);
-    if (!empty)
-      wait_queue_wake_one(&worker_wait);
-    if (empty)
-      self->wakeup_ticks = lapic_timer_get_ticks() + 100;
-    sched_yield();
-    self->wakeup_ticks = 0;
+    if (empty) {
+      sched_yield();
+      self->wakeup_ticks = 0;
+    }
     wait_queue_remove(&worker_wait, &entry);
   }
 }
 
 bool net_rx_submit_irq(struct net_device *dev, const void *frame, size_t len) {
-  if (!ready || !dev || !frame || !len || len > NET_FRAME_MAX) {
-    if (dev)
+  if (!ready || !frame || !len || len > NET_FRAME_MAX) {
+    if (dev && (uintptr_t)dev >= 0xFFFF800000000000ULL)
       dev->stats.rx_errors++;
     return false;
   }
+  if (!dev || (uintptr_t)dev < 0xFFFF800000000000ULL)
+    dev = default_device;
+  if (!dev)
+    return false;
   spinlock_acquire(&lock);
   struct net_packet *p = alloc_locked();
   if (!p) {
     dev->stats.rx_dropped++;
     dev->stats.queue_full++;
     spinlock_release(&lock);
+    static uint64_t last_pool_log = 0;
+    uint64_t now = lapic_timer_get_ticks();
+    if (now - last_pool_log >= 1000) {
+      last_pool_log = now;
+      klog_puts("[NET] rx packet pool empty!\n");
+    }
     return false;
   }
   p->device = dev;
@@ -105,6 +152,12 @@ bool net_rx_submit_irq(struct net_device *dev, const void *frame, size_t len) {
     dev->stats.rx_dropped++;
     dev->stats.queue_full++;
     spinlock_release(&lock);
+    static uint64_t last_qfull_log = 0;
+    uint64_t now = lapic_timer_get_ticks();
+    if (now - last_qfull_log >= 1000) {
+      last_qfull_log = now;
+      klog_puts("[NET] rx queue full!\n");
+    }
     return false;
   }
   dev->stats.rx_packets++;
@@ -186,6 +239,7 @@ void net_core_start_worker(void) {
     return;
   }
   strcpy(worker->comm, "net-worker");
+  sched_set_priority(worker, 0, -20);
   klog_puts("[NET] worker started\n");
 }
 

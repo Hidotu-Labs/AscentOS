@@ -90,6 +90,7 @@ struct sockaddr_nl {
 #define MSG_EOR 0x0080
 #define MSG_WAITALL 0x0100
 #define MSG_NOSIGNAL 0x4000
+#define MSG_CMSG_CLOEXEC 0x40000000
 
 // Shutdown How
 #define SHUT_RD 0   // Disallow further receptions
@@ -291,8 +292,8 @@ void sock_register_family(net_family_t *family);
 net_family_t *sock_lookup_family(int family);
 
 // Default Socket Buffer Sizes
-#define SOCKET_DEFAULT_RCVBUF 65536
-#define SOCKET_DEFAULT_SNDBUF 65536
+#define SOCKET_DEFAULT_RCVBUF 262144
+#define SOCKET_DEFAULT_SNDBUF 262144
 
 // Ancillary Data Support
 #define SCM_RIGHTS 0x01

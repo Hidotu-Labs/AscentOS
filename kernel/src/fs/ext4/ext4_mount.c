@@ -23,22 +23,33 @@ uint32_t ext4_read_impl(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_
     uint8_t *block_buf = kmalloc(mnt->block_size);
     if (!block_buf) return 0;
 
+    bool is_user = is_user_ptr((uint64_t)buffer);
+
     while (bytes_read < size) {
         uint32_t cur = offset + bytes_read;
         uint32_t lblock = cur / mnt->block_size;
         uint32_t off_in = cur % mnt->block_size;
-        uint32_t to_copy = mnt->block_size - off_in;
-        if (to_copy > size - bytes_read) to_copy = size - bytes_read;
+        uint32_t run_blocks = 1;
+        uint32_t disk_block = ext4_get_extent_run(mnt, &inode, lblock, &run_blocks);
 
-        uint32_t disk_block = ext4_get_block_num(mnt, &inode, lblock);
         if (disk_block == 0) {
-            if (is_user_ptr((uint64_t)buffer))
-                clear_user(buffer + bytes_read, to_copy);
+            uint32_t hole_bytes = (run_blocks * mnt->block_size) - off_in;
+            if (hole_bytes > size - bytes_read)
+                hole_bytes = size - bytes_read;
+            if (is_user)
+                clear_user(buffer + bytes_read, hole_bytes);
             else
-                memset(buffer + bytes_read, 0, to_copy);
-        } else {
+                memset(buffer + bytes_read, 0, hole_bytes);
+            bytes_read += hole_bytes;
+            continue;
+        }
+
+        if (off_in != 0 || (size - bytes_read) < mnt->block_size) {
+            uint32_t to_copy = mnt->block_size - off_in;
+            if (to_copy > size - bytes_read) to_copy = size - bytes_read;
+
             ext2_read_block(mnt, disk_block, block_buf);
-            if (is_user_ptr((uint64_t)buffer)) {
+            if (is_user) {
                 unsigned long uncopied = copy_to_user(buffer + bytes_read, block_buf + off_in, to_copy);
                 if (uncopied > 0) {
                     bytes_read += (to_copy - (uint32_t)uncopied);
@@ -47,8 +58,36 @@ uint32_t ext4_read_impl(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_
             } else {
                 memcpy(buffer + bytes_read, block_buf + off_in, to_copy);
             }
+            bytes_read += to_copy;
+            continue;
         }
-        bytes_read += to_copy;
+
+        uint32_t blocks_wanted = (size - bytes_read) / mnt->block_size;
+        uint32_t to_read_blocks = (run_blocks < blocks_wanted) ? run_blocks : blocks_wanted;
+        if (to_read_blocks == 0) to_read_blocks = 1;
+
+        if (!is_user) {
+            uint64_t lba = (uint64_t)disk_block * (mnt->block_size / 512);
+            uint32_t sectors = to_read_blocks * (mnt->block_size / 512);
+            int err = mnt->dev->read_sectors(mnt->dev, lba, sectors, buffer + bytes_read);
+            if (err != 0)
+                break;
+            bytes_read += to_read_blocks * mnt->block_size;
+        } else {
+            uint32_t done_in_run = 0;
+            while (done_in_run < to_read_blocks) {
+                ext2_read_block(mnt, disk_block + done_in_run, block_buf);
+                unsigned long uncopied = copy_to_user(buffer + bytes_read, block_buf, mnt->block_size);
+                if (uncopied > 0) {
+                    bytes_read += (mnt->block_size - (uint32_t)uncopied);
+                    break;
+                }
+                bytes_read += mnt->block_size;
+                done_in_run++;
+            }
+            if (done_in_run < to_read_blocks)
+                break;
+        }
     }
 
     kfree(block_buf);
@@ -75,7 +114,13 @@ uint32_t ext4_write_impl(vfs_node_t *node, uint32_t offset, uint32_t size, uint8
     uint32_t blocks_in_batch = 0;
     while (bytes_written < size) {
         if (blocks_in_batch >= 32) {
+            if (offset + bytes_written > inode.i_size)
+                inode.i_size = offset + bytes_written;
+            uint32_t now = ext2_current_time();
+            inode.i_mtime = now;
+            inode.i_ctime = now;
             ext2_write_inode(mnt, node->inode, &inode);
+            node->length = inode.i_size;
             ext3_journal_stop(mnt);
             if (ext3_journal_start(mnt) != 0)
                 break;
@@ -91,7 +136,12 @@ uint32_t ext4_write_impl(vfs_node_t *node, uint32_t offset, uint32_t size, uint8
         uint32_t disk_block = ext4_get_block_num(mnt, &inode, logical);
         if (!disk_block) {
             uint64_t allocated = 0;
-            if (ext4_alloc_extent(mnt, &inode, node->inode, logical, 1,
+            uint32_t remaining = size - bytes_written;
+            uint32_t blocks_needed = (remaining + in_block + mnt->block_size - 1) / mnt->block_size;
+            if (blocks_needed > 32) blocks_needed = 32;
+            if (blocks_needed < 1) blocks_needed = 1;
+
+            if (ext4_alloc_extent(mnt, &inode, node->inode, logical, blocks_needed,
                                   &allocated) != 0) {
                 klog_puts("[EXT4] extent allocation failed inode=");
                 klog_uint64(node->inode);
@@ -103,7 +153,6 @@ uint32_t ext4_write_impl(vfs_node_t *node, uint32_t offset, uint32_t size, uint8
                 break;
             }
             disk_block = (uint32_t)allocated;
-            inode.i_blocks += mnt->block_size / 512;
             memset(block_buf, 0, mnt->block_size);
         } else if (in_block || count < mnt->block_size) {
             if (ext2_read_block(mnt, disk_block, block_buf) != 0)

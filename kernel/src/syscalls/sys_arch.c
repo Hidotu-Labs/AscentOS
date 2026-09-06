@@ -101,6 +101,17 @@ static uint64_t sys_arch_prctl(uint64_t code, uint64_t addr, uint64_t a2,
     }
     return 0;
 
+  case 0x5002: // ARCH_SHSTK_DISABLE (20482)
+    klog_puts("[ARCH_PRCTL] ARCH_SHSTK_DISABLE handled\n");
+    return 0;
+
+  case 0x5005: // ARCH_SHSTK_STATUS
+    if (addr && vmm_is_user_addr_range_valid(addr, sizeof(uint64_t))) {
+      *(uint64_t *)addr = 0;
+      return 0;
+    }
+    return (uint64_t)-14;
+
   default:
     klog_puts("[ARCH_PRCTL] Unknown code: ");
     klog_uint64(code);

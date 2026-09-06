@@ -4,7 +4,11 @@
 #include "drivers/storage/block.h"
 #include "io/io.h"
 #include "lib/string.h"
+#include "lock/spinlock.h"
 #include <stddef.h>
+
+static spinlock_t ata_lock = SPINLOCK_INIT;
+
 // Internal data
 
 struct ata_drive {
@@ -60,6 +64,8 @@ static int ata_wait_bsy(uint16_t io_base) {
 static int ata_wait_drq(uint16_t io_base) {
   for (int i = 0; i < 100000; i++) {
     uint8_t status = inb(io_base + ATA_REG_STATUS);
+    if (status & ATA_SR_BSY)
+      continue;
     if (status & ATA_SR_ERR)
       return -1;
     if (status & ATA_SR_DF)
@@ -72,7 +78,7 @@ static int ata_wait_drq(uint16_t io_base) {
 
 // IDENTIFY
 
-static bool ata_identify(struct ata_drive *drive) {
+static bool ata_identify_unlocked(struct ata_drive *drive) {
   uint16_t io = drive->io_base;
   uint16_t ctrl = drive->ctrl_base;
 
@@ -143,10 +149,17 @@ static bool ata_identify(struct ata_drive *drive) {
   return true;
 }
 
+static bool ata_identify(struct ata_drive *drive) {
+  spinlock_acquire(&ata_lock);
+  bool ret = ata_identify_unlocked(drive);
+  spinlock_release(&ata_lock);
+  return ret;
+}
+
 // PIO Read
 
-static int ata_pio_read(struct block_device *dev, uint64_t lba, uint32_t count,
-                        void *buf) {
+static int ata_pio_read_unlocked(struct block_device *dev, uint64_t lba, uint32_t count,
+                                 void *buf) {
   struct ata_drive *drive = (struct ata_drive *)dev->driver_data;
   uint16_t io = drive->io_base;
 
@@ -162,11 +175,13 @@ static int ata_pio_read(struct block_device *dev, uint64_t lba, uint32_t count,
     // Select drive + LBA mode + top 4 bits of LBA
     outb(io + ATA_REG_DRIVE,
          0xE0 | (drive->slave << 4) | ((sector >> 24) & 0x0F));
+    ata_400ns_delay(drive->ctrl_base);
     outb(io + ATA_REG_SECCOUNT, 1);
     outb(io + ATA_REG_LBA_LO, (uint8_t)(sector & 0xFF));
     outb(io + ATA_REG_LBA_MID, (uint8_t)((sector >> 8) & 0xFF));
     outb(io + ATA_REG_LBA_HI, (uint8_t)((sector >> 16) & 0xFF));
     outb(io + ATA_REG_COMMAND, ATA_CMD_READ_PIO);
+    ata_400ns_delay(drive->ctrl_base);
 
     // Wait for data
     if (ata_wait_drq(io) < 0)
@@ -180,10 +195,18 @@ static int ata_pio_read(struct block_device *dev, uint64_t lba, uint32_t count,
   return 0;
 }
 
+static int ata_pio_read(struct block_device *dev, uint64_t lba, uint32_t count,
+                        void *buf) {
+  spinlock_acquire(&ata_lock);
+  int ret = ata_pio_read_unlocked(dev, lba, count, buf);
+  spinlock_release(&ata_lock);
+  return ret;
+}
+
 // PIO Write
 
-static int ata_pio_write(struct block_device *dev, uint64_t lba, uint32_t count,
-                         const void *buf) {
+static int ata_pio_write_unlocked(struct block_device *dev, uint64_t lba, uint32_t count,
+                                  const void *buf) {
   struct ata_drive *drive = (struct ata_drive *)dev->driver_data;
   uint16_t io = drive->io_base;
 
@@ -197,11 +220,13 @@ static int ata_pio_write(struct block_device *dev, uint64_t lba, uint32_t count,
 
     outb(io + ATA_REG_DRIVE,
          0xE0 | (drive->slave << 4) | ((sector >> 24) & 0x0F));
+    ata_400ns_delay(drive->ctrl_base);
     outb(io + ATA_REG_SECCOUNT, 1);
     outb(io + ATA_REG_LBA_LO, (uint8_t)(sector & 0xFF));
     outb(io + ATA_REG_LBA_MID, (uint8_t)((sector >> 8) & 0xFF));
     outb(io + ATA_REG_LBA_HI, (uint8_t)((sector >> 16) & 0xFF));
     outb(io + ATA_REG_COMMAND, ATA_CMD_WRITE_PIO);
+    ata_400ns_delay(drive->ctrl_base);
 
     if (ata_wait_drq(io) < 0)
       return -1;
@@ -212,6 +237,14 @@ static int ata_pio_write(struct block_device *dev, uint64_t lba, uint32_t count,
   }
 
   return 0;
+}
+
+static int ata_pio_write(struct block_device *dev, uint64_t lba, uint32_t count,
+                         const void *buf) {
+  spinlock_acquire(&ata_lock);
+  int ret = ata_pio_write_unlocked(dev, lba, count, buf);
+  spinlock_release(&ata_lock);
+  return ret;
 }
 
 // Initialization

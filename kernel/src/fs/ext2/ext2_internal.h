@@ -20,6 +20,7 @@ int      ext2_set_block_num(ext2_mount_t *mnt, ext2_inode_t *inode,
                             uint32_t logical_block, uint32_t disk_block);
 
 uint32_t ext2_alloc_block(ext2_mount_t *mnt);
+uint32_t ext2_alloc_block_hint(ext2_mount_t *mnt, uint32_t goal);
 uint32_t ext2_alloc_inode(ext2_mount_t *mnt);
 int      ext2_free_block(ext2_mount_t *mnt, uint32_t block_num);
 int      ext2_free_inode(ext2_mount_t *mnt, uint32_t inode_num);

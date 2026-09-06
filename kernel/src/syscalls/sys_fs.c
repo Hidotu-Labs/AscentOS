@@ -122,9 +122,6 @@ static uint64_t sys_mkdir(uint64_t pathname, uint64_t mode, uint64_t a2,
     vfs_node_t *base  = (clean_path[0] == '/') ? fs_root
                        : (t->cwd_node ? t->cwd_node : fs_root);
 
-    klog_puts("[MKDIR] path="); klog_puts(clean_path);
-    klog_puts(" mode="); klog_uint64(mode); klog_puts("\n");
-
     char parent_path[256], dir_name[128];
     const char *slash = 0;
     for (const char *p = clean_path; *p; p++)
@@ -142,7 +139,6 @@ static uint64_t sys_mkdir(uint64_t pathname, uint64_t mode, uint64_t a2,
             parent_path[parent_len] = '\0';
             parent = vfs_resolve_path_at(base, parent_path);
             if (!parent) {
-                klog_puts("[MKDIR] Parent not found, creating recursively\n");
                 sys_mkdir((uint64_t)parent_path, mode, 0, 0, 0, 0);
                 parent = vfs_resolve_path_at(base, parent_path);
             }

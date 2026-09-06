@@ -130,6 +130,13 @@ fi
 JAVA_HOME_GUEST="${JAVA_HOME_ROOTFS#"${ROOTFS_DIR}"}"
 echo "[+] Using JDK: ${JAVA_HOME_GUEST}"
 
+# Minecraft's bundled OpenAL is an old glibc build. Ensure a musl-native
+# OpenAL Soft is present even when Java was already installed by setup-alpine.
+# Dependencies are not resolved automatically, so install the library package
+# explicitly before the optional OpenAL utilities package.
+install_apk_mc "openal-soft-libs" "community"
+install_apk_mc "openal-soft" "community"
+
 # All JVM internal .so files use RPATH=$ORIGIN/../lib which AvoryOS's musl
 # doesn't reliably resolve. Copy every .so from the JVM lib dir into /usr/lib/
 # so musl's hardcoded search path always finds them.
@@ -302,12 +309,19 @@ for nat_jar in "${LWJGL_NAT_JAR}" "${JINPUT_NAT_JAR}"; do
     fi
 done
 
-# Replace legacy glibc libopenal with Alpine's musl openal-soft
-if [ -f "${ROOTFS_DIR}/usr/lib/libopenal.so.1" ]; then
-    cp -f "${ROOTFS_DIR}/usr/lib/libopenal.so.1" "${MC_NATIVES_ROOTFS}/libopenal64.so"
-    cp -f "${ROOTFS_DIR}/usr/lib/libopenal.so.1" "${MC_NATIVES_ROOTFS}/libopenal.so"
-    echo "[+] Overwrote legacy OpenAL with Alpine openal-soft"
+# Replace LWJGL's legacy glibc OpenAL with Alpine's musl-native OpenAL Soft.
+SYSTEM_OPENAL="${ROOTFS_DIR}/usr/lib/libopenal.so.1"
+if [ ! -f "${SYSTEM_OPENAL}" ]; then
+    echo "[!] Alpine OpenAL Soft library was not installed at /usr/lib/libopenal.so.1" >&2
+    exit 1
 fi
+if readelf --version-info "${SYSTEM_OPENAL}" 2>/dev/null | grep -q 'GLIBC_'; then
+    echo "[!] Refusing to stage a glibc OpenAL library in the musl rootfs." >&2
+    exit 1
+fi
+cp -Lf "${SYSTEM_OPENAL}" "${MC_NATIVES_ROOTFS}/libopenal64.so"
+cp -Lf "${SYSTEM_OPENAL}" "${MC_NATIVES_ROOTFS}/libopenal.so"
+echo "[+] Replaced legacy OpenAL with Alpine's musl-native OpenAL Soft"
 
 # Copy all library JARs into rootfs
 cp -f "${LIBS_DIR}"/*.jar "${MC_LIBS_ROOTFS}/" 2>/dev/null || true
@@ -316,6 +330,183 @@ NATIVES_COUNT=$(find "${MC_NATIVES_ROOTFS}" -name '*.so' | wc -l)
 LIBS_COUNT=$(find "${MC_LIBS_ROOTFS}" -name '*.jar' | wc -l)
 echo "[+] Staged ${LIBS_COUNT} library JARs → /opt/minecraft/libs/"
 echo "[+] Staged ${NATIVES_COUNT} native .so files → /opt/minecraft/natives/"
+
+# The official launcher normally downloads the asset index and hashed object
+# store. This custom launcher bypasses it, so fetch and verify those assets here.
+ASSETS_BUILD_DIR="${BUILD_DIR}/mc189-assets"
+MC_ASSETS_ROOTFS="${ROOTFS_DIR}/opt/minecraft/assets"
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "[!] python3 is required to download Minecraft assets." >&2
+    exit 1
+fi
+
+echo "[*] Fetching Minecraft 1.8 asset index and objects..."
+python3 - "${ASSETS_BUILD_DIR}" <<'ASSET_DOWNLOADER_EOF'
+import concurrent.futures
+import hashlib
+import json
+import os
+from pathlib import Path
+import sys
+import time
+import urllib.request
+
+VERSION = "1.8.9"
+MANIFEST_URL = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
+ASSET_OBJECT_URL = "https://resources.download.minecraft.net/{prefix}/{digest}"
+CACHE = Path(sys.argv[1])
+INDEXES = CACHE / "indexes"
+OBJECTS = CACHE / "objects"
+INDEXES.mkdir(parents=True, exist_ok=True)
+OBJECTS.mkdir(parents=True, exist_ok=True)
+
+
+def fetch(url):
+    request = urllib.request.Request(url, headers={"User-Agent": "AvoryOS-Minecraft-Setup/1"})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return response.read()
+
+
+def checked_fetch(url, expected_hash):
+    for attempt in range(3):
+        try:
+            data = fetch(url)
+            actual_hash = hashlib.sha1(data).hexdigest()
+            if actual_hash != expected_hash:
+                raise RuntimeError(f"SHA-1 mismatch: expected {expected_hash}, got {actual_hash}")
+            return data
+        except Exception:
+            if attempt == 2:
+                raise
+            time.sleep(attempt + 1)
+
+
+manifest = json.loads(fetch(MANIFEST_URL))
+try:
+    version_entry = next(entry for entry in manifest["versions"] if entry["id"] == VERSION)
+except StopIteration:
+    raise SystemExit(f"Minecraft {VERSION} is missing from Mojang's version manifest")
+
+version_data = json.loads(checked_fetch(version_entry["url"], version_entry["sha1"]))
+asset_index = version_data["assetIndex"]
+if asset_index["id"] != "1.8":
+    raise SystemExit(f"Expected asset index 1.8, got {asset_index['id']}")
+
+index_data = checked_fetch(asset_index["url"], asset_index["sha1"])
+index_path = INDEXES / "1.8.json"
+index_path.write_bytes(index_data)
+index = json.loads(index_data)
+
+
+def download_object(item):
+    logical_name, metadata = item
+    digest = metadata["hash"]
+    destination = OBJECTS / digest[:2] / digest
+    if destination.is_file():
+        with destination.open("rb") as existing:
+            if hashlib.sha1(existing.read()).hexdigest() == digest:
+                return False
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    data = checked_fetch(ASSET_OBJECT_URL.format(prefix=digest[:2], digest=digest), digest)
+    temporary = destination.with_name(destination.name + ".tmp")
+    temporary.write_bytes(data)
+    os.replace(temporary, destination)
+    return True
+
+
+items = list(index["objects"].items())
+downloaded = 0
+with concurrent.futures.ThreadPoolExecutor(max_workers=12) as executor:
+    futures = [executor.submit(download_object, item) for item in items]
+    for completed, future in enumerate(concurrent.futures.as_completed(futures), 1):
+        if future.result():
+            downloaded += 1
+        if completed % 250 == 0 or completed == len(futures):
+            print(f"    Verified {completed}/{len(futures)} asset objects", flush=True)
+
+sound_count = sum(name.endswith(".ogg") for name in index["objects"])
+print(f"[+] Asset index 1.8 ready: {len(items)} objects, {sound_count} OGG sounds ({downloaded} downloaded)")
+ASSET_DOWNLOADER_EOF
+
+rm -rf "${MC_ASSETS_ROOTFS}"
+mkdir -p "${MC_ASSETS_ROOTFS}"
+cp -a "${ASSETS_BUILD_DIR}/." "${MC_ASSETS_ROOTFS}/"
+echo "[+] Staged Minecraft assets → /opt/minecraft/assets/"
+
+# Mojang's LWJGL natives reference glibc fortify entry points that musl does
+# not export. Without them, lazy PLT calls jump into an unrebased trampoline
+# (e.g. 0x86ae); with RTLD_NOW, loading fails with "symbol not found". Provide
+# bounds-checked musl wrappers and force immediate relocation for dlopen'd DSOs.
+NATIVE_COMPAT_SRC="${BUILD_DIR}/native-compat.c"
+NATIVE_COMPAT_LIB="${ROOTFS_DIR}/usr/lib/libavory-native-compat.so"
+MUSL_CC="${MUSL_CC:-x86_64-linux-musl-gcc}"
+if ! command -v "${MUSL_CC}" >/dev/null 2>&1; then
+    echo "[!] ${MUSL_CC} is required to build the native compatibility shim." >&2
+    exit 1
+fi
+cat > "${NATIVE_COMPAT_SRC}" <<'NATIVE_COMPAT_EOF'
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+typedef void *(*dlopen_fn)(const char *, int);
+static dlopen_fn next_dlopen;
+
+__attribute__((constructor))
+static void resolve_dlopen(void) {
+    next_dlopen = (dlopen_fn)dlsym(RTLD_NEXT, "dlopen");
+}
+
+void *dlopen(const char *path, int mode) {
+    if (!next_dlopen)
+        next_dlopen = (dlopen_fn)dlsym(RTLD_NEXT, "dlopen");
+    if (!next_dlopen)
+        return NULL;
+    return next_dlopen(path, (mode & ~RTLD_LAZY) | RTLD_NOW);
+}
+
+int __vsnprintf_chk(char *dst, size_t size, int flag, size_t dst_size,
+                    const char *format, va_list args) {
+    (void)flag;
+    if (size > dst_size)
+        abort();
+    return vsnprintf(dst, size, format, args);
+}
+
+int __snprintf_chk(char *dst, size_t size, int flag, size_t dst_size,
+                   const char *format, ...) {
+    va_list args;
+    va_start(args, format);
+    int result = __vsnprintf_chk(dst, size, flag, dst_size, format, args);
+    va_end(args);
+    return result;
+}
+
+int __vfprintf_chk(FILE *stream, int flag, const char *format, va_list args) {
+    (void)flag;
+    return vfprintf(stream, format, args);
+}
+
+int __fprintf_chk(FILE *stream, int flag, const char *format, ...) {
+    va_list args;
+    va_start(args, format);
+    int result = __vfprintf_chk(stream, flag, format, args);
+    va_end(args);
+    return result;
+}
+
+void *__memmove_chk(void *dst, const void *src, size_t size, size_t dst_size) {
+    if (size > dst_size)
+        abort();
+    return memmove(dst, src, size);
+}
+NATIVE_COMPAT_EOF
+"${MUSL_CC}" -shared -fPIC -O2 -Wl,-z,now \
+    -o "${NATIVE_COMPAT_LIB}" "${NATIVE_COMPAT_SRC}" -ldl
+echo "[+] Built native compatibility shim → /usr/lib/libavory-native-compat.so"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. Stage minecraft.jar
@@ -351,15 +542,17 @@ export MESA_NO_DITHER=1
 export vblank_mode=0
 export MESA_SHADER_CACHE_DISABLE=true
 export MESA_GLSL_CACHE_DISABLE=true
-export ALSOFT_DRIVERS="oss,alsa"
-export ALSOFT_CONF="drivers=oss,alsa;mmap=false"
+# AvoryOS exposes its HDA/AC97 audio through the OSS-compatible /dev/dsp.
+# ALSOFT_CONF must be a config-file path, not inline configuration text.
+# Restrict OpenAL Soft to OSS so it does not probe unsupported host backends.
+export ALSOFT_DRIVERS="\${ALSOFT_DRIVERS:-oss}"
 
 JAVA_HOME="${JAVA_HOME_GUEST}"
 export PATH="\${JAVA_HOME}/bin:\${PATH}"
 export LD_LIBRARY_PATH="\${JAVA_HOME}/lib:\${JAVA_HOME}/lib/server:/usr/lib:/lib:\${LD_LIBRARY_PATH:-}"
 
-MC_PRELOAD=""
-[ -f /usr/lib/libjemalloc.so.2 ] && MC_PRELOAD="/usr/lib/libjemalloc.so.2"
+MC_PRELOAD="/usr/lib/libavory-native-compat.so"
+[ -f /usr/lib/libjemalloc.so.2 ] && MC_PRELOAD="\${MC_PRELOAD}:/usr/lib/libjemalloc.so.2"
 
 MC_USER="\${MC_USER:-${MC_USERNAME}}"
 MC_RAM="\${MC_RAM:-512m}"
@@ -428,6 +621,10 @@ soundCategory_voice:1.0
 OPT_EOF
 
 echo "[minecraft] Starting Minecraft 1.8.9 as '\${MC_USER}' (Heap: \${MC_RAM}, Max FPS Profile)..."
+# Resolve all PLT entries while loading. AvoryOS's current runtime loader can
+# leave lazy JUMP_SLOT trampolines in dlopen'd libraries such as OpenAL
+# unrebased (for example, jumping to 0x86ae instead of base+0x86ae).
+LD_BIND_NOW=1 \
 LD_PRELOAD="\${MC_PRELOAD}\${LD_PRELOAD:+:\$LD_PRELOAD}" \
 MALLOC_CONF="background_thread:false,dirty_decay_ms:5000,muzzy_decay_ms:5000" \
 exec "\${JAVA_HOME}/bin/java" \

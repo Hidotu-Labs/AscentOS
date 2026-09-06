@@ -23,7 +23,6 @@ typedef struct inet_sock {
     struct udp_socket *udp;
     struct raw_icmp_socket *raw;
     struct tcp_tcb *tcp;
-    wait_queue_t     wait;
     /* TCP socket options */
     int              rcvtimeo_ms;   /* SO_RCVTIMEO  */
     int              sndtimeo_ms;   /* SO_SNDTIMEO  */
@@ -57,19 +56,18 @@ static int inet_create(socket_t *sock, int protocol) {
     if (!isk) return -12;
     memset(isk, 0, sizeof(*isk));
     isk->parent = sock;
-    wait_queue_init(&isk->wait);
     if (sock->type == SOCK_RAW) {
         isk->raw = raw_icmp_alloc();
         if (!isk->raw) { kfree(isk); return -12; }
-        isk->raw->wait = &isk->wait;
+        isk->raw->wait = sock->wait_queue;
     } else if (sock->type == SOCK_STREAM) {
         isk->tcp = tcp_alloc();
         if (!isk->tcp) { kfree(isk); return -12; }
-        isk->tcp->wait_queue = &isk->wait;
+        isk->tcp->wait_queue = sock->wait_queue;
     } else {
         isk->udp = udp_socket_alloc();
         if (!isk->udp) { kfree(isk); return -12; }
-        isk->udp->wait_queue = &isk->wait;
+        isk->udp->wait_queue = sock->wait_queue;
     }
     sock->sk = isk;
     return 0;
@@ -90,11 +88,19 @@ static void inet_destroy(socket_t *sock) {
     sock->sk = NULL;
 }
 
+static inline void inet_sync_node(socket_t *sock, inet_sock_t *isk) {
+    if (sock && sock->node && isk) {
+        if (isk->udp) isk->udp->vfs_node = sock->node;
+        if (isk->tcp) isk->tcp->vfs_node = sock->node;
+    }
+}
+
 static int inet_bind(socket_t *sock, struct sockaddr *addr, int addrlen) {
     if (addrlen < (int)sizeof(struct sockaddr_in)) return -22;
     if (addr->sa_family != AF_INET) return -97;
     inet_sock_t *isk = sock->sk;
     if (!isk) return -22;
+    inet_sync_node(sock, isk);
     struct sockaddr_in *sin = (struct sockaddr_in *)addr;
     if (isk->raw) { isk->raw->local_ip = sa_addr(sin); return 0; }
     if (isk->tcp) return tcp_bind(isk->tcp, sa_addr(sin), sa_port(sin));
@@ -105,31 +111,48 @@ static int inet_bind(socket_t *sock, struct sockaddr *addr, int addrlen) {
 }
 
 static int inet_connect(socket_t *sock, struct sockaddr *addr, int addrlen) {
-    if (addrlen < (int)sizeof(struct sockaddr_in)) return -22;
-    if (addr->sa_family != AF_INET) return -97;
     inet_sock_t *isk = sock->sk;
     if (!isk) return -22;
+    inet_sync_node(sock, isk);
+    if (addr && addr->sa_family == 0 /* AF_UNSPEC */ && sock->type == SOCK_DGRAM) {
+        if (isk->udp) udp_disconnect(isk->udp);
+        sock->state = SS_UNCONNECTED;
+        return 0;
+    }
+    if (addrlen < (int)sizeof(struct sockaddr_in)) return -22;
+    if (addr->sa_family != AF_INET) return -97;
     struct sockaddr_in *sin = (struct sockaddr_in *)addr;
     if (isk->raw) { isk->raw->remote_ip=sa_addr(sin); isk->raw->connected=true; sock->state=SS_CONNECTED; return 0; }
     if (isk->tcp) {
-        int r=tcp_active_open(isk->tcp,sa_addr(sin),sa_port(sin)); if(r<0)return r;
-        if(socket_is_nonblocking(sock))return -115; /* EINPROGRESS */
+        if (sock->state == SS_CONNECTED || isk->tcp->state == TCP_ESTABLISHED)
+            return -106; /* EISCONN */
+        if (sock->state == SS_CONNECTING || isk->tcp->state == TCP_SYN_SENT || isk->tcp->state == TCP_SYN_RECEIVED)
+            return -114; /* EALREADY */
+        isk->tcp->vfs_node = sock->node;
+        isk->tcp->wait_queue = sock->wait_queue;
+        int r = tcp_active_open(isk->tcp, sa_addr(sin), sa_port(sin));
+        if (r < 0) return r;
+        if (socket_is_nonblocking(sock)) {
+            sock->state = SS_CONNECTING;
+            return -115; /* EINPROGRESS */
+        }
         /* Block on wait queue until established, error, or timeout */
         uint64_t deadline = lapic_timer_get_ticks() + 3000;
         struct thread *self = sched_get_current();
         wait_queue_entry_t wqe = { .thread = self, .next = NULL };
-        while (isk->tcp->state == TCP_SYN_SENT) {
-            tcp_timer_tick(lapic_timer_get_ticks());
+        while (isk->tcp->state == TCP_SYN_SENT && !isk->tcp->error) {
             if (lapic_timer_get_ticks() >= deadline) break;
-            wait_queue_add(&isk->wait, &wqe);
-            self->wakeup_ticks = lapic_timer_get_ticks() + 100;
-            self->state = THREAD_BLOCKED;
+            wait_queue_add(sock->wait_queue, &wqe);
+            if (self) {
+                self->wakeup_ticks = lapic_timer_get_ticks() + 50;
+                self->state = THREAD_BLOCKED;
+            }
             sched_yield();
-            self->wakeup_ticks = 0;
-            wait_queue_remove(&isk->wait, &wqe);
-            self->state = THREAD_RUNNING;
+            if (self) self->wakeup_ticks = 0;
+            wait_queue_remove(sock->wait_queue, &wqe);
+            if (self) self->state = THREAD_RUNNING;
         }
-        if (isk->tcp->state == TCP_ESTABLISHED) { sock->state=SS_CONNECTED; return 0; }
+        if (isk->tcp->state == TCP_ESTABLISHED) { sock->state = SS_CONNECTED; return 0; }
         return isk->tcp->error ? -isk->tcp->error : -110; /* ETIMEDOUT */
     }
     if (!isk->udp) return -22;
@@ -139,13 +162,14 @@ static int inet_connect(socket_t *sock, struct sockaddr *addr, int addrlen) {
 }
 
 static int inet_listen(socket_t *sock,int backlog){inet_sock_t*isk=sock->sk;if(!isk||!isk->tcp)return-95;int r=tcp_listen(isk->tcp,backlog);if(!r)sock->state=SS_LISTENING;return r;}
-static int inet_accept(socket_t *sock,socket_t **out){inet_sock_t*isk=sock->sk;if(!isk||!isk->tcp||!out)return-22;bool nb=socket_is_nonblocking(sock);struct tcp_tcb*child=tcp_accept(isk->tcp,nb);if(!child)return nb?-11:-4;socket_t*ns=socket_create(AF_INET,SOCK_STREAM,IPPROTO_TCP);if(!ns){tcp_free(child);return-12;}inet_sock_t*nisk=ns->sk;if(nisk->tcp)tcp_free(nisk->tcp);nisk->tcp=child;child->wait_queue=&nisk->wait;ns->state=SS_CONNECTED;*out=ns;return 0;}
+static int inet_accept(socket_t *sock,socket_t **out){inet_sock_t*isk=sock->sk;if(!isk||!isk->tcp||!out)return-22;bool nb=socket_is_nonblocking(sock);struct tcp_tcb*child=tcp_accept(isk->tcp,nb);if(!child)return nb?-11:-4;socket_t*ns=socket_create(AF_INET,SOCK_STREAM,IPPROTO_TCP);if(!ns){tcp_free(child);return-12;}inet_sock_t*nisk=ns->sk;if(nisk->tcp)tcp_free(nisk->tcp);nisk->tcp=child;child->wait_queue=ns->wait_queue;ns->state=SS_CONNECTED;*out=ns;return 0;}
 
 static ssize_t inet_sendto(socket_t *sock, const void *buf, size_t len,
                             int flags, struct sockaddr *dest, int addrlen) {
     (void)flags;
     inet_sock_t *isk = sock->sk;
     if (!isk) return -22;
+    inet_sync_node(sock, isk);
     if (isk->tcp) return tcp_send(isk->tcp,buf,len);
     uint32_t dip;
     uint16_t dport;
@@ -174,6 +198,7 @@ static ssize_t inet_recvfrom(socket_t *sock, void *buf, size_t len, int flags,
                               struct sockaddr *src, int *addrlen) {
     inet_sock_t *isk = sock->sk;
     if (!isk) return -22;
+    inet_sync_node(sock, isk);
     if (isk->tcp) return tcp_recv(isk->tcp,buf,len,socket_is_nonblocking(sock)||(flags&MSG_DONTWAIT));
     if (isk->raw) {
         uint32_t rip=0;
@@ -328,7 +353,8 @@ static int inet_shutdown(socket_t *sock, int how) {
             tcp_close(isk->tcp);
         }
     }
-    wait_queue_wake_all(&isk->wait);
+    if (sock->wait_queue)
+        wait_queue_wake_all((wait_queue_t *)sock->wait_queue);
     return 0;
 }
 
@@ -361,9 +387,9 @@ static int inet_poll(socket_t *sock, int events) {
             if ((events & POLLIN)  && tcp_readable(isk->tcp)) r |= POLLIN;
             if ((events & POLLOUT) && tcp_writable(isk->tcp))  r |= POLLOUT;
             if (isk->tcp->error) r |= POLLERR;
-            /* CLOSE_WAIT means peer sent FIN — signal RDHUP */
+            /* CLOSE_WAIT means peer sent FIN — signal RDHUP and POLLIN (EOF) */
             if (isk->tcp->state == TCP_CLOSE_WAIT)
-                r |= EPOLLRDHUP;
+                r |= EPOLLRDHUP | POLLIN;
             break;
         case TCP_RESET:
             r |= POLLERR | POLLHUP;
@@ -376,6 +402,10 @@ static int inet_poll(socket_t *sock, int events) {
         case TCP_TIME_WAIT:
         case TCP_CLOSED:
             r |= POLLHUP;
+            if (isk->tcp->error) {
+                r |= POLLERR;
+                if (events & POLLOUT) r |= POLLOUT;
+            }
             if (events & POLLIN) r |= POLLIN;
             break;
         default:

@@ -582,13 +582,23 @@ static uint64_t sys_futex(uint64_t uaddr_val, uint64_t op_val, uint64_t val_arg,
     return futex_wait(uaddr, val, timeout, private, is_abs, (uint32_t)val3);
   }
 
-  case FUTEX_WAKE:
-    return futex_wake(uaddr, val, private);
+  case FUTEX_WAKE: {
+    uint64_t woken = futex_wake(uaddr, val, private);
+    if (woken == 0) {
+      woken = futex_wake(uaddr, val, !private);
+    }
+    return woken;
+  }
 
-  case FUTEX_WAKE_BITSET:
+  case FUTEX_WAKE_BITSET: {
     if (val3 == 0)
       return (uint64_t)(-(int64_t)EINVAL);
-    return futex_wake_bitset(uaddr, val, (uint32_t)val3, private);
+    uint64_t woken = futex_wake_bitset(uaddr, val, (uint32_t)val3, private);
+    if (woken == 0) {
+      woken = futex_wake_bitset(uaddr, val, (uint32_t)val3, !private);
+    }
+    return woken;
+  }
 
   case FUTEX_REQUEUE:
     return futex_requeue(uaddr, val, (uint32_t)timeout_ptr,
@@ -620,8 +630,14 @@ static uint64_t sys_futex(uint64_t uaddr_val, uint64_t op_val, uint64_t val_arg,
 
 // Registration
 uint64_t futex_wake_user(uint32_t *uaddr, uint32_t count) {
-  // CLONE_CHILD_CLEARTID is paired with pthread-private futex waits.
-  return futex_wake(uaddr, count, true);
+  // CLONE_CHILD_CLEARTID is paired with pthread-private futex waits in musl,
+  // but glibc pthread_join/lll_wait_tid uses shared futex waits (LLL_SHARED).
+  // Wake private waiters first, and if there are remaining slots, wake shared waiters.
+  uint64_t woken = futex_wake(uaddr, count, true);
+  if (woken < count) {
+    woken += futex_wake(uaddr, count - (uint32_t)woken, false);
+  }
+  return woken;
 }
 
 void syscall_register_futex(void) {

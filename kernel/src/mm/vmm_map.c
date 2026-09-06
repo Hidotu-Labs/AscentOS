@@ -3,6 +3,7 @@
 #include "../lock/spinlock.h"
 #include "pmm.h"
 #include "tlb_shootdown.h"
+#include "../smp/cpu.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -162,12 +163,25 @@ static bool vmm_page_present_nolock(uint64_t *pml4, uint64_t virtual_addr) {
 bool vmm_map_page(uint64_t *pml4, uint64_t virtual_addr, uint64_t physical_addr,
                   uint64_t flags) {
   rawspinlock_acquire(&vmm_lock);
-  // A brand-new PTE cannot have a stale TLB translation on another CPU.
-  // Replacing any present mapping (including changing flags on the same
-  // physical page) still requires the normal synchronous shootdown.
+  // In SMP mode, other CPUs running threads of this address space may have cached
+  // intermediate non-present paging structures. Invalidate TLB if replacing or SMP > 1.
   bool replacing = vmm_page_present_nolock(pml4, virtual_addr);
+  bool flush = replacing || (cpu_get_count() > 1);
   bool ok = vmm_map_page_nolock(pml4, virtual_addr, physical_addr, flags,
-                                replacing);
+                                flush);
+  rawspinlock_release(&vmm_lock);
+  return ok;
+}
+
+bool vmm_map_page_if_unmapped(uint64_t *pml4, uint64_t virtual_addr,
+                             uint64_t physical_addr, uint64_t flags) {
+  rawspinlock_acquire(&vmm_lock);
+  if (vmm_page_present_nolock(pml4, virtual_addr)) {
+    rawspinlock_release(&vmm_lock);
+    return false;
+  }
+  bool flush = (cpu_get_count() > 1);
+  bool ok = vmm_map_page_nolock(pml4, virtual_addr, physical_addr, flags, flush);
   rawspinlock_release(&vmm_lock);
   return ok;
 }

@@ -234,6 +234,32 @@ bool sched_get_thread_snapshot(uint32_t tid,
   return true;
 }
 
+size_t sched_read_thread_auxv(uint32_t tid, uint32_t offset, uint32_t size,
+                              uint8_t *buffer) {
+  if (!buffer || size == 0)
+    return 0;
+
+  spinlock_acquire(&tid_lock);
+  struct thread *t = find_thread_by_tid_locked(tid);
+  if (!t || !t->mm || t->mm->auxv_count == 0) {
+    spinlock_release(&tid_lock);
+    return 0;
+  }
+
+  size_t total_bytes = t->mm->auxv_count * sizeof(uint64_t);
+  if (offset >= total_bytes) {
+    spinlock_release(&tid_lock);
+    return 0;
+  }
+
+  if (offset + size > total_bytes)
+    size = total_bytes - offset;
+
+  memcpy(buffer, ((uint8_t *)t->mm->saved_auxv) + offset, size);
+  spinlock_release(&tid_lock);
+  return size;
+}
+
 bool sched_get_nth_thread_tid(uint32_t index, uint32_t *tid) {
   if (!tid)
     return false;

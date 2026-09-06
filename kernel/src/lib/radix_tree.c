@@ -316,6 +316,8 @@ void radix_tree_destroy(struct radix_tree *tree,
 static bool radix_iter_node(struct radix_tree_node *node, uint8_t level,
                             uint64_t prefix, uint64_t first, uint64_t last,
                             radix_tree_iter_fn callback, void *context) {
+  if (!node || (uint64_t)node < 0xFFFF800000000000ULL)
+    return false;
   for (unsigned i = 0; i < RADIX_TREE_SLOTS; i++) {
     if (!node->slots[i])
       continue;
@@ -323,9 +325,13 @@ static bool radix_iter_node(struct radix_tree_node *node, uint8_t level,
     if (!level) {
       if (key >= first && key <= last && !callback(key, node->slots[i], context))
         return false;
-    } else if (!radix_iter_node(node->slots[i], level - 1, key, first, last,
-                                callback, context)) {
-      return false;
+    } else {
+      if ((uint64_t)node->slots[i] < 0xFFFF800000000000ULL)
+        continue;
+      if (!radix_iter_node(node->slots[i], level - 1, key, first, last,
+                           callback, context)) {
+        return false;
+      }
     }
   }
   return true;

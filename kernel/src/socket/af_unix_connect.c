@@ -56,12 +56,15 @@ int unix_connect_impl(socket_t *sock, struct sockaddr *addr, int addrlen) {
     if (sun->sun_path[0] == '\0') {
       klog_puts("@");
       klog_puts(sun->sun_path + 1);
+      klog_puts("\"\n");
+      KTRACK_ERR(KSUBSYS_AF_UNIX, -111);
+      return -111; // ECONNREFUSED
     } else {
       klog_puts(sun->sun_path);
+      klog_puts("\"\n");
+      KTRACK_ERR(KSUBSYS_AF_UNIX, -2);
+      return -2; // ENOENT
     }
-    klog_puts("\"\n");
-    KTRACK_ERR(KSUBSYS_AF_UNIX, -111);
-    return -111; // ECONNREFUSED
   }
 
   socket_t *listener_sock = dusk->parent;

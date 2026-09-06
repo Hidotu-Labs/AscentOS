@@ -239,10 +239,20 @@ void sched_terminate_thread_group(struct thread *current) {
     return;
 
   uint32_t killed = 0;
+  struct thread *leader = NULL;
+
   spinlock_acquire(&tid_lock);
   for (struct thread *t = global_thread_list; t; t = t->global_next) {
-    if (t == current || t->tgid != current->tgid || t->is_idle ||
-        t->state == THREAD_DEAD || t->state == THREAD_ZOMBIE)
+    if (t == current || t->tgid != current->tgid || t->is_idle)
+      continue;
+
+    // Identify the thread-group leader
+    if (t->tid == current->tgid) {
+      leader = t;
+      continue;
+    }
+
+    if (t->state == THREAD_DEAD || t->state == THREAD_ZOMBIE)
       continue;
 
     /* exit_group is process-wide. Mark siblings unschedulable before making
@@ -259,7 +269,31 @@ void sched_terminate_thread_group(struct thread *current) {
     sched_queue_reap(t);
     killed++;
   }
-  spinlock_release(&tid_lock);
+
+  // If leader was found and is not current, preserve leader as ZOMBIE
+  if (leader && leader != current) {
+    leader->reap_remove_runqueue = true;
+    remove_from_runqueue(leader);
+    leader->state = THREAD_ZOMBIE;
+    leader->exit_status = current->exit_status ? current->exit_status : 0;
+    struct thread *parent_to_wake = NULL;
+    if (leader->parent) {
+      uint32_t parent_tgid = leader->parent->tgid;
+      for (struct thread *waiter = global_thread_list; waiter;
+           waiter = waiter->global_next) {
+        if (waiter->tgid == parent_tgid && waiter->waiting_for_child &&
+            waiter->state == THREAD_BLOCKED) {
+          parent_to_wake = waiter;
+          break;
+        }
+      }
+    }
+    spinlock_release(&tid_lock);
+    if (parent_to_wake)
+      sched_wakeup(parent_to_wake);
+  } else {
+    spinlock_release(&tid_lock);
+  }
 
   if (killed) {
     klog_debug_puts("[EXIT_GROUP] queued sibling threads: ");

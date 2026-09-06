@@ -135,9 +135,21 @@ int udp_connect(struct udp_socket *s, uint32_t ip, uint16_t port) {
         int r = udp_bind(s, 0, 0);
         if (r < 0) return r;
     }
+    spinlock_acquire(&table_lock);
     s->remote_ip   = ip;
     s->remote_port = port;
     s->connected   = true;
+    spinlock_release(&table_lock);
+    return 0;
+}
+
+int udp_disconnect(struct udp_socket *s) {
+    if (!s) return -22;
+    spinlock_acquire(&table_lock);
+    s->remote_ip   = 0;
+    s->remote_port = 0;
+    s->connected   = false;
+    spinlock_release(&table_lock);
     return 0;
 }
 
@@ -157,8 +169,7 @@ ssize_t udp_sendto(struct udp_socket *s, const void *buf, size_t len,
     if (!cfg || !cfg->address) return -101;
 
     uint16_t udp_len = (uint16_t)(UDP_HDR_LEN + len);
-    uint8_t *seg = kmalloc(udp_len);
-    if (!seg) return -12;
+    uint8_t seg[UDP_HDR_LEN + UDP_PAYLOAD_MAX];
     put16_be(seg + 0, s->local_port);
     put16_be(seg + 2, dst_port);
     put16_be(seg + 4, udp_len);
@@ -169,7 +180,6 @@ ssize_t udp_sendto(struct udp_socket *s, const void *buf, size_t len,
     put16_be(seg + 6, csum);
 
     int r = ipv4_send_raw(dst_ip, 17, seg, udp_len);
-    kfree(seg);
     return r < 0 ? (ssize_t)r : (ssize_t)len;
 }
 
@@ -208,7 +218,10 @@ ssize_t udp_recvfrom(struct udp_socket *s, void *buf, size_t len,
             bool empty = s->q_head == s->q_tail;
             if (empty && self) self->state = THREAD_BLOCKED;
             spinlock_release(&table_lock);
-            if (!empty) wait_queue_wake_one(wq);
+            if (!empty) {
+                wait_queue_remove(wq, &entry);
+                continue;
+            }
             if (timeout_ms > 0 && self)
                 self->wakeup_ticks = deadline;
             sched_yield();
@@ -234,8 +247,7 @@ void udp_deliver(uint32_t src_ip, uint16_t src_port,
         if (s->connected && s->remote_ip != src_ip) continue;
         if (s->connected && s->remote_port != src_port) continue;
 
-        uint32_t next_head = (s->q_head + 1) % (UDP_RX_QUEUE_DEPTH * 2);
-        if (next_head == s->q_tail % (UDP_RX_QUEUE_DEPTH * 2)) {
+        if (s->q_head - s->q_tail >= UDP_RX_QUEUE_DEPTH) {
             spinlock_release(&table_lock);
             return;
         }
@@ -249,7 +261,7 @@ void udp_deliver(uint32_t src_ip, uint16_t src_port,
         s->q_head++;
 
         if (s->wait_queue)
-            wait_queue_wake_one((wait_queue_t *)s->wait_queue);
+            wait_queue_wake_all((wait_queue_t *)s->wait_queue);
         if (s->vfs_node) {
             extern void epoll_notify_event(struct vfs_node *, uint32_t);
             epoll_notify_event((struct vfs_node *)s->vfs_node, 0x00000001u);

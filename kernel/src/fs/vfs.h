@@ -219,6 +219,7 @@ void vfs_cache_put(vfs_node_t *node, vfs_page_t *page);
 bool vfs_cache_phase3_stress_test(void);
 uint32_t vfs_cache_read(vfs_node_t *node, uint32_t offset, uint32_t size,
                         uint8_t *buffer);
+uint32_t vfs_cache_readahead(vfs_node_t *node, uint32_t offset, uint32_t max_bytes);
 bool vfs_cache_phase4_stress_test(void);
 bool vfs_cache_phase5_stress_test(void);
 

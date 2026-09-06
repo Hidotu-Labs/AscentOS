@@ -1,6 +1,7 @@
 // Signal Syscalls: rt_sigaction, rt_sigprocmask
 #include "../apic/lapic_timer.h"
 #include "../console/klog.h"
+#include "../cpu/features.h"
 #include "../cpu/fpu.h"
 #include "../cpu/isr.h"
 #include "../fs/vfs.h"
@@ -69,7 +70,7 @@ struct sigframe {
   uint64_t mask;
   struct kernel_siginfo info;
   struct kernel_ucontext ucontext;
-};
+} __attribute__((aligned(16)));
 
 _Static_assert(sizeof(struct kernel_siginfo) == 128,
                "x86_64 siginfo ABI size");
@@ -105,7 +106,7 @@ static void restore_signal_context(struct registers *regs,
 }
 
 static void fill_signal_context(struct sigframe *frame, int sig,
-                                const struct thread *current) {
+                                struct thread *current) {
   struct kernel_siginfo *info = &frame->info;
   struct kernel_ucontext *uc = &frame->ucontext;
   memset(info, 0, sizeof(*info));
@@ -166,7 +167,9 @@ static void fill_signal_context(struct sigframe *frame, int sig,
   /* With lazy FPU, hardware registers may belong to a different thread.
      Ensure this thread's FPU state is live in hardware before saving. */
   fpu_ensure_loaded(current);
-  __asm__ volatile("fxsave64 %0" : "=m"(uc->fpregs_mem));
+  uint8_t aligned_fpregs[512] __attribute__((aligned(16)));
+  __asm__ volatile("fxsave64 %0" : "=m"(aligned_fpregs) : : "memory");
+  memcpy(uc->fpregs_mem, aligned_fpregs, sizeof(aligned_fpregs));
 }
 
 
@@ -440,24 +443,31 @@ static uint64_t sys_rt_sigreturn(struct syscall_regs *sregs) {
   }
 
   /*
-   * Linux defines the ucontext as the restorable signal state. Keep the
-   * private register copy only as frame-building storage; restoring from the
-   * ucontext also permits SA_SIGINFO handlers to adjust their return state.
+   * Linux defines the ucontext as the restorable signal state. Restore into
+   * kernel-side current->sigreturn_regs so IRETQ restores from safe kernel memory.
    */
-  restore_signal_context(&frame->regs, &frame->ucontext);
+  restore_signal_context(&current->sigreturn_regs, &frame->ucontext);
   current->signal_mask = frame->ucontext.uc_sigmask[0];
   current->signal_mask &=
       ~((1ULL << (SIGKILL - 1)) | (1ULL << (SIGSTOP - 1)));
-  if ((frame->regs.cs & 3) != 3 || (frame->regs.ss & 3) != 3 ||
-      frame->regs.rip >= 0x0000800000000000ULL ||
-      frame->regs.rsp >= 0x0000800000000000ULL) {
+  if ((current->sigreturn_regs.cs & 3) != 3 || (current->sigreturn_regs.ss & 3) != 3 ||
+      current->sigreturn_regs.rip >= 0x0000800000000000ULL ||
+      current->sigreturn_regs.rsp >= 0x0000800000000000ULL) {
     klog_puts("[SIGNAL] sigreturn: invalid user context\n");
     process_do_exit(11);
   }
-  __asm__ volatile("fxrstor64 %0" : : "m"(frame->ucontext.fpregs_mem));
+  uint8_t aligned_fpregs[512] __attribute__((aligned(16)));
+  memcpy(aligned_fpregs, (const void *)frame->ucontext.fpregs_mem, sizeof(aligned_fpregs));
+  __asm__ volatile("fxrstor64 %0" : : "m"(aligned_fpregs) : "memory");
+  if (cpu_has_xsave_flag) {
+    uint32_t eax = 0xFFFFFFFF, edx = 0xFFFFFFFF;
+    __asm__ volatile("xsave64 %0" : "=m"(current->fpu_state) : "a"(eax), "d"(edx) : "memory");
+  } else {
+    __asm__ volatile("fxsave64 %0" : "=m"(current->fpu_state) : : "memory");
+  }
 
-  /* syscall_entry.asm restores the full frame with IRETQ. */
-  cpu_get_current()->sigreturn_frame = (uint64_t)&frame->regs;
+  /* syscall_entry.asm restores the full frame with IRETQ from kernel memory. */
+  cpu_get_current()->sigreturn_frame = (uint64_t)&current->sigreturn_regs;
   return 0;
 }
 
@@ -529,7 +539,11 @@ void signal_deliver(struct registers *regs) {
   if ((sa->sa_flags & SA_ONSTACK) && !(current->ss_flags & SS_DISABLE) &&
       !on_sig_stack(current, regs->rsp)) {
     // Switch to the alternate signal stack (top = base + size)
-    rsp = current->ss_sp + current->ss_size;
+    if (current->ss_size >= sizeof(struct sigframe) + X86_64_RED_ZONE_SIZE + 64) {
+      rsp = current->ss_sp + current->ss_size;
+    } else {
+      rsp = regs->rsp;
+    }
   } else {
     rsp = regs->rsp;
   }
@@ -542,7 +556,13 @@ void signal_deliver(struct registers *regs) {
 
   // Push frame to the chosen stack
   rsp -= sizeof(struct sigframe);
-  rsp &= ~0xFULL;
+  rsp &= ~0xFULL; // 16-byte align for SysV ABI
+
+  if (current->ss_sp && on_sig_stack(current, current->ss_sp + current->ss_size - 1) &&
+      rsp < current->ss_sp) {
+    klog_puts("[SIGNAL] Altstack underflow during delivery\n");
+    process_do_exit(11);
+  }
 
   if (!vmm_is_user_addr_range_writable(rsp, sizeof(struct sigframe))) {
     klog_puts("[SIGNAL] Stack overflow/invalid during delivery\n");
@@ -550,6 +570,7 @@ void signal_deliver(struct registers *regs) {
   }
 
   struct sigframe *frame = (struct sigframe *)rsp;
+  memset(frame, 0, sizeof(struct sigframe));
   frame->regs = *regs;
   uint64_t mask_to_save = current->has_saved_signal_mask ? current->saved_signal_mask : current->signal_mask;
   frame->mask = mask_to_save;

@@ -3,8 +3,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#define TCP_MAX_TCBS 32
-#define TCP_RX_BUFFER_SIZE 65535
+#define TCP_MAX_TCBS 64
+#define TCP_RX_BUFFER_SIZE 524288
 #define TCP_DEFAULT_WINDOW 65535
 enum tcp_state { TCP_CLOSED, TCP_LISTEN, TCP_SYN_SENT, TCP_SYN_RECEIVED, TCP_ESTABLISHED, TCP_FIN_WAIT_1,
   TCP_FIN_WAIT_2, TCP_CLOSE_WAIT, TCP_LAST_ACK, TCP_TIME_WAIT, TCP_RESET };
@@ -19,6 +19,7 @@ struct tcp_tcb {
   uint8_t rx_buffer[TCP_RX_BUFFER_SIZE];
   uint8_t tx_buffer[1460]; size_t tx_length; uint32_t tx_seq; uint8_t tx_flags;
   size_t rx_head, rx_tail; bool peer_closed; int error;
+  uint8_t unacked_packets;
   void *wait_queue; void *vfs_node;
   struct tcp_tcb *listener;
   struct tcp_tcb *accept_queue[8]; size_t accept_head, accept_tail; int backlog;

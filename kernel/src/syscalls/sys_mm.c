@@ -4,6 +4,7 @@
 #include "../mm/pmm.h"
 #include "../mm/vma.h"
 #include "../mm/vmm.h"
+#include "../mm/tlb_shootdown.h"
 #include "../sched/sched.h"
 #include "syscall.h"
 #include <stdint.h>
@@ -96,12 +97,13 @@ static void teardown_range(uint64_t *pml4, struct thread *t, uint64_t base,
     // all 512 pages via pmm_free_pages in one shot. Skip the remaining 511
     // sub-page VAs inside this huge mapping to avoid redundant work.
 #define HUGE_2MB (2ULL * 1024 * 1024)
-    if ((va & (HUGE_2MB - 1)) == 0 && vmm_is_huge_page(pml4, va)) {
+    if (vmm_is_huge_page(pml4, va)) {
       // 2 MB PS-bit huge page. vmm_unmap_page clears the PDE and frees all
       // 512 constituent frames via pmm_free_pages in one shot. Skip forward
-      // past the remaining 511 sub-page VAs inside this huge mapping.
+      // past the remaining sub-page VAs inside this huge mapping.
       vmm_unmap_page(pml4, va);
-      va += HUGE_2MB - PAGE_SIZE; // loop will add PAGE_SIZE next iteration
+      uint64_t next_huge = (va & ~(HUGE_2MB - 1)) + HUGE_2MB;
+      va = (next_huge <= end ? next_huge : end) - PAGE_SIZE;
       continue;
     }
 #undef HUGE_2MB
@@ -739,14 +741,17 @@ static uint64_t sys_madvise(uint64_t addr, uint64_t len, uint64_t advice,
 
   spinlock_acquire(&current->mm->lock);
 
-  // MADV_DONTNEED / MADV_FREE / MADV_REMOVE:
+  // MADV_DONTNEED / MADV_REMOVE:
   // Discard physical pages in the address range so that subsequent accesses
   // yield fresh zero-filled pages for anonymous mappings, as required by POSIX/Linux.
-  if (advice == MADV_DONTNEED || advice == MADV_FREE || advice == MADV_REMOVE) {
+  // Note: MADV_FREE is an advisory hint that pages CAN be reclaimed under memory
+  // pressure, but must NOT be immediately discarded if no pressure exists.
+  if (advice == MADV_DONTNEED || advice == MADV_REMOVE) {
     uint64_t *pml4 = (uint64_t *)current->cr3;
     if (!pml4)
       pml4 = vmm_get_active_pml4();
     teardown_range(pml4, current, addr, aligned_len, "madvise DONTNEED");
+    tlb_shootdown_all();
     spinlock_release(&current->mm->lock);
     return 0;
   }
@@ -783,6 +788,55 @@ static uint64_t sys_madvise(uint64_t addr, uint64_t len, uint64_t advice,
   return 0;
 }
 
+// sys_mincore: determine whether pages are resident in memory
+static uint64_t sys_mincore(uint64_t addr, uint64_t len, uint64_t vec_ptr,
+                            uint64_t a4, uint64_t a5, uint64_t a6) {
+  (void)a4; (void)a5; (void)a6;
+  if (addr & (PAGE_SIZE - 1))
+    return (uint64_t)-22; // EINVAL
+  if (len == 0)
+    return 0;
+  if (!vec_ptr)
+    return (uint64_t)-14; // EFAULT
+
+  size_t pages = (len + PAGE_SIZE - 1) / PAGE_SIZE;
+  if (!vmm_is_user_addr_range_writable(vec_ptr, pages))
+    return (uint64_t)-14; // EFAULT
+
+  // In AvoryOS all allocated user pages are in physical memory (no swap)
+  memset((void *)vec_ptr, 1, pages);
+  return 0;
+}
+
+static uint64_t sys_msync(uint64_t addr, uint64_t len, uint64_t flags,
+                          uint64_t a4, uint64_t a5, uint64_t a6) {
+  (void)a4; (void)a5; (void)a6;
+  if (addr & (PAGE_SIZE - 1))
+    return (uint64_t)-22; // EINVAL: addr must be page-aligned
+
+  #define MS_ASYNC 1
+  #define MS_INVALIDATE 2
+  #define MS_SYNC 4
+
+  // Flags must contain either MS_ASYNC or MS_SYNC, but not both
+  uint64_t sync_mode = flags & (MS_ASYNC | MS_SYNC);
+  if (sync_mode == 0 || sync_mode == (MS_ASYNC | MS_SYNC))
+    return (uint64_t)-22; // EINVAL
+
+  // Reject unsupported flag bits
+  if (flags & ~(MS_ASYNC | MS_INVALIDATE | MS_SYNC))
+    return (uint64_t)-22; // EINVAL
+
+  if (len == 0)
+    return 0;
+
+  if (!is_user_pointer(addr) || addr + len < addr || !is_user_pointer(addr + len))
+    return (uint64_t)-14; // EFAULT
+
+  // In AvoryOS all allocated user pages reside in-core physical memory
+  // with a unified page cache. Synchronous flush is a no-op.
+  return 0;
+}
 
 // Public API
 
@@ -790,6 +844,8 @@ void syscall_register_mm(void) {
   syscall_register(SYS_MMAP, sys_mmap);
   syscall_register(SYS_MUNMAP, sys_munmap);
   syscall_register(SYS_MREMAP, sys_mremap);
+  syscall_register(SYS_MSYNC, sys_msync);
+  syscall_register(SYS_MINCORE, sys_mincore);
   syscall_register(SYS_MADVISE, sys_madvise);
   syscall_register(SYS_BRK, sys_brk);
   syscall_register(SYS_MPROTECT, sys_mprotect);

@@ -202,10 +202,10 @@ uint64_t sys_open_path(int dirfd, const char *path, uint64_t flags,
 
   if (!node) {
     if (flags & O_CREAT) {
-      char parent_path[128];
-      char file_name[128];
+      char parent_path[512];
+      char file_name[256];
       size_t len = strlen(path);
-      if (len == 0 || len >= sizeof(file_name))
+      if (len == 0 || len >= 4096)
         return (uint64_t)-14;
 
       const char *slash = 0;

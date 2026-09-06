@@ -12,7 +12,10 @@ bool ext4_inode_has_extents(ext2_inode_t *inode) {
     return (inode->i_flags & EXT4_EXTENTS_FL) != 0;
 }
 
-uint32_t ext4_get_block_num(ext2_mount_t *mnt, ext2_inode_t *inode, uint32_t logical_block) {
+uint32_t ext4_get_extent_run(ext2_mount_t *mnt, ext2_inode_t *inode,
+                             uint32_t logical_block, uint32_t *out_run_len) {
+    if (out_run_len)
+        *out_run_len = 1;
     uint8_t *bufs[5] = {NULL, NULL, NULL, NULL, NULL};
     int depth_idx = 0;
     uint32_t result = 0;
@@ -29,14 +32,27 @@ uint32_t ext4_get_block_num(ext2_mount_t *mnt, ext2_inode_t *inode, uint32_t log
             for (uint16_t i = 0; i < hdr->eh_entries; i++) {
                 ext4_extent_t *ex = &exts[i];
                 uint16_t len = ex->ee_len & 0x7FFF;
+                if (logical_block < ex->ee_block) {
+                    if (out_run_len)
+                        *out_run_len = ex->ee_block - logical_block;
+                    result = 0;
+                    goto done;
+                }
                 if (logical_block >= ex->ee_block && logical_block < ex->ee_block + len) {
-                    if (ex->ee_len > 0x8000)
+                    uint32_t offset_in_extent = logical_block - ex->ee_block;
+                    if (out_run_len)
+                        *out_run_len = len - offset_in_extent;
+                    if (ex->ee_len > 0x8000) {
+                        result = 0;
                         goto done;
+                    }
                     uint64_t pblock = ext4_extent_get_pblock(ex);
-                    result = (uint32_t)(pblock + (logical_block - ex->ee_block));
+                    result = (uint32_t)(pblock + offset_in_extent);
                     goto done;
                 }
             }
+            if (out_run_len)
+                *out_run_len = 1;
             goto done;
         } else {
             ext4_extent_idx_t *idxs = (ext4_extent_idx_t *)entries;
@@ -67,6 +83,10 @@ done:
     for (int i = 0; i < 5; i++)
         if (bufs[i]) kfree(bufs[i]);
     return result;
+}
+
+uint32_t ext4_get_block_num(ext2_mount_t *mnt, ext2_inode_t *inode, uint32_t logical_block) {
+    return ext4_get_extent_run(mnt, inode, logical_block, NULL);
 }
 
 void ext4_extent_init_inode(ext2_inode_t *inode) {
@@ -224,24 +244,128 @@ static int ext4_extent_grow_root(ext2_mount_t *mnt, ext2_inode_t *inode) {
     return 0;
 }
 
-static int ext4_extent_add_root_index(ext2_inode_t *inode,
-                                      uint32_t logical_block,
-                                      uint32_t child_block) {
-    ext4_extent_header_t *root = (ext4_extent_header_t *)inode->i_block;
-    if (root->eh_entries >= root->eh_max)
-        return -1;
+static int ext4_extent_insert_index_entry(ext4_extent_header_t *hdr,
+                                          ext4_extent_idx_t *idxs,
+                                          uint32_t logical_block,
+                                          uint64_t phys_block) {
+    if (hdr->eh_entries >= hdr->eh_max)
+        return 1;
 
-    ext4_extent_idx_t *idxs = (ext4_extent_idx_t *)(root + 1);
     uint16_t pos = 0;
-    while (pos < root->eh_entries && idxs[pos].ei_block < logical_block)
+    while (pos < hdr->eh_entries && idxs[pos].ei_block < logical_block)
         pos++;
-    for (uint16_t i = root->eh_entries; i > pos; i--)
+    for (uint16_t i = hdr->eh_entries; i > pos; i--)
         idxs[i] = idxs[i - 1];
     memset(&idxs[pos], 0, sizeof(*idxs));
     idxs[pos].ei_block = logical_block;
-    ext4_idx_set_pblock(&idxs[pos], child_block);
-    root->eh_entries++;
+    ext4_idx_set_pblock(&idxs[pos], phys_block);
+    hdr->eh_entries++;
     return 0;
+}
+
+static int ext4_extent_split_index(ext2_mount_t *mnt,
+                                   ext2_inode_t *inode,
+                                   ext4_extent_header_t *idx_hdr,
+                                   uint32_t idx_phys,
+                                   uint32_t logical_block,
+                                   uint32_t child_phys) {
+    uint16_t total = idx_hdr->eh_entries + 1;
+    ext4_extent_idx_t *all = kmalloc(total * sizeof(*all));
+    if (!all)
+        return -1;
+
+    ext4_extent_idx_t *old = (ext4_extent_idx_t *)(idx_hdr + 1);
+    uint16_t pos = 0;
+    while (pos < idx_hdr->eh_entries && old[pos].ei_block < logical_block)
+        pos++;
+    memcpy(all, old, pos * sizeof(*all));
+    memset(&all[pos], 0, sizeof(*all));
+    all[pos].ei_block = logical_block;
+    ext4_idx_set_pblock(&all[pos], child_phys);
+    memcpy(&all[pos + 1], &old[pos],
+           (idx_hdr->eh_entries - pos) * sizeof(*all));
+
+    uint32_t new_idx_block = ext2_alloc_block_hint(mnt, idx_phys + 1);
+    uint8_t *new_idx_buf = new_idx_block ? kcalloc(1, mnt->block_size) : NULL;
+    if (!new_idx_buf) {
+        if (new_idx_block) ext2_free_block(mnt, new_idx_block);
+        kfree(all);
+        return -1;
+    }
+
+    uint16_t left_count = total / 2;
+    uint16_t right_count = total - left_count;
+    idx_hdr->eh_entries = left_count;
+    memcpy(old, all, left_count * sizeof(*old));
+
+    ext4_extent_header_t *new_hdr = (ext4_extent_header_t *)new_idx_buf;
+    new_hdr->eh_magic = EXT4_EXT_MAGIC;
+    new_hdr->eh_entries = right_count;
+    new_hdr->eh_max = ext4_extent_block_max(mnt);
+    new_hdr->eh_depth = idx_hdr->eh_depth;
+    new_hdr->eh_generation = idx_hdr->eh_generation;
+    memcpy(new_hdr + 1, &all[left_count], right_count * sizeof(*all));
+
+    int result = ext4_extent_write_node(mnt, idx_phys, idx_hdr);
+    if (result == 0)
+        result = ext4_extent_write_node(mnt, new_idx_block, new_idx_buf);
+
+    if (result == 0) {
+        ext4_extent_header_t *root = (ext4_extent_header_t *)inode->i_block;
+        result = ext4_extent_insert_index_entry(
+            root, (ext4_extent_idx_t *)(root + 1),
+            all[left_count].ei_block, new_idx_block);
+    }
+
+    if (result == 0)
+        inode->i_blocks += mnt->block_size / 512;
+    else
+        ext2_free_block(mnt, new_idx_block);
+
+    kfree(new_idx_buf);
+    kfree(all);
+    return result;
+}
+
+static int ext4_extent_add_root_index(ext2_mount_t *mnt,
+                                      ext2_inode_t *inode,
+                                      uint32_t logical_block,
+                                      uint32_t child_block) {
+    ext4_extent_header_t *root = (ext4_extent_header_t *)inode->i_block;
+    if (root->eh_entries < root->eh_max) {
+        return ext4_extent_insert_index_entry(
+            root, (ext4_extent_idx_t *)(root + 1), logical_block, child_block);
+    }
+
+    /* Root is full. If depth == 1, grow root to depth 2 */
+    if (root->eh_depth != 1)
+        return -1;
+
+    if (ext4_extent_grow_root(mnt, inode) != 0)
+        return -1;
+
+    /* Root is now depth 2, with 1 index entry pointing to the new index block */
+    root = (ext4_extent_header_t *)inode->i_block;
+    ext4_extent_idx_t *root_idxs = (ext4_extent_idx_t *)(root + 1);
+    uint64_t idx_phys = ext4_idx_get_pblock(&root_idxs[0]);
+
+    uint8_t *idx_buf = kmalloc(mnt->block_size);
+    if (!idx_buf)
+        return -1;
+
+    if (ext2_read_block(mnt, (uint32_t)idx_phys, idx_buf) != 0) {
+        kfree(idx_buf);
+        return -1;
+    }
+
+    ext4_extent_header_t *idx_hdr = (ext4_extent_header_t *)idx_buf;
+    int res = ext4_extent_insert_index_entry(
+        idx_hdr, (ext4_extent_idx_t *)(idx_hdr + 1), logical_block, child_block);
+    if (res == 0)
+        res = ext4_extent_write_node(mnt, (uint32_t)idx_phys, idx_buf);
+
+    kfree(idx_buf);
+    return res;
 }
 
 static int ext4_extent_split_leaf(ext2_mount_t *mnt, ext2_inode_t *inode,
@@ -265,7 +389,7 @@ static int ext4_extent_split_leaf(ext2_mount_t *mnt, ext2_inode_t *inode,
     memcpy(&all[pos + 1], &old[pos],
            (leaf->eh_entries - pos) * sizeof(*all));
 
-    uint32_t new_block = ext2_alloc_block(mnt);
+    uint32_t new_block = ext2_alloc_block_hint(mnt, leaf_block + 1);
     uint8_t *new_buf = new_block ? kcalloc(1, mnt->block_size) : NULL;
     if (!new_buf) {
         if (new_block)
@@ -291,7 +415,7 @@ static int ext4_extent_split_leaf(ext2_mount_t *mnt, ext2_inode_t *inode,
     if (result == 0)
         result = ext4_extent_write_node(mnt, new_block, new_buf);
     if (result == 0)
-        result = ext4_extent_add_root_index(inode, all[left_count].ee_block,
+        result = ext4_extent_add_root_index(mnt, inode, all[left_count].ee_block,
                                             new_block);
     if (result == 0)
         inode->i_blocks += mnt->block_size / 512;
@@ -314,7 +438,7 @@ int ext4_extent_insert(ext2_mount_t *mnt, ext2_inode_t *inode,
 
 retry:
     ext4_extent_header_t *root = (ext4_extent_header_t *)inode->i_block;
-    if (root->eh_magic != EXT4_EXT_MAGIC || root->eh_depth > 1)
+    if (root->eh_magic != EXT4_EXT_MAGIC || root->eh_depth > 2)
         return -1;
 
     if (root->eh_depth == 0) {
@@ -324,7 +448,150 @@ retry:
             return result;
         if (ext4_extent_grow_root(mnt, inode) != 0)
             return -1;
+        if (inode_num)
+            ext2_write_inode(mnt, inode_num, inode);
         goto retry;
+    }
+
+    if (root->eh_depth == 2) {
+        /* Level 2: find intermediate index block */
+        ext4_extent_idx_t *root_idxs = (ext4_extent_idx_t *)(root + 1);
+        ext4_extent_idx_t *best_root = NULL;
+        for (uint16_t i = 0; i < root->eh_entries; i++) {
+            if (root_idxs[i].ei_block <= logical_block)
+                best_root = &root_idxs[i];
+        }
+        if (!best_root)
+            best_root = &root_idxs[0];
+        uint64_t idx_phys = ext4_idx_get_pblock(best_root);
+        if (!idx_phys || idx_phys > UINT32_MAX)
+            return -1;
+
+        uint8_t *idx_buf = kmalloc(mnt->block_size);
+        if (!idx_buf)
+            return -1;
+        if (ext2_read_block(mnt, (uint32_t)idx_phys, idx_buf) != 0) {
+            kfree(idx_buf);
+            return -1;
+        }
+
+        ext4_extent_header_t *idx_hdr = (ext4_extent_header_t *)idx_buf;
+        if (idx_hdr->eh_magic != EXT4_EXT_MAGIC || idx_hdr->eh_depth != 1) {
+            kfree(idx_buf);
+            return -1;
+        }
+
+        /* Level 1: find leaf block */
+        ext4_extent_idx_t *mid_idxs = (ext4_extent_idx_t *)(idx_hdr + 1);
+        ext4_extent_idx_t *best_mid = NULL;
+        for (uint16_t i = 0; i < idx_hdr->eh_entries; i++) {
+            if (mid_idxs[i].ei_block <= logical_block)
+                best_mid = &mid_idxs[i];
+        }
+        if (!best_mid)
+            best_mid = &mid_idxs[0];
+        uint64_t leaf_phys = ext4_idx_get_pblock(best_mid);
+        if (!leaf_phys || leaf_phys > UINT32_MAX) {
+            kfree(idx_buf);
+            return -1;
+        }
+
+        uint8_t *leaf_buf = kmalloc(mnt->block_size);
+        if (!leaf_buf) {
+            kfree(idx_buf);
+            return -1;
+        }
+        if (ext2_read_block(mnt, (uint32_t)leaf_phys, leaf_buf) != 0) {
+            kfree(leaf_buf);
+            kfree(idx_buf);
+            return -1;
+        }
+
+        ext4_extent_header_t *leaf = (ext4_extent_header_t *)leaf_buf;
+        if (leaf->eh_magic != EXT4_EXT_MAGIC || leaf->eh_depth != 0) {
+            kfree(leaf_buf);
+            kfree(idx_buf);
+            return -1;
+        }
+
+        int result = ext4_extent_insert_leaf_entry(
+            leaf, (ext4_extent_t *)(leaf + 1), logical_block, phys_block, len);
+        if (result == 0) {
+            result = ext4_extent_write_node(mnt, (uint32_t)leaf_phys, leaf_buf);
+        } else if (result == 1) {
+            /* Leaf is full. Split leaf into leaf and new_leaf */
+            uint16_t total = leaf->eh_entries + 1;
+            ext4_extent_t *all = kmalloc(total * sizeof(*all));
+            if (!all) {
+                kfree(leaf_buf);
+                kfree(idx_buf);
+                return -1;
+            }
+            ext4_extent_t *old = (ext4_extent_t *)(leaf + 1);
+            uint16_t pos = 0;
+            while (pos < leaf->eh_entries && old[pos].ee_block < logical_block)
+                pos++;
+            memcpy(all, old, pos * sizeof(*all));
+            memset(&all[pos], 0, sizeof(*all));
+            all[pos].ee_block = logical_block;
+            all[pos].ee_len = len;
+            ext4_extent_set_pblock(&all[pos], phys_block);
+            memcpy(&all[pos + 1], &old[pos],
+                   (leaf->eh_entries - pos) * sizeof(*all));
+
+            uint32_t new_block = ext2_alloc_block_hint(mnt, (uint32_t)leaf_phys + 1);
+            uint8_t *new_buf = new_block ? kcalloc(1, mnt->block_size) : NULL;
+            if (!new_buf) {
+                if (new_block) ext2_free_block(mnt, new_block);
+                kfree(all);
+                kfree(leaf_buf);
+                kfree(idx_buf);
+                return -1;
+            }
+
+            uint16_t left_count = total / 2;
+            uint16_t right_count = total - left_count;
+            leaf->eh_entries = left_count;
+            memcpy(old, all, left_count * sizeof(*old));
+
+            ext4_extent_header_t *new_hdr = (ext4_extent_header_t *)new_buf;
+            new_hdr->eh_magic = EXT4_EXT_MAGIC;
+            new_hdr->eh_entries = right_count;
+            new_hdr->eh_max = ext4_extent_block_max(mnt);
+            new_hdr->eh_depth = 0;
+            new_hdr->eh_generation = leaf->eh_generation;
+            memcpy(new_hdr + 1, &all[left_count], right_count * sizeof(*all));
+
+            result = ext4_extent_write_node(mnt, (uint32_t)leaf_phys, leaf);
+            if (result == 0)
+                result = ext4_extent_write_node(mnt, new_block, new_buf);
+
+            if (result == 0) {
+                result = ext4_extent_insert_index_entry(
+                    idx_hdr, (ext4_extent_idx_t *)(idx_hdr + 1),
+                    all[left_count].ee_block, new_block);
+                if (result == 0) {
+                    result = ext4_extent_write_node(mnt, (uint32_t)idx_phys, idx_buf);
+                } else if (result == 1) {
+                    /* Intermediate index block is full. Split index block into root */
+                    result = ext4_extent_split_index(
+                        mnt, inode, idx_hdr, (uint32_t)idx_phys,
+                        all[left_count].ee_block, new_block);
+                }
+            }
+
+            if (result == 0)
+                inode->i_blocks += mnt->block_size / 512;
+            else
+                ext2_free_block(mnt, new_block);
+
+            kfree(new_buf);
+            kfree(all);
+        }
+
+        kfree(leaf_buf);
+        kfree(idx_buf);
+        return result;
     }
 
     ext4_extent_idx_t *idxs = (ext4_extent_idx_t *)(root + 1);
@@ -357,15 +624,13 @@ retry:
         klog_uint64(leaf_phys);
         klog_puts(" magic=");
         klog_uint64(leaf->eh_magic);
-        klog_puts(" depth=");
-        klog_uint64(leaf->eh_depth);
-        klog_puts(" entries=");
-        klog_uint64(leaf->eh_entries);
-        klog_puts(" max=");
-        klog_uint64(leaf->eh_max);
-        klog_puts("\n");
-        kfree(buf);
-        return -1;
+        klog_puts(" - reinitializing corrupt leaf\n");
+        memset(buf, 0, mnt->block_size);
+        leaf->eh_magic = EXT4_EXT_MAGIC;
+        leaf->eh_entries = 0;
+        leaf->eh_max = ext4_extent_block_max(mnt);
+        leaf->eh_depth = 0;
+        leaf->eh_generation = 0;
     }
 
     int result = ext4_extent_insert_leaf_entry(
@@ -386,42 +651,85 @@ int ext4_alloc_extent(ext2_mount_t *mnt, ext2_inode_t *inode,
     if (!mnt || !inode || !out_phys || !num_blocks || num_blocks > 0x7FFF)
         return -1;
 
-    uint32_t *blocks = kmalloc(num_blocks * sizeof(*blocks));
+    uint32_t stack_blocks[32];
+    uint32_t *blocks = (num_blocks <= 32) ? stack_blocks : kmalloc(num_blocks * sizeof(*blocks));
     if (!blocks)
         return -1;
 
+    int fail_reason = 0;
     if (ext3_journal_start(mnt) != 0) {
-        kfree(blocks);
+        if (blocks != stack_blocks) kfree(blocks);
         return -1;
+    }
+
+    uint32_t goal = 0;
+    if (logical_block > 0) {
+        uint32_t prev_phys = ext4_get_block_num(mnt, inode, logical_block - 1);
+        if (prev_phys)
+            goal = prev_phys + 1;
+    }
+    if (!goal && inode_num) {
+        uint32_t group = (inode_num - 1) / mnt->inodes_per_group;
+        goal = group * mnt->sb.s_blocks_per_group + mnt->sb.s_first_data_block +
+               ((inode_num % 64) * 64);
     }
 
     uint32_t count = 0;
     int result = -1;
     while (count < num_blocks) {
-        blocks[count] = ext2_alloc_block(mnt);
-        if (!blocks[count]) {
+        uint32_t hint = goal ? (goal + count) : 0;
+        uint32_t blk = ext2_alloc_block_hint(mnt, hint);
+        if (!blk) {
+            if (count > 0) break;
+            fail_reason = 2; /* No free blocks */
             goto done;
         }
-        count++;
-        if (count > 1 && blocks[count - 1] != blocks[0] + count - 1)
-            goto done;
+        if (count == 0 && goal > 0 && blk != goal) {
+            /* Another concurrent file claimed the adjacent block. Jump ahead to avoid leapfrogging */
+            ext2_free_block(mnt, blk);
+            goal = blk + 256 + ((inode_num % 16) * 64);
+            blk = ext2_alloc_block_hint(mnt, goal);
+            if (!blk) {
+                fail_reason = 2;
+                goto done;
+            }
+        } else if (count > 0 && blk != blocks[0] + count) {
+            ext2_free_block(mnt, blk);
+            break;
+        }
+        blocks[count++] = blk;
     }
 
-    if (ext4_extent_insert(mnt, inode, inode_num, logical_block,
-                           blocks[0], (uint16_t)num_blocks) != 0) {
+    if (count == 0) {
+        if (!fail_reason) fail_reason = 2;
         goto done;
     }
 
+    int insert_err = ext4_extent_insert(mnt, inode, inode_num, logical_block,
+                                        blocks[0], (uint16_t)count);
+    if (insert_err != 0) {
+        fail_reason = 3; /* Extent tree insert failed */
+        goto done;
+    }
+
+    inode->i_blocks += count * (mnt->block_size / 512);
     *out_phys = blocks[0];
     result = 0;
 
 done:
     if (result != 0) {
+        klog_puts("[EXT4] alloc_extent FAILED inode=");
+        klog_uint64(inode_num);
+        klog_puts(" logical=");
+        klog_uint64(logical_block);
+        klog_puts(" reason=");
+        klog_uint64(fail_reason);
+        klog_puts("\n");
         for (uint32_t i = 0; i < count; i++)
             ext2_free_block(mnt, blocks[i]);
     }
     ext3_journal_stop(mnt);
-    kfree(blocks);
+    if (blocks != stack_blocks) kfree(blocks);
     return result;
 }
 static void ext4_extent_unaccount(ext2_mount_t *mnt, ext2_inode_t *inode,
@@ -491,8 +799,7 @@ int ext4_extent_free_all(ext2_mount_t *mnt, ext2_inode_t *inode) {
     if (!mnt || !inode || !ext4_inode_has_extents(inode))
         return -1;
     ext4_extent_header_t *root = (ext4_extent_header_t *)inode->i_block;
-    if (ext4_extent_free_node(mnt, root, inode) != 0)
-        return -1;
+    ext4_extent_free_node(mnt, root, inode);
     ext4_extent_init_inode(inode);
     inode->i_blocks = 0;
     inode->i_size = 0;

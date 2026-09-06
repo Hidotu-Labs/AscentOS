@@ -666,6 +666,11 @@ void sysfs_init(void) {
                    "E:ID_SEAT=seat0\n"
                    "E:NAME=\"AscentOS Mouse\"\n");
     }
+
+    // Mark system as container-like environment so WebKitGTK and sandbox tools
+    // detect that unprivileged user namespaces are not available and use their
+    // native non-sandboxed process execution path automatically.
+    sysfs_mkfile(run_dir, ".containerenv", "engine=avoryos\n");
   }
 
   klog_puts("[OK] SysFS initialized at /sys\n");

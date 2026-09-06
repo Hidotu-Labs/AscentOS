@@ -222,22 +222,6 @@ int ext3_journal_stop(ext2_mount_t *mnt) {
   jbd_superblock_t *jsb = (jbd_superblock_t *)sb_buf;
   jsb->s_start = __builtin_bswap32(trans->start_block);
   ext2_write_block(mnt, sb_phys, sb_buf);
-  for (uint32_t i = 0; i < trans->blocks_in_trans; i++) {
-    uint32_t tag_off = sizeof(jbd_header_t) + (i * sizeof(jbd_block_tag_t));
-    jbd_block_tag_t *tag =
-        (jbd_block_tag_t *)(trans->desc_block_buf + tag_off);
-    uint32_t target_nr = __builtin_bswap32(tag->t_blocknr);
-
-    uint32_t j_data_pos = trans->start_block + 1 + i;
-    uint32_t j_phys =
-        ext2_get_block_num(mnt, &trans->journal_inode, j_data_pos);
-
-    uint8_t *tmp = kmalloc(mnt->block_size);
-    ext2_read_block(mnt, j_phys, tmp);
-    ext2_write_block(mnt, target_nr, tmp);
-    kfree(tmp);
-  }
-
   trans->sequence++;
   trans->active = false;
   trans->owner_tid = 0;

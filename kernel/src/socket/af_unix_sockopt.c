@@ -148,6 +148,15 @@ int unix_getsockopt_impl(socket_t *sock, int level, int optname,
     }
     return 0;
 
+  case 9: { // SO_KEEPALIVE
+    if (*optlen < (int)sizeof(int))
+      return -22;
+    *(int *)optval = 0;
+    *optlen = sizeof(int);
+    klog_puts("[OK] unix_getsockopt: SO_KEEPALIVE (0)\n");
+    return 0;
+  }
+
   case 31: // SO_PEERSEC
   case 59: // SO_PEERGROUPS
     return -92; // ENOPROTOOPT (unsupported security context / groups)
@@ -315,6 +324,10 @@ int unix_setsockopt_impl(socket_t *sock, int level, int optname,
     klog_puts(" ms\n");
     return 0;
   }
+
+  case 9: // SO_KEEPALIVE
+    klog_puts("[OK] unix_setsockopt: SO_KEEPALIVE\n");
+    return 0;
 
   case 31: // SO_PEERSEC
   case 59: // SO_PEERGROUPS

@@ -7,7 +7,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define THREAD_STACK_SIZE 8192
+#define THREAD_STACK_SIZE 16384
 
 /* Global thread registry state */
 extern spinlock_t tid_lock;

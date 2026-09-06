@@ -177,6 +177,117 @@ vfs_page_t *vfs_cache_get_or_create(vfs_node_t *node, uint32_t offset) {
   return page;
 }
 
+#define MAX_READAHEAD_PAGES 32u
+
+uint32_t vfs_cache_readahead(vfs_node_t *node, uint32_t offset, uint32_t max_bytes) {
+  if (!node || !node->read || !max_bytes || offset >= node->length)
+    return 0;
+
+  offset &= ~(PAGE_SIZE - 1);
+  if (offset >= node->length)
+    return 0;
+
+  uint32_t available = node->length - offset;
+  if (max_bytes > available)
+    max_bytes = available;
+
+  uint32_t max_pages = (max_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
+  if (max_pages > MAX_READAHEAD_PAGES)
+    max_pages = MAX_READAHEAD_PAGES;
+  if (max_pages == 0)
+    return 0;
+
+  uint32_t missing_count = 0;
+  spinlock_acquire(&node->pages_lock);
+  for (uint32_t i = 0; i < max_pages; i++) {
+    uint32_t page_off = offset + i * PAGE_SIZE;
+    if (page_off >= node->length)
+      break;
+    vfs_page_t *existing = radix_tree_lookup(&node->pages, cache_key(page_off));
+    if (existing) {
+      if (i == 0) {
+        spinlock_release(&node->pages_lock);
+        return 0;
+      }
+      break;
+    }
+    missing_count++;
+  }
+  spinlock_release(&node->pages_lock);
+
+  if (missing_count <= 1)
+    return 0;
+
+  void *frames[MAX_READAHEAD_PAGES] = {0};
+  vfs_page_t *candidates[MAX_READAHEAD_PAGES] = {0};
+  uint32_t allocated = 0;
+
+  for (uint32_t i = 0; i < missing_count; i++) {
+    frames[i] = pmm_alloc_page();
+    if (!frames[i])
+      break;
+    candidates[i] = kmalloc(sizeof(vfs_page_t));
+    if (!candidates[i]) {
+      pmm_free_page(frames[i]);
+      break;
+    }
+    memset(candidates[i], 0, sizeof(vfs_page_t));
+    candidates[i]->offset = offset + i * PAGE_SIZE;
+    candidates[i]->frame_phys = (uint64_t)frames[i];
+    candidates[i]->loading = true;
+    candidates[i]->refs = 1;
+    candidates[i]->last_used = cache_stamp();
+    allocated++;
+  }
+
+  if (allocated == 0)
+    return 0;
+
+  uint32_t inserted = 0;
+  spinlock_acquire(&node->pages_lock);
+  for (uint32_t i = 0; i < allocated; i++) {
+    uint32_t page_off = offset + i * PAGE_SIZE;
+    vfs_page_t *existing = radix_tree_lookup(&node->pages, cache_key(page_off));
+    if (existing || radix_tree_insert(&node->pages, cache_key(page_off), candidates[i])) {
+      break;
+    }
+    __atomic_add_fetch(&vfs_cached_pages, 1, __ATOMIC_RELAXED);
+    inserted++;
+  }
+  spinlock_release(&node->pages_lock);
+
+  for (uint32_t i = inserted; i < allocated; i++) {
+    pmm_free_page(frames[i]);
+    kfree(candidates[i]);
+  }
+
+  if (inserted == 0)
+    return 0;
+
+  for (uint32_t i = 0; i < inserted; i++) {
+    uint32_t page_off = offset + i * PAGE_SIZE;
+    uint32_t avail = node->length > page_off ? node->length - page_off : 0;
+    uint32_t to_read = avail > PAGE_SIZE ? PAGE_SIZE : avail;
+    void *frame_virt = PHYS_TO_VIRT(candidates[i]->frame_phys);
+    uint32_t read = to_read ? node->read(node, page_off, to_read, frame_virt) : 0;
+    if (read < PAGE_SIZE)
+      memset((uint8_t *)frame_virt + read, 0, PAGE_SIZE - read);
+  }
+
+  spinlock_acquire(&node->pages_lock);
+  for (uint32_t i = 0; i < inserted; i++) {
+    candidates[i]->uptodate = true;
+    candidates[i]->loading = false;
+  }
+  spinlock_release(&node->pages_lock);
+
+  for (uint32_t i = 0; i < inserted; i++) {
+    vfs_cache_put(node, candidates[i]);
+  }
+
+  return inserted * PAGE_SIZE;
+}
+
 uint32_t vfs_cache_read(vfs_node_t *node, uint32_t offset, uint32_t size,
                         uint8_t *buffer) {
   if (!node || !buffer || !size || offset >= node->length)
@@ -192,7 +303,19 @@ uint32_t vfs_cache_read(vfs_node_t *node, uint32_t offset, uint32_t size,
     uint32_t count = PAGE_SIZE - in_page;
     if (count > size - done)
       count = size - done;
-    vfs_page_t *page = vfs_cache_get_or_create(node, page_offset);
+
+    vfs_page_t *page = vfs_cache_lookup(node, page_offset);
+    if (!page) {
+      if (node->length >= 64 * 1024) {
+        uint32_t ra_bytes = 128 * 1024;
+        if (size - done > ra_bytes)
+          ra_bytes = (size - done + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+        if (ra_bytes > 256 * 1024)
+          ra_bytes = 256 * 1024;
+        vfs_cache_readahead(node, page_offset, ra_bytes);
+      }
+      page = vfs_cache_get_or_create(node, page_offset);
+    }
     if (!page)
       break;
     if (is_user_ptr((uint64_t)buffer)) {
@@ -245,6 +368,8 @@ struct key_batch {
 static bool collect_keys(uint64_t key, void *value, void *opaque) {
   struct key_batch *batch = opaque;
   vfs_page_t *page = value;
+  if (!page || (uint64_t)page < 0xFFFF800000000000ULL)
+    return true;
   if (key < batch->first || key > batch->last)
     return true;
   if (batch->unused_only &&
@@ -290,6 +415,8 @@ void vfs_cache_invalidate_range(vfs_node_t *node, uint32_t offset,
 
 static void cache_destroy_value(void *value) {
   vfs_page_t *page = value;
+  if (!page || (uint64_t)page < 0xFFFF800000000000ULL)
+    return;
   page->evicted = true;
   __atomic_sub_fetch(&vfs_cached_pages, 1, __ATOMIC_RELAXED);
   if (!page->refs)
@@ -297,7 +424,7 @@ static void cache_destroy_value(void *value) {
 }
 
 void vfs_cache_clear(vfs_node_t *node) {
-  if (!node)
+  if (!node || (uint64_t)node < 0xFFFF800000000000ULL)
     return;
   spinlock_acquire(&node->pages_lock);
   radix_tree_destroy(&node->pages, cache_destroy_value);
@@ -305,7 +432,7 @@ void vfs_cache_clear(vfs_node_t *node) {
 }
 
 void vfs_cache_clear_unused(vfs_node_t *node) {
-  if (!node)
+  if (!node || (uint64_t)node < 0xFFFF800000000000ULL || !(node->flags & FS_PAGE_CACHE))
     return;
   spinlock_acquire(&node->pages_lock);
   cache_remove_range(node, 0, UINT64_MAX, true);
@@ -320,6 +447,8 @@ struct reclaim_search {
 
 static bool find_reclaimable(uint64_t key, void *value, void *opaque) {
   vfs_page_t *page = value;
+  if (!page || (uint64_t)page < 0xFFFF800000000000ULL)
+    return true;
   struct reclaim_search *search = opaque;
   if (page->refs || page->dirty || page->loading || page->writeback ||
       pmm_get_ref((void *)page->frame_phys) != 1)

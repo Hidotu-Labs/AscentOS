@@ -621,9 +621,85 @@ install_apk "acl-libs" "main"
 install_apk "elogind-common" "community"
 install_apk "elogind" "community"
 install_apk "lightdm" "community"
+install_apk "lightdm-gtk-greeter" "community"
 install_apk "lxdm" "community"
 install_apk "xinit" "community"
 ln -sf elogind/libelogind-shared-252.so "${ROOTFS_DIR}/usr/lib/libelogind-shared-252.so" 2>/dev/null || true
+
+# Patch lightdm-gtk-greeter embedded UI signal for GreeterMenuBar (bypasses missing signal in standalone GtkBuilder load)
+if [ -f "${ROOTFS_DIR}/usr/bin/lightdm-gtk-greeter" ]; then
+    python3 - <<'PY'
+from pathlib import Path
+path = Path("${ROOTFS_DIR}/usr/bin/lightdm-gtk-greeter")
+data = bytearray(path.read_bytes())
+target = b'<signal name="key-press-event" handler="menubar_key_press_cb" swapped="no"/>'
+off = data.find(target)
+if off != -1:
+    data[off:off + len(target)] = b" " * len(target)
+    path.write_bytes(data)
+    print(f"[OK] patched lightdm-gtk-greeter UI signal at 0x{off:x}")
+else:
+    print("[OK] lightdm-gtk-greeter already patched or target not found")
+PY
+    chmod +x "${ROOTFS_DIR}/usr/bin/lightdm-gtk-greeter"
+fi
+
+# Configure LightDM and GTK Greeter
+mkdir -p "${ROOTFS_DIR}/etc/lightdm"
+cat > "${ROOTFS_DIR}/etc/lightdm/lightdm.conf" <<'EOF'
+[LightDM]
+run-directory=/run/lightdm
+start-default-seat=true
+logind-load-seats=false
+logind-check-graphical=false
+
+[Seat:*]
+type=local
+greeter-session=lightdm-gtk-greeter
+greeter-hide-users=false
+user-session=xfce
+xserver-command=/usr/libexec/Xorg -noreset -nolisten tcp -ac
+session-wrapper=/etc/X11/xinit/Xsession
+EOF
+
+cat > "${ROOTFS_DIR}/etc/lightdm/lightdm-gtk-greeter.conf" <<'EOF'
+[greeter]
+at-spi-enabled=false
+indicators=~host;~spacer;~clock;~power
+theme-name=Adwaita
+icon-theme-name=Adwaita
+EOF
+
+mkdir -p "${ROOTFS_DIR}/etc/pam.d"
+cat > "${ROOTFS_DIR}/etc/pam.d/lightdm-greeter" <<'EOF'
+#%PAM-1.0
+auth      required  pam_permit.so
+account   required  pam_permit.so
+password  required  pam_deny.so
+session   required  pam_env.so
+session   required  pam_unix.so
+-session  optional  pam_limits.so
+EOF
+
+cat > "${ROOTFS_DIR}/etc/pam.d/lightdm" <<'EOF'
+#%PAM-1.0
+auth      required  pam_permit.so
+account   required  pam_permit.so
+password  required  pam_deny.so
+session   required  pam_env.so
+session   required  pam_unix.so
+-session  optional  pam_limits.so
+EOF
+
+cat > "${ROOTFS_DIR}/etc/pam.d/lightdm-autologin" <<'EOF'
+#%PAM-1.0
+auth      required  pam_permit.so
+account   required  pam_permit.so
+password  required  pam_deny.so
+session   required  pam_env.so
+session   required  pam_unix.so
+-session  optional  pam_limits.so
+EOF
 
 # Plugins commonly expected to exist at XFCE4 startup
 install_apk "xfce4-panel-dev" "community"
@@ -738,6 +814,11 @@ install_apk "libsrtp" "main"
 install_apk "tiff" "main"
 install_apk "spandsp" "main"
 install_apk "gst-plugins-bad" "community"
+install_apk "fdk-aac" "community"
+install_apk "mpg123-libs" "main"
+install_apk "speex" "main"
+install_apk "gst-plugins-good" "community"
+install_apk "gst-plugins-ugly" "community"
 install_apk "harfbuzz-icu" "main"
 install_apk "hyphen" "community"
 install_apk "icu-data-en" "main"
@@ -1285,23 +1366,67 @@ XfdesktopIconView rubberband {
 }
 EOF
 
-mkdir -p "${ROOTFS_DIR}/etc/lightdm" "${ROOTFS_DIR}/etc/X11/xinit"
+mkdir -p "${ROOTFS_DIR}/etc/lightdm" "${ROOTFS_DIR}/etc/X11/xinit" "${ROOTFS_DIR}/etc/pam.d"
 cat > "${ROOTFS_DIR}/etc/lightdm/lightdm.conf" << 'EOF'
 [LightDM]
 run-directory=/run/lightdm
 start-default-seat=true
+logind-load-seats=false
 logind-check-graphical=false
 
 [Seat:*]
 type=local
-autologin-user=root
-autologin-user-timeout=0
-autologin-session=xfce
+greeter-session=lightdm-gtk-greeter
 greeter-hide-users=false
 user-session=xfce
 xserver-command=/usr/libexec/Xorg -noreset -nolisten tcp
 session-wrapper=/etc/X11/xinit/Xsession
 EOF
+
+cat > "${ROOTFS_DIR}/etc/lightdm/lightdm-gtk-greeter.conf" << 'EOF'
+[greeter]
+at-spi-enabled=false
+indicators=~host;~spacer;~clock;~power
+theme-name=Adwaita
+icon-theme-name=Adwaita
+EOF
+
+# Ensure PAM services for LightDM (greeter, login, autologin) work without elogind / utmps issues
+cat > "${ROOTFS_DIR}/etc/pam.d/lightdm-greeter" << 'EOF'
+#%PAM-1.0
+auth      required  pam_permit.so
+account   required  pam_permit.so
+password  required  pam_deny.so
+session   required  pam_env.so
+session   required  pam_unix.so
+-session  optional  pam_limits.so
+EOF
+
+cat > "${ROOTFS_DIR}/etc/pam.d/lightdm" << 'EOF'
+#%PAM-1.0
+auth      required  pam_permit.so
+account   required  pam_permit.so
+password  required  pam_deny.so
+session   required  pam_env.so
+session   required  pam_unix.so
+-session  optional  pam_limits.so
+EOF
+
+cat > "${ROOTFS_DIR}/etc/pam.d/lightdm-autologin" << 'EOF'
+#%PAM-1.0
+auth      required  pam_permit.so
+account   required  pam_permit.so
+password  required  pam_deny.so
+session   required  pam_env.so
+session   required  pam_unix.so
+-session  optional  pam_limits.so
+EOF
+
+# Ensure base-session-noninteractive does not fail if pam_limits is missing libutmps
+if [ -f "${ROOTFS_DIR}/etc/pam.d/base-session-noninteractive" ]; then
+    sed -i 's/^session[[:space:]]\+required[[:space:]]\+pam_limits.so/-session optional pam_limits.so/' \
+        "${ROOTFS_DIR}/etc/pam.d/base-session-noninteractive" 2>/dev/null || true
+fi
 cat > "${ROOTFS_DIR}/etc/xprofile" << 'EOF'
 export XDG_SESSION_TYPE=x11
 export XDG_CURRENT_DESKTOP=XFCE

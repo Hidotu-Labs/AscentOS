@@ -56,6 +56,26 @@ uint32_t ramfs_read(vfs_node_t *node, uint32_t offset, uint32_t size,
   return size;
 }
 
+static uint8_t *ramfs_alloc_buffer(ramfs_file_t *file, uint32_t req_cap, uint32_t *out_cap, uint8_t *out_is_pmm) {
+  if (file->data_is_pmm || req_cap >= 4096) {
+    uint32_t aligned_cap = (req_cap + 4095) & ~4095U;
+    if (aligned_cap < 4096)
+      aligned_cap = 4096;
+    size_t pages = aligned_cap / 4096;
+    void *phys = pmm_alloc_pages(pages);
+    if (phys) {
+      uint64_t hhdm = pmm_get_hhdm_offset();
+      *out_cap = aligned_cap;
+      *out_is_pmm = 1;
+      return (uint8_t *)((uint64_t)phys + hhdm);
+    }
+  }
+
+  *out_cap = req_cap;
+  *out_is_pmm = 0;
+  return (uint8_t *)kmalloc(req_cap);
+}
+
 uint32_t ramfs_write(vfs_node_t *node, uint32_t offset, uint32_t size,
                      uint8_t *buffer) {
   if (!node || !node->device)
@@ -65,21 +85,24 @@ uint32_t ramfs_write(vfs_node_t *node, uint32_t offset, uint32_t size,
 
   // Auto-resize buffer if needed
   if (offset + size > file->capacity) {
-    uint32_t new_cap = (offset + size) * 2; // Double the required size
-    if (new_cap < 512)
-      new_cap = 512;
+    uint32_t req_cap = (offset + size) * 2; // Double the required size
+    if (req_cap < 512)
+      req_cap = 512;
 
-    uint8_t *new_data = kmalloc(new_cap);
+    uint32_t new_cap = 0;
+    uint8_t new_is_pmm = 0;
+    uint8_t *new_data = ramfs_alloc_buffer(file, req_cap, &new_cap, &new_is_pmm);
     if (!new_data)
       return 0; // OOM
 
     if (file->data) {
-      memcpy(new_data, file->data, file->capacity);
+      uint32_t copy_len = node->length < file->capacity ? node->length : file->capacity;
+      memcpy(new_data, file->data, copy_len);
       ramfs_free_file_data(file);
     }
     file->data = new_data;
     file->capacity = new_cap;
-    file->data_is_pmm = 0;
+    file->data_is_pmm = new_is_pmm;
   }
 
   if (is_user_ptr((uint64_t)buffer)) {
@@ -115,19 +138,21 @@ int ramfs_truncate(vfs_node_t *node, uint32_t new_len) {
   }
 
   if (new_len > file->capacity) {
-    uint32_t new_cap = new_len;
-    uint8_t *new_data = kmalloc(new_cap);
+    uint32_t new_cap = 0;
+    uint8_t new_is_pmm = 0;
+    uint8_t *new_data = ramfs_alloc_buffer(file, new_len, &new_cap, &new_is_pmm);
     if (!new_data)
       return -1; // ENOMEM
     if (file->data) {
-      memcpy(new_data, file->data, file->capacity);
+      uint32_t copy_len = node->length < file->capacity ? node->length : file->capacity;
+      memcpy(new_data, file->data, copy_len);
       ramfs_free_file_data(file);
     }
-    if (new_len > node->length)
-      memset(new_data + node->length, 0, new_len - node->length);
+    if (new_cap > node->length)
+      memset(new_data + node->length, 0, new_cap - node->length);
     file->data = new_data;
     file->capacity = new_cap;
-    file->data_is_pmm = 0;
+    file->data_is_pmm = new_is_pmm;
   } else if (new_len > node->length) {
     memset(file->data + node->length, 0, new_len - node->length);
   }
@@ -141,7 +166,10 @@ int ramfs_fallocate(vfs_node_t *node, int mode, uint32_t offset, uint32_t len) {
     return -1;
 
   ramfs_file_t *file = (ramfs_file_t *)node->device;
-  uint32_t needed = offset + len;
+  uint64_t needed64 = (uint64_t)offset + (uint64_t)len;
+  if (needed64 > 0xFFFFFFFFULL)
+    return -1;
+  uint32_t needed = (uint32_t)needed64;
 
   klog_debugf("[RAMFS] fallocate node=%s mode=%llu offset=%llu len=%llu old_len=%llu old_cap=%llu old_pmm=%llu needed=%llu\n",
               node->name, (unsigned long long)mode, (unsigned long long)offset,
@@ -150,19 +178,22 @@ int ramfs_fallocate(vfs_node_t *node, int mode, uint32_t offset, uint32_t len) {
               (unsigned long long)needed);
 
   if (needed > file->capacity) {
-    uint8_t *new_data = kmalloc(needed);
+    uint32_t new_cap = 0;
+    uint8_t new_is_pmm = 0;
+    uint8_t *new_data = ramfs_alloc_buffer(file, needed, &new_cap, &new_is_pmm);
     if (!new_data)
       return -1;
     if (file->data) {
-      memcpy(new_data, file->data, node->length);
+      uint32_t copy_len = node->length < file->capacity ? node->length : file->capacity;
+      memcpy(new_data, file->data, copy_len);
       ramfs_free_file_data(file);
     }
     // Zero initialize new capacity range
-    if (needed > node->length)
-      memset(new_data + node->length, 0, needed - node->length);
+    if (new_cap > node->length)
+      memset(new_data + node->length, 0, new_cap - node->length);
     file->data = new_data;
-    file->capacity = needed;
-    file->data_is_pmm = 0;
+    file->capacity = new_cap;
+    file->data_is_pmm = new_is_pmm;
   }
 
   // mode 1 is FALLOC_FL_KEEP_SIZE
@@ -180,11 +211,6 @@ static struct dirent *ramfs_readdir(vfs_node_t *node, uint32_t index) {
     return 0;
   ramfs_dir_t *dir = (ramfs_dir_t *)node->device;
 
-  // For standard compliance, the returned dirent is often dynamically allocated
-  // or statically buffered. For simplicity without a thread-local static, we
-  // allocate a temp dirent per call. Callers are normally responsible for
-  // providing a buffer, but our signature returns struct dirent*. Using a
-  // static inside the function is OK for non-preemptive mono-core currently.
   static struct dirent d;
   memset(&d, 0, sizeof(struct dirent));
 
@@ -195,8 +221,7 @@ static struct dirent *ramfs_readdir(vfs_node_t *node, uint32_t index) {
   }
   if (index == 1) {
     strcpy(d.name, "..");
-    d.ino = node->inode; // Technically wrong parent inode, but acceptable for
-                         // basic ramfs
+    d.ino = node->inode;
     return &d;
   }
 
@@ -218,13 +243,6 @@ static struct dirent *ramfs_readdir(vfs_node_t *node, uint32_t index) {
 static vfs_node_t *ramfs_finddir(vfs_node_t *node, char *name) {
   if (!node || !node->device)
     return 0;
-
-  // Log searches in /sys
-  klog_debug_puts("[RAMFS] finddir: parent=");
-  klog_debug_puts(node->name);
-  klog_debug_puts(" looking for=");
-  klog_debug_puts(name);
-  klog_debug_puts("\n");
 
   ramfs_dir_t *dir = (ramfs_dir_t *)node->device;
 
@@ -280,7 +298,6 @@ static vfs_node_t *ramfs_make_node(char *name, uint16_t perm, uint32_t type) {
 
   n->chmod = ramfs_chmod;
   n->chown = ramfs_chown;
-  // Block devices would be populated via ramfs_mount_node
 
   return n;
 }
@@ -441,7 +458,7 @@ static int ramfs_rename(vfs_node_t *node, char *old_name, char *new_name) {
   if (ramfs_finddir(node, new_name) != 0) {
     // If target exists, unlink it first (overwrite semantics per POSIX)
     vfs_node_t *target = ramfs_finddir(node, new_name);
-    if ((target->flags & FS_TYPE_MASK) != FS_DIRECTORY) {
+    if (target && (target->flags & FS_TYPE_MASK) != FS_DIRECTORY) {
       ramfs_unlink(node, new_name);
     } else {
       return -1; // Can't overwrite a directory

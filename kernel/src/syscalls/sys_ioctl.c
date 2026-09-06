@@ -128,6 +128,25 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
     ret = 0;
     break;
   }
+  case TCGETS2: {
+    if (!arg ||
+        !vmm_is_user_addr_range_valid(arg, sizeof(struct termios2))) {
+      ret = (uint64_t)-14;
+      break;
+    }
+    struct termios2 t2;
+    t2.c_iflag = console_termios.c_iflag;
+    t2.c_oflag = console_termios.c_oflag;
+    t2.c_cflag = console_termios.c_cflag;
+    t2.c_lflag = console_termios.c_lflag;
+    t2.c_line = console_termios.c_line;
+    memcpy(t2.c_cc, console_termios.c_cc, KERNEL_NCCS);
+    t2.c_ispeed = 38400;
+    t2.c_ospeed = 38400;
+    memcpy((void *)arg, &t2, sizeof(struct termios2));
+    ret = 0;
+    break;
+  }
   case TCSETS:
   case TCSETSW:
   case TCSETSF: {
@@ -144,6 +163,44 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
     console_termios.c_lflag = kt.c_lflag;
     console_termios.c_line = kt.c_line;
     memcpy(console_termios.c_cc, kt.c_cc, KERNEL_NCCS);
+    ret = 0;
+    break;
+  }
+  case TCSETS2:
+  case TCSETSW2:
+  case TCSETSF2: {
+    if (!arg ||
+        !vmm_is_user_addr_range_valid(arg, sizeof(struct termios2))) {
+      ret = (uint64_t)-14;
+      break;
+    }
+    struct termios2 t2;
+    memcpy(&t2, (const void *)arg, sizeof(struct termios2));
+    console_termios.c_iflag = t2.c_iflag;
+    console_termios.c_oflag = t2.c_oflag;
+    console_termios.c_cflag = t2.c_cflag;
+    console_termios.c_lflag = t2.c_lflag;
+    console_termios.c_line = t2.c_line;
+    memcpy(console_termios.c_cc, t2.c_cc, KERNEL_NCCS);
+    ret = 0;
+    break;
+  }
+  case TIOCGPGRP: {
+    if (!arg || !vmm_is_user_addr_range_valid(arg, sizeof(int))) {
+      ret = (uint64_t)-14;
+      break;
+    }
+    struct thread *curr = sched_get_current();
+    int pgrp = curr ? (int)curr->pgid : 1;
+    memcpy((void *)arg, &pgrp, sizeof(int));
+    ret = 0;
+    break;
+  }
+  case TIOCSPGRP: {
+    if (!arg || !vmm_is_user_addr_range_valid(arg, sizeof(int))) {
+      ret = (uint64_t)-14;
+      break;
+    }
     ret = 0;
     break;
   }

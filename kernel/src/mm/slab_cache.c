@@ -34,22 +34,11 @@ static kmem_cache_t cache_pool[SLAB_CACHE_MAX_CACHES];
 static bool cache_used[SLAB_CACHE_MAX_CACHES];
 static int cache_count = 0;
 
-// Virtual address bumper for slab pages (separate from heap bumper)
-static uint64_t slab_vaddr_cursor = KERNEL_HEAP_BASE + 0x100000000ULL;
-
 // Pre-built Kernel Object Caches
 
 kmem_cache_t *thread_cache = NULL;
 kmem_cache_t *vfs_node_cache = NULL;
 kmem_cache_t *vma_cache = NULL;
-
-// Internal Helpers
-
-static uint64_t slab_allocate_vaddr(void) {
-  uint64_t va = slab_vaddr_cursor;
-  slab_vaddr_cursor += PAGE_SIZE;
-  return va;
-}
 
 // Unlink a slab from a doubly-linked list
 static void slab_unlink(struct slab_page **head, struct slab_page *s) {
@@ -78,16 +67,7 @@ static struct slab_page *slab_page_alloc(kmem_cache_t *cache) {
   if (!frame)
     return NULL;
 
-  uint64_t vaddr = slab_allocate_vaddr();
-  uint64_t *pml4 = vmm_get_active_pml4();
-
-  if (!vmm_map_page(pml4, vaddr, (uint64_t)frame,
-                    PAGE_FLAG_PRESENT | PAGE_FLAG_RW)) {
-    pmm_free_page(frame);
-    return NULL;
-  }
-
-  struct slab_page *s = (struct slab_page *)vaddr;
+  struct slab_page *s = (struct slab_page *)PHYS_TO_VIRT(frame);
   memset(s, 0, PAGE_SIZE);
 
   s->magic = SLAB_PAGE_MAGIC;

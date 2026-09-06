@@ -414,13 +414,26 @@ int ext2_set_block_num(ext2_mount_t *mnt, ext2_inode_t *inode,
   return -1;
 }
 
-uint32_t ext2_alloc_block(ext2_mount_t *mnt) {
+uint32_t ext2_alloc_block_hint(ext2_mount_t *mnt, uint32_t goal) {
   ext3_journal_start(mnt);
   uint8_t *bitmap = kmalloc(mnt->block_size);
   if (!bitmap)
     return 0;
 
-  for (uint32_t g = 0; g < mnt->groups_count; g++) {
+  uint32_t start_group = 0;
+  uint32_t start_bit = 0;
+
+  if (goal >= mnt->sb.s_first_data_block && goal < mnt->sb.s_blocks_count) {
+    start_group = (goal - mnt->sb.s_first_data_block) / mnt->sb.s_blocks_per_group;
+    start_bit   = (goal - mnt->sb.s_first_data_block) % mnt->sb.s_blocks_per_group;
+    if (start_group >= mnt->groups_count) {
+      start_group = 0;
+      start_bit = 0;
+    }
+  }
+
+  for (uint32_t i = 0; i < mnt->groups_count; i++) {
+    uint32_t g = (start_group + i) % mnt->groups_count;
     if (mnt->bgdt[g].bg_free_blocks_count == 0)
       continue;
 
@@ -434,7 +447,8 @@ uint32_t ext2_alloc_block(ext2_mount_t *mnt) {
         blocks_in_group = remaining;
     }
 
-    for (uint32_t b = 0; b < blocks_in_group; b++) {
+    uint32_t b_start = (i == 0) ? start_bit : 0;
+    for (uint32_t b = b_start; b < blocks_in_group; b++) {
       uint32_t byte_idx = b / 8;
       uint8_t  bit_mask = 1 << (b % 8);
       if (!(bitmap[byte_idx] & bit_mask)) {
@@ -446,10 +460,48 @@ uint32_t ext2_alloc_block(ext2_mount_t *mnt) {
         ext2_write_bgdt(mnt);
         ext2_write_superblock(mnt);
 
+        uint32_t allocated_block = g * mnt->sb.s_blocks_per_group + b +
+                                   mnt->sb.s_first_data_block;
+        uint32_t c_idx = allocated_block % EXT2_CACHE_SIZE;
+        spinlock_acquire(&mnt->cache_lock);
+        if (mnt->cache[c_idx].num == allocated_block) {
+          mnt->cache[c_idx].num = 0;
+        }
+        spinlock_release(&mnt->cache_lock);
+
         ext3_journal_stop(mnt);
         kfree(bitmap);
-        return g * mnt->sb.s_blocks_per_group + b +
-               mnt->sb.s_first_data_block;
+        return allocated_block;
+      }
+    }
+
+    if (i == 0 && start_bit > 0) {
+      uint32_t b_limit = (start_bit < blocks_in_group) ? start_bit : blocks_in_group;
+      for (uint32_t b = 0; b < b_limit; b++) {
+        uint32_t byte_idx = b / 8;
+        uint8_t  bit_mask = 1 << (b % 8);
+        if (!(bitmap[byte_idx] & bit_mask)) {
+          bitmap[byte_idx] |= bit_mask;
+          ext3_journal_block(mnt, mnt->bgdt[g].bg_block_bitmap, bitmap);
+
+          mnt->bgdt[g].bg_free_blocks_count--;
+          mnt->sb.s_free_blocks_count--;
+          ext2_write_bgdt(mnt);
+          ext2_write_superblock(mnt);
+
+          uint32_t allocated_block = g * mnt->sb.s_blocks_per_group + b +
+                                     mnt->sb.s_first_data_block;
+          uint32_t c_idx = allocated_block % EXT2_CACHE_SIZE;
+          spinlock_acquire(&mnt->cache_lock);
+          if (mnt->cache[c_idx].num == allocated_block) {
+            mnt->cache[c_idx].num = 0;
+          }
+          spinlock_release(&mnt->cache_lock);
+
+          ext3_journal_stop(mnt);
+          kfree(bitmap);
+          return allocated_block;
+        }
       }
     }
   }
@@ -457,6 +509,10 @@ uint32_t ext2_alloc_block(ext2_mount_t *mnt) {
   ext3_journal_stop(mnt);
   kfree(bitmap);
   return 0;
+}
+
+uint32_t ext2_alloc_block(ext2_mount_t *mnt) {
+  return ext2_alloc_block_hint(mnt, 0);
 }
 
 uint32_t ext2_alloc_inode(ext2_mount_t *mnt) {
@@ -518,6 +574,13 @@ int ext2_free_block(ext2_mount_t *mnt, uint32_t block_num) {
 
   ext3_journal_block(mnt, mnt->bgdt[group].bg_block_bitmap, bitmap);
   kfree(bitmap);
+
+  uint32_t c_idx = block_num % EXT2_CACHE_SIZE;
+  spinlock_acquire(&mnt->cache_lock);
+  if (mnt->cache[c_idx].num == block_num) {
+    mnt->cache[c_idx].num = 0;
+  }
+  spinlock_release(&mnt->cache_lock);
 
   mnt->bgdt[group].bg_free_blocks_count++;
   mnt->sb.s_free_blocks_count++;

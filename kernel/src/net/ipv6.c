@@ -199,6 +199,10 @@ int ipv6_send_raw(const uint8_t destination[16], uint8_t next_header,
   bool link_local = destination[0] == 0xfe &&
                     (destination[1] & 0xc0) == 0x80;
   if (!link_local && !addr_multicast(destination)) {
+    bool dest_global = (destination[0] & 0xe0) == 0x20;
+    bool cfg_global = config.global_valid && ((config.global[0] & 0xe0) == 0x20);
+    if (dest_global && !cfg_global)
+      return -101; // ENETUNREACH
     if (!config.global_valid)
       return -101;
     source = config.global;
@@ -228,10 +232,14 @@ static void handle_ra(const uint8_t source[16], const uint8_t source_mac[6],
       return;
     if (icmp[offset] == 3 && option_length == 32 && icmp[offset + 2] == 64 &&
         (icmp[offset + 3] & 0x40)) {
-      memcpy(config.global, icmp + offset + 16, 8);
-      memcpy(config.global + 8, config.link_local + 8, 8);
-      config.prefix_length = 64;
-      config.global_valid = true;
+      const uint8_t *prefix = icmp + offset + 16;
+      // Only 2000::/3 addresses are global unicast routable to the internet (RFC 4291)
+      if ((prefix[0] & 0xe0) == 0x20) {
+        memcpy(config.global, prefix, 8);
+        memcpy(config.global + 8, config.link_local + 8, 8);
+        config.prefix_length = 64;
+        config.global_valid = true;
+      }
     }
     offset += option_length;
   }

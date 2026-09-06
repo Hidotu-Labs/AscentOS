@@ -10,7 +10,7 @@ typedef int64_t ssize_t;
 #define UDP_PORT_EPHEMERAL_MIN 49152
 #define UDP_PORT_EPHEMERAL_MAX 65535
 #define UDP_MAX_SOCKETS        64
-#define UDP_RX_QUEUE_DEPTH     32
+#define UDP_RX_QUEUE_DEPTH     64
 /* IPv4 fragmentation is not implemented: 1500 - 20 (IPv4) - 8 (UDP). */
 #define UDP_PAYLOAD_MAX        1472
 
@@ -48,6 +48,7 @@ void               udp_socket_free(struct udp_socket *s);
 
 int  udp_bind(struct udp_socket *s, uint32_t ip, uint16_t port);
 int  udp_connect(struct udp_socket *s, uint32_t ip, uint16_t port);
+int  udp_disconnect(struct udp_socket *s);
 
 ssize_t udp_sendto(struct udp_socket *s, const void *buf, size_t len,
                    uint32_t dst_ip, uint16_t dst_port);

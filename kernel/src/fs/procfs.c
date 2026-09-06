@@ -1,4 +1,5 @@
 #include "fs/procfs.h"
+#include "console/klog.h"
 #include "apic/lapic_timer.h"
 #include "drivers/storage/block.h"
 #include "drivers/gpu/drm/drm.h"
@@ -791,6 +792,13 @@ static uint32_t procfs_pid_io_read(vfs_node_t *node, uint32_t offset,
   return size;
 }
 
+// /proc/<pid>/auxv
+static uint32_t procfs_pid_auxv_read(vfs_node_t *node, uint32_t offset,
+                                     uint32_t size, uint8_t *buffer) {
+  uint32_t pid = node->impl;
+  return (uint32_t)sched_read_thread_auxv(pid, offset, size, buffer);
+}
+
 // /proc/<pid>/fd/ support
 
 static int procfs_pid_fd_link_readlink(vfs_node_t *node, char *buf,
@@ -995,6 +1003,19 @@ static vfs_node_t *make_pid_dir(uint32_t pid) {
     ramfs_mount_node(dir, io_node);
   }
 
+  // auxv — ELF auxiliary vector
+  vfs_node_t *auxv_node = kmalloc(sizeof(vfs_node_t));
+  if (auxv_node) {
+    vfs_node_init(auxv_node);
+    strcpy(auxv_node->name, "auxv");
+    auxv_node->flags = FS_FILE;
+    auxv_node->mask = 0444;
+    auxv_node->impl = pid;
+    auxv_node->length = 512;
+    auxv_node->read = procfs_pid_auxv_read;
+    ramfs_mount_node(dir, auxv_node);
+  }
+
   // fd directory
   vfs_node_t *fd_dir = kmalloc(sizeof(vfs_node_t));
   if (fd_dir) {
@@ -1119,12 +1140,6 @@ void procfs_release_pid_dir(uint32_t pid) {
   }
 }
 
-// Number of static entries in the procfs root (excluding . and ..)
-// These are the nodes added by procfs_init before we install our hooks:
-//   meminfo drmstats cpuinfo partitions mounts uptime stat loadavg heapinfo
-//   cmdline version filesystems net → 13
-#define PROCFS_STATIC_ENTRIES 13
-
 static int procfs_self_readlink(vfs_node_t *node, char *buf, uint32_t size) {
   (void)node;
   struct thread *t = sched_get_current();
@@ -1144,7 +1159,7 @@ static int procfs_self_readlink(vfs_node_t *node, char *buf, uint32_t size) {
 // Index layout:
 //   0        → "."
 //   1        → ".."
-//   2..N+1   → static ramfs children (N = PROCFS_STATIC_ENTRIES)
+//   2..N+1   → static ramfs children (all nodes mounted in procfs_root)
 //   N+2 ..   → live PID entries (one per thread in global_thread_list)
 
 static struct dirent procfs_dent; // single static buffer (safe: no preemption
@@ -1164,33 +1179,36 @@ static struct dirent *procfs_root_readdir(vfs_node_t *node, uint32_t index) {
     return &procfs_dent;
   }
 
-  // Static children (index 2 .. PROCFS_STATIC_ENTRIES+1)
+  // Walk the ramfs child list
+  typedef struct child_node_s {
+    vfs_node_t *node;
+    struct child_node_s *next;
+  } child_node_t;
+  typedef struct {
+    child_node_t *children;
+  } ramfs_dir_t;
+  ramfs_dir_t *rdir = (ramfs_dir_t *)node->device;
+  if (!rdir)
+    return NULL;
+
   uint32_t static_idx = index - 2;
-  if (static_idx < PROCFS_STATIC_ENTRIES) {
-    // Walk the ramfs child list
-    typedef struct child_node_s {
-      vfs_node_t *node;
-      struct child_node_s *next;
-    } child_node_t;
-    typedef struct {
-      child_node_t *children;
-    } ramfs_dir_t;
-    ramfs_dir_t *rdir = (ramfs_dir_t *)node->device;
-    if (!rdir)
-      return NULL;
-    child_node_t *curr = rdir->children;
-    for (uint32_t i = 0; i < static_idx && curr; i++)
-      curr = curr->next;
-    if (!curr)
-      return NULL;
+  child_node_t *curr = rdir->children;
+  for (uint32_t i = 0; i < static_idx && curr; i++)
+    curr = curr->next;
+  if (curr) {
     strcpy(procfs_dent.name, curr->node->name);
     procfs_dent.ino = curr->node->inode;
     return &procfs_dent;
   }
 
+  // Count total static children
+  uint32_t num_static = 0;
+  for (child_node_t *c = rdir->children; c; c = c->next)
+    num_static++;
+
   // PID entries
   uint32_t pid;
-  if (!sched_get_nth_thread_tid(static_idx - PROCFS_STATIC_ENTRIES, &pid))
+  if (!sched_get_nth_thread_tid(static_idx - num_static, &pid))
     return NULL;
   snprintf(procfs_dent.name, sizeof(procfs_dent.name), "%u", pid);
   procfs_dent.ino = 0x10000 + pid;
@@ -1432,6 +1450,9 @@ void procfs_init(void) {
     // Add /proc/net/ subdirectory
     procfs_net_init(procfs_root);
 
+    // Add /proc/sys/ subdirectory
+    procfs_sys_init(procfs_root);
+
     // Install dynamic PID hooks on top of the ramfs root.
     // These wrap the ramfs readdir/finddir to also expose live per-PID dirs.
     procfs_root->flags |= FS_DENTRY_NOCACHE;
@@ -1540,11 +1561,15 @@ static uint32_t procfs_net_dev_read(vfs_node_t *node, uint32_t offset,
 
 static uint32_t procfs_net_tcp_read(vfs_node_t *node, uint32_t offset,
                                     uint32_t size, uint8_t *buffer) {
-    struct tcp_entry_snapshot snaps[TCP_MAX_TCBS];
+    struct tcp_entry_snapshot *snaps = kmalloc(sizeof(struct tcp_entry_snapshot) * TCP_MAX_TCBS);
+    if (!snaps) return 0;
     int n = tcp_get_snapshot(snaps, TCP_MAX_TCBS);
 
     char *buf = kmalloc(256 + n * 128);
-    if (!buf) return 0;
+    if (!buf) {
+        kfree(snaps);
+        return 0;
+    }
 
     int pos = snprintf(buf, 256,
         "  sl  local_address rem_address   st tx_queue rx_queue "
@@ -1561,6 +1586,7 @@ static uint32_t procfs_net_tcp_read(vfs_node_t *node, uint32_t offset,
             "%4d: %s:%s %s:%s %02X 00000000:00000000 00 00000000 0 0 0\n",
             i, lip, lport, rip, rport, st);
     }
+    kfree(snaps);
 
     node->length = (uint32_t)pos;
     if (offset >= (uint32_t)pos) { kfree(buf); return 0; }
@@ -1663,8 +1689,11 @@ static uint32_t procfs_net_if_inet6_read(vfs_node_t *node, uint32_t offset,
 
 static uint32_t procfs_net_sockstat_read(vfs_node_t *node, uint32_t offset,
                                          uint32_t size, uint8_t *buffer) {
-    struct tcp_entry_snapshot tcp_snaps[TCP_MAX_TCBS];
-    int tcp_n = tcp_get_snapshot(tcp_snaps, TCP_MAX_TCBS);
+    struct tcp_entry_snapshot *tcp_snaps = kmalloc(sizeof(struct tcp_entry_snapshot) * TCP_MAX_TCBS);
+    int tcp_n = 0;
+    if (tcp_snaps) {
+        tcp_n = tcp_get_snapshot(tcp_snaps, TCP_MAX_TCBS);
+    }
 
     struct udp_entry_snapshot udp_snaps[UDP_MAX_SOCKETS];
     int udp_n = udp_get_snapshot(udp_snaps, UDP_MAX_SOCKETS);
@@ -1674,6 +1703,8 @@ static uint32_t procfs_net_sockstat_read(vfs_node_t *node, uint32_t offset,
     for (int i = 0; i < tcp_n; i++)
         if (tcp_state_to_linux(tcp_snaps[i].state) == 0x01)
             tcp_estab++;
+
+    if (tcp_snaps) kfree(tcp_snaps);
 
     char buf[256];
     int len = snprintf(buf, sizeof(buf),
@@ -1730,4 +1761,205 @@ void procfs_net_init(vfs_node_t *procfs_root) {
 #undef ADD_NET_FILE
 
     ramfs_mount_node(procfs_root, net_dir);
+}
+
+// =============================================================================
+// /proc/sys/
+// =============================================================================
+
+static uint32_t procfs_sys_overflowuid_read(vfs_node_t *node, uint32_t offset,
+                                            uint32_t size, uint8_t *buffer) {
+    (void)node;
+    klog_puts("[PROCFS] read /proc/sys/kernel/overflowuid\n");
+    const char *val = "65534\n";
+    uint32_t len = 6;
+    if (offset >= len) return 0;
+    if (offset + size > len) size = len - offset;
+    memcpy(buffer, val + offset, size);
+    return size;
+}
+
+static uint32_t procfs_sys_overflowgid_read(vfs_node_t *node, uint32_t offset,
+                                            uint32_t size, uint8_t *buffer) {
+    (void)node;
+    klog_puts("[PROCFS] read /proc/sys/kernel/overflowgid\n");
+    const char *val = "65534\n";
+    uint32_t len = 6;
+    if (offset >= len) return 0;
+    if (offset + size > len) size = len - offset;
+    memcpy(buffer, val + offset, size);
+    return size;
+}
+
+static uint32_t procfs_sys_pid_max_read(vfs_node_t *node, uint32_t offset,
+                                        uint32_t size, uint8_t *buffer) {
+    (void)node;
+    klog_puts("[PROCFS] read /proc/sys/kernel/pid_max\n");
+    const char *val = "32768\n";
+    uint32_t len = 6;
+    if (offset >= len) return 0;
+    if (offset + size > len) size = len - offset;
+    memcpy(buffer, val + offset, size);
+    return size;
+}
+
+static uint32_t procfs_sys_hostname_read(vfs_node_t *node, uint32_t offset,
+                                         uint32_t size, uint8_t *buffer) {
+    (void)node;
+    klog_puts("[PROCFS] read /proc/sys/kernel/hostname\n");
+    const char *val = "AvoryOS\n";
+    uint32_t len = 8;
+    if (offset >= len) return 0;
+    if (offset + size > len) size = len - offset;
+    memcpy(buffer, val + offset, size);
+    return size;
+}
+
+static uint32_t procfs_sys_osrelease_read(vfs_node_t *node, uint32_t offset,
+                                          uint32_t size, uint8_t *buffer) {
+    (void)node;
+    klog_puts("[PROCFS] read /proc/sys/kernel/osrelease\n");
+    const char *val = "2.5.0-beta\n";
+    uint32_t len = 11;
+    if (offset >= len) return 0;
+    if (offset + size > len) size = len - offset;
+    memcpy(buffer, val + offset, size);
+    return size;
+}
+
+static uint32_t procfs_sys_ostype_read(vfs_node_t *node, uint32_t offset,
+                                       uint32_t size, uint8_t *buffer) {
+    (void)node;
+    klog_puts("[PROCFS] read /proc/sys/kernel/ostype\n");
+    const char *val = "Linux\n";
+    uint32_t len = 6;
+    if (offset >= len) return 0;
+    if (offset + size > len) size = len - offset;
+    memcpy(buffer, val + offset, size);
+    return size;
+}
+
+static uint32_t procfs_sys_version_read(vfs_node_t *node, uint32_t offset,
+                                        uint32_t size, uint8_t *buffer) {
+    (void)node;
+    klog_puts("[PROCFS] read /proc/sys/kernel/version\n");
+    const char *val = "#1 SMP\n";
+    uint32_t len = 7;
+    if (offset >= len) return 0;
+    if (offset + size > len) size = len - offset;
+    memcpy(buffer, val + offset, size);
+    return size;
+}
+
+static uint32_t procfs_sys_max_user_ns_read(vfs_node_t *node, uint32_t offset,
+                                            uint32_t size, uint8_t *buffer) {
+    (void)node;
+    klog_puts("[PROCFS] read /proc/sys/user/max_user_namespaces\n");
+    const char *val = "65536\n";
+    uint32_t len = 6;
+    if (offset >= len) return 0;
+    if (offset + size > len) size = len - offset;
+    memcpy(buffer, val + offset, size);
+    return size;
+}
+
+static uint32_t procfs_sys_file_max_read(vfs_node_t *node, uint32_t offset,
+                                         uint32_t size, uint8_t *buffer) {
+    (void)node;
+    klog_puts("[PROCFS] read /proc/sys/fs/file-max\n");
+    const char *val = "1048576\n";
+    uint32_t len = 8;
+    if (offset >= len) return 0;
+    if (offset + size > len) size = len - offset;
+    memcpy(buffer, val + offset, size);
+    return size;
+}
+
+static uint32_t procfs_sys_mount_max_read(vfs_node_t *node, uint32_t offset,
+                                          uint32_t size, uint8_t *buffer) {
+    (void)node;
+    klog_puts("[PROCFS] read /proc/sys/fs/mount-max\n");
+    const char *val = "100000\n";
+    uint32_t len = 7;
+    if (offset >= len) return 0;
+    if (offset + size > len) size = len - offset;
+    memcpy(buffer, val + offset, size);
+    return size;
+}
+
+static uint32_t procfs_sys_max_map_count_read(vfs_node_t *node, uint32_t offset,
+                                              uint32_t size, uint8_t *buffer) {
+    (void)node;
+    klog_puts("[PROCFS] read /proc/sys/vm/max_map_count\n");
+    const char *val = "65530\n";
+    uint32_t len = 6;
+    if (offset >= len) return 0;
+    if (offset + size > len) size = len - offset;
+    memcpy(buffer, val + offset, size);
+    return size;
+}
+
+static vfs_node_t *procfs_create_dir_node(const char *name) {
+    vfs_node_t *dir = kmalloc(sizeof(vfs_node_t));
+    if (!dir) return NULL;
+    vfs_node_init(dir);
+    strncpy(dir->name, name, 127);
+    dir->flags = FS_DIRECTORY | FS_PERSISTENT;
+    dir->mask  = 0555;
+    ramfs_mount_on(dir);
+    return dir;
+}
+
+static void procfs_add_file_node(vfs_node_t *parent, const char *name, read_type_t rfunc, uint32_t len) {
+    vfs_node_t *n = kmalloc(sizeof(vfs_node_t));
+    if (!n) return;
+    vfs_node_init(n);
+    strncpy(n->name, name, 127);
+    n->flags = FS_FILE | FS_PERSISTENT;
+    n->mask = 0444;
+    n->read = rfunc;
+    n->length = len;
+    ramfs_mount_node(parent, n);
+}
+
+void procfs_sys_init(vfs_node_t *procfs_root) {
+    vfs_node_t *sys_dir = procfs_create_dir_node("sys");
+    if (!sys_dir) return;
+
+    // /proc/sys/kernel/
+    vfs_node_t *kernel_dir = procfs_create_dir_node("kernel");
+    if (kernel_dir) {
+        procfs_add_file_node(kernel_dir, "overflowuid", procfs_sys_overflowuid_read, 16);
+        procfs_add_file_node(kernel_dir, "overflowgid", procfs_sys_overflowgid_read, 16);
+        procfs_add_file_node(kernel_dir, "pid_max",     procfs_sys_pid_max_read, 16);
+        procfs_add_file_node(kernel_dir, "hostname",    procfs_sys_hostname_read, 32);
+        procfs_add_file_node(kernel_dir, "osrelease",   procfs_sys_osrelease_read, 32);
+        procfs_add_file_node(kernel_dir, "ostype",      procfs_sys_ostype_read, 16);
+        procfs_add_file_node(kernel_dir, "version",     procfs_sys_version_read, 32);
+        ramfs_mount_node(sys_dir, kernel_dir);
+    }
+
+    // /proc/sys/user/
+    vfs_node_t *user_dir = procfs_create_dir_node("user");
+    if (user_dir) {
+        procfs_add_file_node(user_dir, "max_user_namespaces", procfs_sys_max_user_ns_read, 16);
+        ramfs_mount_node(sys_dir, user_dir);
+    }
+
+    // /proc/sys/fs/
+    vfs_node_t *fs_dir = procfs_create_dir_node("fs");
+    if (fs_dir) {
+        procfs_add_file_node(fs_dir, "file-max",  procfs_sys_file_max_read, 16);
+        procfs_add_file_node(fs_dir, "mount-max", procfs_sys_mount_max_read, 16);
+        ramfs_mount_node(sys_dir, fs_dir);
+    }
+
+    // /proc/sys/vm/
+    vfs_node_t *vm_dir = procfs_create_dir_node("vm");
+    if (vm_dir) {
+        procfs_add_file_node(vm_dir, "max_map_count", procfs_sys_max_map_count_read, 16);
+        ramfs_mount_node(sys_dir, vm_dir);
+    }
+
+    ramfs_mount_node(procfs_root, sys_dir);
 }

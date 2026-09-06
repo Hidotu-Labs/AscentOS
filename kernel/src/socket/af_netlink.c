@@ -9,6 +9,9 @@
 #include "epoll.h"
 #include "socket.h"
 #include "socket_internal.h"
+#include "../include/arch/uaccess.h"
+
+#include "../net/ipv6.h"
 
 static struct list_head netlink_sockets;
 static spinlock_t netlink_lock;
@@ -29,6 +32,8 @@ struct nlmsghdr_min {
 #define RTM_GETLINK 18
 #define RTM_NEWADDR 20
 #define RTM_GETADDR 22
+#define RTM_NEWROUTE 24
+#define RTM_GETROUTE 26
 #define IFLA_ADDRESS 1
 #define IFLA_IFNAME 3
 #define IFLA_MTU 4
@@ -36,8 +41,16 @@ struct nlmsghdr_min {
 #define IFA_LOCAL 2
 #define IFA_LABEL 3
 #define IFA_BROADCAST 4
+#define RTA_DST 1
+#define RTA_SRC 2
+#define RTA_OIF 4
+#define RTA_GATEWAY 5
+#define RTA_PRIORITY 6
+#define RTA_PREFSRC 7
+#define RTA_TABLE 15
 #define IFF_UP 0x1
 #define IFF_BROADCAST 0x2
+#define IFF_LOOPBACK 0x8
 #define IFF_RUNNING 0x40
 #define IFF_MULTICAST 0x1000
 #define NL_ALIGN(n) (((n) + 3U) & ~3U)
@@ -48,6 +61,11 @@ struct ifinfomsg_min {
 };
 struct ifaddrmsg_min {
   uint8_t family, prefixlen, flags, scope; uint32_t index;
+};
+struct rtmsg_min {
+  uint8_t rtm_family, rtm_dst_len, rtm_src_len, rtm_tos;
+  uint8_t rtm_table, rtm_protocol, rtm_scope, rtm_type;
+  uint32_t rtm_flags;
 };
 struct rtattr_min { uint16_t len, type; };
 
@@ -80,12 +98,12 @@ static void ipv4_bytes(uint8_t out[4], uint32_t ip) {
   out[0] = ip >> 24; out[1] = ip >> 16; out[2] = ip >> 8; out[3] = ip;
 }
 
-static int route_link(netlink_sock_t *nsk, uint32_t seq,
+static int route_link(netlink_sock_t *nsk, uint32_t seq, uint32_t pid,
                       const struct net_device *dev) {
   uint8_t msg[128]; memset(msg, 0, sizeof(msg));
   struct nlmsghdr_min *h = (struct nlmsghdr_min *)msg;
   struct ifinfomsg_min *i = (struct ifinfomsg_min *)(h + 1);
-  h->nlmsg_type = RTM_NEWLINK; h->nlmsg_flags = NLM_F_MULTI; h->nlmsg_seq = seq;
+  h->nlmsg_type = RTM_NEWLINK; h->nlmsg_flags = NLM_F_MULTI; h->nlmsg_seq = seq; h->nlmsg_pid = pid;
   i->index = 2; i->flags = IFF_UP | IFF_BROADCAST | IFF_RUNNING | IFF_MULTICAST;
   i->change = 0xffffffffU;
   size_t pos = sizeof(*h) + sizeof(*i);
@@ -95,19 +113,81 @@ static int route_link(netlink_sock_t *nsk, uint32_t seq,
   h->nlmsg_len = pos; return route_queue(nsk, msg, pos);
 }
 
-static int route_address(netlink_sock_t *nsk, uint32_t seq, const char *name,
+static int route_address(netlink_sock_t *nsk, uint32_t seq, uint32_t pid, const char *name,
                          uint32_t address, uint32_t mask) {
   uint8_t msg[128], ip[4], broadcast[4]; memset(msg, 0, sizeof(msg));
   ipv4_bytes(ip, address); ipv4_bytes(broadcast, address | ~mask);
   struct nlmsghdr_min *h = (struct nlmsghdr_min *)msg;
   struct ifaddrmsg_min *i = (struct ifaddrmsg_min *)(h + 1);
-  h->nlmsg_type = RTM_NEWADDR; h->nlmsg_flags = NLM_F_MULTI; h->nlmsg_seq = seq;
+  h->nlmsg_type = RTM_NEWADDR; h->nlmsg_flags = NLM_F_MULTI; h->nlmsg_seq = seq; h->nlmsg_pid = pid;
   i->family = 2; i->prefixlen = ipv4_prefix(mask); i->index = 2;
   size_t pos = sizeof(*h) + sizeof(*i);
   pos = route_attr(msg, pos, sizeof(msg), IFA_ADDRESS, ip, 4);
   pos = route_attr(msg, pos, sizeof(msg), IFA_LOCAL, ip, 4);
   pos = route_attr(msg, pos, sizeof(msg), IFA_LABEL, name, strlen(name) + 1);
   pos = route_attr(msg, pos, sizeof(msg), IFA_BROADCAST, broadcast, 4);
+  h->nlmsg_len = pos; return route_queue(nsk, msg, pos);
+}
+
+static int route_loopback_link(netlink_sock_t *nsk, uint32_t seq, uint32_t pid) {
+  uint8_t msg[128]; memset(msg, 0, sizeof(msg));
+  struct nlmsghdr_min *h = (struct nlmsghdr_min *)msg;
+  struct ifinfomsg_min *i = (struct ifinfomsg_min *)(h + 1);
+  h->nlmsg_type = RTM_NEWLINK; h->nlmsg_flags = NLM_F_MULTI; h->nlmsg_seq = seq; h->nlmsg_pid = pid;
+  i->index = 1; i->flags = IFF_UP | IFF_LOOPBACK | IFF_RUNNING;
+  i->change = 0xffffffffU;
+  size_t pos = sizeof(*h) + sizeof(*i);
+  pos = route_attr(msg, pos, sizeof(msg), IFLA_IFNAME, "lo", 3);
+  uint32_t mtu = 65536;
+  pos = route_attr(msg, pos, sizeof(msg), IFLA_MTU, &mtu, sizeof(mtu));
+  h->nlmsg_len = pos; return route_queue(nsk, msg, pos);
+}
+
+static int route_loopback_addr(netlink_sock_t *nsk, uint32_t seq, uint32_t pid) {
+  uint8_t msg[128], ip[4] = {127, 0, 0, 1}; memset(msg, 0, sizeof(msg));
+  struct nlmsghdr_min *h = (struct nlmsghdr_min *)msg;
+  struct ifaddrmsg_min *i = (struct ifaddrmsg_min *)(h + 1);
+  h->nlmsg_type = RTM_NEWADDR; h->nlmsg_flags = NLM_F_MULTI; h->nlmsg_seq = seq; h->nlmsg_pid = pid;
+  i->family = 2; i->prefixlen = 8; i->index = 1; i->scope = 254; // RT_SCOPE_HOST
+  size_t pos = sizeof(*h) + sizeof(*i);
+  pos = route_attr(msg, pos, sizeof(msg), IFA_ADDRESS, ip, 4);
+  pos = route_attr(msg, pos, sizeof(msg), IFA_LOCAL, ip, 4);
+  pos = route_attr(msg, pos, sizeof(msg), IFA_LABEL, "lo", 3);
+  h->nlmsg_len = pos; return route_queue(nsk, msg, pos);
+}
+
+static int route_address6(netlink_sock_t *nsk, uint32_t seq, uint32_t pid, const uint8_t ip[16]) {
+  uint8_t msg[128]; memset(msg, 0, sizeof(msg));
+  struct nlmsghdr_min *h = (struct nlmsghdr_min *)msg;
+  struct ifaddrmsg_min *i = (struct ifaddrmsg_min *)(h + 1);
+  h->nlmsg_type = RTM_NEWADDR; h->nlmsg_flags = NLM_F_MULTI; h->nlmsg_seq = seq; h->nlmsg_pid = pid;
+  i->family = 10; // AF_INET6
+  i->prefixlen = 64; i->index = 2; i->scope = 253; // RT_SCOPE_LINK
+  size_t pos = sizeof(*h) + sizeof(*i);
+  pos = route_attr(msg, pos, sizeof(msg), IFA_ADDRESS, ip, 16);
+  pos = route_attr(msg, pos, sizeof(msg), IFA_LOCAL, ip, 16);
+  h->nlmsg_len = pos; return route_queue(nsk, msg, pos);
+}
+
+static int route_default(netlink_sock_t *nsk, uint32_t seq, uint32_t pid, uint32_t gateway, uint32_t prefsrc) {
+  uint8_t msg[128], gw[4], src[4]; memset(msg, 0, sizeof(msg));
+  ipv4_bytes(gw, gateway); ipv4_bytes(src, prefsrc);
+  struct nlmsghdr_min *h = (struct nlmsghdr_min *)msg;
+  struct rtmsg_min *r = (struct rtmsg_min *)(h + 1);
+  h->nlmsg_type = RTM_NEWROUTE; h->nlmsg_flags = NLM_F_MULTI; h->nlmsg_seq = seq; h->nlmsg_pid = pid;
+  r->rtm_family = 2; // AF_INET
+  r->rtm_dst_len = 0; // Default route 0.0.0.0/0
+  r->rtm_table = 254; // RT_TABLE_MAIN
+  r->rtm_protocol = 3; // RTPROT_BOOT
+  r->rtm_scope = 0; // RT_SCOPE_UNIVERSE
+  r->rtm_type = 1; // RTN_UNICAST
+  uint32_t oif = 2;
+  uint32_t table = 254;
+  size_t pos = sizeof(*h) + sizeof(*r);
+  pos = route_attr(msg, pos, sizeof(msg), RTA_GATEWAY, gw, 4);
+  pos = route_attr(msg, pos, sizeof(msg), RTA_OIF, &oif, sizeof(oif));
+  pos = route_attr(msg, pos, sizeof(msg), RTA_PREFSRC, src, 4);
+  pos = route_attr(msg, pos, sizeof(msg), RTA_TABLE, &table, sizeof(table));
   h->nlmsg_len = pos; return route_queue(nsk, msg, pos);
 }
 
@@ -442,16 +522,34 @@ static ssize_t netlink_sendto(socket_t *sock, const void *buf, size_t len,
     if (!buf || len < sizeof(struct nlmsghdr_min))
       return -22; // EINVAL
 
-    const struct nlmsghdr_min *request =
-        (const struct nlmsghdr_min *)buf;
+    struct nlmsghdr_min request;
+    if (is_user_ptr((uint64_t)buf)) {
+      if (copy_from_user(&request, buf, sizeof(request)) != 0)
+        return -14; // EFAULT
+    } else {
+      memcpy(&request, buf, sizeof(request));
+    }
+
+    uint32_t reply_pid = nsk->portid ? (uint32_t)nsk->portid : request.nlmsg_pid;
     struct net_device *dev = net_device_default();
     const struct ipv4_config *cfg = ipv4_get_config();
+    const struct ipv6_config *cfg6 = ipv6_get_config();
     int route_ret = 0;
-    if (request->nlmsg_type == RTM_GETLINK && dev)
-      route_ret = route_link(nsk, request->nlmsg_seq, dev);
-    else if (request->nlmsg_type == RTM_GETADDR && dev && cfg && cfg->address)
-      route_ret = route_address(nsk, request->nlmsg_seq, dev->name,
-                                cfg->address, cfg->netmask);
+    if (request.nlmsg_type == RTM_GETLINK) {
+      route_ret = route_loopback_link(nsk, request.nlmsg_seq, reply_pid);
+      if (route_ret == 0 && dev)
+        route_ret = route_link(nsk, request.nlmsg_seq, reply_pid, dev);
+    } else if (request.nlmsg_type == RTM_GETADDR) {
+      route_ret = route_loopback_addr(nsk, request.nlmsg_seq, reply_pid);
+      if (route_ret == 0 && dev && cfg && cfg->address)
+        route_ret = route_address(nsk, request.nlmsg_seq, reply_pid, dev->name,
+                                  cfg->address, cfg->netmask);
+      if (route_ret == 0 && cfg6 && cfg6->link_local[0] != 0)
+        route_ret = route_address6(nsk, request.nlmsg_seq, reply_pid, cfg6->link_local);
+    } else if (request.nlmsg_type == RTM_GETROUTE) {
+      if (cfg && cfg->gateway)
+        route_ret = route_default(nsk, request.nlmsg_seq, reply_pid, cfg->gateway, cfg->address);
+    }
     if (route_ret != 0)
       return route_ret;
 
@@ -460,7 +558,8 @@ static ssize_t netlink_sendto(socket_t *sock, const void *buf, size_t len,
     done.nlmsg_len = sizeof(done);
     done.nlmsg_type = NLMSG_DONE;
     done.nlmsg_flags = NLM_F_MULTI;
-    done.nlmsg_seq = request->nlmsg_seq;
+    done.nlmsg_seq = request.nlmsg_seq;
+    done.nlmsg_pid = reply_pid;
 
     if (route_queue(nsk, &done, sizeof(done)) != 0)
       return -12; // ENOMEM
@@ -528,9 +627,28 @@ static ssize_t netlink_sendmsg(socket_t *sock, struct msghdr *msg, int flags) {
   for (size_t i = 0; i < msg->msg_iovlen; i++) {
     total_len += msg->msg_iov[i].iov_len;
   }
+  if (total_len == 0)
+    return 0;
 
-  return netlink_sendto(sock, NULL, total_len, flags,
-                        (struct sockaddr *)msg->msg_name, msg->msg_namelen);
+  if (msg->msg_iovlen == 1) {
+    return netlink_sendto(sock, msg->msg_iov[0].iov_base, total_len, flags,
+                          (struct sockaddr *)msg->msg_name, msg->msg_namelen);
+  }
+
+  void *kbuf = kmalloc(total_len);
+  if (!kbuf)
+    return -12;
+  size_t off = 0;
+  for (size_t i = 0; i < msg->msg_iovlen; i++) {
+    if (msg->msg_iov[i].iov_base && msg->msg_iov[i].iov_len) {
+      memcpy((uint8_t *)kbuf + off, msg->msg_iov[i].iov_base, msg->msg_iov[i].iov_len);
+      off += msg->msg_iov[i].iov_len;
+    }
+  }
+  ssize_t ret = netlink_sendto(sock, kbuf, total_len, flags,
+                              (struct sockaddr *)msg->msg_name, msg->msg_namelen);
+  kfree(kbuf);
+  return ret;
 }
 
 static int netlink_poll(socket_t *sock, int events) {

@@ -20,6 +20,25 @@ extern spinlock_t socket_table_lock;
 // ────────────────────────────────────── This is the family-specific data
 // pointed to by socket->sk for AF_UNIX
 
+typedef struct unix_scm_msg {
+  struct unix_scm_msg *next;
+  size_t stream_offset;     // Stream byte offset where this SCM was sent
+  int count;                // Number of FDs in this message
+  struct vfs_node *nodes[]; // Dynamically allocated array of vfs_node_t*
+} unix_scm_msg_t;
+
+// Packet struct for SOCK_SEQPACKET and SOCK_DGRAM
+typedef struct unix_packet {
+  struct unix_packet *next;
+  size_t data_len;
+  unix_scm_msg_t *scm;      // Attached SCM rights, if any
+  bool cred_pending;        // Attached SCM credentials, if any
+  int cred_pid;
+  int cred_uid;
+  int cred_gid;
+  uint8_t data[];           // Inline packet payload
+} unix_packet_t;
+
 typedef struct unix_sock {
   socket_t *parent;           // Pointer to the parent socket structure
   struct sockaddr_un addr;    // Bound address
@@ -46,6 +65,11 @@ typedef struct unix_sock {
   size_t recv_buf_tail;
   spinlock_t recv_lock;
 
+  // Packet queue for SOCK_SEQPACKET and SOCK_DGRAM
+  unix_packet_t *packet_queue_head;
+  unix_packet_t *packet_queue_tail;
+  size_t packet_queue_bytes;
+
   // Send buffer
   uint8_t *send_buf;
   size_t send_buf_size;
@@ -70,9 +94,11 @@ typedef struct unix_sock {
 
   struct vfs_node *bound_vnode; // Filesystem socket inode, if bound to a path
 
-  struct vfs_node *scm_nodes[16];   // Pending FDs to be received
-  int scm_count;                    // Number of pending nodes
-  bool scm_cred_pending;            // Sender credentials for SO_PASSCRED
+  struct unix_scm_msg *scm_queue_head; // FIFO queue of pending SCM messages (for stream sockets)
+  struct unix_scm_msg *scm_queue_tail;
+  size_t bytes_written;                // Total stream bytes written into this socket's recv_buf
+  size_t bytes_read;                   // Total stream bytes read from this socket's recv_buf
+  bool scm_cred_pending;               // Sender credentials for SO_PASSCRED
   int scm_cred_pid;
   int scm_cred_uid;
   int scm_cred_gid;

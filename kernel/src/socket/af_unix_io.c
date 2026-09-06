@@ -1,5 +1,6 @@
 #include "af_unix_internal.h"
 #include "../apic/lapic_timer.h"
+#include "../syscalls/sys_io_shared.h"
 #include "arch/uaccess.h"
 
 static bool unix_user_range_valid(uint64_t addr, size_t len) {
@@ -55,15 +56,38 @@ static socket_t *unix_get_live_peer(socket_t *sock, unix_sock_t **peer_out) {
   return peer_sock;
 }
 
-static bool unix_ensure_recv_buf(unix_sock_t *usk) {
+static bool unix_ensure_recv_buf(unix_sock_t *usk, size_t needed) {
   if (!usk) return false;
   if (!usk->recv_buf) {
-    size_t sz = (usk->parent && usk->parent->rcvbuf > 0) ? usk->parent->rcvbuf : 65536;
+    size_t sz = (usk->parent && usk->parent->rcvbuf > 0) ? (size_t)usk->parent->rcvbuf : SOCKET_DEFAULT_RCVBUF;
+    if (needed > 0 && needed + 1 > sz)
+      sz = needed + 4096;
+    if (sz < 65536) sz = 65536;
     usk->recv_buf = kmalloc(sz);
     if (!usk->recv_buf) return false;
     usk->recv_buf_size = sz;
     usk->recv_buf_head = 0;
     usk->recv_buf_tail = 0;
+  } else if (needed > 0 && needed + 1 > usk->recv_buf_size && usk->recv_buf_size < 4 * 1024 * 1024) {
+    size_t new_sz = usk->recv_buf_size * 2;
+    while (new_sz < needed + 4096 && new_sz < 4 * 1024 * 1024)
+      new_sz *= 2;
+    uint8_t *new_buf = kmalloc(new_sz);
+    if (new_buf) {
+      size_t head = usk->recv_buf_head;
+      size_t tail = usk->recv_buf_tail;
+      size_t old_size = usk->recv_buf_size;
+      size_t available = (old_size > 0) ? (tail - head + old_size) % old_size : 0;
+      for (size_t i = 0; i < available; i++)
+        new_buf[i] = usk->recv_buf[(head + i) % old_size];
+      kfree(usk->recv_buf);
+      usk->recv_buf = new_buf;
+      usk->recv_buf_size = new_sz;
+      usk->recv_buf_head = 0;
+      usk->recv_buf_tail = available;
+      if (usk->parent)
+        usk->parent->rcvbuf = (int)new_sz;
+    }
   }
   return true;
 }
@@ -78,13 +102,15 @@ ssize_t unix_send_impl(socket_t *sock, const void *buf, size_t len, int flags) {
 
   unix_sock_t *usk = (unix_sock_t *)sock->sk;
 
-  if (sock->closing) {
+  if (sock->closing || usk->write_shutdown) {
     KTRACK_ERR(KSUBSYS_AF_UNIX, -32);
     return -32; // EPIPE
   }
 
   if (sock->state != SS_CONNECTED && sock->state != SS_CONNECTING) {
     KTRACK_ERR(KSUBSYS_AF_UNIX, -107);
+    if (usk->was_connected)
+      return -32; // EPIPE
     return -107; // ENOTCONN
   }
 
@@ -113,8 +139,87 @@ ssize_t unix_send_impl(socket_t *sock, const void *buf, size_t len, int flags) {
 
   unix_sock_t *peer = NULL;
   socket_t *peer_sock = unix_get_live_peer(sock, &peer);
-  if (!peer_sock || !peer)
+  if (!peer_sock || !peer) {
+    if (usk->was_connected)
+      return -32; // EPIPE
     return -107; // ENOTCONN
+  }
+
+  if (sock->type == SOCK_SEQPACKET || sock->type == SOCK_DGRAM) {
+    while (1) {
+      if (sock->closing || peer_sock->closing || peer->read_shutdown) {
+        socket_put(peer_sock);
+        return -32; // EPIPE
+      }
+
+      spinlock_acquire(&peer->recv_lock);
+      if (peer->packet_queue_bytes + len > 4 * 1024 * 1024 && peer->packet_queue_bytes > 0) {
+        if ((sock->flags & SOCK_NONBLOCK) || (flags & 0x40)) {
+          spinlock_release(&peer->recv_lock);
+          socket_put(peer_sock);
+          return -11; // EAGAIN
+        }
+
+        struct thread *current = sched_get_current();
+        wait_queue_entry_t entry = {.thread = current, .next = NULL};
+        wait_queue_add(peer->wait, &entry);
+        current->state = THREAD_BLOCKED;
+
+        spinlock_release(&peer->recv_lock);
+        sched_yield();
+        wait_queue_remove(peer->wait, &entry);
+        current->state = THREAD_RUNNING;
+        continue;
+      }
+      break;
+    }
+
+    unix_packet_t *pkt = kmalloc(sizeof(unix_packet_t) + len);
+    if (!pkt) {
+      spinlock_release(&peer->recv_lock);
+      socket_put(peer_sock);
+      return -12; // ENOMEM
+    }
+
+    pkt->next = NULL;
+    pkt->data_len = len;
+    pkt->scm = NULL;
+    pkt->cred_pending = false;
+    if (len > 0 && buf)
+      memcpy(pkt->data, buf, len);
+
+    if (peer->passcred) {
+      struct thread *sender = sched_get_current();
+      if (sender) {
+        pkt->cred_pending = true;
+        pkt->cred_pid = (int)sender->tgid;
+        pkt->cred_uid = (int)sender->uid;
+        pkt->cred_gid = (int)sender->gid;
+      }
+    }
+
+    if (!peer->packet_queue_tail) {
+      peer->packet_queue_head = pkt;
+      peer->packet_queue_tail = pkt;
+    } else {
+      peer->packet_queue_tail->next = pkt;
+      peer->packet_queue_tail = pkt;
+    }
+    peer->packet_queue_bytes += len;
+
+    spinlock_release(&peer->recv_lock);
+
+    wait_queue_wake_all(peer->wait);
+    if (peer->parent && peer->parent->wait_queue)
+      wait_queue_wake_all((wait_queue_t *)peer->parent->wait_queue);
+    if (peer->parent && peer->parent->node)
+      epoll_notify_event(peer->parent->node, EPOLLIN | EPOLLRDNORM);
+    if (peer->parent && peer->parent->fd >= 0)
+      epoll_notify_socket(peer->parent->fd, EPOLLIN);
+
+    socket_put(peer_sock);
+    return (ssize_t)len;
+  }
 
   size_t sent = 0;
   const uint8_t *src = (const uint8_t *)buf;
@@ -125,7 +230,7 @@ ssize_t unix_send_impl(socket_t *sock, const void *buf, size_t len, int flags) {
 
     spinlock_acquire(&peer->recv_lock);
 
-    if (!unix_ensure_recv_buf(peer)) {
+    if (!unix_ensure_recv_buf(peer, len)) {
       spinlock_release(&peer->recv_lock);
       if (sent > 0) break;
       socket_put(peer_sock);
@@ -181,6 +286,7 @@ ssize_t unix_send_impl(socket_t *sock, const void *buf, size_t len, int flags) {
     }
     peer->recv_buf_tail = tail;
     sent += to_copy;
+    peer->bytes_written += to_copy;
 
     unix_record_sender_credentials(peer, sched_get_current());
 
@@ -210,7 +316,102 @@ ssize_t unix_recv_impl(socket_t *sock, void *buf, size_t len, int flags) {
 
   unix_sock_t *usk = (unix_sock_t *)sock->sk;
 
-  if (sock->closing && usk->recv_buf_head == usk->recv_buf_tail)
+  if (sock->type == SOCK_SEQPACKET || sock->type == SOCK_DGRAM) {
+    while (1) {
+      spinlock_acquire(&usk->recv_lock);
+      if (usk->packet_queue_head != NULL)
+        break;
+
+      if (sock->closing || usk->read_shutdown) {
+        spinlock_release(&usk->recv_lock);
+        return 0; // EOF
+      }
+
+      if (sock->state != SS_CONNECTED) {
+        spinlock_release(&usk->recv_lock);
+        return 0; // EOF
+      }
+
+      bool peer_shut = false;
+      spinlock_acquire(&sock->lock);
+      if (usk->peer && usk->peer->write_shutdown)
+        peer_shut = true;
+      spinlock_release(&sock->lock);
+
+      if (peer_shut) {
+        spinlock_release(&usk->recv_lock);
+        return 0; // EOF
+      }
+
+      if ((sock->flags & SOCK_NONBLOCK) || (flags & 0x40)) { // MSG_DONTWAIT
+        spinlock_release(&usk->recv_lock);
+        return -11; // EAGAIN
+      }
+
+      uint64_t rcvtimeo_deadline = 0;
+      if (usk->rcvtimeo_ms > 0)
+        rcvtimeo_deadline = lapic_timer_get_ticks() + (uint64_t)usk->rcvtimeo_ms;
+
+      struct thread *current = sched_get_current();
+      wait_queue_entry_t entry = {.thread = current, .next = NULL};
+      wait_queue_add(usk->wait, &entry);
+      current->state = THREAD_BLOCKED;
+      if (rcvtimeo_deadline != 0)
+        current->wakeup_ticks = rcvtimeo_deadline;
+
+      spinlock_release(&usk->recv_lock);
+      sched_yield();
+      wait_queue_remove(usk->wait, &entry);
+      current->state = THREAD_RUNNING;
+      current->wakeup_ticks = 0;
+
+      if (rcvtimeo_deadline != 0 && lapic_timer_get_ticks() >= rcvtimeo_deadline)
+        return -11; // EAGAIN
+
+      if (sock->closing || usk->read_shutdown)
+        return 0;
+      if (sock->error)
+        return -(int)sock->error;
+    }
+
+    unix_packet_t *pkt = usk->packet_queue_head;
+    size_t to_copy = (len < pkt->data_len) ? len : pkt->data_len;
+    if (to_copy > 0 && buf)
+      memcpy(buf, pkt->data, to_copy);
+
+    if (!(flags & 0x02)) { // MSG_PEEK
+      usk->packet_queue_head = pkt->next;
+      if (!usk->packet_queue_head)
+        usk->packet_queue_tail = NULL;
+      usk->packet_queue_bytes -= pkt->data_len;
+
+      if (pkt->scm) {
+        for (int i = 0; i < pkt->scm->count; i++) {
+          if (pkt->scm->nodes[i]) vfs_close(pkt->scm->nodes[i]);
+        }
+        kfree(pkt->scm);
+      }
+      kfree(pkt);
+
+      wait_queue_wake_all(usk->wait);
+    }
+
+    spinlock_release(&usk->recv_lock);
+
+    unix_sock_t *notify_peer = NULL;
+    socket_t *notify_peer_sock = unix_get_live_peer(sock, &notify_peer);
+    if (notify_peer_sock) {
+      if (notify_peer_sock->node)
+        epoll_notify_event(notify_peer_sock->node, EPOLLOUT | EPOLLWRNORM);
+      if (notify_peer_sock->fd >= 0)
+        epoll_notify_socket(notify_peer_sock->fd, EPOLLOUT | EPOLLWRNORM);
+      socket_put(notify_peer_sock);
+    }
+
+    return (ssize_t)to_copy;
+  }
+
+  if ((sock->closing || usk->read_shutdown) && usk->recv_buf_head == usk->recv_buf_tail)
     return 0; // EOF
 
   if (sock->state != SS_CONNECTED &&
@@ -230,13 +431,24 @@ ssize_t unix_recv_impl(socket_t *sock, void *buf, size_t len, int flags) {
     size_t available = (size > 0) ? (tail - head + size) % size : 0;
 
     if (available == 0) {
-      if (sock->closing) {
+      if (sock->closing || usk->read_shutdown) {
         spinlock_release(&usk->recv_lock);
         return (ssize_t)received;
       }
 
       if (sock->state != SS_CONNECTED) {
         usk->accepted_orphaned = false;
+        spinlock_release(&usk->recv_lock);
+        return (ssize_t)received;
+      }
+
+      bool peer_shut = false;
+      spinlock_acquire(&sock->lock);
+      if (usk->peer && usk->peer->write_shutdown)
+        peer_shut = true;
+      spinlock_release(&sock->lock);
+
+      if (peer_shut) {
         spinlock_release(&usk->recv_lock);
         return (ssize_t)received;
       }
@@ -262,7 +474,13 @@ ssize_t unix_recv_impl(socket_t *sock, void *buf, size_t len, int flags) {
       wait_queue_remove(usk->wait, &entry);
       current->state = THREAD_RUNNING;
 
-      if (sock->closing)
+      if (sock->closing || usk->read_shutdown)
+        return 0; // EOF
+
+      spinlock_acquire(&sock->lock);
+      bool peer_shut_after_wait = (usk->peer && usk->peer->write_shutdown);
+      spinlock_release(&sock->lock);
+      if (peer_shut_after_wait && usk->recv_buf_head == usk->recv_buf_tail)
         return 0; // EOF
 
       if (sock->error)
@@ -277,7 +495,19 @@ ssize_t unix_recv_impl(socket_t *sock, void *buf, size_t len, int flags) {
 
     if (!(flags & 0x02)) { // MSG_PEEK
       usk->recv_buf_head = (size > 0) ? (head + to_copy) % size : 0;
+      usk->bytes_read += to_copy;
       usk->scm_cred_pending = false;
+
+      // Close and discard any bypassed SCM messages from unread stream offsets
+      while (usk->scm_queue_head && usk->bytes_read >= usk->scm_queue_head->stream_offset) {
+        unix_scm_msg_t *discard = usk->scm_queue_head;
+        for (int i = 0; i < discard->count; i++) {
+          if (discard->nodes[i]) vfs_close(discard->nodes[i]);
+        }
+        usk->scm_queue_head = discard->next;
+        if (!usk->scm_queue_head) usk->scm_queue_tail = NULL;
+        kfree(discard);
+      }
     }
 
     spinlock_release(&usk->recv_lock);
@@ -351,8 +581,11 @@ ssize_t unix_sendmsg_impl(socket_t *sock, struct msghdr *msg, int flags) {
 
   unix_sock_t *peer = NULL;
   socket_t *peer_sock = unix_get_live_peer(sock, &peer);
-  if (!peer_sock || !peer)
+  if (!peer_sock || !peer) {
+    if (usk->was_connected)
+      return -32; // EPIPE
     return -107; // ENOTCONN
+  }
 
   struct thread *current = sched_get_current();
 
@@ -360,10 +593,139 @@ ssize_t unix_sendmsg_impl(socket_t *sock, struct msghdr *msg, int flags) {
   for (size_t i = 0; i < msg->msg_iovlen; i++)
     total_len += msg->msg_iov[i].iov_len;
 
+  if (sock->type == SOCK_SEQPACKET || sock->type == SOCK_DGRAM) {
+    while (1) {
+      if (sock->closing || peer_sock->closing || peer->read_shutdown) {
+        socket_put(peer_sock);
+        return -32; // EPIPE
+      }
+
+      spinlock_acquire(&peer->recv_lock);
+      if (peer->packet_queue_bytes + total_len > 4 * 1024 * 1024 && peer->packet_queue_bytes > 0) {
+        if ((sock->flags & SOCK_NONBLOCK) || (flags & 0x40)) {
+          spinlock_release(&peer->recv_lock);
+          socket_put(peer_sock);
+          return -11; // EAGAIN
+        }
+
+        struct thread *ct = sched_get_current();
+        wait_queue_entry_t entry = {.thread = ct, .next = NULL};
+        wait_queue_add(peer->wait, &entry);
+        ct->state = THREAD_BLOCKED;
+
+        spinlock_release(&peer->recv_lock);
+        sched_yield();
+        wait_queue_remove(peer->wait, &entry);
+        ct->state = THREAD_RUNNING;
+        continue;
+      }
+      break;
+    }
+
+    unix_scm_msg_t *scm_item = NULL;
+    int total_fds = 0;
+    struct cmsghdr *cmsg = CMSG_FIRSTHDR(msg);
+    while (cmsg) {
+      if (cmsg->cmsg_len >= sizeof(struct cmsghdr) &&
+          cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
+        int count = (int)((cmsg->cmsg_len - CMSG_ALIGN(sizeof(struct cmsghdr))) / sizeof(int));
+        if (count > 0) total_fds += count;
+      }
+      cmsg = CMSG_NXTHDR(msg, cmsg);
+    }
+
+    if (total_fds > 0) {
+      scm_item = kmalloc(sizeof(unix_scm_msg_t) + total_fds * sizeof(vfs_node_t *));
+      if (scm_item) {
+        scm_item->next = NULL;
+        scm_item->stream_offset = 0;
+        scm_item->count = 0;
+
+        cmsg = CMSG_FIRSTHDR(msg);
+        while (cmsg) {
+          if (cmsg->cmsg_len >= sizeof(struct cmsghdr) &&
+              cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
+            int *fds = (int *)CMSG_DATA(cmsg);
+            int count = (int)((cmsg->cmsg_len - CMSG_ALIGN(sizeof(struct cmsghdr))) / sizeof(int));
+            for (int i = 0; i < count; i++) {
+              int fd = fds[i];
+              if (fd >= 0 && fd < MAX_FDS && current->fds[fd]) {
+                vfs_node_t *node = current->fds[fd];
+                vfs_open(node);
+                scm_item->nodes[scm_item->count++] = node;
+              }
+            }
+          }
+          cmsg = CMSG_NXTHDR(msg, cmsg);
+        }
+
+        if (scm_item->count == 0) {
+          kfree(scm_item);
+          scm_item = NULL;
+        }
+      }
+    }
+
+    unix_packet_t *pkt = kmalloc(sizeof(unix_packet_t) + total_len);
+    if (!pkt) {
+      if (scm_item) {
+        for (int i = 0; i < scm_item->count; i++) {
+          if (scm_item->nodes[i]) vfs_close(scm_item->nodes[i]);
+        }
+        kfree(scm_item);
+      }
+      spinlock_release(&peer->recv_lock);
+      socket_put(peer_sock);
+      return -12; // ENOMEM
+    }
+
+    pkt->next = NULL;
+    pkt->data_len = total_len;
+    pkt->scm = scm_item;
+    pkt->cred_pending = false;
+
+    size_t offset = 0;
+    for (size_t i = 0; i < msg->msg_iovlen; i++) {
+      if (msg->msg_iov[i].iov_base && msg->msg_iov[i].iov_len > 0) {
+        memcpy(pkt->data + offset, msg->msg_iov[i].iov_base, msg->msg_iov[i].iov_len);
+        offset += msg->msg_iov[i].iov_len;
+      }
+    }
+
+    if (peer->passcred) {
+      pkt->cred_pending = true;
+      pkt->cred_pid = (int)current->tgid;
+      pkt->cred_uid = (int)current->uid;
+      pkt->cred_gid = (int)current->gid;
+    }
+
+    if (!peer->packet_queue_tail) {
+      peer->packet_queue_head = pkt;
+      peer->packet_queue_tail = pkt;
+    } else {
+      peer->packet_queue_tail->next = pkt;
+      peer->packet_queue_tail = pkt;
+    }
+    peer->packet_queue_bytes += total_len;
+
+    spinlock_release(&peer->recv_lock);
+
+    wait_queue_wake_all(peer->wait);
+    if (peer->parent && peer->parent->wait_queue)
+      wait_queue_wake_all((wait_queue_t *)peer->parent->wait_queue);
+    if (peer->parent && peer->parent->node)
+      epoll_notify_event(peer->parent->node, EPOLLIN | EPOLLRDNORM);
+    if (peer->parent && peer->parent->fd >= 0)
+      epoll_notify_socket(peer->parent->fd, EPOLLIN);
+
+    socket_put(peer_sock);
+    return (ssize_t)total_len;
+  }
+
   // Hold peer->recv_lock for the entire sendmsg so SCM delivery is atomic.
   spinlock_acquire(&peer->recv_lock);
 
-  if (!unix_ensure_recv_buf(peer)) {
+  if (!unix_ensure_recv_buf(peer, total_len)) {
     spinlock_release(&peer->recv_lock);
     socket_put(peer_sock);
     return -12; // ENOMEM
@@ -409,23 +771,57 @@ ssize_t unix_sendmsg_impl(socket_t *sock, struct msghdr *msg, int flags) {
   // Deliver SCM_RIGHTS nodes atomically (lock order: recv_lock → parent->lock)
   spinlock_acquire(&peer_sock->lock);
 
+  int total_fds = 0;
   struct cmsghdr *cmsg = CMSG_FIRSTHDR(msg);
   while (cmsg) {
-    if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
-      int *fds  = (int *)CMSG_DATA(cmsg);
+    if (cmsg->cmsg_len >= sizeof(struct cmsghdr) &&
+        cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
       int count = (int)((cmsg->cmsg_len - CMSG_ALIGN(sizeof(struct cmsghdr))) /
                         sizeof(int));
-
-      for (int i = 0; i < count && peer->scm_count < 16; i++) {
-        int fd = fds[i];
-        if (fd >= 0 && fd < MAX_FDS && current->fds[fd]) {
-          vfs_node_t *node = current->fds[fd];
-          vfs_open(node);
-          peer->scm_nodes[peer->scm_count++] = node;
-        }
-      }
+      if (count > 0)
+        total_fds += count;
     }
     cmsg = CMSG_NXTHDR(msg, cmsg);
+  }
+
+  if (total_fds > 0) {
+    unix_scm_msg_t *scm_item = kmalloc(sizeof(unix_scm_msg_t) + total_fds * sizeof(vfs_node_t *));
+    if (scm_item) {
+      scm_item->next = NULL;
+      scm_item->stream_offset = peer->bytes_written;
+      scm_item->count = 0;
+
+      cmsg = CMSG_FIRSTHDR(msg);
+      while (cmsg) {
+        if (cmsg->cmsg_len >= sizeof(struct cmsghdr) &&
+            cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
+          int *fds = (int *)CMSG_DATA(cmsg);
+          int count = (int)((cmsg->cmsg_len - CMSG_ALIGN(sizeof(struct cmsghdr))) /
+                            sizeof(int));
+          for (int i = 0; i < count; i++) {
+            int fd = fds[i];
+            if (fd >= 0 && fd < MAX_FDS && current->fds[fd]) {
+              vfs_node_t *node = current->fds[fd];
+              vfs_open(node);
+              scm_item->nodes[scm_item->count++] = node;
+            }
+          }
+        }
+        cmsg = CMSG_NXTHDR(msg, cmsg);
+      }
+
+      if (scm_item->count > 0) {
+        if (!peer->scm_queue_tail) {
+          peer->scm_queue_head = scm_item;
+          peer->scm_queue_tail = scm_item;
+        } else {
+          peer->scm_queue_tail->next = scm_item;
+          peer->scm_queue_tail = scm_item;
+        }
+      } else {
+        kfree(scm_item);
+      }
+    }
   }
 
   spinlock_release(&peer_sock->lock);
@@ -457,8 +853,10 @@ ssize_t unix_sendmsg_impl(socket_t *sock, struct msghdr *msg, int flags) {
     total_sent += (ssize_t)sent;
   }
 
-  if (total_sent > 0)
+  if (total_sent > 0) {
+    peer->bytes_written += (size_t)total_sent;
     unix_record_sender_credentials(peer, current);
+  }
 
   spinlock_release(&peer->recv_lock);
 
@@ -531,6 +929,203 @@ ssize_t unix_recvmsg_impl(socket_t *sock, struct msghdr *msg, int flags) {
 
   struct thread *current = sched_get_current();
 
+  if (sock->type == SOCK_SEQPACKET || sock->type == SOCK_DGRAM) {
+    while (1) {
+      spinlock_acquire(&usk->recv_lock);
+      if (usk->packet_queue_head != NULL)
+        break;
+
+      if (sock->closing || usk->read_shutdown) {
+        spinlock_release(&usk->recv_lock);
+        goto no_data;
+      }
+
+      if (sock->state != SS_CONNECTED) {
+        spinlock_release(&usk->recv_lock);
+        goto no_data;
+      }
+
+      bool peer_shut = false;
+      spinlock_acquire(&sock->lock);
+      if (usk->peer && usk->peer->write_shutdown)
+        peer_shut = true;
+      spinlock_release(&sock->lock);
+
+      if (peer_shut) {
+        spinlock_release(&usk->recv_lock);
+        goto no_data;
+      }
+
+      if ((sock->flags & SOCK_NONBLOCK) || (flags & 0x40)) {
+        spinlock_release(&usk->recv_lock);
+        return -11; // EAGAIN
+      }
+
+      uint64_t rcvtimeo_deadline = 0;
+      if (usk->rcvtimeo_ms > 0)
+        rcvtimeo_deadline = lapic_timer_get_ticks() + (uint64_t)usk->rcvtimeo_ms;
+
+      struct thread *ct = sched_get_current();
+      wait_queue_entry_t entry = {.thread = ct, .next = NULL};
+      wait_queue_add(usk->wait, &entry);
+      ct->state = THREAD_BLOCKED;
+      if (rcvtimeo_deadline != 0)
+        ct->wakeup_ticks = rcvtimeo_deadline;
+
+      spinlock_release(&usk->recv_lock);
+      sched_yield();
+      wait_queue_remove(usk->wait, &entry);
+      ct->state = THREAD_RUNNING;
+      ct->wakeup_ticks = 0;
+
+      if (rcvtimeo_deadline != 0 && lapic_timer_get_ticks() >= rcvtimeo_deadline)
+        return -11; // EAGAIN
+
+      if (sock->closing || usk->read_shutdown)
+        goto no_data;
+      if (sock->error)
+        return -(int)sock->error;
+    }
+
+    unix_packet_t *pkt = usk->packet_queue_head;
+
+    size_t control_capacity = msg->msg_controllen;
+    size_t control_used = 0;
+    bool have_control = msg->msg_control && control_capacity > 0;
+
+    if (have_control &&
+        !unix_user_range_valid((uint64_t)(uintptr_t)msg->msg_control,
+                               control_capacity)) {
+      spinlock_release(&usk->recv_lock);
+      return -14; // EFAULT
+    }
+
+    if (pkt->cred_pending && have_control) {
+      size_t needed = CMSG_SPACE(sizeof(struct unix_ucred));
+      if (control_capacity - control_used >= needed) {
+        struct cmsghdr *cmsg = (struct cmsghdr *)
+            ((uint8_t *)msg->msg_control + control_used);
+        cmsg->cmsg_len = CMSG_LEN(sizeof(struct unix_ucred));
+        cmsg->cmsg_level = SOL_SOCKET;
+        cmsg->cmsg_type = SCM_CREDENTIALS;
+
+        struct unix_ucred *cred = (struct unix_ucred *)CMSG_DATA(cmsg);
+        cred->pid = pkt->cred_pid;
+        cred->uid = pkt->cred_uid;
+        cred->gid = pkt->cred_gid;
+        control_used += needed;
+      } else {
+        msg->msg_flags |= MSG_CTRUNC;
+      }
+    }
+
+    if (pkt->scm != NULL) {
+      unix_scm_msg_t *head = pkt->scm;
+      if (have_control && control_capacity - control_used >= sizeof(struct cmsghdr)) {
+        struct cmsghdr *cmsg = (struct cmsghdr *)
+            ((uint8_t *)msg->msg_control + control_used);
+        cmsg->cmsg_level = SOL_SOCKET;
+        cmsg->cmsg_type  = SCM_RIGHTS;
+
+        int *fds = (int *)CMSG_DATA(cmsg);
+        size_t max_bytes_for_fds = 0;
+        if (control_capacity - control_used > CMSG_ALIGN(sizeof(struct cmsghdr)))
+          max_bytes_for_fds = control_capacity - control_used - CMSG_ALIGN(sizeof(struct cmsghdr));
+        int max_fds = (int)(max_bytes_for_fds / sizeof(int));
+        if (max_fds > head->count)
+          max_fds = head->count;
+
+        int actual_count = 0;
+        for (int i = 0; i < max_fds; i++) {
+          vfs_node_t *node = head->nodes[i];
+          int new_fd = alloc_fd(current);
+          if (new_fd >= 0) {
+            current->fds[new_fd] = node;
+            current->fd_offsets[new_fd] = 0;
+            current->fd_flags[new_fd] = (flags & MSG_CMSG_CLOEXEC) ? FD_FLAGS_CLOEXEC_BIT : 0;
+            fds[actual_count++] = new_fd;
+          } else {
+            vfs_close(node);
+          }
+          head->nodes[i] = NULL;
+        }
+
+        cmsg->cmsg_len = CMSG_LEN(actual_count * sizeof(int));
+        control_used += CMSG_SPACE(actual_count * sizeof(int));
+
+        if (actual_count < head->count) {
+          msg->msg_flags |= MSG_CTRUNC;
+          for (int i = actual_count; i < head->count; i++) {
+            if (head->nodes[i]) {
+              vfs_close(head->nodes[i]);
+              head->nodes[i] = NULL;
+            }
+          }
+        }
+      } else if (have_control) {
+        msg->msg_flags |= MSG_CTRUNC;
+        for (int i = 0; i < head->count; i++) {
+          if (head->nodes[i]) {
+            vfs_close(head->nodes[i]);
+            head->nodes[i] = NULL;
+          }
+        }
+      }
+    }
+
+    msg->msg_controllen = control_used;
+
+    size_t copied = 0;
+    for (size_t i = 0; i < msg->msg_iovlen && copied < pkt->data_len; i++) {
+      uint8_t *dest = (uint8_t *)msg->msg_iov[i].iov_base;
+      size_t want = msg->msg_iov[i].iov_len;
+      size_t avail = pkt->data_len - copied;
+      size_t chunk = (want < avail) ? want : avail;
+      if (chunk > 0 && dest) {
+        memcpy(dest, pkt->data + copied, chunk);
+        copied += chunk;
+      }
+    }
+
+    if (pkt->data_len > copied)
+      msg->msg_flags |= MSG_TRUNC;
+
+    if (!(flags & 0x02)) { // MSG_PEEK
+      usk->packet_queue_head = pkt->next;
+      if (!usk->packet_queue_head)
+        usk->packet_queue_tail = NULL;
+      usk->packet_queue_bytes -= pkt->data_len;
+
+      if (pkt->scm) {
+        for (int i = 0; i < pkt->scm->count; i++) {
+          if (pkt->scm->nodes[i]) {
+            vfs_close(pkt->scm->nodes[i]);
+            pkt->scm->nodes[i] = NULL;
+          }
+        }
+        kfree(pkt->scm);
+      }
+      kfree(pkt);
+
+      wait_queue_wake_all(usk->wait);
+    }
+
+    spinlock_release(&usk->recv_lock);
+
+    unix_sock_t *notify_peer = NULL;
+    socket_t *notify_peer_sock = unix_get_live_peer(sock, &notify_peer);
+    if (notify_peer_sock) {
+      if (notify_peer_sock->node)
+        epoll_notify_event(notify_peer_sock->node, EPOLLOUT | EPOLLWRNORM);
+      if (notify_peer_sock->fd >= 0)
+        epoll_notify_socket(notify_peer_sock->fd, EPOLLOUT | EPOLLWRNORM);
+      socket_put(notify_peer_sock);
+    }
+
+    unix_fill_msg_name(sock, msg);
+    return (ssize_t)copied;
+  }
+
   // Block until data is available; keep recv_lock held on exit from loop
   while (1) {
     spinlock_acquire(&usk->recv_lock);
@@ -601,67 +1196,105 @@ ssize_t unix_recvmsg_impl(socket_t *sock, struct msghdr *msg, int flags) {
 
   if (usk->scm_cred_pending) {
     size_t needed = CMSG_SPACE(sizeof(struct unix_ucred));
-    if (have_control && control_capacity - control_used >= needed) {
-      struct cmsghdr *cmsg = (struct cmsghdr *)
-          ((uint8_t *)msg->msg_control + control_used);
-      cmsg->cmsg_len = CMSG_LEN(sizeof(struct unix_ucred));
-      cmsg->cmsg_level = SOL_SOCKET;
-      cmsg->cmsg_type = SCM_CREDENTIALS;
+    if (have_control) {
+      if (control_capacity - control_used >= needed) {
+        struct cmsghdr *cmsg = (struct cmsghdr *)
+            ((uint8_t *)msg->msg_control + control_used);
+        cmsg->cmsg_len = CMSG_LEN(sizeof(struct unix_ucred));
+        cmsg->cmsg_level = SOL_SOCKET;
+        cmsg->cmsg_type = SCM_CREDENTIALS;
 
-      struct unix_ucred *cred = (struct unix_ucred *)CMSG_DATA(cmsg);
-      cred->pid = usk->scm_cred_pid;
-      cred->uid = usk->scm_cred_uid;
-      cred->gid = usk->scm_cred_gid;
-      control_used += needed;
-
-      if (!(flags & 0x02)) // MSG_PEEK
-        usk->scm_cred_pending = false;
-    } else {
-      msg->msg_flags |= MSG_CTRUNC;
+        struct unix_ucred *cred = (struct unix_ucred *)CMSG_DATA(cmsg);
+        cred->pid = usk->scm_cred_pid;
+        cred->uid = usk->scm_cred_uid;
+        cred->gid = usk->scm_cred_gid;
+        control_used += needed;
+      } else {
+        msg->msg_flags |= MSG_CTRUNC;
+      }
       if (!(flags & 0x02)) // MSG_PEEK
         usk->scm_cred_pending = false;
     }
   }
 
-  if (usk->scm_count > 0 && have_control &&
-      control_capacity - control_used >= CMSG_SPACE(sizeof(int))) {
-    struct cmsghdr *cmsg = (struct cmsghdr *)
-        ((uint8_t *)msg->msg_control + control_used);
-    cmsg->cmsg_level = SOL_SOCKET;
-    cmsg->cmsg_type  = SCM_RIGHTS;
+  size_t max_stream_bytes = (size_t)-1;
+  if (usk->scm_queue_head != NULL) {
+    unix_scm_msg_t *head = usk->scm_queue_head;
+    if (usk->bytes_read < head->stream_offset) {
+      // SCM belongs to future bytes in the stream.
+      // Do not deliver SCM on this call, and cap data read at stream_offset.
+      max_stream_bytes = head->stream_offset - usk->bytes_read;
+    } else {
+      // Stream position is at SCM boundary: deliver SCM!
+      if (have_control && control_capacity - control_used >= sizeof(struct cmsghdr)) {
+        struct cmsghdr *cmsg = (struct cmsghdr *)
+            ((uint8_t *)msg->msg_control + control_used);
+        cmsg->cmsg_level = SOL_SOCKET;
+        cmsg->cmsg_type  = SCM_RIGHTS;
 
-    int *fds = (int *)CMSG_DATA(cmsg);
-    int max_fds = (int)((control_capacity - control_used -
-                         CMSG_ALIGN(sizeof(struct cmsghdr))) / sizeof(int));
-    if (max_fds > usk->scm_count)
-      max_fds = usk->scm_count;
+        int *fds = (int *)CMSG_DATA(cmsg);
+        size_t max_bytes_for_fds = 0;
+        if (control_capacity - control_used > CMSG_ALIGN(sizeof(struct cmsghdr)))
+          max_bytes_for_fds = control_capacity - control_used - CMSG_ALIGN(sizeof(struct cmsghdr));
+        int max_fds = (int)(max_bytes_for_fds / sizeof(int));
+        if (max_fds > head->count)
+          max_fds = head->count;
 
-    int actual_count = 0;
-    for (int i = 0; i < max_fds; i++) {
-      vfs_node_t *node = usk->scm_nodes[i];
-      int new_fd = alloc_fd(current);
-      if (new_fd >= 0) {
-        current->fds[new_fd] = node;
-        fds[actual_count++] = new_fd;
-      } else {
-        vfs_close(node);
+        int actual_count = 0;
+        for (int i = 0; i < max_fds; i++) {
+          vfs_node_t *node = head->nodes[i];
+          int new_fd = alloc_fd(current);
+          if (new_fd >= 0) {
+            current->fds[new_fd] = node;
+            current->fd_offsets[new_fd] = 0;
+            current->fd_flags[new_fd] = (flags & MSG_CMSG_CLOEXEC) ? FD_FLAGS_CLOEXEC_BIT : 0;
+            fds[actual_count++] = new_fd;
+          } else {
+            vfs_close(node);
+          }
+          head->nodes[i] = NULL;
+        }
+
+        cmsg->cmsg_len = CMSG_LEN(actual_count * sizeof(int));
+        control_used += CMSG_SPACE(actual_count * sizeof(int));
+
+        if (actual_count < head->count) {
+          msg->msg_flags |= MSG_CTRUNC;
+          for (int i = actual_count; i < head->count; i++) {
+            if (head->nodes[i]) {
+              vfs_close(head->nodes[i]);
+              head->nodes[i] = NULL;
+            }
+          }
+        }
+
+        if (!(flags & 0x02)) { // MSG_PEEK
+          usk->scm_queue_head = head->next;
+          if (!usk->scm_queue_head)
+            usk->scm_queue_tail = NULL;
+          kfree(head);
+        }
+      } else if (have_control) {
+        msg->msg_flags |= MSG_CTRUNC;
+        if (!(flags & 0x02)) {
+          for (int i = 0; i < head->count; i++) {
+            if (head->nodes[i]) {
+              vfs_close(head->nodes[i]);
+              head->nodes[i] = NULL;
+            }
+          }
+          usk->scm_queue_head = head->next;
+          if (!usk->scm_queue_head)
+            usk->scm_queue_tail = NULL;
+          kfree(head);
+        }
       }
-      usk->scm_nodes[i] = NULL;
+
+      // If another SCM is queued after this one, cap read to that SCM's boundary
+      if (usk->scm_queue_head && usk->scm_queue_head->stream_offset > usk->bytes_read) {
+        max_stream_bytes = usk->scm_queue_head->stream_offset - usk->bytes_read;
+      }
     }
-
-    // Shift remaining nodes down
-    int remaining = usk->scm_count - max_fds;
-    for (int i = 0; i < remaining; i++)
-      usk->scm_nodes[i] = usk->scm_nodes[max_fds + i];
-    usk->scm_count = remaining;
-
-    cmsg->cmsg_len = CMSG_LEN(actual_count * sizeof(int));
-    control_used += CMSG_SPACE(actual_count * sizeof(int));
-
-    if (remaining > 0)
-      msg->msg_flags |= MSG_CTRUNC;
-  } else if (usk->scm_count > 0) {
-    msg->msg_flags |= MSG_CTRUNC;
   }
 
   msg->msg_controllen = control_used;
@@ -679,17 +1312,27 @@ ssize_t unix_recvmsg_impl(socket_t *sock, struct msghdr *msg, int flags) {
     size_t size      = usk->recv_buf_size;
     size_t available = (size > 0) ? (tail - head + size) % size : 0;
 
-    if (available == 0)
+    if (available == 0 || max_stream_bytes == 0)
       break;
 
     size_t to_copy = (want < available) ? want : available;
+    if (to_copy > max_stream_bytes)
+      to_copy = max_stream_bytes;
+
+    if (to_copy == 0)
+      break;
+
     for (size_t j = 0; j < to_copy; j++)
       dest[j] = (size > 0) ? usk->recv_buf[(head + j) % size] : 0;
 
-    if (!(flags & 0x02)) // MSG_PEEK
+    if (!(flags & 0x02)) { // MSG_PEEK
       usk->recv_buf_head = (size > 0) ? (head + to_copy) % size : 0;
+      usk->bytes_read += to_copy;
+    }
 
     total_received += (ssize_t)to_copy;
+    if (max_stream_bytes != (size_t)-1)
+      max_stream_bytes -= to_copy;
   }
 
   spinlock_release(&usk->recv_lock);

@@ -26,6 +26,8 @@ struct mm_struct {
   int ref_count;           // Reference count for sharing across threads
   uint16_t pcid;           // Hardware PCID tag (0 = kernel/unassigned)
   spinlock_t lock;         // Lock for thread-safe MM state updates
+  uint64_t saved_auxv[64]; // Auxiliary vector (type, val pairs)
+  uint32_t auxv_count;     // Number of uint64_t entries
 };
 
 
@@ -207,6 +209,7 @@ struct thread {
   bool has_saved_signal_mask;
   uint64_t fault_addr;
   uint32_t fault_code;
+  struct registers sigreturn_regs; // Safe kernel-side register store for IRETQ restoration
 
   // Alternate signal stack (sigaltstack)
   uint64_t ss_sp;   // Base of alternate signal stack
@@ -296,6 +299,8 @@ bool sched_terminate_thread(uint32_t tid);
 struct thread *sched_get_thread_by_tid(uint32_t tid);
 bool sched_get_thread_snapshot(uint32_t tid,
                                struct sched_thread_snapshot *snapshot);
+size_t sched_read_thread_auxv(uint32_t tid, uint32_t offset, uint32_t size,
+                              uint8_t *buffer);
 bool sched_get_nth_thread_tid(uint32_t index, uint32_t *tid);
 bool sched_get_nth_open_fd(uint32_t tid, uint32_t index, uint32_t *fd);
 bool sched_get_fd_path_snapshot(uint32_t tid, uint32_t fd, char *path,

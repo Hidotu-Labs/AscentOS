@@ -623,6 +623,83 @@ static uint64_t sys_recvmsg(uint64_t sockfd, uint64_t msg_ptr, uint64_t flags,
   return (uint64_t)total_received;
 }
 
+struct mmsghdr {
+  struct msghdr msg_hdr;
+  unsigned int msg_len;
+};
+
+// Syscall: sendmmsg(int sockfd, struct mmsghdr *msgvec, unsigned int vlen, int flags)
+static uint64_t sys_sendmmsg(uint64_t sockfd, uint64_t msgvec_ptr, uint64_t vlen,
+                             uint64_t flags, uint64_t _arg4, uint64_t _arg5) {
+  (void)_arg4;
+  (void)_arg5;
+
+  if (!msgvec_ptr)
+    return (uint64_t)-14; // EFAULT
+
+  unsigned int count = (unsigned int)vlen;
+  if (count == 0)
+    return 0;
+  if (count > 1024)
+    count = 1024;
+
+  if (!vmm_is_user_addr_range_writable(msgvec_ptr, count * sizeof(struct mmsghdr)))
+    return (uint64_t)-14; // EFAULT
+
+  struct mmsghdr *vec = (struct mmsghdr *)msgvec_ptr;
+  unsigned int sent_msgs = 0;
+
+  for (unsigned int i = 0; i < count; i++) {
+    uint64_t ret = sys_sendmsg(sockfd, (uint64_t)&vec[i].msg_hdr, flags, 0, 0, 0);
+    if ((int64_t)ret < 0) {
+      if (sent_msgs > 0)
+        return (uint64_t)sent_msgs;
+      return ret;
+    }
+    vec[i].msg_len = (unsigned int)ret;
+    sent_msgs++;
+  }
+
+  return (uint64_t)sent_msgs;
+}
+
+// Syscall: recvmmsg(int sockfd, struct mmsghdr *msgvec, unsigned int vlen, int flags, struct timespec *timeout)
+static uint64_t sys_recvmmsg(uint64_t sockfd, uint64_t msgvec_ptr, uint64_t vlen,
+                             uint64_t flags, uint64_t timeout_ptr, uint64_t _arg5) {
+  (void)timeout_ptr;
+  (void)_arg5;
+
+  if (!msgvec_ptr)
+    return (uint64_t)-14; // EFAULT
+
+  unsigned int count = (unsigned int)vlen;
+  if (count == 0)
+    return 0;
+  if (count > 1024)
+    count = 1024;
+
+  if (!vmm_is_user_addr_range_writable(msgvec_ptr, count * sizeof(struct mmsghdr)))
+    return (uint64_t)-14; // EFAULT
+
+  struct mmsghdr *vec = (struct mmsghdr *)msgvec_ptr;
+  unsigned int recvd_msgs = 0;
+
+  for (unsigned int i = 0; i < count; i++) {
+    uint64_t ret = sys_recvmsg(sockfd, (uint64_t)&vec[i].msg_hdr, flags, 0, 0, 0);
+    if ((int64_t)ret < 0) {
+      if (recvd_msgs > 0)
+        return (uint64_t)recvd_msgs;
+      return ret;
+    }
+    vec[i].msg_len = (unsigned int)ret;
+    recvd_msgs++;
+    if (flags & MSG_DONTWAIT)
+      break;
+  }
+
+  return (uint64_t)recvd_msgs;
+}
+
 // Syscall: shutdown(int sockfd, int how)
 static uint64_t sys_shutdown(uint64_t sockfd, uint64_t how, uint64_t _arg2,
                              uint64_t _arg3, uint64_t _arg4, uint64_t _arg5) {
@@ -965,6 +1042,8 @@ void syscall_register_socket(void) {
   syscall_register(SYS_SETSOCKOPT, sys_setsockopt);
   syscall_register(SYS_GETSOCKOPT, sys_getsockopt);
   syscall_register(SYS_SENDMSG, sys_sendmsg);
+  syscall_register(SYS_SENDMMSG, sys_sendmmsg);
+  syscall_register(SYS_RECVMMSG, sys_recvmmsg);
   syscall_register(SYS_GETSOCKNAME, sys_getsockname);
   syscall_register(SYS_GETPEERNAME, sys_getpeername);
 

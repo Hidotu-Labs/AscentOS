@@ -8,33 +8,17 @@
 #include "pcid.h"
 #include "vmm.h"
 #include "../lock/spinlock.h"
+#include "../cpu/features.h"
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
 
 /* -------------------------------------------------------------------------
  * Per-CPU TLB shootdown state
- *
- * Old design: one global shootdown_addr + one global ack_pending.
- *   - Global serialisation: only one shootdown in flight across all CPUs.
- *   - Initiator spins until ALL remote CPUs ack before doing local flush.
- *   - Sequential IPI loop: CPU0 sends to CPU1, waits, sends to CPU2, etc.
- *     (actually sent all at once but spin still waits for all 3 before
- *      flushing locally, so local flush is always delayed by the slowest
- *      remote CPU).
- *
- * New design: per-CPU pending address + per-CPU ack flag.
- *   - No global lock needed for user-space CR3-filtered shootdowns.
- *   - All IPIs are sent in one burst; initiator then spins — but because
- *     all three remote CPUs handle their IPI concurrently the aggregate
- *     wait time ≈ 1× latency rather than 3×.
- *   - Initiator flushes locally while waiting (overlap CPU-local invlpg
- *     with remote IPI round-trip).
- *   - kernel-wide (TLB_SHOOTDOWN_ALL) still uses a lock for safety.
  * ------------------------------------------------------------------------- */
 
-/* Global lock only for full-CR3-reload shootdowns (rare: fork/exec). */
-static spinlock_t shootdown_lock = SPINLOCK_INIT;
+/* Global lock for shootdown serialization (without disabling interrupts to avoid IPI deadlock). */
+static rawspinlock_t shootdown_lock = RAWSPINLOCK_INIT;
 
 /* Per-CPU pending virtual address (written by initiator, read by target). */
 #define MAX_CPUS 64
@@ -43,21 +27,17 @@ static volatile uint8_t  cpu_shootdown_ack[MAX_CPUS];
 
 static bool cpu_needs_shootdown(struct cpu_info *cpu, struct cpu_info *self,
                                 uint64_t addr, uint64_t source_cr3) {
+    (void)addr;
+    (void)source_cr3;
     if (!cpu || cpu == self)
         return false;
     if (cpu->status != CPU_STATUS_ONLINE && cpu->status != CPU_STATUS_BSP)
         return false;
-    /* Kernel-wide or high-bit addresses must go to every CPU. */
-    if (addr == TLB_SHOOTDOWN_ALL || (addr & (1ULL << 63)))
-        return true;
-
-    /* User translation: only CPUs currently running the same CR3 have a
-     * stale entry. Check current_thread->cr3 with an acquire load so we
-     * see the latest context switch. */
-    struct thread *thread =
-        __atomic_load_n(&cpu->current_thread, __ATOMIC_ACQUIRE);
-    uint64_t target_cr3 = thread && thread->cr3 ? thread->cr3 : cpu->kernel_cr3;
-    return (target_cr3 & ~0xFFFULL) == (source_cr3 & ~0xFFFULL);
+    /* Broadcast shootdown to all online remote CPUs. With lazy CR3 and
+     * PCID-enabled context switching (CR3_NOFLUSH), any remote CPU may hold
+     * stale cached translations for user address spaces even when idle or
+     * currently switched away. */
+    return true;
 }
 
 void tlb_shootdown_handle_ipi(void) {
@@ -72,13 +52,24 @@ void tlb_shootdown_handle_ipi(void) {
     uint64_t addr = __atomic_load_n(&cpu_shootdown_addr[id], __ATOMIC_ACQUIRE);
 
     if (addr == TLB_SHOOTDOWN_ALL) {
-        cpu_pcid_invalidate_all(self);
-        uint64_t cr3;
-        __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
-        cr3 &= ~CR3_NOFLUSH;
-        __asm__ volatile("mov %0, %%cr3" :: "r"(cr3) : "memory");
+        if (cpu_has_pcid()) {
+            cpu_pcid_invalidate_all(self);
+            pcid_flush_all();
+        } else {
+            uint64_t cr3;
+            __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
+            cr3 &= ~CR3_NOFLUSH;
+            __asm__ volatile("mov %0, %%cr3" :: "r"(cr3) : "memory");
+        }
     } else if (addr != 0) {
         __asm__ volatile("invlpg (%0)" :: "r"(addr) : "memory");
+        if (cpu_has_pcid()) {
+            cpu_pcid_invalidate_all(self);
+            if (cpu_has_invpcid()) {
+                struct invpcid_desc desc = {0};
+                invpcid(INVPCID_TYPE_ALL_NON_GLOBAL, &desc);
+            }
+        }
     }
 
     /* Ack: store 0 to signal the initiator we are done. */
@@ -136,7 +127,7 @@ static void do_shootdown(uint64_t addr) {
         return;
     }
 
-    spinlock_acquire(&shootdown_lock);
+    rawspinlock_acquire(&shootdown_lock);
 
     /* Publish address to all target CPUs. */
     for (uint32_t i = 0; i < cpu_count && i < MAX_CPUS; i++) {
@@ -176,7 +167,7 @@ static void do_shootdown(uint64_t addr) {
             hal_cpu_relax();
     }
 
-    spinlock_release(&shootdown_lock);
+    rawspinlock_release(&shootdown_lock);
 }
 
 void tlb_shootdown_page(uint64_t addr) {

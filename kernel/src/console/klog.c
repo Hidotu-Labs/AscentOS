@@ -297,6 +297,14 @@ void klog_proc_exit(uint32_t tid, uint32_t tgid, bool is_thread, const char *com
   *p++ = '\n';
 
   klog_write_dispatch(buf, (size_t)(p - buf));
+
+  if (status != 0) {
+    char warn[160];
+    int wlen = snprintf(warn, sizeof(warn), "[PROC] WARNING: tid=%u comm=%s exited with failure status=%llu\n",
+                        tid, comm ? comm : "?", (unsigned long long)status);
+    if (wlen > 0)
+      klog_write_dispatch(warn, (size_t)wlen);
+  }
 }
 
 void klog_proc_exec(uint32_t tid, const char *path) {
@@ -335,9 +343,18 @@ void klog_proc_exec(uint32_t tid, const char *path) {
   *p++ = '\n';
 
   klog_write_dispatch(buf, (size_t)(p - buf));
+
+  if (path && (strstr(path, "badwolf") || strstr(path, "bwrap") || strstr(path, "WebKit") || strstr(path, "webkit"))) {
+    char note[160];
+    int nlen = snprintf(note, sizeof(note), "[PROC] [WEBKIT/BROWSER] Launching %s (tid=%u)\n",
+                        path, tid);
+    if (nlen > 0)
+      klog_write_dispatch(note, (size_t)nlen);
+  }
 }
 
 void klog_ramfs_free(void *ptr, uint64_t capacity, bool is_pmm, uint64_t pages) {
+#if KLOG_VERBOSE
   char buf[160];
   char *p = buf;
 
@@ -395,4 +412,10 @@ void klog_ramfs_free(void *ptr, uint64_t capacity, bool is_pmm, uint64_t pages) 
   *p++ = '\n';
 
   klog_write_dispatch(buf, (size_t)(p - buf));
+#else
+  (void)ptr;
+  (void)capacity;
+  (void)is_pmm;
+  (void)pages;
+#endif
 }

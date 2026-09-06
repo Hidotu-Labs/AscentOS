@@ -457,6 +457,8 @@ int socket_create_pair(int domain, int type, int protocol, socket_t *sv[2]) {
   if (usk0 && usk1) {
     usk0->peer = usk1;
     usk1->peer = usk0;
+    usk0->was_connected = true;
+    usk1->was_connected = true;
   }
 
   sv[0] = sock0;
@@ -508,7 +510,7 @@ int socket_alloc_fd(socket_t *sock) {
   sock->node = node;
   t->fds[fd] = node;
   t->fd_offsets[fd] = 0;
-  t->fd_flags[fd] = O_RDWR;
+  t->fd_flags[fd] = O_RDWR | ((sock->flags & SOCK_CLOEXEC) ? FD_FLAGS_CLOEXEC_BIT : 0);
 
   // node->refcount = 1 (from vfs_node_init) — the fd-table's reference.
   // sock->refcount = 1 (from socket_create) — the VFS node's reference.

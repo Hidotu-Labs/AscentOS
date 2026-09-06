@@ -464,6 +464,36 @@ void syscall_dispatcher(struct syscall_regs *regs) {
     t->last_kernel_func = syscall_get_name(regs->rax);
   }
 
+  uint64_t syscall_num = regs->rax;
+  bool is_mocktail = (t && t->comm[0] && strstr(t->comm, "mocktail") != NULL);
+  (void)is_mocktail;
+  bool log_mocktail = false;
+
+  if (log_mocktail) {
+    const char *name = syscall_get_name(syscall_num);
+    klog_puts("[MOCKTAIL SYS] ");
+    klog_puts(name ? name : "?");
+    klog_puts("(");
+    klog_uint64(syscall_num);
+    klog_puts(") tid=");
+    klog_uint64(t->tid);
+    klog_puts(" args: ");
+    klog_hex64(regs->rdi);
+    klog_puts(" ");
+    klog_hex64(regs->rsi);
+    klog_puts(" ");
+    klog_hex64(regs->rdx);
+    if (syscall_num == 202) {
+      klog_puts(" t/o=");
+      klog_hex64(regs->r10);
+      klog_puts(" u2=");
+      klog_hex64(regs->r8);
+      klog_puts(" v3=");
+      klog_hex64(regs->r9);
+    }
+    klog_puts("\n");
+  }
+
   if (regs->rax >= MAX_SYSCALL) {
     log_unimplemented_syscall(regs, t);
     regs->rax = (uint64_t)-38; // ENOSYS
@@ -475,8 +505,8 @@ void syscall_dispatcher(struct syscall_regs *regs) {
   }
 
   // Check raw handlers first (e.g. fork needs the full register frame)
-  if (raw_syscall_table[regs->rax]) {
-    syscall_raw_handler_t raw_handler = raw_syscall_table[regs->rax];
+  if (raw_syscall_table[syscall_num]) {
+    syscall_raw_handler_t raw_handler = raw_syscall_table[syscall_num];
 #if SYSCALL_LOG
     log_syscall_entry(regs, t);
 #endif
@@ -487,10 +517,20 @@ void syscall_dispatcher(struct syscall_regs *regs) {
         t->last_error_code = (int64_t)regs->rax;
       }
     }
+    if (log_mocktail && (syscall_num == 202 || syscall_num == 42 || syscall_num == 435)) {
+      const char *name = syscall_get_name(syscall_num);
+      klog_puts("[MOCKTAIL SYS RET] ");
+      klog_puts(name ? name : "?");
+      klog_puts(" tid=");
+      klog_uint64(t->tid);
+      klog_puts(" ret=");
+      klog_hex64(regs->rax);
+      klog_puts("\n");
+    }
     return;
   }
 
-  if (!syscall_table[regs->rax]) {
+  if (!syscall_table[syscall_num]) {
     log_unimplemented_syscall(regs, t);
     regs->rax = (uint64_t)-38; // ENOSYS
     if (t) {
@@ -500,7 +540,6 @@ void syscall_dispatcher(struct syscall_regs *regs) {
     return;
   }
 
-  uint64_t syscall_num = regs->rax;
   syscall_handler_t handler = syscall_table[syscall_num];
 
 #if SYSCALL_LOG
@@ -515,6 +554,17 @@ void syscall_dispatcher(struct syscall_regs *regs) {
     if ((int64_t)regs->rax < 0 && (int64_t)regs->rax >= -4095) {
       t->last_error_code = (int64_t)regs->rax;
     }
+  }
+
+  if (log_mocktail && (syscall_num == 202 || syscall_num == 42 || syscall_num == 435)) {
+    const char *name = syscall_get_name(syscall_num);
+    klog_puts("[MOCKTAIL SYS RET] ");
+    klog_puts(name ? name : "?");
+    klog_puts(" tid=");
+    klog_uint64(t->tid);
+    klog_puts(" ret=");
+    klog_hex64(regs->rax);
+    klog_puts("\n");
   }
 
   /* Signal frame conversion copies the complete register set. Keep it off the
