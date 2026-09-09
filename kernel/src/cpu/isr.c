@@ -11,6 +11,7 @@
 #include "arch/x86_64/extable.h"
 #include "fault.h"
 #include "fpu.h"
+#include "kpf_dump.h"
 #include "ktrack.h"
 #include "msr.h"
 #include "pic.h"
@@ -458,6 +459,24 @@ static void send_eoi(struct registers *regs) {
 // Exception Handling & Signals
 
 static void isr_panic(struct registers *regs, const char *msg) {
+  /* Announce the panic on the serial line before touching the console: the
+   * framebuffer path takes locks this CPU may already be holding, and the
+   * console dump never reaches the log if that hangs. */
+  kpf_dump_panic_entry(msg, regs);
+
+  /* A panic that faults on the way out - the console dump touches the
+   * framebuffer, locks and the faulting thread's stack - used to re-enter this
+   * function and start the whole dump again, forever. That loop is what looks
+   * like a hang on the serial line. Give up on the console after the first
+   * attempt and stop cleanly instead. */
+  static volatile int panicking;
+  if (__atomic_exchange_n(&panicking, 1, __ATOMIC_ACQ_REL)) {
+    kpf_dump_panic_recursion(msg, regs);
+    for (;;) {
+      __asm__ volatile("cli; hlt");
+    }
+  }
+
   console_clear();
   console_puts("==================== KERNEL PANIC ====================\n");
   console_puts(msg);
@@ -939,7 +958,12 @@ static void page_fault_handler(struct registers *regs) {
       if (extable_fixup(regs)) {
         return;
       }
-      klog_puts("[VMM] KERNEL-mode fault could not be handled by paging engine!\n");
+      klog_puts("[VMM] KERNEL-mode fault could not be handled by paging "
+                "engine!\n");
+      /* Everything the paging engine knew, written straight to the serial port
+       * without a lock: isr_panic() only prints to the console, and the box is
+       * about to stop listening to anything else. */
+      kpf_dump_page_fault(regs, cr2);
       isr_panic(regs, "Unhandled Kernel Page Fault");
     }
   }

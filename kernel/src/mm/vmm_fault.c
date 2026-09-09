@@ -30,9 +30,56 @@ static uint64_t dp_build_flags(uint64_t prot) {
   return flags;
 }
 
+/* ---- Why the paging engine refused a fault --------------------------------
+ *
+ * A -1 is a death sentence for a kernel-mode fault, so every bail-out in
+ * vmm_handle_page_fault() annotates itself and page_fault_handler() prints the
+ * record through kpf_dump.c while the machine can still talk.
+ *
+ * Plain stores only: this runs on the fault path, where taking a lock or
+ * allocating can fault again or spin forever on a ticket lock this CPU already
+ * holds. A record torn by a rejection on another CPU only garbles one line on a
+ * machine that is about to panic anyway.
+ */
+static struct vmm_fault_reject pf_reject;
+static volatile uint32_t pf_reject_seq;
+
+static int pf_reject_record(uint64_t cr2, uint64_t error_code,
+                            const struct registers *regs,
+                            const struct thread *current, const char *reason,
+                            const char *file, uint32_t line, uint64_t detail,
+                            uint64_t detail2) {
+  pf_reject.reason = reason;
+  pf_reject.file = file;
+  pf_reject.line = line;
+  pf_reject.cr2 = cr2;
+  pf_reject.err_code = error_code;
+  pf_reject.rip = regs ? regs->rip : 0;
+  pf_reject.detail = detail;
+  pf_reject.detail2 = detail2;
+  pf_reject.tid = current ? current->tid : 0;
+  pf_reject.seq = pf_reject_seq + 1;
+  pf_reject_seq = pf_reject.seq;
+  return -1;
+}
+
+/* Only usable inside vmm_handle_page_fault(), whose locals it borrows. */
+#define PF_REJECT(reason, detail, detail2)                                     \
+  pf_reject_record(cr2, error_code, regs, current, (reason), __FILE__,         \
+                   __LINE__, (uint64_t)(detail), (uint64_t)(detail2))
+
+bool vmm_get_last_fault_reject(struct vmm_fault_reject *out) {
+  if (!out)
+    return false;
+  uint32_t seq = pf_reject_seq;
+  if (seq == 0)
+    return false;
+  *out = pf_reject;
+  return out->seq == seq;
+}
+
 int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
                           struct registers *regs) {
-  (void)regs;
   bool user_mode = (error_code & 0x4) != 0;
   bool write_fault = (error_code & 0x2) != 0;
   bool present_bit = (error_code & 0x1) != 0;
@@ -41,7 +88,15 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
 
   struct thread *current = sched_get_current();
   if (!current)
-    return -1; // kernel fault, no process context
+    return PF_REJECT("no current thread - fault outside any thread context", 0,
+                     0);
+
+  /* A kernel thread has no address space, so there is nothing to demand page
+   * and no VMA to recover permissions from. Checked here because every path
+   * below reaches through current->mm->lock, which would fault again inside
+   * the fault handler and turn this reportable #PF into a double fault. */
+  if (!current->mm)
+    return PF_REJECT("thread has no address space (kernel thread)", 0, 0);
 
   uint64_t target_cr3 = current->cr3;
   if (target_cr3 == 0) {
@@ -55,32 +110,34 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
 
     rawspinlock_acquire(vmm_get_lock());
 
-    if (!(pml4[(virt >> 39) & 511] & PAGE_FLAG_PRESENT)) {
+    uint64_t pml4e = pml4[(virt >> 39) & 511];
+    if (!(pml4e & PAGE_FLAG_PRESENT)) {
       rawspinlock_release(vmm_get_lock());
-      return -1;
+      return PF_REJECT("write walk: PML4E is not present", pml4e, virt);
     }
-    uint64_t *pdpt =
-        (uint64_t *)PHYS_TO_VIRT(pml4[(virt >> 39) & 511] & PAGE_MASK);
+    uint64_t *pdpt = (uint64_t *)PHYS_TO_VIRT(pml4e & PAGE_MASK);
 
-    if (!(pdpt[(virt >> 30) & 511] & PAGE_FLAG_PRESENT) ||
-        (pdpt[(virt >> 30) & 511] & PAGE_FLAG_PS)) {
+    uint64_t pdpte = pdpt[(virt >> 30) & 511];
+    if (!(pdpte & PAGE_FLAG_PRESENT) || (pdpte & PAGE_FLAG_PS)) {
       rawspinlock_release(vmm_get_lock());
-      return -1;
-    }
-
-    uint64_t *pd =
-        (uint64_t *)PHYS_TO_VIRT(pdpt[(virt >> 30) & 511] & PAGE_MASK);
-    if (!(pd[(virt >> 21) & 511] & PAGE_FLAG_PRESENT) ||
-        (pd[(virt >> 21) & 511] & PAGE_FLAG_PS)) {
-      rawspinlock_release(vmm_get_lock());
-      return -1;
+      return PF_REJECT("write walk: PDPT entry missing or a 1GB page", pdpte,
+                       virt);
     }
 
-    uint64_t *pt = (uint64_t *)PHYS_TO_VIRT(pd[(virt >> 21) & 511] & PAGE_MASK);
+    uint64_t *pd = (uint64_t *)PHYS_TO_VIRT(pdpte & PAGE_MASK);
+    uint64_t pde = pd[(virt >> 21) & 511];
+    if (!(pde & PAGE_FLAG_PRESENT) || (pde & PAGE_FLAG_PS)) {
+      rawspinlock_release(vmm_get_lock());
+      return PF_REJECT("write walk: PD entry missing or a 2MB huge page", pde,
+                       virt);
+    }
+
+    uint64_t *pt = (uint64_t *)PHYS_TO_VIRT(pde & PAGE_MASK);
     uint64_t *pte = &pt[(virt >> 12) & 511];
     if (!(*pte & PAGE_FLAG_PRESENT)) {
       rawspinlock_release(vmm_get_lock());
-      return -1;
+      return PF_REJECT("error code says P=1 but the PTE is not present", *pte,
+                       virt);
     }
 
     if (*pte & PAGE_FLAG_RW) {
@@ -113,7 +170,8 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
         void *new_phys = pmm_alloc_page();
         if (!new_phys) {
           rawspinlock_release(vmm_get_lock());
-          return -1;
+          return PF_REJECT("CoW break of the shared zero page: PMM out of "
+                           "memory", old_phys, 0);
         }
 
         memset(PHYS_TO_VIRT((uint64_t)new_phys), 0, PAGE_SIZE);
@@ -135,7 +193,7 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
         void *new_phys = pmm_alloc_page();
         if (!new_phys) {
           rawspinlock_release(vmm_get_lock());
-          return -1;
+          return PF_REJECT("CoW copy: PMM out of memory", old_phys, refs);
         }
 
         memcpy(PHYS_TO_VIRT((uint64_t)new_phys), PHYS_TO_VIRT(old_phys),
@@ -172,20 +230,32 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
       klog_puts(" RSP=");
       klog_hex64(regs->rsp);
       klog_puts("\n");
-      return -1;
+      return PF_REJECT("write-protect violation: present page is read-only and "
+                       "not CoW", *pte, *pte & PAGE_FLAG_COW);
     }
   }
 
   // If we reach here for a PRESENT page, check if the VMA permissions allow this
   // access (e.g. if the page was previously PROT_NONE or missing USER/RW bits).
   if (present_bit) {
+    const char *why = user_mode
+                          ? "present page: no VMA covers it, permissions could "
+                            "not be recovered"
+                          : "present page: ring-0 fault outside any VMA "
+                            "(protection violation)";
+    uint64_t vma_prot = 0;
+    uint64_t vma_start = 0;
     spinlock_acquire(&current->mm->lock);
     struct vma *v = vma_find(&current->mm->vmas, cr2);
     if (v && v->prot != PROT_NONE) {
+      vma_prot = v->prot;
+      vma_start = v->start;
       bool allowed = true;
       if (write_fault && !(v->prot & PROT_WRITE)) allowed = false;
       if (exec_fault && !(v->prot & PROT_EXEC)) allowed = false;
       if (!write_fault && !exec_fault && !(v->prot & PROT_READ)) allowed = false;
+      if (!allowed)
+        why = "present page: VMA permissions forbid this access";
 
       if (allowed) {
         uint64_t *pml4 = (uint64_t *)PHYS_TO_VIRT(target_cr3);
@@ -209,10 +279,21 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
                 spinlock_release(&current->mm->lock);
                 return 0; // Recovered PTE permissions from VMA
               }
+              why = "present page: PTE vanished underneath the permission "
+                    "recovery walk";
+            } else {
+              why = "present page: walk stopped at a missing PD or a huge page";
             }
+          } else {
+            why = "present page: walk stopped at a missing PDPT or a huge page";
           }
+        } else {
+          why = "present page: walk stopped at an absent PML4E";
         }
       }
+    } else if (v) {
+      vma_start = v->start;
+      why = "present page: VMA is PROT_NONE";
     }
     spinlock_release(&current->mm->lock);
 
@@ -225,13 +306,10 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
       klog_hex64(error_code);
       klog_puts("\n");
     }
-    return -1;
+    return PF_REJECT(why, vma_prot, vma_start);
   }
 
   // ---- VMA-based demand paging --------------------------------------------
-
-  if (!current || !current->mm)
-    return -1;
 
   spinlock_acquire(&current->mm->lock);
 
@@ -327,12 +405,13 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
         klog_puts(")\n[VMM] Active VMAs:\n");
         vma_dump(&current->mm->vmas);
       }
-      return -1;
+      return PF_REJECT("no VMA covers the faulting address", cr2, 0);
     }
 
     if (!user_mode && cr2 <= USER_SPACE_LIMIT) {
       if (regs && extable_has_entry(regs->rip)) {
-        return -1;
+        return PF_REJECT("kernel read of a user address at a guarded (extable) "
+                         "instruction", cr2, regs->rip);
       }
       klog_puts("\n" KLOG_CLR_RED "[ FATAL ]" KLOG_CLR_RESET
                 " KERNEL-MODE FAULT on user address\n");
@@ -395,17 +474,22 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
     klog_hex64(cr2);
     klog_puts("\n[VMM] Active VMAs:\n");
     vma_dump(&current->mm->vmas);
-    return -1;
+    return PF_REJECT(user_mode
+                         ? "no VMA covers the faulting address"
+                         : "kernel address is not covered by a VMA, so there is "
+                           "nothing to demand page (higher-half mapping missing?)",
+                     cr2, 0);
   }
 
   // PROT_NONE enforcement — reserves address space but forbids all access.
   if (vma_prot == PROT_NONE) {
-    return -1;
+    return PF_REJECT("VMA covering the address is PROT_NONE", vma_start,
+                     vma_end);
   }
 
   // Write to read-only VMA.
   if (write_fault && !(vma_prot & PROT_WRITE)) {
-    return -1;
+    return PF_REJECT("write to a read-only VMA", vma_prot, vma_start);
   }
 
   void *frame = NULL;
@@ -418,14 +502,16 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
       // 1. Pure BSS page (past eff_file_size) — allocate zero-filled page
       frame = pmm_alloc_page();
       if (!frame)
-        return -1;
+        return PF_REJECT("PMM out of memory for a BSS page", page_offset,
+                         eff_file_size);
       memset(PHYS_TO_VIRT((uint64_t)frame), 0, 4096);
     } else if ((vma_flags & MAP_PRIVATE) && (vma_prot & PROT_WRITE)) {
       // 2. Private Writable file mapping (e.g. ELF .data / .got / partial BSS)
       //    Must allocate a private page so user writes never mutate shared page cache.
       frame = pmm_alloc_page();
       if (!frame)
-        return -1;
+        return PF_REJECT("PMM out of memory for a private file page",
+                         page_offset, eff_file_size);
       void *priv_virt = PHYS_TO_VIRT((uint64_t)frame);
       memset(priv_virt, 0, 4096);
 
@@ -453,7 +539,8 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
         pmm_free_page(frame);
         klogf("[VMM] File cache read failure for VMA [%016llx-%016llx] off=%u\n",
               (unsigned long long)vma_start, (unsigned long long)vma_end, file_offset);
-        return -1;
+        return PF_REJECT("private file mapping: page cache could not supply the "
+                         "page", file_offset, page_offset);
       }
     } else {
       // 3. Shared or Read-Only file mapping (e.g. ELF .text / .rodata)
@@ -484,7 +571,8 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
               (current && current->comm[0]) ? current->comm : "?",
               current ? current->tid : 0,
               regs ? regs->rip : 0);
-        return -1;
+        return PF_REJECT("shared/read-only file mapping: page cache could not "
+                         "supply the page", file_offset, page_offset);
       }
 
       // Proactive cluster mapping: map adjacent cached pages in the 64 KB window to avoid redundant faults
@@ -584,7 +672,8 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
         sched_terminate_thread(current->tid);
         return 0;
       }
-      return -1;
+      return PF_REJECT("PMM out of memory while demand paging a 4KB page",
+                       vma_start, vma_end);
     }
     memset(PHYS_TO_VIRT((uint64_t)frame), 0, 4096);
   }
@@ -605,7 +694,8 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
     } else {
       pmm_decref((void *)frame);
     }
-    return -1;
+    return PF_REJECT("VMA disappeared while the frame was being prepared "
+                     "(racing munmap or mprotect)", cr2, vma_start);
   }
 
   uint64_t flags = dp_build_flags(vma_prot);
@@ -633,7 +723,8 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
       sched_terminate_thread(current->tid);
       return 0;
     }
-    return -1;
+    return PF_REJECT("no memory left for an intermediate page table", vpage,
+                     flags);
   }
 
   return 0;

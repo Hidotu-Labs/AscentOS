@@ -111,6 +111,13 @@ isr_common_stub:
     ; The struct registers rsp/ss fields will contain garbage in that case.
     ; isr_panic() compensates by reading RSP directly via inline asm for ring-0.
 
+    ; The kernel is entirely responsible for the direction flag: memset and
+    ; memcpy here are REP strings, so an interrupted context with RFLAGS.DF=1
+    ; would make every one of them copy backwards through memory. Clearing it
+    ; is safe for the interrupted code because iretq restores RFLAGS from the
+    ; frame the CPU pushed before this instruction.
+    cld
+
     test qword [rsp + 24], 3    ; check CPL bits in saved CS
     jz .skip_swapgs
     swapgs

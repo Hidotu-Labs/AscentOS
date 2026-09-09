@@ -121,14 +121,21 @@ void *memmove(void *dest, const void *src, size_t n) {
                      :
                      : "memory");
   } else {
-    uint8_t *dst_end = (uint8_t *)dest + n - 1;
-    const uint8_t *src_end = (const uint8_t *)src + n - 1;
-    __asm__ volatile("std\n\t"
-                     "rep movsb\n\t"
-                     "cld"
-                     : "+D"(dst_end), "+S"(src_end), "+c"(n)
-                     :
-                     : "memory");
+    /* Overlapping copy towards higher addresses: copy from the tail.
+     *
+     * This was `std; rep movsb; cld`, which leaks the direction flag. Those
+     * are three separate instructions, so an interrupt or exception that
+     * arrives after `std` and before `cld` runs its whole handler with
+     * RFLAGS.DF set - and every memset/memcpy in that handler (both are REP
+     * strings here) then walks *backwards*, writing over whatever sits below
+     * its destination. A 8 MiB console_clear() inside a panic handler turning
+     * into a descending zero-fill through read-only .rodata is exactly what
+     * hung the machine after an unrelated fault. A plain descending loop keeps
+     * RFLAGS alone. */
+    const uint8_t *s = (const uint8_t *)src;
+    uint8_t *dst = (uint8_t *)dest;
+    for (size_t i = n; i > 0; i--)
+      dst[i - 1] = s[i - 1];
   }
   return d;
 }

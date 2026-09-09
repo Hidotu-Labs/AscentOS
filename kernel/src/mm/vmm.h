@@ -113,6 +113,28 @@ struct registers;
 int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
                           struct registers *regs);
 
+// Refusing a fault is fatal in kernel mode, and vmm_handle_page_fault() has
+// more than a dozen ways to refuse one, all of which used to look identical
+// from the outside. Each bail-out records the check that gave up so the panic
+// report can name it instead of guessing.
+struct vmm_fault_reject {
+  const char *reason; // what the check was looking at
+  const char *file;   // source file of the check
+  uint32_t line;      // line of the check
+  uint32_t seq;       // bumped on every rejection
+  uint32_t tid;       // thread whose fault was refused
+  uint64_t cr2;       // fault address this rejection belongs to
+  uint64_t err_code;  // CPU error code as the paging engine saw it
+  uint64_t rip;       // faulting instruction, when registers were available
+  uint64_t detail;    // the offending entry, VMA prot, or frame
+  uint64_t detail2;   // second piece of context (VMA bounds, refcount, ...)
+};
+
+// Copies the most recent rejection into *out. False means the paging engine
+// has never refused a fault, or the record was caught mid-update by a
+// rejection on another CPU.
+bool vmm_get_last_fault_reject(struct vmm_fault_reject *out);
+
 // Checks if a user address range is valid (within the user address space
 // and covered by one or more VMAs).
 bool vmm_is_user_addr_range_valid(uint64_t addr, size_t size);

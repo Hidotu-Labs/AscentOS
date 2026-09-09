@@ -8,6 +8,13 @@ syscall_entry:
 
     swapgs
 
+    ; User mode owns RFLAGS.DF (any process can set it with pushfq/popfq), and
+    ; the kernel runs memset/memcpy as REP strings. Clear it before touching
+    ; the kernel stack, or the whole syscall runs with string operations
+    ; counting downwards. The user's own DF lives on in R11 and is restored
+    ; with it on the way out.
+    cld
+
     mov gs:[368], rsp
 
     mov rsp, gs:[24]

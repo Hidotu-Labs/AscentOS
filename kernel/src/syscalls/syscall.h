@@ -220,6 +220,24 @@
 #define SYS_FACCESSAT2 439
 #define SYS_FCHMODAT2  452
 
+/* Extended attributes (188..199) */
+#define SYS_SETXATTR      188
+#define SYS_LSETXATTR     189
+#define SYS_FSETXATTR     190
+#define SYS_GETXATTR      191
+#define SYS_LGETXATTR     192
+#define SYS_FGETXATTR     193
+#define SYS_LISTXATTR     194
+#define SYS_LLISTXATTR    195
+#define SYS_FLISTXATTR    196
+#define SYS_REMOVEXATTR   197
+#define SYS_LREMOVEXATTR  198
+#define SYS_FREMOVEXATTR  199
+
+/* Moving data between descriptors */
+#define SYS_SPLICE           275
+#define SYS_COPY_FILE_RANGE  326
+
 #define MAX_SYSCALL 512
 
 #ifndef SYSCALL_LOG

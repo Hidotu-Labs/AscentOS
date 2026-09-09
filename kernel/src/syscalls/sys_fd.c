@@ -750,6 +750,179 @@ static uint64_t sys_sendfile(uint64_t out_fd, uint64_t in_fd,
 }
 
 // ---------------------------------------------------------------------------
+// copy_file_range / splice
+// ---------------------------------------------------------------------------
+//
+// Both move bytes between two descriptors under Linux's offset rules: a
+// non-NULL offset is used and updated in place, a NULL one means "use the
+// descriptor's own position and advance it". Pipes have no position, so their
+// offset argument is ignored.
+//
+// The bytes travel through a kernel bounce buffer. A real splice(2) hands
+// page-cache frames to the pipe without copying, but neither the page cache nor
+// the ramfs-backed pipe here has such a hand-off, so copying is what is
+// actually correct. Callers depend on the bytes arriving and the offsets being
+// updated, not on the transfer being zero-copy.
+
+#define RANGE_CHUNK (64 * 1024)
+
+#define SPLICE_F_MOVE     0x01
+#define SPLICE_F_NONBLOCK 0x02
+#define SPLICE_F_MORE     0x04
+#define SPLICE_F_GIFT     0x08
+
+static bool fd_is_pipe(vfs_node_t *node) {
+  return node && (node->flags & FS_TYPE_MASK) == FS_PIPE;
+}
+
+static int64_t move_range(struct thread *t, uint64_t fd_in, uint64_t off_in_ptr,
+                          uint64_t fd_out, uint64_t off_out_ptr, uint64_t len) {
+  vfs_node_t *in_node = t->fds[fd_in];
+  vfs_node_t *out_node = t->fds[fd_out];
+  bool in_pipe = fd_is_pipe(in_node);
+  bool out_pipe = fd_is_pipe(out_node);
+
+  if (!in_node->read || !out_node->write)
+    return -22; /* EINVAL: cannot read from, or write to, this descriptor */
+
+  if (len == 0)
+    return 0;
+
+  bool in_tracked = !in_pipe && off_in_ptr != 0;
+  bool out_tracked = !out_pipe && off_out_ptr != 0;
+
+  uint64_t in_off = 0, out_off = 0;
+  if (in_tracked) {
+    if (!is_user_range((const void *)off_in_ptr, sizeof(uint64_t)) ||
+        copy_from_user(&in_off, (const void *)off_in_ptr, sizeof(in_off)) != 0)
+      return -14;
+  } else if (!in_pipe) {
+    in_off = t->fd_offsets[fd_in];
+  }
+
+  if (out_tracked) {
+    if (!is_user_range((const void *)off_out_ptr, sizeof(uint64_t)) ||
+        copy_from_user(&out_off, (const void *)off_out_ptr,
+                       sizeof(out_off)) != 0)
+      return -14;
+  } else if (!out_pipe) {
+    out_off = t->fd_offsets[fd_out];
+  }
+
+  if (in_off > 0xFFFFFFFFULL || out_off > 0xFFFFFFFFULL)
+    return -27; /* EFBIG: the VFS works in 32-bit offsets */
+
+  uint8_t *buf = kmalloc(RANGE_CHUNK);
+  if (!buf)
+    return -12;
+
+  int64_t moved = 0;
+
+  while ((uint64_t)moved < len) {
+    uint64_t remaining = len - (uint64_t)moved;
+    uint32_t want =
+        (uint32_t)(remaining > RANGE_CHUNK ? RANGE_CHUNK : remaining);
+
+    int32_t got = (int32_t)vfs_read(in_node, (uint32_t)in_off, want, buf);
+    if (got <= 0) {
+      /* Zero is end of file, or an empty pipe with no writers left. A negative
+       * value is already an errno from the read implementation (EAGAIN for a
+       * non-blocking pipe, for instance). */
+      if (got < 0 && moved == 0)
+        moved = got;
+      break;
+    }
+
+    int32_t put =
+        (int32_t)vfs_write(out_node, (uint32_t)out_off, (uint32_t)got, buf);
+    if (put < 0) {
+      if (moved == 0)
+        moved = put; /* EPIPE for a pipe nobody is reading, etc. */
+      break;
+    }
+    if (put == 0) {
+      if (moved == 0)
+        moved = -28; /* ENOSPC: the sink took nothing at all */
+      break;
+    }
+
+    in_off += (uint64_t)got;
+    out_off += (uint64_t)put;
+    moved += put;
+
+    if (put < got)
+      break; /* short write: full pipe, non-blocking sink, or device limit */
+    if (in_off > 0xFFFFFFFFULL || out_off > 0xFFFFFFFFULL)
+      break;
+  }
+
+  kfree(buf);
+
+  if (moved < 0)
+    return moved;
+
+  /* Publish positions for what was actually transferred. An explicit offset
+   * goes back to the caller's variable; a NULL one means the descriptor's own
+   * position moves. */
+  if (!in_pipe) {
+    if (in_tracked) {
+      if (copy_to_user((void *)off_in_ptr, &in_off, sizeof(in_off)) != 0 &&
+          moved == 0)
+        return -14;
+    } else {
+      t->fd_offsets[fd_in] = in_off;
+    }
+  }
+  if (!out_pipe) {
+    if (out_tracked) {
+      if (copy_to_user((void *)off_out_ptr, &out_off, sizeof(out_off)) != 0 &&
+          moved == 0)
+        return -14;
+    } else {
+      t->fd_offsets[fd_out] = out_off;
+    }
+  }
+
+  return moved;
+}
+
+static uint64_t sys_copy_file_range(uint64_t fd_in, uint64_t off_in,
+                                    uint64_t fd_out, uint64_t off_out,
+                                    uint64_t len, uint64_t flags) {
+  struct thread *t = sched_get_current();
+  if (!t || fd_in >= MAX_FDS || fd_out >= MAX_FDS || !t->fds[fd_in] ||
+      !t->fds[fd_out])
+    return (uint64_t)-9;
+
+  if (flags != 0)
+    return (uint64_t)-22; /* copy_file_range(2) defines no flags yet */
+
+  return (uint64_t)move_range(t, fd_in, off_in, fd_out, off_out, len);
+}
+
+static uint64_t sys_splice(uint64_t fd_in, uint64_t off_in, uint64_t fd_out,
+                           uint64_t off_out, uint64_t len, uint64_t flags) {
+  struct thread *t = sched_get_current();
+  if (!t || fd_in >= MAX_FDS || fd_out >= MAX_FDS || !t->fds[fd_in] ||
+      !t->fds[fd_out])
+    return (uint64_t)-9;
+
+  /* splice(2) moves data through a pipe. A plain file-to-file request is
+   * copy_file_range(2), and Linux rejects it here with EINVAL. */
+  if (!fd_is_pipe(t->fds[fd_in]) && !fd_is_pipe(t->fds[fd_out]))
+    return (uint64_t)-22;
+
+  if (flags & ~(uint64_t)(SPLICE_F_MOVE | SPLICE_F_NONBLOCK | SPLICE_F_MORE |
+                          SPLICE_F_GIFT))
+    return (uint64_t)-22;
+
+  /* MOVE and GIFT describe how pages are handed to the pipe, which a copying
+   * implementation may ignore. NONBLOCK is honoured through the descriptor's
+   * own O_NONBLOCK flag, which is what the pipe read and write paths consult. */
+  return (uint64_t)move_range(t, fd_in, off_in, fd_out, off_out, len);
+}
+
+// ---------------------------------------------------------------------------
 // lseek
 // ---------------------------------------------------------------------------
 
@@ -1052,5 +1225,7 @@ void syscall_register_fd(void) {
   syscall_register(SYS_FDATASYNC, sys_fdatasync);
   syscall_register(SYS_MOUNT, sys_mount);
   syscall_register(SYS_SENDFILE, sys_sendfile);
+  syscall_register(SYS_COPY_FILE_RANGE, sys_copy_file_range);
+  syscall_register(SYS_SPLICE, sys_splice);
   syscall_register(SYS_FADVISE64, sys_fadvise64);
 }

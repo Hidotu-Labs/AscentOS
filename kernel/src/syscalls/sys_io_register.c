@@ -13,6 +13,7 @@ void syscall_register_stat(void);
 void syscall_register_fs(void);
 void syscall_register_aio(void);
 void syscall_register_random(void);
+void syscall_register_xattr(void);
 
 // syscall_register_io is the single entry-point called from syscall_init().
 void syscall_register_io(void) {
@@ -22,6 +23,7 @@ void syscall_register_io(void) {
     syscall_register_fs();
     syscall_register_aio();
     syscall_register_random();
+    syscall_register_xattr();
 
     // Initialise console termios defaults (previously at bottom of
     // syscall_register_io in sys_io.c).
