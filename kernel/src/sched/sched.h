@@ -209,6 +209,9 @@ struct thread {
   bool has_saved_signal_mask;
   uint64_t fault_addr;
   uint32_t fault_code;
+  uint64_t last_report_rip;
+  uint64_t last_report_addr;
+  int last_report_sig;
   struct registers sigreturn_regs; // Safe kernel-side register store for IRETQ restoration
 
   // Alternate signal stack (sigaltstack)

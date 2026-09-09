@@ -633,6 +633,14 @@ void isr_report_user_fault(struct registers *regs, int sig,
     }
 
     if (!has_custom_handler) {
+      if (current->last_report_sig == sig &&
+          current->last_report_rip == regs->rip &&
+          current->last_report_addr == addr) {
+        return;
+      }
+      current->last_report_sig = sig;
+      current->last_report_rip = regs->rip;
+      current->last_report_addr = addr;
       // 1. Log detailed report to kernel console
       klog_puts("\n" KLOG_CLR_RED "################################################################################" KLOG_CLR_RESET "\n");
       klog_puts(KLOG_CLR_RED "[ USER FAULT ]" KLOG_CLR_RESET " process '");

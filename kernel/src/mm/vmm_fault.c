@@ -344,7 +344,9 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
       klog_puts("\n");
       klog_puts("          TID:  ");
       klog_uint64(current->tid);
-      klog_puts("\n\n");
+      klog_puts(" COMM: '");
+      klog_puts((current->comm[0]) ? current->comm : "?");
+      klog_puts("'\n\n");
 
       klog_puts("      RAX: ");
       klog_hex64(regs->rax);
@@ -474,8 +476,14 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
       } else {
         if (cached)
           vfs_cache_put(node, cached);
-        klogf("[VMM] File cache read failure for ro VMA [%016llx-%016llx] off=%u\n",
-              (unsigned long long)vma_start, (unsigned long long)vma_end, file_offset);
+        klogf("[VMM] File cache read failure for ro VMA [%016llx-%016llx] off=%u page_off=%llu eff_size=%llu vma_off=%llu file='%s' comm='%s' tid=%u rip=%016llx\n",
+              (unsigned long long)vma_start, (unsigned long long)vma_end, file_offset,
+              (unsigned long long)page_offset, (unsigned long long)eff_file_size,
+              (unsigned long long)vma_offset,
+              (node && node->name[0]) ? node->name : "?",
+              (current && current->comm[0]) ? current->comm : "?",
+              current ? current->tid : 0,
+              regs ? regs->rip : 0);
         return -1;
       }
 
@@ -583,6 +591,22 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
 
 
   // ---- Map the faulting page ----------------------------------------------
+
+  // The frame was prepared without mm->lock (file I/O is slow). Another
+  // thread may have munmapped this range meanwhile. Mapping into a VA
+  // with no VMA creates a phantom page: the app reads zeros instead of
+  // faulting, which corrupts heap metadata (e.g. musl malloc asserts).
+  spinlock_acquire(&current->mm->lock);
+  struct vma *recheck = vma_find(&current->mm->vmas, cr2);
+  spinlock_release(&current->mm->lock);
+  if (!recheck) {
+    if (!node) {
+      pmm_free_page(frame);
+    } else {
+      pmm_decref((void *)frame);
+    }
+    return -1;
+  }
 
   uint64_t flags = dp_build_flags(vma_prot);
   uint64_t vpage = cr2 & ~0xFFFULL;

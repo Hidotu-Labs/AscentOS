@@ -98,8 +98,10 @@ static void restore_signal_context(struct registers *regs,
   regs->rcx = g[14];
   regs->rsp = g[15];
   regs->rip = g[16];
-  regs->rflags = g[17];
-  regs->cs = (uint16_t)g[18];
+  regs->rflags = g[17] | 0x200;
+
+  uint16_t cs = (uint16_t)g[18];
+  regs->cs = ((cs & 3) == 3 && cs != 0) ? cs : 0x2B;
   regs->err_code = g[19];
   regs->int_no = g[20];
   regs->ss = 0x23;
@@ -167,9 +169,16 @@ static void fill_signal_context(struct sigframe *frame, int sig,
   /* With lazy FPU, hardware registers may belong to a different thread.
      Ensure this thread's FPU state is live in hardware before saving. */
   fpu_ensure_loaded(current);
-  uint8_t aligned_fpregs[512] __attribute__((aligned(16)));
-  __asm__ volatile("fxsave64 %0" : "=m"(aligned_fpregs) : : "memory");
-  memcpy(uc->fpregs_mem, aligned_fpregs, sizeof(aligned_fpregs));
+  if (cpu_has_xsave_flag) {
+    uint32_t eax = 0xFFFFFFFF, edx = 0xFFFFFFFF;
+    __asm__ volatile("xsave64 %0" : "=m"(current->fpu_state) : "a"(eax), "d"(edx) : "memory");
+    memcpy(uc->fpregs_mem, (const void *)current->fpu_state, 512);
+  } else {
+    uint8_t aligned_fpregs[512] __attribute__((aligned(16)));
+    __asm__ volatile("fxsave64 %0" : "=m"(aligned_fpregs) : : "memory");
+    memcpy(uc->fpregs_mem, aligned_fpregs, sizeof(aligned_fpregs));
+    memcpy(current->fpu_state, aligned_fpregs, 512);
+  }
 }
 
 
@@ -450,24 +459,36 @@ static uint64_t sys_rt_sigreturn(struct syscall_regs *sregs) {
   current->signal_mask = frame->ucontext.uc_sigmask[0];
   current->signal_mask &=
       ~((1ULL << (SIGKILL - 1)) | (1ULL << (SIGSTOP - 1)));
-  if ((current->sigreturn_regs.cs & 3) != 3 || (current->sigreturn_regs.ss & 3) != 3 ||
+ if ((current->sigreturn_regs.cs & 3) != 3 || (current->sigreturn_regs.ss & 3) != 3 ||
       current->sigreturn_regs.rip >= 0x0000800000000000ULL ||
       current->sigreturn_regs.rsp >= 0x0000800000000000ULL) {
-    klog_puts("[SIGNAL] sigreturn: invalid user context\n");
+    klog_puts("[SIGNAL] sigreturn: invalid user context rip=");
+    klog_uint64(current->sigreturn_regs.rip);
+    klog_puts(" rsp=");
+    klog_uint64(current->sigreturn_regs.rsp);
+    klog_puts(" cs=");
+    klog_uint64(current->sigreturn_regs.cs);
+    klog_puts("\n");
     process_do_exit(11);
   }
-  uint8_t aligned_fpregs[512] __attribute__((aligned(16)));
-  memcpy(aligned_fpregs, (const void *)frame->ucontext.fpregs_mem, sizeof(aligned_fpregs));
-  __asm__ volatile("fxrstor64 %0" : : "m"(aligned_fpregs) : "memory");
+ __asm__ volatile("cli" ::: "memory");
+  fpu_ensure_loaded(current);
   if (cpu_has_xsave_flag) {
+    // Preserve extended AVX/YMM state: update only the legacy 512-byte region
+    // at the beginning of current->fpu_state without clearing upper YMM registers
+    memcpy(&current->fpu_state, (const void *)frame->ucontext.fpregs_mem, 512);
     uint32_t eax = 0xFFFFFFFF, edx = 0xFFFFFFFF;
-    __asm__ volatile("xsave64 %0" : "=m"(current->fpu_state) : "a"(eax), "d"(edx) : "memory");
+    __asm__ volatile("xrstor64 %0" : : "m"(current->fpu_state), "a"(eax), "d"(edx) : "memory");
   } else {
-    __asm__ volatile("fxsave64 %0" : "=m"(current->fpu_state) : : "memory");
+    uint8_t aligned_fpregs[512] __attribute__((aligned(16)));
+    memcpy(aligned_fpregs, (const void *)frame->ucontext.fpregs_mem, sizeof(aligned_fpregs));
+    __asm__ volatile("fxrstor64 %0" : : "m"(aligned_fpregs) : "memory");
+    memcpy(&current->fpu_state, aligned_fpregs, 512);
   }
 
-  /* syscall_entry.asm restores the full frame with IRETQ from kernel memory. */
+  /* syscall_entry.asm IRETQs from here with IF restored from user RFLAGS. */
   cpu_get_current()->sigreturn_frame = (uint64_t)&current->sigreturn_regs;
+  __asm__ volatile("" ::: "memory");
   return 0;
 }
 
@@ -478,6 +499,11 @@ extern void process_dump_core(struct thread *t, struct registers *regs,
 void signal_deliver(struct registers *regs) {
   struct thread *current = sched_get_current();
   if (!current)
+    return;
+
+  // Never deliver signals when interrupted while in kernel mode!
+  // Signals must only be delivered when transitioning back to user space (CPL 3).
+  if ((regs->cs & 3) != 3)
     return;
 
   uint64_t pending = current->pending_signals & ~current->signal_mask;
@@ -525,7 +551,7 @@ void signal_deliver(struct registers *regs) {
     // Print full registers, backtrace, and memory inspection only for fatal crash signals
     if (sig == SIGQUIT || sig == SIGILL || sig == SIGTRAP || sig == SIGABRT ||
         sig == SIGFPE || sig == SIGSEGV || sig == SIGBUS || sig == SIGSYS) {
-      isr_report_user_fault(regs, sig, 0);
+      isr_report_user_fault(regs, sig, current->fault_addr);
       process_dump_core(current, regs, sig);
     }
 
@@ -601,9 +627,11 @@ void signal_deliver(struct registers *regs) {
   }
   regs->rsp = rsp;
 
+  current->signal_mask |= sa->sa_mask;
   if (!(sa->sa_flags & SA_NODEFER)) {
-    current->signal_mask |= sa->sa_mask | (1ULL << (sig - 1));
+    current->signal_mask |= (1ULL << (sig - 1));
   }
+  current->last_report_sig = 0;
 }
 
 // Helper to deliver from syscall context

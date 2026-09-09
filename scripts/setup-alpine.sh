@@ -628,7 +628,7 @@ ln -sf elogind/libelogind-shared-252.so "${ROOTFS_DIR}/usr/lib/libelogind-shared
 
 # Patch lightdm-gtk-greeter embedded UI signal for GreeterMenuBar (bypasses missing signal in standalone GtkBuilder load)
 if [ -f "${ROOTFS_DIR}/usr/bin/lightdm-gtk-greeter" ]; then
-    python3 - <<'PY'
+    python3 - <<PY
 from pathlib import Path
 path = Path("${ROOTFS_DIR}/usr/bin/lightdm-gtk-greeter")
 data = bytearray(path.read_bytes())
@@ -846,6 +846,12 @@ install_apk "libwebpmux" "main"
 install_apk "libwebpdemux" "main"
 install_apk "webkit2gtk-4.1" "community"
 install_apk "badwolf" "community"
+# Badwolf/WebKitGTK crash fix: Discord login drove musl's mbrtowc/locale
+# code into __builtin_trap (HLT) when fonts/locales/tzdata were missing.
+install_apk "font-noto" "community"
+install_apk "font-noto-emoji" "community"
+install_apk "musl-locales" "main"
+install_apk "tzdata" "main"
 install_apk "alacritty" "community"
 
 
