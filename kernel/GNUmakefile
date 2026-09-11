@@ -37,6 +37,49 @@ ifeq ($(SYSCALL_LOG),1)
 override CPPFLAGS += -DSYSCALL_LOG=1
 endif
 
+# Diagnostics knobs.
+#
+# The hang/deadlock detector in kernel/src/lock/lockdiag.c is armed by default:
+# its cost is a couple of stores per timer tick and a few relaxed atomics per
+# futex operation, and the point of it is that a normal build left running an
+# XFCE session produces a report instead of a silent serial line.
+#
+#   make LOCKDIAG=0           compile the detector out entirely
+#   make LOCKDIAG_OWNER=1     also record every spinlock each CPU holds, and
+#                             where it took it from.  This adds a store plus a
+#                             shadow-stack push to every spinlock in the kernel
+#                             (slab allocator included), so it is a rebuild for
+#                             chasing a specific hang rather than a default.
+#   make LOCKDIAG_HUNG_MS=2000  notice a stopped core sooner
+#   make LOCKDIAG_STUCK_MS=30000  enumerate futex waiters periodically.  Off by
+#                             default: idle worker pools (tumblerd's, xfdesktop's)
+#                             park in FUTEX_WAIT forever on a healthy desktop, and
+#                             from the kernel that is indistinguishable from a
+#                             lost wakeup, so the periodic lines were noise.  Long
+#                             parks are still listed inside a real hang report.
+#   make LOCKDIAG_SELFTEST=1  render one full report at boot on a healthy machine
+ifeq ($(LOCKDIAG),0)
+override CPPFLAGS += -DLOCKDIAG=0
+endif
+
+ifeq ($(LOCKDIAG_OWNER),1)
+override CPPFLAGS += -DLOCKDIAG_OWNER=1
+endif
+
+ifneq ($(LOCKDIAG_HUNG_MS),)
+override CPPFLAGS += -DLOCKDIAG_HUNG_CPU_MS=$(LOCKDIAG_HUNG_MS)ULL
+endif
+
+ifneq ($(LOCKDIAG_STUCK_MS),)
+override CPPFLAGS += -DLOCKDIAG_STUCK_TASK_MS=$(LOCKDIAG_STUCK_MS)ULL
+endif
+
+# Renders one full hang report at boot on a healthy machine, so the report code
+# is exercised somewhere other than during a real hang.
+ifeq ($(LOCKDIAG_SELFTEST),1)
+override CPPFLAGS += -DLOCKDIAG_SELFTEST=1
+endif
+
 ifeq ($(ARCH),x86_64)
     NASMFLAGS := -g
 endif

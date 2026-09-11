@@ -13,7 +13,7 @@ static void reclaim_unmapped_file_cache(struct vma *v) {
   reclaim_unmapped_file_cache(v->right);
   if (v->file_node) {
     vfs_node_t *node = (vfs_node_t *)v->file_node;
-    if ((uint64_t)node >= 0xFFFF800000000000ULL && (node->flags & FS_PAGE_CACHE))
+    if (vfs_node_is_alive(node) && (node->flags & FS_PAGE_CACHE))
       vfs_cache_clear_unused(node);
   }
 }
@@ -153,16 +153,25 @@ void vmm_free_user_pages_vma(uint64_t cr3, struct vma_list *vmas) {
           uint64_t va = ((uint64_t)i << 39) | ((uint64_t)j << 30) |
                         ((uint64_t)k << 21) | ((uint64_t)l << 12);
           struct vma *v = vma_find(vmas, va);
-          if (v && (v->flags & MAP_SHARED)) {
+
+          if (v && (v->flags & MAP_PAGECACHE)) {
+            /* Generic file mapping: this PTE holds a PMM reference to its
+             * page-cache frame, which teardown must drop.  A shared write goes
+             * straight into that frame, so flag it for writeback while the
+             * dirty bit is still visible. */
             vfs_node_t *file = (vfs_node_t *)v->file_node;
-            if (file && (file->flags & FS_PAGE_CACHE) &&
-                (pt_virt[l] & PAGE_FLAG_D)) {
+            if ((v->flags & MAP_SHARED) && (pt_virt[l] & PAGE_FLAG_D) &&
+                vfs_node_is_alive(file)) {
               uint32_t file_offset = (uint32_t)(v->offset + va - v->start);
               vfs_cache_mark_dirty(file, file_offset);
             }
-            /* Shared mappings in AscentOS do not take a per-PTE PMM
-             * reference. Their backing object owns the frame, so dropping a
-             * reference here frees live memfd/GEM/framebuffer storage. */
+            pmm_free_page((void *)frame);
+            continue;
+          }
+
+          if (v && (v->flags & MAP_SHARED)) {
+            /* Device-backed shared mappings (memfd/GEM/framebuffer) do not take
+             * a per-PTE PMM reference; their backing object owns the frame. */
             continue;
           }
 

@@ -81,7 +81,17 @@ void pcid_free(uint16_t pcid) {
     next_hint = pcid;
   spinlock_release(&pcid_lock);
 
-  // Invalidate this PCID across all CPUs
+  /*
+   * Releasing a PCID must leave no core able to reuse it with stale
+   * translations, because pcid_alloc() hands ids straight back out.
+   *
+   * Clearing each CPU's bookkeeping bit is what achieves that: the scheduler
+   * only reloads CR3 with CR3_NOFLUSH when the bit is set (sched/sched.c), so
+   * the next switch into a recycled PCID is a flushing load.  Note that
+   * pcid_flush_context() below can only ever reach this core - INVPCID is a
+   * local instruction - so the bitmap clears, not the INVPCID, are what make
+   * remote reuse safe.
+   */
   uint32_t count = cpu_get_count();
   for (uint32_t i = 0; i < count; i++) {
     struct cpu_info *cpu = cpu_get_info(i);
@@ -96,12 +106,22 @@ void pcid_free(uint16_t pcid) {
   }
 }
 
+/*
+ * The active_pcids_bmp words are shared: a CPU clearing a bit for a PCID it is
+ * not running (pcid_free, or a shootdown for a space that is not loaded here)
+ * races the owner setting it when it switches in.  Both operations are therefore
+ * locked RMWs.  This matters now that a single-address shootdown clears one bit
+ * instead of flushing everything: a lost update would leave the bit set, and the
+ * scheduler would then reload CR3 with CR3_NOFLUSH and keep using a stale
+ * translation forever.
+ */
 bool cpu_pcid_is_cached(struct cpu_info *cpu, uint16_t pcid) {
   if (!cpu || pcid == PCID_KERNEL || pcid > PCID_MAX)
     return false;
   size_t word = pcid / 64;
   size_t bit = pcid % 64;
-  return (cpu->active_pcids_bmp[word] & (1ULL << bit)) != 0;
+  return (__atomic_load_n(&cpu->active_pcids_bmp[word], __ATOMIC_ACQUIRE) &
+          (1ULL << bit)) != 0;
 }
 
 void cpu_pcid_mark_cached(struct cpu_info *cpu, uint16_t pcid) {
@@ -109,7 +129,7 @@ void cpu_pcid_mark_cached(struct cpu_info *cpu, uint16_t pcid) {
     return;
   size_t word = pcid / 64;
   size_t bit = pcid % 64;
-  cpu->active_pcids_bmp[word] |= (1ULL << bit);
+  __atomic_or_fetch(&cpu->active_pcids_bmp[word], 1ULL << bit, __ATOMIC_ACQ_REL);
 }
 
 void cpu_pcid_invalidate(struct cpu_info *cpu, uint16_t pcid) {
@@ -117,7 +137,8 @@ void cpu_pcid_invalidate(struct cpu_info *cpu, uint16_t pcid) {
     return;
   size_t word = pcid / 64;
   size_t bit = pcid % 64;
-  cpu->active_pcids_bmp[word] &= ~(1ULL << bit);
+  __atomic_and_fetch(&cpu->active_pcids_bmp[word], ~(1ULL << bit),
+                     __ATOMIC_ACQ_REL);
 }
 
 void cpu_pcid_invalidate_all(struct cpu_info *cpu) {

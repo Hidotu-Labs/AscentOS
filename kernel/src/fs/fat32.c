@@ -997,6 +997,8 @@ static struct dirent *fat32_readdir_impl(vfs_node_t *node, uint32_t index) {
   }
 
   struct dirent *dirent = NULL;
+  static struct dirent dre;
+  memset(&dre, 0, sizeof(dre));
   uint32_t current_index = 0;
 
   while (true) {
@@ -1026,8 +1028,8 @@ static struct dirent *fat32_readdir_impl(vfs_node_t *node, uint32_t index) {
     }
 
     if (current_index == index) {
-      dirent = kmalloc(sizeof(struct dirent));
-      if (dirent) {
+      dirent = &dre;
+      {
         // Decode LFN if present
         char lfn_name[256] = {0};
         if (iter.lfn_count > 0) {
@@ -1059,6 +1061,7 @@ static struct dirent *fat32_readdir_impl(vfs_node_t *node, uint32_t index) {
         uint32_t entry_cluster =
             entry->cluster_low | (entry->cluster_high << 16);
         dirent->ino = entry_cluster ? entry_cluster : mnt->root_cluster;
+        dirent->d_type = (entry->attr & FAT32_ATTR_DIRECTORY) ? DT_DIR : DT_REG;
       }
       break;
     }

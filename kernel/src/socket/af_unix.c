@@ -338,8 +338,10 @@ void unix_destroy(socket_t *sock) {
   spinlock_release(&unix_bound_lock);
 
   if (usk->bound_vnode) {
-    usk->bound_vnode->device = NULL;
+    vfs_node_t *bound = usk->bound_vnode;
     usk->bound_vnode = NULL;
+    bound->device = NULL;
+    vfs_close(bound); // release the reference transferred at bind time
   }
 
   // Detach the peer before freeing buffers so concurrent I/O stops seeing us.

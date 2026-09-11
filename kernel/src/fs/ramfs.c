@@ -217,23 +217,35 @@ static struct dirent *ramfs_readdir(vfs_node_t *node, uint32_t index) {
   if (index == 0) {
     strcpy(d.name, ".");
     d.ino = node->inode;
+    d.d_type = DT_DIR;
     return &d;
   }
   if (index == 1) {
     strcpy(d.name, "..");
     d.ino = node->inode;
+    d.d_type = DT_DIR;
     return &d;
   }
 
   index -= 2;
-  child_node_t *curr = dir->children;
-  for (uint32_t i = 0; i < index && curr; i++) {
-    curr = curr->next;
+  /* Resume from the cursor for sequential getdents; otherwise rescan. */
+  child_node_t *cursor = dir->cursor;
+  uint32_t cursor_index = dir->cursor_index;
+  child_node_t *curr;
+  if (cursor && index == cursor_index + 1) {
+    curr = cursor->next;
+  } else {
+    curr = dir->children;
+    for (uint32_t i = 0; i < index && curr; i++)
+      curr = curr->next;
   }
+  dir->cursor = curr;
+  dir->cursor_index = index;
 
   if (curr) {
     strcpy(d.name, curr->node->name);
     d.ino = curr->node->inode;
+    d.d_type = vfs_dtype(curr->node->flags);
     return &d;
   }
 
@@ -281,6 +293,8 @@ static vfs_node_t *ramfs_make_node(char *name, uint16_t perm, uint32_t type) {
   if (type == FS_DIRECTORY) {
     ramfs_dir_t *d = kmalloc(sizeof(ramfs_dir_t));
     d->children = 0;
+    d->cursor = 0;
+    d->cursor_index = 0;
     n->device = d;
     n->readdir = ramfs_readdir;
     n->finddir = ramfs_finddir;
@@ -559,5 +573,6 @@ void ramfs_mount_at(char *path) {
 
     ramfs_mount_on(ram_root);
     vfs_mount(mountpoint, ram_root);
+    vfs_close(mountpoint);
   }
 }

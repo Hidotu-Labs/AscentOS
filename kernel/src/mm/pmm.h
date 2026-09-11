@@ -40,6 +40,15 @@ uint16_t pmm_get_ref(void *ptr); // Get current reference count
 bool pmm_is_managed(
     uint64_t phys); // Check if page is managed by PMM (RAM vs MMIO)
 
+// True when `ptr` is a kernel virtual address inside the HHDM window whose
+// backing physical page is currently managed by the buddy allocator.  Data
+// structures that cache raw kernel pointers (radix tree nodes, page cache
+// entries, VMA file nodes) can be corrupted by a use-after-free or an
+// out-of-bounds write; callers use this to reject a wild address before
+// dereferencing it.  Note that a stale-but-still-mapped pointer can pass this
+// check; it only rules out addresses that would page-fault in ring 0.
+bool pmm_kernel_ptr_is_managed(const void *ptr);
+
 // Compatibility aliases for existing code
 #define pmm_alloc pmm_alloc_page
 #define pmm_alloc_blocks pmm_alloc_pages

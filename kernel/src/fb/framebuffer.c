@@ -349,17 +349,83 @@ void fb_init(struct limine_framebuffer *framebuffer) {
     fb_global.kd_mode = KD_TEXT;
     fb_global.fbops = &fb_default_ops;
 
-    /* Derive physical base from Limine HHDM address */
-    if ((uint64_t)framebuffer->address >= 0xFFFF800000000000ULL) {
-        fb_global.phys_base = (uint64_t)framebuffer->address - 0xFFFF800000000000ULL;
+    /* Derive physical base from the HHDM address Limine handed us.  The real
+     * offset from pmm is used rather than the usual 0xFFFF8000... constant so
+     * the WC remap below targets the right frames. */
+    uint64_t hhdm = pmm_get_hhdm_offset();
+    uint64_t fb_addr = (uint64_t)framebuffer->address;
+    if (hhdm && fb_addr >= hhdm) {
+        fb_global.phys_base = fb_addr - hhdm;
+    } else if (fb_addr >= 0xFFFF800000000000ULL) {
+        fb_global.phys_base = fb_addr - 0xFFFF800000000000ULL;
     } else {
-        fb_global.phys_base = 0;
+        fb_global.phys_base = hhdm ? 0 : fb_addr;
     }
     fb_global.fix.smem_start = fb_global.phys_base;
 
     fb_global.backbuffer = saved_backbuffer;
     fb_global.backbuffer_enabled = saved_backbuffer_enabled;
     fb_global.is_dirty = false;
+
+    /* The aperture is mapped long before vmm_init(); retype it once the
+     * kernel page tables exist so every screen_base user gets WC stores. */
+    if (vmm_get_kernel_pml4())
+        fb_map_wc();
+}
+
+/* ── Write-Combining Aperture Mapping ────────────────────────────────────── */
+
+static bool fb_wc_mapped = false;
+
+/*
+ * The Limine HHDM mapping of VRAM inherits whatever memory type firmware left
+ * behind, which is uncached on most machines.  Uncached qword stores are one
+ * bus transaction each, so a full-screen console blit costs milliseconds.
+ *
+ * Re-type the kernel's mapping of the visible aperture in place as
+ * write-combining (PAT entry 7, programmed in cpu_pat_init()) instead of
+ * creating an alias: screen_base does not change, so the swap, the DRM
+ * software fallback and klog all pick the new type up for free.  vmm_map_page()
+ * flushes a replaced mapping, so no stale UC translation survives on this CPU,
+ * and the call runs before the APs and userland exist to hold one.
+ *
+ * WC versus MTRR: a firmware MTRR that already marks the range UC wins over
+ * PAT.  In that case this is harmless but the win comes from the non-temporal
+ * stores in fb_swap_buffer_rect() instead.
+ */
+void fb_map_wc(void) {
+    if (fb_wc_mapped)
+        return;
+
+    uint64_t *pml4 = vmm_get_kernel_pml4();
+    if (!pml4 || !fb_global.screen_base || !fb_global.screen_size)
+        return;
+
+    uint64_t phys = fb_global.phys_base;
+    if (!phys)
+        phys = vmm_virt_to_phys(pml4, (uint64_t)fb_global.screen_base) & PAGE_MASK;
+    if (!phys)
+        return;
+
+    uint64_t va = (uint64_t)fb_global.screen_base;
+    size_t pages = (fb_global.screen_size + 0xFFF) / 0x1000;
+    /* PAT=1, PCD=1, PWT=1 selects PAT entry 7 (WC).  RW only: this is a kernel
+     * mapping, userland gets its own WC VMA through fb_dev_mmap(). */
+    uint64_t flags = PAGE_FLAG_RW | PAGE_FLAG_PAT | PAGE_FLAG_PCD | PAGE_FLAG_PWT;
+
+    for (size_t i = 0; i < pages; i++) {
+        if (!vmm_map_page(pml4, va + i * 0x1000, phys + i * 0x1000, flags)) {
+            klog_puts("[FB] Warning: WC remap stopped at page ");
+            klog_uint64(i);
+            klog_puts("; earlier pages stay write-combining\n");
+            return;
+        }
+    }
+
+    fb_wc_mapped = true;
+    klog_puts("[FB] Framebuffer aperture remapped write-combining: ");
+    klog_uint64(pages);
+    klog_puts(" pages\n");
 }
 
 /* ── Backbuffer Management ───────────────────────────────────────────────── */

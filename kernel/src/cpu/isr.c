@@ -676,13 +676,34 @@ void isr_report_user_fault(struct registers *regs, int sig,
       
       // Fault Reason
       klog_puts("  Fault Reason: ");
-      if (sig == 11) {
+      if (regs->int_no == 3) {
+        klog_puts(KLOG_CLR_YELLOW "Breakpoint instruction (int3)" KLOG_CLR_RESET);
+      } else if (regs->int_no == 13) {
+        /* #GP error codes carry a selector, not page bits: bit 1 = IDT,
+         * bit 2 = LDT (else GDT), bits 3-15 = selector index.  Without this
+         * decode a DPL violation on an IDT gate looks like an NX fault,
+         * because the index lands in bit 4. */
+        uint64_t gerr = regs->err_code;
+        if (gerr == 0) {
+          klog_puts(KLOG_CLR_YELLOW "General protection fault" KLOG_CLR_RESET);
+        } else {
+          klog_puts(KLOG_CLR_YELLOW "#GP selector error: index " KLOG_CLR_RESET);
+          klog_uint64(gerr >> 3);
+          klog_puts(KLOG_CLR_YELLOW " in " KLOG_CLR_RESET);
+          klog_puts((gerr & 2) ? "IDT" : ((gerr & 4) ? "LDT" : "GDT"));
+          if (gerr & 1)
+            klog_puts(KLOG_CLR_YELLOW " (external)" KLOG_CLR_RESET);
+        }
+      } else if (sig == 11) {
         if (addr < 0x1000) {
           klog_puts(KLOG_CLR_YELLOW "Null / near-null pointer dereference" KLOG_CLR_RESET);
         } else if (addr >= 0x0000800000000000ULL && addr < 0xFFFF800000000000ULL) {
           klog_puts(KLOG_CLR_YELLOW "Non-canonical memory access" KLOG_CLR_RESET);
-        } else if (regs->err_code & 16) {
+        } else if ((regs->err_code & 1) && (regs->err_code & 16)) {
+          /* NX requires a present entry (P=1) plus an instruction fetch. */
           klog_puts(KLOG_CLR_YELLOW "Execute non-executable page (NX)" KLOG_CLR_RESET);
+        } else if (regs->err_code & 16) {
+          klog_puts(KLOG_CLR_YELLOW "Instruction fetch on an unmapped page" KLOG_CLR_RESET);
         } else if (regs->err_code & 1) {
           klog_puts(KLOG_CLR_YELLOW "Page protection violation (page present)" KLOG_CLR_RESET);
         } else {
@@ -710,7 +731,8 @@ void isr_report_user_fault(struct registers *regs, int sig,
         }
       }
       klog_puts("\n");
-      klog_puts("  CR2: "); klog_hex64(addr);
+      klog_puts(regs->int_no == 14 ? "  CR2: " : "  ADDR: ");
+      klog_hex64(addr);
       klog_puts("  ERR: "); klog_hex64(regs->err_code);
       klog_puts("  CS: "); klog_hex64(regs->cs);
       klog_puts("\n");
@@ -993,7 +1015,33 @@ static void stack_fault_handler(struct registers *regs) {
   }
 }
 
+/*
+ * int3 from user mode.  This is how debuggers plant breakpoints and how
+ * GLib's G_BREAKPOINT() (g_error, g_assert) deliberately traps; the only
+ * correct disposition is SIGTRAP.  The CPU saved the address *after* the
+ * int3, so a handler that returns simply resumes there; Linux reports the
+ * trap address itself (rip - 1) as si_addr.
+ */
+static void breakpoint_handler(struct registers *regs) {
+  if ((regs->cs & 0x3) == 0x3) {
+    isr_report_user_fault(regs, SIGTRAP, regs->rip - 1);
+  } else {
+    isr_panic(regs, "Unhandled Breakpoint Exception");
+  }
+}
+
+/* into (overflow) from user mode; Linux reports it as SIGSEGV. */
+static void overflow_handler(struct registers *regs) {
+  if ((regs->cs & 0x3) == 0x3) {
+    isr_report_user_fault(regs, SIGSEGV, regs->rip);
+  } else {
+    isr_panic(regs, "Unhandled Overflow Exception");
+  }
+}
+
 void isr_init_exceptions(void) {
+  register_interrupt_handler(3, breakpoint_handler);
+  register_interrupt_handler(4, overflow_handler);
   register_interrupt_handler(6, invalid_opcode_handler);
   register_interrupt_handler(12, stack_fault_handler);
   register_interrupt_handler(13, gpf_handler);
@@ -1012,6 +1060,12 @@ void isr_handler(struct registers *regs) {
     }
 
     send_eoi(regs);
+
+    /* Only hardware IRQs (and IPIs) are preemption points here, and only
+     * after EOI: an exception return may be an extable fixup, and switching
+     * with a vector still in-service starves this CPU's LAPIC. */
+    if (regs->int_no >= 32)
+      sched_check_resched((regs->cs & 0x3) == 0x3);
     return;
   }
 
@@ -1020,6 +1074,7 @@ void isr_handler(struct registers *regs) {
       signal_deliver(regs);
     }
     send_eoi(regs);
+    sched_check_resched((regs->cs & 0x3) == 0x3);
     return;
   }
 

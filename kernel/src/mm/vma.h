@@ -17,6 +17,10 @@
 /* Kernel-internal: use 2 MB huge pages for this anonymous VMA.
  * Set automatically when madvise(MADV_HUGEPAGE) or MAP_HUGETLB is used. */
 #define MAP_HUGEPAGE 0x200000000ULL
+/* Kernel-internal: VMA created by the generic file-mmap path, so its PTEs hold
+ * a PMM reference to page-cache frames that teardown must drop.  System V shm
+ * and driver mmaps (DRM, fb, tmpfs) own their frames and must not set it. */
+#define MAP_PAGECACHE 0x400000000ULL
 
 // VMA structure - internally represents an AVL Interval Tree Node
 struct vma {

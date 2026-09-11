@@ -1,5 +1,6 @@
 
 #include "usb_kbd.h"
+#include "../../lock/lockdiag.h"
 #include "../../console/console.h"
 #include "../../console/klog.h"
 #include "../../io/io.h"
@@ -280,6 +281,15 @@ static void process_modifier(uint8_t old_mods, uint8_t new_mods, uint8_t bit,
 
   // Push raw scancode event for games like Doom
   keyboard_push_scancode(scancode, is_extended, !now);
+
+  /* Also feed the hang-report trigger from the modifier transition itself.
+   * Right-Ctrl three times is the trigger, and this is the one place a
+   * modifier-only HID report is guaranteed to be noticed - measured in QEMU, a
+   * report that changes only the modifier byte produced no scancode events at
+   * all, so a trigger that relied on the scancode funnel alone would never
+   * fire.  Idempotent with the other entry points: they share one tap counter
+   * and one cooldown. */
+  lockdiag_keyboard_scancode(scancode, is_extended, !now);
 }
 
 static void process_modifiers(uint8_t old_mods, uint8_t new_mods) {

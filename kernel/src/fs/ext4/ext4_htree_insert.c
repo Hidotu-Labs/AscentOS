@@ -1,214 +1,9 @@
-#include "ext4_dir_index.h"
+#include "ext4_htree.h"
 #include "ext4_extent.h"
 #include "fs/ext2/ext2_internal.h"
+#include "fs/ext3/ext3.h"
 #include "lib/string.h"
 #include "mm/heap.h"
-
-#include <stdint.h>
-
-#define MD4_F(x, y, z) ((z) ^ ((x) & ((y) ^ (z))))
-#define MD4_G(x, y, z) (((x) & (y)) + (((x) ^ (y)) & (z)))
-#define MD4_H(x, y, z) ((x) ^ (y) ^ (z))
-
-#define ROL32(value, shift) \
-    (((value) << (shift)) | ((value) >> (32 - (shift))))
-
-#define MD4_ROUND(function, a, b, c, d, value, shift) \
-    do {                                                   \
-        (a) += function((b), (c), (d)) + (value);          \
-        (a) = ROL32((a), (shift));                         \
-    } while (0)
-
-#define MD4_K2 013240474631u
-#define MD4_K3 015666365641u
-
-typedef struct {
-    uint32_t zero;
-    uint8_t version;
-    uint8_t length;
-    uint8_t levels;
-    uint8_t flags;
-} __attribute__((packed)) dx_info_t;
-
-typedef struct {
-    uint16_t limit;
-    uint16_t count;
-} __attribute__((packed)) dx_count_limit_t;
-
-typedef struct {
-    uint32_t hash;
-    uint32_t block;
-} __attribute__((packed)) dx_entry_t;
-
-typedef struct {
-    uint32_t hash;
-    uint32_t inode;
-    uint16_t size;
-    uint8_t name_len;
-    uint8_t type;
-    char name[256];
-} dx_item_t;
-
-static uint32_t dirent_min_size(uint32_t name_length)
-{
-    return (8u + name_length + 3u) & ~3u;
-}
-
-static void build_hash_buffer(
-    const char *name,
-    int name_length,
-    uint32_t *output,
-    int output_words,
-    int unsigned_chars)
-{
-    uint32_t padding;
-    uint32_t value;
-    int words_left;
-
-    padding = (uint32_t)name_length |
-              ((uint32_t)name_length << 8);
-
-    padding |= padding << 16;
-
-    value = padding;
-    words_left = output_words;
-
-    if (name_length > output_words * 4)
-        name_length = output_words * 4;
-
-    for (int i = 0; i < name_length; i++) {
-        int character;
-
-        if (unsigned_chars)
-            character = (int)(uint8_t)name[i];
-        else
-            character = (int)(int8_t)name[i];
-
-        value = (uint32_t)character + (value << 8);
-
-        if ((i & 3) == 3) {
-            *output++ = value;
-            value = padding;
-            words_left--;
-        }
-    }
-
-    if (--words_left >= 0)
-        *output++ = value;
-
-    while (--words_left >= 0)
-        *output++ = padding;
-}
-
-static void half_md4_transform(
-    uint32_t state[4],
-    const uint32_t input[8])
-{
-    uint32_t a = state[0];
-    uint32_t b = state[1];
-    uint32_t c = state[2];
-    uint32_t d = state[3];
-
-    /* Round 1 */
-
-    MD4_ROUND(MD4_F, a, b, c, d, input[0], 3);
-    MD4_ROUND(MD4_F, d, a, b, c, input[1], 7);
-    MD4_ROUND(MD4_F, c, d, a, b, input[2], 11);
-    MD4_ROUND(MD4_F, b, c, d, a, input[3], 19);
-
-    MD4_ROUND(MD4_F, a, b, c, d, input[4], 3);
-    MD4_ROUND(MD4_F, d, a, b, c, input[5], 7);
-    MD4_ROUND(MD4_F, c, d, a, b, input[6], 11);
-    MD4_ROUND(MD4_F, b, c, d, a, input[7], 19);
-
-    /* Round 2 */
-
-    MD4_ROUND(MD4_G, a, b, c, d, input[1] + MD4_K2, 3);
-    MD4_ROUND(MD4_G, d, a, b, c, input[3] + MD4_K2, 5);
-    MD4_ROUND(MD4_G, c, d, a, b, input[5] + MD4_K2, 9);
-    MD4_ROUND(MD4_G, b, c, d, a, input[7] + MD4_K2, 13);
-
-    MD4_ROUND(MD4_G, a, b, c, d, input[0] + MD4_K2, 3);
-    MD4_ROUND(MD4_G, d, a, b, c, input[2] + MD4_K2, 5);
-    MD4_ROUND(MD4_G, c, d, a, b, input[4] + MD4_K2, 9);
-    MD4_ROUND(MD4_G, b, c, d, a, input[6] + MD4_K2, 13);
-
-    /* Round 3 */
-
-    MD4_ROUND(MD4_H, a, b, c, d, input[3] + MD4_K3, 3);
-    MD4_ROUND(MD4_H, d, a, b, c, input[7] + MD4_K3, 9);
-    MD4_ROUND(MD4_H, c, d, a, b, input[2] + MD4_K3, 11);
-    MD4_ROUND(MD4_H, b, c, d, a, input[6] + MD4_K3, 15);
-
-    MD4_ROUND(MD4_H, a, b, c, d, input[1] + MD4_K3, 3);
-    MD4_ROUND(MD4_H, d, a, b, c, input[5] + MD4_K3, 9);
-    MD4_ROUND(MD4_H, c, d, a, b, input[0] + MD4_K3, 11);
-    MD4_ROUND(MD4_H, b, c, d, a, input[4] + MD4_K3, 15);
-
-    state[0] += a;
-    state[1] += b;
-    state[2] += c;
-    state[3] += d;
-}
-
-static int ext4_directory_hash(
-    ext2_mount_t *mount,
-    uint8_t version,
-    const char *name,
-    int name_length,
-    uint32_t *result_hash)
-{
-    uint32_t state[4] = {
-        0x67452301,
-        0xefcdab89,
-        0x98badcfe,
-        0x10325476
-    };
-
-    const char *current;
-    int bytes_left;
-
-    if (version != 1 && version != 4)
-        return -1;
-
-    if (mount->sb.s_hash_seed[0] ||
-        mount->sb.s_hash_seed[1] ||
-        mount->sb.s_hash_seed[2] ||
-        mount->sb.s_hash_seed[3]) {
-        memcpy(
-            state,
-            mount->sb.s_hash_seed,
-            sizeof(state)
-        );
-    }
-
-    current = name;
-    bytes_left = name_length;
-
-    while (bytes_left > 0) {
-        uint32_t hash_input[8];
-
-        build_hash_buffer(
-            current,
-            bytes_left,
-            hash_input,
-            8,
-            version == 4
-        );
-
-        half_md4_transform(state, hash_input);
-
-        current += 32;
-        bytes_left -= 32;
-    }
-
-    *result_hash = state[1] & 0xfffffffeu;
-
-    if (*result_hash == 0xfffffffeu)
-        *result_hash = 0xfffffffcu;
-
-    return 0;
-}
 
 static int insert_into_leaf(
     uint8_t *block_buffer,
@@ -218,7 +13,7 @@ static int insert_into_leaf(
     uint8_t name_length,
     uint8_t file_type)
 {
-    uint32_t required_size = dirent_min_size(name_length);
+    uint32_t required_size = ext4_dirent_min_size(name_length);
 
     for (uint32_t offset = 0; offset < block_size;) {
         ext2_dirent_t *entry;
@@ -252,7 +47,7 @@ static int insert_into_leaf(
         /*
          * Split the unused tail space from an existing entry.
          */
-        used_size = dirent_min_size(entry->name_len);
+        used_size = ext4_dirent_min_size(entry->name_len);
 
         if (entry->rec_len >= used_size + required_size) {
             uint16_t old_record_length = entry->rec_len;
@@ -294,7 +89,7 @@ static int collect_leaf_items(
     uint8_t hash_version,
     uint8_t *block_buffer,
     uint32_t block_size,
-    dx_item_t *items,
+    ext4_dx_item_t *items,
     uint32_t item_capacity,
     uint32_t *item_count)
 {
@@ -309,14 +104,14 @@ static int collect_leaf_items(
         }
 
         if (entry->inode != 0) {
-            dx_item_t *item;
+            ext4_dx_item_t *item;
 
             if (*item_count >= item_capacity)
                 return -1;
 
             item = &items[(*item_count)++];
 
-            if (ext4_directory_hash(
+            if (ext4_htree_hash(
                     mount,
                     hash_version,
                     entry->name,
@@ -328,7 +123,7 @@ static int collect_leaf_items(
             item->inode = entry->inode;
             item->name_len = entry->name_len;
             item->type = entry->file_type;
-            item->size = dirent_min_size(entry->name_len);
+            item->size = ext4_dirent_min_size(entry->name_len);
 
             memcpy(
                 item->name,
@@ -344,7 +139,7 @@ static int collect_leaf_items(
 }
 
 static void sort_items_by_hash(
-    dx_item_t *items,
+    ext4_dx_item_t *items,
     uint32_t item_count)
 {
     /*
@@ -352,7 +147,7 @@ static void sort_items_by_hash(
      * leaf generally contains a relatively small number of entries.
      */
     for (uint32_t i = 1; i < item_count; i++) {
-        dx_item_t current = items[i];
+        ext4_dx_item_t current = items[i];
         uint32_t position = i;
 
         while (position > 0 &&
@@ -368,7 +163,7 @@ static void sort_items_by_hash(
 static int pack_leaf_items(
     uint8_t *block_buffer,
     uint32_t block_size,
-    dx_item_t *items,
+    ext4_dx_item_t *items,
     uint32_t first_item,
     uint32_t end_item)
 {
@@ -412,7 +207,7 @@ static int pack_leaf_items(
     return 0;
 }
 
-int ext4_dx_add_entry(
+int ext4_htree_add_entry(
     ext2_mount_t *mount,
     uint32_t directory_inode_number,
     ext2_inode_t *directory_inode,
@@ -427,7 +222,7 @@ int ext4_dx_add_entry(
     uint8_t *leaf_buffer = NULL;
     uint8_t *right_buffer = NULL;
 
-    dx_item_t *items = NULL;
+    ext4_dx_item_t *items = NULL;
 
     int result = -1;
 
@@ -470,21 +265,21 @@ int ext4_dx_add_entry(
         goto cleanup;
     }
 
-    dx_info_t *root_info =
-        (dx_info_t *)(root_buffer + 24);
+    ext4_dx_root_info_t *root_info =
+        (ext4_dx_root_info_t *)(root_buffer + 24);
 
-    dx_count_limit_t *count_limit =
-        (dx_count_limit_t *)(root_buffer + 32);
+    ext4_dx_count_limit_t *count_limit =
+        (ext4_dx_count_limit_t *)(root_buffer + 32);
 
-    dx_entry_t *entries =
-        (dx_entry_t *)(root_buffer + 32);
+    ext4_dx_entry_t *entries =
+        (ext4_dx_entry_t *)(root_buffer + 32);
 
     if (root_info->zero != 0 ||
-        root_info->length != 8 ||
-        root_info->levels != 0 ||
+        root_info->info_length != 8 ||
+        root_info->indirect_levels != 0 ||
         count_limit->count == 0 ||
         count_limit->count > count_limit->limit ||
-        32u + (uint32_t)count_limit->limit * sizeof(dx_entry_t) >
+        32u + (uint32_t)count_limit->limit * sizeof(ext4_dx_entry_t) >
             mount->block_size) {
         goto cleanup;
     }
@@ -494,9 +289,9 @@ int ext4_dx_add_entry(
      */
     uint32_t name_hash;
 
-    if (ext4_directory_hash(
+    if (ext4_htree_hash(
             mount,
-            root_info->version,
+            root_info->hash_version,
             name,
             name_length,
             &name_hash) != 0) {
@@ -506,7 +301,7 @@ int ext4_dx_add_entry(
     uint16_t target_index = 0;
 
     for (uint16_t i = 1; i < count_limit->count; i++) {
-        if (name_hash < entries[i].hash)
+        if (name_hash < (entries[i].hash & ~1u))
             break;
 
         target_index = i;
@@ -567,7 +362,7 @@ int ext4_dx_add_entry(
 
     if (collect_leaf_items(
             mount,
-            root_info->version,
+            root_info->hash_version,
             leaf_buffer,
             mount->block_size,
             items,
@@ -577,13 +372,13 @@ int ext4_dx_add_entry(
         goto cleanup;
     }
 
-    dx_item_t *new_item = &items[item_count++];
+    ext4_dx_item_t *new_item = &items[item_count++];
 
     new_item->hash = name_hash;
     new_item->inode = child_inode_number;
     new_item->name_len = name_length;
     new_item->type = file_type;
-    new_item->size = dirent_min_size(name_length);
+    new_item->size = ext4_dirent_min_size(name_length);
 
     memcpy(new_item->name, name, name_length);
 

@@ -56,6 +56,31 @@ static socket_t *unix_get_live_peer(socket_t *sock, unix_sock_t **peer_out) {
   return peer_sock;
 }
 
+// A socket's epoll watchers register on its VFS node, so notifying the node
+// reaches every epoll instance watching this fd.  The by-fd fallback is only
+// needed for a socket that somehow has no node.
+static void unix_notify_epoll(socket_t *s, uint32_t events) {
+  if (!s)
+    return;
+  if (s->node)
+    epoll_notify_event(s->node, events);
+  else if (s->fd >= 0)
+    epoll_notify_socket(s->fd, events);
+}
+
+// usk->wait is initialised from the socket's own wait queue, so the second
+// wake in the old code walked the same list again.  Keep both calls but skip
+// the duplicate queue.
+static void unix_wake_recv_waiters(unix_sock_t *peer) {
+  if (!peer)
+    return;
+  wait_queue_t *sock_wq =
+      peer->parent ? (wait_queue_t *)peer->parent->wait_queue : NULL;
+  wait_queue_wake_all(peer->wait);
+  if (sock_wq && sock_wq != peer->wait)
+    wait_queue_wake_all(sock_wq);
+}
+
 static bool unix_ensure_recv_buf(unix_sock_t *usk, size_t needed) {
   if (!usk) return false;
   if (!usk->recv_buf) {
@@ -78,8 +103,7 @@ static bool unix_ensure_recv_buf(unix_sock_t *usk, size_t needed) {
       size_t tail = usk->recv_buf_tail;
       size_t old_size = usk->recv_buf_size;
       size_t available = (old_size > 0) ? (tail - head + old_size) % old_size : 0;
-      for (size_t i = 0; i < available; i++)
-        new_buf[i] = usk->recv_buf[(head + i) % old_size];
+      unix_ring_consume(usk->recv_buf, old_size, head, new_buf, available);
       kfree(usk->recv_buf);
       usk->recv_buf = new_buf;
       usk->recv_buf_size = new_sz;
@@ -209,13 +233,8 @@ ssize_t unix_send_impl(socket_t *sock, const void *buf, size_t len, int flags) {
 
     spinlock_release(&peer->recv_lock);
 
-    wait_queue_wake_all(peer->wait);
-    if (peer->parent && peer->parent->wait_queue)
-      wait_queue_wake_all((wait_queue_t *)peer->parent->wait_queue);
-    if (peer->parent && peer->parent->node)
-      epoll_notify_event(peer->parent->node, EPOLLIN | EPOLLRDNORM);
-    if (peer->parent && peer->parent->fd >= 0)
-      epoll_notify_socket(peer->parent->fd, EPOLLIN);
+    unix_wake_recv_waiters(peer);
+    unix_notify_epoll(peer->parent, EPOLLIN | EPOLLRDNORM);
 
     socket_put(peer_sock);
     return (ssize_t)len;
@@ -280,10 +299,7 @@ ssize_t unix_send_impl(socket_t *sock, const void *buf, size_t len, int flags) {
 
     size_t to_copy = (len - sent < space) ? len - sent : space;
 
-    for (size_t i = 0; i < to_copy; i++) {
-      peer->recv_buf[tail] = src[sent + i];
-      tail = (size > 0) ? (tail + 1) % size : 0;
-    }
+    tail = unix_ring_append(peer->recv_buf, size, tail, src + sent, to_copy);
     peer->recv_buf_tail = tail;
     sent += to_copy;
     peer->bytes_written += to_copy;
@@ -292,15 +308,8 @@ ssize_t unix_send_impl(socket_t *sock, const void *buf, size_t len, int flags) {
 
     spinlock_release(&peer->recv_lock);
 
-    wait_queue_wake_all(peer->wait);
-
-    if (peer->parent && peer->parent->wait_queue)
-      wait_queue_wake_all((wait_queue_t *)peer->parent->wait_queue);
-
-    if (peer->parent && peer->parent->node)
-      epoll_notify_event(peer->parent->node, EPOLLIN | EPOLLRDNORM);
-    if (peer->parent && peer->parent->fd >= 0)
-      epoll_notify_socket(peer->parent->fd, EPOLLIN);
+    unix_wake_recv_waiters(peer);
+    unix_notify_epoll(peer->parent, EPOLLIN | EPOLLRDNORM);
   }
 
   bool closed = sock->closing || peer_sock->closing;
@@ -401,10 +410,7 @@ ssize_t unix_recv_impl(socket_t *sock, void *buf, size_t len, int flags) {
     unix_sock_t *notify_peer = NULL;
     socket_t *notify_peer_sock = unix_get_live_peer(sock, &notify_peer);
     if (notify_peer_sock) {
-      if (notify_peer_sock->node)
-        epoll_notify_event(notify_peer_sock->node, EPOLLOUT | EPOLLWRNORM);
-      if (notify_peer_sock->fd >= 0)
-        epoll_notify_socket(notify_peer_sock->fd, EPOLLOUT | EPOLLWRNORM);
+      unix_notify_epoll(notify_peer_sock, EPOLLOUT | EPOLLWRNORM);
       socket_put(notify_peer_sock);
     }
 
@@ -490,11 +496,10 @@ ssize_t unix_recv_impl(socket_t *sock, void *buf, size_t len, int flags) {
 
     size_t to_copy = (len - received < available) ? len - received : available;
 
-    for (size_t i = 0; i < to_copy; i++)
-      dest[received + i] = (size > 0) ? usk->recv_buf[(head + i) % size] : 0;
+    size_t next_head = unix_ring_consume(usk->recv_buf, size, head, dest + received, to_copy);
 
     if (!(flags & 0x02)) { // MSG_PEEK
-      usk->recv_buf_head = (size > 0) ? (head + to_copy) % size : 0;
+      usk->recv_buf_head = (size > 0) ? next_head : 0;
       usk->bytes_read += to_copy;
       usk->scm_cred_pending = false;
 
@@ -522,10 +527,7 @@ ssize_t unix_recv_impl(socket_t *sock, void *buf, size_t len, int flags) {
   unix_sock_t *notify_peer = NULL;
   socket_t *notify_peer_sock = unix_get_live_peer(sock, &notify_peer);
   if (notify_peer_sock) {
-    if (notify_peer_sock->node)
-      epoll_notify_event(notify_peer_sock->node, EPOLLOUT | EPOLLWRNORM);
-    if (notify_peer_sock->fd >= 0)
-      epoll_notify_socket(notify_peer_sock->fd, EPOLLOUT | EPOLLWRNORM);
+    unix_notify_epoll(notify_peer_sock, EPOLLOUT | EPOLLWRNORM);
     socket_put(notify_peer_sock);
   }
 
@@ -710,13 +712,8 @@ ssize_t unix_sendmsg_impl(socket_t *sock, struct msghdr *msg, int flags) {
 
     spinlock_release(&peer->recv_lock);
 
-    wait_queue_wake_all(peer->wait);
-    if (peer->parent && peer->parent->wait_queue)
-      wait_queue_wake_all((wait_queue_t *)peer->parent->wait_queue);
-    if (peer->parent && peer->parent->node)
-      epoll_notify_event(peer->parent->node, EPOLLIN | EPOLLRDNORM);
-    if (peer->parent && peer->parent->fd >= 0)
-      epoll_notify_socket(peer->parent->fd, EPOLLIN);
+    unix_wake_recv_waiters(peer);
+    unix_notify_epoll(peer->parent, EPOLLIN | EPOLLRDNORM);
 
     socket_put(peer_sock);
     return (ssize_t)total_len;
@@ -843,10 +840,7 @@ ssize_t unix_sendmsg_impl(socket_t *sock, struct msghdr *msg, int flags) {
         break;
 
       size_t to_copy = (len - sent < space) ? len - sent : space;
-      for (size_t j = 0; j < to_copy; j++) {
-        peer->recv_buf[tail] = src[sent + j];
-        tail = (size > 0) ? (tail + 1) % size : 0;
-      }
+      tail = unix_ring_append(peer->recv_buf, size, tail, src + sent, to_copy);
       peer->recv_buf_tail = tail;
       sent += to_copy;
     }
@@ -861,14 +855,8 @@ ssize_t unix_sendmsg_impl(socket_t *sock, struct msghdr *msg, int flags) {
   spinlock_release(&peer->recv_lock);
 
   // Wake receiver
-  wait_queue_wake_all(peer->wait);
-  if (peer->parent && peer->parent->wait_queue)
-    wait_queue_wake_all((wait_queue_t *)peer->parent->wait_queue);
-
-  if (peer->parent && peer->parent->node)
-    epoll_notify_event(peer->parent->node, EPOLLIN | EPOLLRDNORM);
-  if (peer->parent && peer->parent->fd >= 0)
-    epoll_notify_socket(peer->parent->fd, EPOLLIN);
+  unix_wake_recv_waiters(peer);
+  unix_notify_epoll(peer->parent, EPOLLIN | EPOLLRDNORM);
 
   socket_put(peer_sock);
   return total_sent;
@@ -1115,10 +1103,7 @@ ssize_t unix_recvmsg_impl(socket_t *sock, struct msghdr *msg, int flags) {
     unix_sock_t *notify_peer = NULL;
     socket_t *notify_peer_sock = unix_get_live_peer(sock, &notify_peer);
     if (notify_peer_sock) {
-      if (notify_peer_sock->node)
-        epoll_notify_event(notify_peer_sock->node, EPOLLOUT | EPOLLWRNORM);
-      if (notify_peer_sock->fd >= 0)
-        epoll_notify_socket(notify_peer_sock->fd, EPOLLOUT | EPOLLWRNORM);
+      unix_notify_epoll(notify_peer_sock, EPOLLOUT | EPOLLWRNORM);
       socket_put(notify_peer_sock);
     }
 
@@ -1322,11 +1307,10 @@ ssize_t unix_recvmsg_impl(socket_t *sock, struct msghdr *msg, int flags) {
     if (to_copy == 0)
       break;
 
-    for (size_t j = 0; j < to_copy; j++)
-      dest[j] = (size > 0) ? usk->recv_buf[(head + j) % size] : 0;
+    size_t next_head = unix_ring_consume(usk->recv_buf, size, head, dest, to_copy);
 
     if (!(flags & 0x02)) { // MSG_PEEK
-      usk->recv_buf_head = (size > 0) ? (head + to_copy) % size : 0;
+      usk->recv_buf_head = (size > 0) ? next_head : 0;
       usk->bytes_read += to_copy;
     }
 
@@ -1342,10 +1326,7 @@ ssize_t unix_recvmsg_impl(socket_t *sock, struct msghdr *msg, int flags) {
   unix_sock_t *notify_peer = NULL;
   socket_t *notify_peer_sock = unix_get_live_peer(sock, &notify_peer);
   if (notify_peer_sock) {
-    if (notify_peer_sock->node)
-      epoll_notify_event(notify_peer_sock->node, EPOLLOUT | EPOLLWRNORM);
-    if (notify_peer_sock->fd >= 0)
-      epoll_notify_socket(notify_peer_sock->fd, EPOLLOUT | EPOLLWRNORM);
+    unix_notify_epoll(notify_peer_sock, EPOLLOUT | EPOLLWRNORM);
     socket_put(notify_peer_sock);
   }
 

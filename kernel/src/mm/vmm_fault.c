@@ -30,6 +30,78 @@ static uint64_t dp_build_flags(uint64_t prot) {
   return flags;
 }
 
+/* Map already-cached neighbours of a freshly faulted private file page in one
+ * pass, the way the shared/read-only path clusters its 128 KB window.  Every
+ * page is installed read-only with the CoW bit, so the first write still
+ * copies in the write-fault path.  Each frame gets its own reference; pages
+ * whose VMA changed, disappeared, or no longer describes the same file offset
+ * are dropped instead of being mapped. */
+static void vmm_map_cow_cluster(uint64_t *pml4, uint64_t cr2,
+                                vfs_node_t *node, struct mm_struct *mm,
+                                uint64_t vma_start, uint64_t vma_end,
+                                uint64_t vma_offset, uint64_t eff_file_size) {
+  if (!pml4 || !node || !mm)
+    return;
+
+  uint64_t fault_vpage = cr2 & ~0xFFFULL;
+  uint64_t cluster_vstart = cr2 & ~0x1FFFFULL;
+
+  struct {
+    uint64_t vpage;
+    uint64_t phys;
+  } batch[32];
+  uint32_t batch_count = 0;
+
+  spinlock_acquire(&node->pages_lock);
+  for (int ci = 0; ci < 32; ci++) {
+    uint64_t vpage = cluster_vstart + (uint64_t)ci * PAGE_SIZE;
+    if (vpage == fault_vpage || vpage < vma_start || vpage >= vma_end)
+      continue;
+    uint64_t page_off = vpage - vma_start;
+    if (page_off + PAGE_SIZE > eff_file_size)
+      continue; // partial tail: zeros come from the copy-now path
+    uint32_t file_off = (uint32_t)(vma_offset + page_off);
+    vfs_page_t *p = radix_tree_lookup(&node->pages, (uint64_t)(file_off >> 12));
+    if (p && !p->loading && p->uptodate && p->frame_phys && !p->evicted) {
+      batch[batch_count].vpage = vpage;
+      batch[batch_count].phys = p->frame_phys;
+      pmm_incref((void *)p->frame_phys);
+      batch_count++;
+    }
+  }
+  spinlock_release(&node->pages_lock);
+
+  if (batch_count == 0)
+    return;
+
+  /* Hold mm->lock while installing: mm->lock -> vmm_lock is the established
+   * order, and it keeps a concurrent munmap/mprotect from leaving a phantom
+   * mapping behind.  Each page is revalidated against the current VMA so a
+   * split, merge or remap cannot alias a frame that belongs elsewhere. */
+  spinlock_acquire(&mm->lock);
+  for (uint32_t i = 0; i < batch_count; i++) {
+    struct vma *nv = vma_find(&mm->vmas, batch[i].vpage);
+    uint64_t nv_file_size =
+        nv ? ((nv->file_size > 0) ? nv->file_size : (nv->end - nv->start)) : 0;
+    bool ok = nv && (nv->flags & MAP_PRIVATE) && (nv->prot & PROT_READ) &&
+              batch[i].vpage >= nv->start &&
+              batch[i].vpage + PAGE_SIZE <= nv->end &&
+              (batch[i].vpage - nv->start) + PAGE_SIZE <= nv_file_size &&
+              (void *)nv->file_node == (void *)node &&
+              (uint32_t)(nv->offset + (batch[i].vpage - nv->start)) ==
+                  (uint32_t)(vma_offset + (batch[i].vpage - vma_start));
+    if (!ok) {
+      pmm_decref((void *)batch[i].phys);
+      continue;
+    }
+
+    uint64_t flags = (dp_build_flags(nv->prot) & ~PAGE_FLAG_RW) | PAGE_FLAG_COW;
+    if (!vmm_map_page_if_unmapped(pml4, batch[i].vpage, batch[i].phys, flags))
+      pmm_decref((void *)batch[i].phys);
+  }
+  spinlock_release(&mm->lock);
+}
+
 /* ---- Why the paging engine refused a fault --------------------------------
  *
  * A -1 is a death sentence for a kernel-mode fault, so every bail-out in
@@ -108,50 +180,63 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
     uint64_t *pml4 = (uint64_t *)PHYS_TO_VIRT(target_cr3);
     uint64_t virt = cr2 & PAGE_MASK;
 
-    rawspinlock_acquire(vmm_get_lock());
+    /* Lock order in this kernel is mm->lock -> vmm_lock.  sys_mmap(),
+     * sys_mprotect(), sys_madvise() and the teardown paths all hold mm->lock
+     * and then reach vmm_map_page()/vmm_unmap_page(), which take vmm_lock.
+     * This path used to take them the other way round (mm->lock from inside
+     * the vmm_lock section below), so a CoW fault on one CPU could deadlock
+     * against an mprotect()/mmap() on another, with neither able to back off. */
+    spinlock_acquire(&current->mm->lock);
+    vmm_lock_acquire();
+
+    /* Every bail-out from the walk below has to unwind the pair again. */
+#define WALK_UNLOCK()                                                          \
+  do {                                                                         \
+    vmm_lock_release();                                       \
+    spinlock_release(&current->mm->lock);                                      \
+  } while (0)
+#define WALK_REJECT(reason, d1, d2)                                             \
+  do {                                                                         \
+    WALK_UNLOCK();                                                             \
+    return PF_REJECT((reason), (d1), (d2));                                    \
+  } while (0)
 
     uint64_t pml4e = pml4[(virt >> 39) & 511];
-    if (!(pml4e & PAGE_FLAG_PRESENT)) {
-      rawspinlock_release(vmm_get_lock());
-      return PF_REJECT("write walk: PML4E is not present", pml4e, virt);
-    }
+    if (!(pml4e & PAGE_FLAG_PRESENT))
+      WALK_REJECT("write walk: PML4E is not present", pml4e, virt);
     uint64_t *pdpt = (uint64_t *)PHYS_TO_VIRT(pml4e & PAGE_MASK);
 
     uint64_t pdpte = pdpt[(virt >> 30) & 511];
-    if (!(pdpte & PAGE_FLAG_PRESENT) || (pdpte & PAGE_FLAG_PS)) {
-      rawspinlock_release(vmm_get_lock());
-      return PF_REJECT("write walk: PDPT entry missing or a 1GB page", pdpte,
-                       virt);
-    }
+    if (!(pdpte & PAGE_FLAG_PRESENT) || (pdpte & PAGE_FLAG_PS))
+      WALK_REJECT("write walk: PDPT entry missing or a 1GB page", pdpte, virt);
 
     uint64_t *pd = (uint64_t *)PHYS_TO_VIRT(pdpte & PAGE_MASK);
     uint64_t pde = pd[(virt >> 21) & 511];
-    if (!(pde & PAGE_FLAG_PRESENT) || (pde & PAGE_FLAG_PS)) {
-      rawspinlock_release(vmm_get_lock());
-      return PF_REJECT("write walk: PD entry missing or a 2MB huge page", pde,
-                       virt);
-    }
+    if (!(pde & PAGE_FLAG_PRESENT) || (pde & PAGE_FLAG_PS))
+      WALK_REJECT("write walk: PD entry missing or a 2MB huge page", pde, virt);
 
     uint64_t *pt = (uint64_t *)PHYS_TO_VIRT(pde & PAGE_MASK);
     uint64_t *pte = &pt[(virt >> 12) & 511];
-    if (!(*pte & PAGE_FLAG_PRESENT)) {
-      rawspinlock_release(vmm_get_lock());
-      return PF_REJECT("error code says P=1 but the PTE is not present", *pte,
-                       virt);
-    }
+    if (!(*pte & PAGE_FLAG_PRESENT))
+      WALK_REJECT("error code says P=1 but the PTE is not present", *pte, virt);
+
+    /* The frame the PTE stopped pointing at, and whether a flush is owed.
+     * Both are acted on only after the locks are dropped - see below. */
+    uint64_t cow_old_phys = 0;
+    bool cow_broken = false;
 
     if (*pte & PAGE_FLAG_RW) {
       // Stale TLB: Another thread in this process already broke CoW on this
       // page.
+      WALK_UNLOCK();
       tlb_shootdown_page(virt);
-      rawspinlock_release(vmm_get_lock());
       return 0;
     }
 
     if (!(*pte & PAGE_FLAG_COW)) {
       // Not marked COW yet. Is it a MAP_PRIVATE VMA that's now writable?
       // (This can happen if it was first mapped read-only and then mprotected).
-      spinlock_acquire(&current->mm->lock);
+      // mm->lock is already held, so the VMA tree may be walked directly.
       struct vma *v = vma_find(&current->mm->vmas, cr2);
       if (v) {
         if ((v->flags & MAP_PRIVATE) && (v->prot & PROT_WRITE)) {
@@ -160,7 +245,6 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
           *pte |= PAGE_FLAG_COW;
         }
       }
-      spinlock_release(&current->mm->lock);
     }
 
     if (*pte & PAGE_FLAG_COW) {
@@ -168,11 +252,9 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
 
       if (old_phys == pmm_get_zero_page_phys()) {
         void *new_phys = pmm_alloc_page();
-        if (!new_phys) {
-          rawspinlock_release(vmm_get_lock());
-          return PF_REJECT("CoW break of the shared zero page: PMM out of "
-                           "memory", old_phys, 0);
-        }
+        if (!new_phys)
+          WALK_REJECT("CoW break of the shared zero page: PMM out of "
+                      "memory", old_phys, 0);
 
         memset(PHYS_TO_VIRT((uint64_t)new_phys), 0, PAGE_SIZE);
 
@@ -181,8 +263,8 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
         pml4[(virt >> 39) & 511] |= (PAGE_FLAG_RW | PAGE_FLAG_USER);
         pdpt[(virt >> 30) & 511] |= (PAGE_FLAG_RW | PAGE_FLAG_USER);
         pd[(virt >> 21) & 511] |= (PAGE_FLAG_RW | PAGE_FLAG_USER);
+        WALK_UNLOCK();
         tlb_shootdown_page(virt);
-        rawspinlock_release(vmm_get_lock());
         return 0; // zero page CoW broken with fresh zeroed page
       }
 
@@ -191,17 +273,16 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
       if (refs > 1) {
         // Multiple owners — make a private copy.
         void *new_phys = pmm_alloc_page();
-        if (!new_phys) {
-          rawspinlock_release(vmm_get_lock());
-          return PF_REJECT("CoW copy: PMM out of memory", old_phys, refs);
-        }
+        if (!new_phys)
+          WALK_REJECT("CoW copy: PMM out of memory", old_phys, refs);
 
         memcpy(PHYS_TO_VIRT((uint64_t)new_phys), PHYS_TO_VIRT(old_phys),
                PAGE_SIZE);
 
         *pte = ((uint64_t)new_phys & PAGE_MASK) |
                (*pte & ~PAGE_MASK & ~PAGE_FLAG_COW) | PAGE_FLAG_RW;
-        pmm_decref((void *)old_phys);
+        // Released after the flush below, not here.
+        cow_old_phys = old_phys;
       } else {
         // Sole owner — just make it writable in place.
         *pte &= ~PAGE_FLAG_COW;
@@ -211,12 +292,26 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
       pml4[(virt >> 39) & 511] |= (PAGE_FLAG_RW | PAGE_FLAG_USER);
       pdpt[(virt >> 30) & 511] |= (PAGE_FLAG_RW | PAGE_FLAG_USER);
       pd[(virt >> 21) & 511] |= (PAGE_FLAG_RW | PAGE_FLAG_USER);
-      tlb_shootdown_page(virt);
-      rawspinlock_release(vmm_get_lock());
-      return 0; // fault handled
+      cow_broken = true;
     }
 
-    rawspinlock_release(vmm_get_lock());
+    WALK_UNLOCK();
+#undef WALK_UNLOCK
+#undef WALK_REJECT
+
+    if (cow_broken) {
+      /* Flushing and releasing the old frame happen outside both locks on
+       * purpose.  A shootdown IPIs every CPU and waits for them, which must
+       * never be done while holding a lock that other CPUs are waiting for -
+       * the initiator would be waiting for CPUs that are waiting for it.
+       * Dropping the frame only after the flush keeps the window closed: until
+       * every CPU has thrown away its stale writable translation, the frame
+       * cannot be handed to anybody else. */
+      tlb_shootdown_page(virt);
+      if (cow_old_phys)
+        pmm_decref((void *)cow_old_phys);
+      return 0; // fault handled
+    }
 
     // Present page, write fault, no COW flag → genuine write protection
     // violation.
@@ -493,6 +588,7 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
   }
 
   void *frame = NULL;
+  bool cow_mapping = false;
   vfs_node_t *node = (vfs_node_t *)vma_file_node;
   if (node && (node->flags & FS_TYPE_MASK) == FS_FILE) {
     uint64_t page_offset = (cr2 & ~0xFFFULL) - vma_start;
@@ -507,54 +603,90 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
       memset(PHYS_TO_VIRT((uint64_t)frame), 0, 4096);
     } else if ((vma_flags & MAP_PRIVATE) && (vma_prot & PROT_WRITE)) {
       // 2. Private Writable file mapping (e.g. ELF .data / .got / partial BSS)
-      //    Must allocate a private page so user writes never mutate shared page cache.
-      frame = pmm_alloc_page();
-      if (!frame)
-        return PF_REJECT("PMM out of memory for a private file page",
-                         page_offset, eff_file_size);
-      void *priv_virt = PHYS_TO_VIRT((uint64_t)frame);
-      memset(priv_virt, 0, 4096);
-
-      uint32_t valid_bytes = 4096;
-      if (page_offset + 4096 > eff_file_size)
-        valid_bytes = (uint32_t)(eff_file_size - page_offset);
-
+      //
+      //    A read fault maps the shared page-cache frame read-only with the CoW
+      //    bit set instead of copying it.  The frame is then shared by every
+      //    process mapping the same library, and the existing write-fault CoW
+      //    path copies it on the first actual write.  A write fault takes the
+      //    private copy immediately so the page is not faulted twice.
+      //
+      //    The page must lie entirely inside the segment's file-backed range:
+      //    on a partial last page the cache frame holds the bytes that follow
+      //    the segment in the file, while the mapping must expose zeros there,
+      //    so those keep the copy-now path.
       uint32_t file_offset = (uint32_t)(vma_offset + page_offset);
       vfs_page_t *cached = vfs_cache_lookup(node, file_offset);
       if (!cached) {
         // Clustered 128 KB read-ahead into VFS page cache (32 pages)
-        uint32_t cluster_base = file_offset & ~0x1FFFFU;
-        vfs_cache_readahead(node, cluster_base, 128 * 1024);
+        vfs_cache_readahead(node, file_offset, 128 * 1024);
       } else {
         vfs_cache_put(node, cached);
       }
       cached = vfs_cache_get_or_create(node, file_offset);
 
-      if (cached && cached->frame_phys) {
-        memcpy(priv_virt, PHYS_TO_VIRT(cached->frame_phys), valid_bytes);
-        vfs_cache_put(node, cached);
-      } else {
+      if (!cached || !cached->frame_phys) {
         if (cached)
           vfs_cache_put(node, cached);
-        pmm_free_page(frame);
         klogf("[VMM] File cache read failure for VMA [%016llx-%016llx] off=%u\n",
-              (unsigned long long)vma_start, (unsigned long long)vma_end, file_offset);
+              (unsigned long long)vma_start, (unsigned long long)vma_end,
+              file_offset);
         return PF_REJECT("private file mapping: page cache could not supply the "
                          "page", file_offset, page_offset);
       }
+
+      bool whole_page_in_file = (page_offset + PAGE_SIZE) <= eff_file_size;
+      if (!write_fault && whole_page_in_file) {
+        // Share the cached frame: read-only + CoW, no private frame, no memcpy.
+        frame = (void *)cached->frame_phys;
+        pmm_incref(frame);
+        cow_mapping = true;
+      } else {
+        // The page is about to be dirtied (or is the partial tail of the
+        // segment): take the private zero-filled copy now.
+        frame = pmm_alloc_page();
+        if (!frame) {
+          vfs_cache_put(node, cached);
+          return PF_REJECT("PMM out of memory for a private file page",
+                           page_offset, eff_file_size);
+        }
+        void *priv_virt = PHYS_TO_VIRT((uint64_t)frame);
+        memset(priv_virt, 0, 4096);
+
+        uint32_t valid_bytes = 4096;
+        if (page_offset + 4096 > eff_file_size)
+          valid_bytes = (uint32_t)(eff_file_size - page_offset);
+
+        memcpy(priv_virt, PHYS_TO_VIRT(cached->frame_phys), valid_bytes);
+      }
+      vfs_cache_put(node, cached);
+
+      // Map the rest of the cached 128 KB window read-only + CoW in one pass so
+      // adjacent .data/.got pages do not each take a separate fault.
+      if (cow_mapping)
+        vmm_map_cow_cluster((uint64_t *)target_cr3, cr2, node, current->mm,
+                            vma_start, vma_end, vma_offset, eff_file_size);
     } else {
       // 3. Shared or Read-Only file mapping (e.g. ELF .text / .rodata)
       //    Use shared VFS page-cache frame directly.
       uint32_t file_offset = (uint32_t)(vma_offset + page_offset);
       vfs_page_t *cached = vfs_cache_lookup(node, file_offset);
-      if (!cached) {
-        // Clustered 64 KB read-ahead into VFS page cache
-        uint32_t cluster_base = file_offset & ~0xFFFFU;
-        vfs_cache_readahead(node, cluster_base, 64 * 1024);
+      if (cached) {
+        // Fast path: verify page is ready without redundant lookup cycle
+        bool ready = false;
+        spinlock_acquire(&node->pages_lock);
+        if (!cached->loading && cached->uptodate && cached->frame_phys)
+          ready = true;
+        spinlock_release(&node->pages_lock);
+
+        if (!ready) {
+          vfs_cache_put(node, cached);
+          cached = vfs_cache_get_or_create(node, file_offset);
+        }
       } else {
-        vfs_cache_put(node, cached);
+        // Cache miss: clustered 128 KB read-ahead starting at current fault
+        vfs_cache_readahead(node, file_offset, 128 * 1024);
+        cached = vfs_cache_get_or_create(node, file_offset);
       }
-      cached = vfs_cache_get_or_create(node, file_offset);
 
       if (cached && cached->frame_phys) {
         frame = (void *)cached->frame_phys;
@@ -575,34 +707,39 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
                          "supply the page", file_offset, page_offset);
       }
 
-      // Proactive cluster mapping: map adjacent cached pages in the 64 KB window to avoid redundant faults
-      uint64_t cluster_vstart = cr2 & ~0xFFFFULL;
+      // Proactive cluster mapping: map adjacent cached pages in a 128 KB window (32 pages)
+      // to avoid dozens of redundant page faults during library / binary startup.
+      uint64_t cluster_vstart = cr2 & ~0x1FFFFULL;
       uint64_t pt_flags = dp_build_flags(vma_prot);
-      for (int ci = 0; ci < 16; ci++) {
+      struct {
+        uint64_t vpage;
+        uint64_t phys;
+      } batch[32];
+      uint32_t batch_count = 0;
+
+      spinlock_acquire(&node->pages_lock);
+      for (int ci = 0; ci < 32; ci++) {
         uint64_t vpage = cluster_vstart + (uint64_t)(ci * 4096);
         if (vpage == (cr2 & ~0xFFFULL))
           continue;
         if (vpage < vma_start || vpage >= vma_end)
           continue;
-        if (vmm_virt_to_phys((uint64_t *)target_cr3, vpage) != 0)
-          continue;
 
         uint32_t foff = (uint32_t)(vma_offset + (vpage - vma_start));
-        vfs_page_t *p = vfs_cache_lookup(node, foff);
-        if (p) {
-          bool ready = false;
-          spinlock_acquire(&node->pages_lock);
-          if (!p->loading && p->uptodate && p->frame_phys) {
-            ready = true;
-          }
-          spinlock_release(&node->pages_lock);
-          if (ready) {
-            pmm_incref((void *)p->frame_phys);
-            if (!vmm_map_page_if_unmapped((uint64_t *)target_cr3, vpage, p->frame_phys, pt_flags)) {
-              pmm_decref((void *)p->frame_phys);
-            }
-          }
-          vfs_cache_put(node, p);
+        vfs_page_t *p = radix_tree_lookup(&node->pages, (uint64_t)(foff >> 12));
+        if (p && !p->loading && p->uptodate && p->frame_phys && !p->evicted) {
+          batch[batch_count].vpage = vpage;
+          batch[batch_count].phys = p->frame_phys;
+          pmm_incref((void *)p->frame_phys);
+          batch_count++;
+        }
+      }
+      spinlock_release(&node->pages_lock);
+
+      for (uint32_t bi = 0; bi < batch_count; bi++) {
+        if (!vmm_map_page_if_unmapped((uint64_t *)target_cr3, batch[bi].vpage,
+                                      batch[bi].phys, pt_flags)) {
+          pmm_decref((void *)batch[bi].phys);
         }
       }
     }
@@ -699,6 +836,8 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
   }
 
   uint64_t flags = dp_build_flags(vma_prot);
+  if (cow_mapping)
+    flags = (flags & ~PAGE_FLAG_RW) | PAGE_FLAG_COW;
   uint64_t vpage = cr2 & ~0xFFFULL;
   if (!vmm_map_page_if_unmapped((uint64_t *)target_cr3, vpage, (uint64_t)frame,
                                 flags)) {

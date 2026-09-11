@@ -40,16 +40,20 @@ static uint64_t xattr_check_path(const char *path) {
 
   struct thread *t = sched_get_current();
   vfs_node_t *base = fs_root;
+  vfs_node_t *cwd = NULL;
   if (path[0] != '/' && t && t->cwd_path[0]) {
-    vfs_node_t *cwd = vfs_resolve_path_at(fs_root, t->cwd_path);
+    cwd = vfs_resolve_path_at(fs_root, t->cwd_path);
     if (cwd)
       base = cwd;
   }
 
   vfs_node_t *node = vfs_resolve_path_at(base, path);
-  if (!node)
+  if (!node) {
+    if (cwd) vfs_close(cwd);
     return (uint64_t)-XATTR_ENOENT;
+  }
   vfs_close(node);
+  if (cwd) vfs_close(cwd);
   return 0;
 }
 

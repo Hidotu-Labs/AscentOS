@@ -527,6 +527,31 @@ uint32_t ptmx_write(struct vfs_node *node, uint32_t offset, uint32_t size,
   return written;
 }
 
+/* TIOCINQ/FIONREAD: how many bytes a read() would return.  kpty asks this on
+ * every read notification and skips the read entirely if the ioctl fails, which
+ * is how a Konsole tab ends up showing nothing while bash is alive and running
+ * commands.  A canonical slave only ever yields whole lines, and packet mode
+ * costs the master one status byte per read.  Caller holds pty->lock. */
+static uint32_t pty_bytes_pending(pty_pair_t *pty, bool to_master) {
+  uint32_t used = to_master ? ring_used(pty->s2m_head, pty->s2m_tail)
+                            : ring_used(pty->m2s_head, pty->m2s_tail);
+
+  if (!to_master && (pty->termios.c_lflag & ICANON)) {
+    if (pty->m2s_newline_count == 0)
+      return 0;
+    for (uint32_t i = 0; i < used; i++) {
+      uint32_t at = (pty->m2s_tail + i) % PTY_BUFFER_SIZE;
+      if (pty->master_to_slave[at] == '\n') {
+        used = i + 1;
+        break;
+      }
+    }
+  } else if (to_master && pty->packet_mode) {
+    used += 1; // the packet header read() prepends
+  }
+  return used;
+}
+
 int ptmx_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
   pty_pair_t *pty = (pty_pair_t *)node->device;
   if (!pty)
@@ -579,6 +604,18 @@ int ptmx_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
       ret = -14;
     } else {
       pty->packet_mode = (*enabled != 0);
+      ret = 0;
+    }
+    break;
+  }
+
+  case TIOCINQ: /* same request number as FIONREAD */
+  {
+    int *pending = (int *)arg;
+    if (!pending || !vmm_is_user_addr_range_valid(arg, sizeof(int))) {
+      ret = -14; // EFAULT
+    } else {
+      *pending = (int)pty_bytes_pending(pty, true);
       ret = 0;
     }
     break;
@@ -1111,6 +1148,18 @@ int pty_slave_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
         pgid_to_signal = pty->pgid;
         signal_to_send = 28; // SIGWINCH
       }
+      ret = 0;
+    }
+    break;
+  }
+
+  case TIOCINQ: /* same request number as FIONREAD */
+  {
+    int *pending = (int *)arg;
+    if (!pending || !vmm_is_user_addr_range_valid(arg, sizeof(int))) {
+      ret = -14; // EFAULT
+    } else {
+      *pending = (int)pty_bytes_pending(pty, false);
       ret = 0;
     }
     break;

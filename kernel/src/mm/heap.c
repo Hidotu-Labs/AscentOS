@@ -161,8 +161,21 @@ static void *slab_alloc_from_cache_locked(struct slab_cache *c) {
 // Free a single object back into its slab (caller must hold c->lock)
 static void slab_free_to_cache_locked(struct slab_cache *c, struct slab *s, void *ptr) {
   uint64_t page_base = (uint64_t)s;
-  uint64_t offset = (uint64_t)ptr - (page_base + sizeof(struct slab));
+  uint64_t object_base = page_base + sizeof(struct slab);
+  if ((uint64_t)ptr < object_base) {
+    console_puts("[WARN] kfree: pointer inside slab metadata (wild free)!\n");
+    return;
+  }
+  uint64_t offset = (uint64_t)ptr - object_base;
+  if (offset % c->obj_size != 0) {
+    console_puts("[WARN] kfree: pointer is not object-aligned (wild free)!\n");
+    return;
+  }
   uint32_t idx = offset / c->obj_size;
+  if (idx >= s->total_count) {
+    console_puts("[WARN] kfree: object index out of range (wild free)!\n");
+    return;
+  }
 
   if (!BITMAP_TEST(s->bitmap, idx)) {
     console_puts("[WARN] kfree: Double free intercepted inside Slab!\n");
@@ -304,6 +317,18 @@ void kfree(void *ptr) {
       if (cpu && cpu->cpu_id < MAX_CPUS) {
         struct cpu_local_slab *local = &cpu_slab_caches[cpu->cpu_id][cache_idx];
         if (local->count < LOCAL_CACHE_CAPACITY) {
+          /* The fast path deliberately leaves the slab bitmap bit set, so the
+           * slow-path double-free check cannot see an object that is already
+           * parked here.  A second free would otherwise queue the same object
+           * twice and two later kmalloc()s would hand it out twice. */
+          for (uint16_t i = 0; i < local->count; i++) {
+            if (local->entries[i] == ptr) {
+              console_puts("[WARN] kfree: double free intercepted in per-CPU "
+                           "freelist!\n");
+              hal_irq_restore(flags);
+              return;
+            }
+          }
           local->entries[local->count++] = ptr;
           hal_irq_restore(flags);
           return;

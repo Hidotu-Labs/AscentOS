@@ -11,8 +11,29 @@
 #include "../mm/vmm.h"
 #include "../smp/cpu.h"
 #include "../syscalls/syscall.h"
+#define TSC_PROBES_ENABLE
+#include "../lib/tsc.h"
 #include "elf.h"
 #include "sched.h"
+
+/* The exec stack is registered as a VMA but its pages are mapped on demand.
+ * The initial stack builder writes through this helper, which backs each
+ * touched page with a freshly zeroed frame. */
+static void process_ensure_user_page(uint64_t *pml4, uint64_t va) {
+  uint64_t page = va & ~(PAGE_SIZE - 1);
+  if (vmm_virt_to_phys(pml4, page))
+    return;
+
+  void *phys = pmm_alloc();
+  if (!phys)
+    return;
+  if (!vmm_map_page(pml4, page, (uint64_t)phys,
+                    PAGE_FLAG_USER | PAGE_FLAG_RW | PAGE_FLAG_PRESENT)) {
+    pmm_free(phys);
+    return;
+  }
+  memset((void *)((uint64_t)phys + pmm_get_hhdm_offset()), 0, PAGE_SIZE);
+}
 
 static void process_copy_to_user(uint64_t *pml4, uint64_t dest_user_va,
                                  const void *src_kern_va, size_t size) {
@@ -25,6 +46,7 @@ static void process_copy_to_user(uint64_t *pml4, uint64_t dest_user_va,
     if (to_copy > size - done)
       to_copy = size - done;
 
+    process_ensure_user_page(pml4, va);
     uint64_t phys = vmm_virt_to_phys(pml4, va);
     if (phys != 0) {
       memcpy((void *)(phys + hhdm), (const uint8_t *)src_kern_va + done,
@@ -168,10 +190,12 @@ static bool do_elf_load(const char *path, uint64_t *pml4,
     return false;
   }
 
+  TSC_BEGIN(elf_phdr);
   // Read the ELF Header
   Elf64_Ehdr ehdr;
   if (vfs_read(file, 0, sizeof(Elf64_Ehdr), (uint8_t *)&ehdr) !=
       sizeof(Elf64_Ehdr)) {
+    TSC_END(elf_phdr);
     vfs_close(file);
     return false;
   }
@@ -179,10 +203,12 @@ static bool do_elf_load(const char *path, uint64_t *pml4,
   if (ehdr.e_ident[0] != 0x7f || ehdr.e_ident[1] != 'E' ||
       ehdr.e_ident[2] != 'L' || ehdr.e_ident[3] != 'F' ||
       ehdr.e_ident[4] != 2) {
+    TSC_END(elf_phdr);
     vfs_close(file);
     return false;
   }
   if (ehdr.e_type != ET_EXEC && ehdr.e_type != ET_DYN) {
+    TSC_END(elf_phdr);
     klog_puts("[PROC] ELF load failed: unsupported ELF type\n");
     vfs_close(file);
     return false;
@@ -193,16 +219,39 @@ static bool do_elf_load(const char *path, uint64_t *pml4,
     load_base = ELF_PIE_BASE;
   }
 
+  // Read the whole program header table in one vfs_read() when the layout is
+  // standard.  A typical binary has 10-15 headers, so this replaces that many
+  // VFS round trips with one read (usually a page-cache hit); unusual
+  // e_phentsize values fall back to per-header reads in the loop below.
+  uint32_t phdr_tab_bytes = (uint32_t)ehdr.e_phnum * ehdr.e_phentsize;
+  uint8_t *phdr_tab = NULL;
+  if (phdr_tab_bytes > 0 && phdr_tab_bytes <= 64 * 1024 &&
+      ehdr.e_phentsize == sizeof(Elf64_Phdr)) {
+    phdr_tab = kmalloc(phdr_tab_bytes);
+    if (phdr_tab &&
+        vfs_read(file, ehdr.e_phoff, phdr_tab_bytes, phdr_tab) !=
+            phdr_tab_bytes) {
+      kfree(phdr_tab);
+      phdr_tab = NULL;
+    }
+  }
+  TSC_END(elf_phdr);
+
   // Single pass over program headers: collect PT_INTERP, PT_PHDR, and
-  // process PT_LOAD segments all at once, halving the number of vfs_read
-  // calls compared to the previous two-loop approach.
+  // process PT_LOAD segments all at once.
+  TSC_BEGIN(elf_segments);
   uint64_t phdr_vaddr = 0;
   for (uint16_t i = 0; i < ehdr.e_phnum; i++) {
     Elf64_Phdr phdr;
-    uint32_t offset = ehdr.e_phoff + (i * ehdr.e_phentsize);
-    if (vfs_read(file, offset, sizeof(Elf64_Phdr), (uint8_t *)&phdr) !=
-        sizeof(Elf64_Phdr))
-      continue;
+    if (phdr_tab) {
+      memcpy(&phdr, phdr_tab + (uint32_t)i * ehdr.e_phentsize,
+             sizeof(Elf64_Phdr));
+    } else {
+      uint32_t offset = ehdr.e_phoff + (i * ehdr.e_phentsize);
+      if (vfs_read(file, offset, sizeof(Elf64_Phdr), (uint8_t *)&phdr) !=
+          sizeof(Elf64_Phdr))
+        continue;
+    }
 
     // Collect interpreter path from PT_INTERP.
     if (phdr.p_type == PT_INTERP && interp_path) {
@@ -259,19 +308,27 @@ static bool do_elf_load(const char *path, uint64_t *pml4,
         vma_add(&current_thread->mm->vmas, start_page, end_page, prot,
                 MAP_PRIVATE, -1, vma_offset, file, vma_file_size);
 
-        // Pre-read PT_LOAD file segment into VFS page cache in bulk to eliminate page faults
+        // Queue the PT_LOAD file pages for the async prefetch worker in
+        // 256 KB windows.  execve() no longer waits for the whole image: the
+        // worker streams the remaining pages while the process starts running,
+        // and demand paging fills anything the worker has not reached yet.
         if (filesz > 0 && file) {
+          const uint32_t prefetch_chunk = 256 * 1024;
           uint32_t start_off = file_offset & ~(PAGE_SIZE - 1);
           uint32_t end_off = (file_offset + filesz + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
-          for (uint32_t poff = start_off; poff < end_off; poff += PAGE_SIZE) {
-            vfs_page_t *p = vfs_cache_get_or_create(file, poff);
-            if (p)
-              vfs_cache_put(file, p);
+          for (uint32_t poff = start_off; poff < end_off; poff += prefetch_chunk) {
+            uint32_t remaining = end_off - poff;
+            vfs_cache_prefetch_async(file, poff, remaining < prefetch_chunk
+                                                     ? remaining
+                                                     : prefetch_chunk);
           }
         }
       }
     }
   }
+  if (phdr_tab)
+    kfree(phdr_tab);
+  TSC_END(elf_segments);
 
   if (out_info) {
     if (is_interp) {
@@ -322,20 +379,12 @@ bool elf_load(const char *path, uint64_t *pml4, elf_info_t *out_info) {
     }
   }
 
-  // Pre-allocate user stack page and map it
+  // User stack: register the region now, map pages lazily.  The initial stack
+  // builder maps whichever pages it writes through process_copy_to_user();
+  // faults fill the rest as the program grows its stack (MAP_GROWSDOWN).
   uint64_t stack_top = ASCENTOS_USER_STACK_TOP;
   uint64_t stack_size = 4 * PAGE_SIZE;
   uint64_t stack_bottom = stack_top - stack_size;
-
-  for (uint64_t page = stack_bottom; page < stack_top; page += PAGE_SIZE) {
-    void *phys = pmm_alloc();
-    if (!phys)
-      return false;
-    vmm_map_page(pml4, page, (uint64_t)phys,
-                 PAGE_FLAG_USER | PAGE_FLAG_RW | PAGE_FLAG_PRESENT);
-    uint64_t kernel_virt = (uint64_t)phys + pmm_get_hhdm_offset();
-    memset((void *)kernel_virt, 0, PAGE_SIZE);
-  }
 
   // Page-align the brk base upward and set current brk.
   if (current_thread && current_thread->mm) {
@@ -354,7 +403,9 @@ bool elf_load(const char *path, uint64_t *pml4, elf_info_t *out_info) {
   // Pre-fault the entry point code page so context switching into userland does not immediately trigger a page fault
   if (out_info && out_info->entry) {
     uint64_t entry_addr = out_info->interp_entry ? out_info->interp_entry : out_info->entry;
+    TSC_BEGIN(elf_entry_fault);
     vmm_handle_page_fault(entry_addr, 0x4, NULL);
+    TSC_END(elf_entry_fault);
   }
 
   return true;
@@ -436,12 +487,29 @@ uint64_t process_build_initial_stack(uint64_t stack_top, const char *path,
   }
 
   uint64_t current_string = string_area_bottom;
-  // Note: We copy in order from lowest to highest address within the area
+  /* Mirror the argv strings into a kernel-side blob while they are being
+   * written to the user stack, so /proc/<pid>/cmdline can report the real
+   * command line later without touching user memory.  The strings are packed
+   * back to back here in exactly the order Linux lays them out, so the blob is
+   * byte-identical to what a reader would find between arg_start and arg_end. */
+  uint32_t cmdline_len  = 0;
+  uint64_t argv_bytes   = 0;
+  char cmdline_buf[sizeof(((struct mm_struct *)0)->saved_cmdline)];
+  bool     cmdline_fits = true;
   for (int i = 0; i < argc; i++) {
     argv_ptrs[i] = current_string;
     size_t len = strlen(argv[i]) + 1;
     process_copy_to_user(vmm_get_active_pml4(), current_string, argv[i], len);
     current_string += len;
+    argv_bytes += len;
+    /* Stop at the first argument that does not fit, so the blob is always a
+     * whole-argument prefix of argv: a pattern must never match half a path. */
+    if (!cmdline_fits || cmdline_len + len > sizeof(cmdline_buf)) {
+      cmdline_fits = false;
+      continue;
+    }
+    memcpy(cmdline_buf + cmdline_len, argv[i], len);
+    cmdline_len += (uint32_t)len;
   }
   for (int i = 0; i < envc; i++) {
     envp_ptrs[i] = current_string;
@@ -535,6 +603,15 @@ uint64_t process_build_initial_stack(uint64_t stack_top, const char *path,
       cur->mm->saved_auxv[i] = stack_entries[aux_start + i];
     }
     cur->mm->auxv_count = (uint32_t)aux_entries;
+
+    /* Command line for /proc/<pid>/cmdline.  If argv did not fit, keep the
+     * longest whole-argument prefix rather than a truncated final token: a
+     * pattern must never match against half a path. */
+    memset(cur->mm->saved_cmdline, 0, sizeof(cur->mm->saved_cmdline));
+    memcpy(cur->mm->saved_cmdline, cmdline_buf, cmdline_len);
+    cur->mm->cmdline_len = cmdline_len;
+    cur->mm->arg_start   = argc > 0 ? string_area_bottom : 0;
+    cur->mm->arg_end     = string_area_bottom + argv_bytes;
   }
 
   // 6. Copy Pointers/Auxv to user space at final_sp
@@ -823,6 +900,8 @@ static bool core_append(vfs_node_t *file, uint32_t *offset, const void *data,
   return true;
 }
 
+bool process_core_dump_enabled = false;
+
 static void dump_vma_recursive(struct vma *v, vfs_node_t *file, uint64_t cr3,
                                uint32_t *offset, bool *truncated) {
   if (!v || *truncated)
@@ -835,7 +914,7 @@ static void dump_vma_recursive(struct vma *v, vfs_node_t *file, uint64_t cr3,
     uint64_t hhdm = pmm_get_hhdm_offset();
     for (uint64_t addr = v->start; addr < v->end; addr += PAGE_SIZE) {
       uint64_t phys = vmm_virt_to_phys((uint64_t *)cr3, addr);
-      if (phys != 0) {
+      if (phys != 0 && pmm_is_managed(phys)) {
         struct core_page_record record = {
             .virtual_address = addr,
             .size = PAGE_SIZE,
@@ -856,7 +935,7 @@ static void dump_vma_recursive(struct vma *v, vfs_node_t *file, uint64_t cr3,
 }
 
 void process_dump_core(struct thread *t, struct registers *regs, int sig) {
-  if (!t || !t->mm)
+  if (!process_core_dump_enabled || !t || !t->mm)
     return;
 
   char path[64];

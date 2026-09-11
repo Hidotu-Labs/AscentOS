@@ -2,153 +2,211 @@
 #define LOCK_SPINLOCK_H
 
 #include "hal/hal.h"
+#include "lockdiag.h"
 #include <stdbool.h>
 #include <stdint.h>
 
-// Ticket Spinlock with TTAS & PAUSE backoff
-// Provides:
-// 1. Strict FIFO fairness (no CPU starvation on multi-core SMP).
-// 2. Read-only spinning in local L1/L2 cache (eliminates cacheline bouncing and bus locks).
-// 3. Hardware PAUSE backoff (reduces pipeline power and stall latency).
+// ---------------------------------------------------------------------------
+// Test-and-test-and-set spinlock with PAUSE backoff.
+//
+// Why this is NOT a ticket lock
+// -----------------------------
+// A waiter must never own a position in a queue, because a waiter can be
+// interrupted by something that needs the same lock:
+//
+//   * an IRQ handler on the same CPU (the LAPIC tick takes serial_lock through
+//     serial_flush(), and timerfd_tick() takes wait-queue locks), and
+//   * an exception handler on the same CPU (a #PF reaches vmm_lock through the
+//     paging engine, and exceptions are not maskable by IF at all).
+//
+// With FIFO tickets the interrupting context claims the *next* ticket and then
+// spins - behind the very task it just interrupted.  That task cannot run to
+// release its ticket until the interrupting context returns, so both spin
+// forever.  With test-and-set the interrupting context takes the lock the
+// instant it is free, finishes, and returns, and the interrupted waiter then
+// proceeds normally.
+//
+// Waiting with interrupts ENABLED (we only mask once the lock is ours) is
+// deliberate as well: a CPU that is blocked on a lock must still be able to
+// answer a TLB shootdown IPI, otherwise a shootdown initiator waits for an
+// acknowledgement that can never be sent.  See the note in
+// mm/tlb_shootdown.c.  A caller that already masked interrupts keeps them
+// masked (the flags are saved, not forced).
+//
+// Trade-off: there is no FIFO fairness, so a heavily contended lock can keep a
+// waiter waiting.  That is the same trade Linux's spin_lock() makes, and it
+// beats a guaranteed deadlock.  A holder always runs with interrupts disabled,
+// so a holder cannot be preempted or interrupted while it owns the lock.
+// ---------------------------------------------------------------------------
 typedef struct {
-  union {
-    uint32_t val;
-    struct {
-      uint16_t now_serving;
-      uint16_t next_ticket;
-    };
-  };
+  volatile uint32_t locked;
   hal_irq_state_t saved_flags;
 } spinlock_t;
 
-#define SPINLOCK_INIT { .val = 0, .saved_flags = 0 }
+#define SPINLOCK_INIT { .locked = 0, .saved_flags = 0 }
 
 static inline void spinlock_init(spinlock_t *lock) {
-  lock->val = 0;
+  __atomic_store_n(&lock->locked, 0, __ATOMIC_RELAXED);
   lock->saved_flags = 0;
 }
 
-// Interrupt-safe ticket spinlock acquire:
-// 1. Save current RFLAGS (preserving IF state)
-// 2. Disable interrupts (cli) so no timer tick can preempt us
-// 3. Atomically claim our ticket number
-// 4. Spin read-only with PAUSE until now_serving == our ticket
+/* The RFLAGS interrupt-enable bit, for deciding whether a waiter may open an
+ * interrupt window while it spins.  (hal.h exposes no predicate for a saved
+ * state, and re-reading RFLAGS would race the save itself.) */
+#define SPINLOCK_RFLAGS_IF (1ULL << 9)
+
+/* Acquire with interrupts masked from before the atomic that wins the lock.
+ *
+ * This ordering is the whole point: winning the lock with IF=1 and only then
+ * calling hal_irq_save() leaves a window of a few instructions in which an
+ * interrupt can arrive.  The handler enters through an interrupt gate with
+ * IF=0, so if it takes the same lock - and locks shared with IRQ handlers are
+ * exactly the ones that matter, e.g. serial_lock or a wait queue woken from a
+ * device IRQ - it spins forever: the interrupted context owns the lock and
+ * cannot run again to release it.  That is a self-deadlock that no lock owner
+ * tracking can see coming, and it is timing-dependent, so it looks like a
+ * random freeze.  Masking first closes the window entirely.
+ *
+ * Interrupts are still *opened while waiting* (when the caller had them
+ * enabled), which is what keeps a spinning core able to answer a TLB shootdown
+ * IPI - the property the original design wanted.  They are never enabled once
+ * the lock is held. */
 static inline void spinlock_acquire(spinlock_t *lock) {
   hal_irq_state_t flags = hal_irq_save();
+  bool may_open = (flags & SPINLOCK_RFLAGS_IF) != 0;
 
-  uint16_t my_ticket = __atomic_fetch_add(&lock->next_ticket, 1, __ATOMIC_RELAXED);
-
-  while (__atomic_load_n(&lock->now_serving, __ATOMIC_ACQUIRE) != my_ticket) {
-    __asm__ volatile("pause" ::: "memory");
+  if (__builtin_expect(__atomic_test_and_set(&lock->locked, __ATOMIC_ACQUIRE),
+                       0)) {
+    LOCKDIAG_SPIN_BEGIN(lock);
+    // Test-and-test-and-set: poll this CPU's copy of the line instead of
+    // re-issuing a locked RMW, which would bounce the cacheline between cores.
+    while (__atomic_test_and_set(&lock->locked, __ATOMIC_ACQUIRE)) {
+      if (may_open) {
+        hal_irq_enable();
+        while (__atomic_load_n(&lock->locked, __ATOMIC_RELAXED))
+          __asm__ volatile("pause" ::: "memory");
+        hal_irq_disable();
+      } else {
+        while (__atomic_load_n(&lock->locked, __ATOMIC_RELAXED))
+          __asm__ volatile("pause" ::: "memory");
+      }
+    }
+    LOCKDIAG_SPIN_END(lock);
   }
 
   lock->saved_flags = flags;
+  LOCKDIAG_HOLD(lock);
 }
 
 static inline void spinlock_release(spinlock_t *lock) {
   hal_irq_state_t flags = lock->saved_flags;
-  uint16_t serving = lock->now_serving + 1;
-  __atomic_store_n(&lock->now_serving, serving, __ATOMIC_RELEASE);
+  LOCKDIAG_UNHOLD(lock);
+  __atomic_clear(&lock->locked, __ATOMIC_RELEASE);
   hal_irq_restore(flags);
 }
 
+// Same lock, but the caller keeps the previous interrupt state in its own
+// variable instead of in the lock.  Do not mix these with the plain
+// spinlock_release(): restoring flags that a different acquisition saved would
+// re-enable interrupts inside a live critical section.
 static inline void spinlock_acquire_save(spinlock_t *lock, uint64_t *flags) {
-  *flags = hal_irq_save();
-  uint16_t my_ticket = __atomic_fetch_add(&lock->next_ticket, 1, __ATOMIC_RELAXED);
-  while (__atomic_load_n(&lock->now_serving, __ATOMIC_ACQUIRE) != my_ticket) {
-    __asm__ volatile("pause" ::: "memory");
+  /* Same mask-first ordering as spinlock_acquire; see the comment there. */
+  hal_irq_state_t saved = hal_irq_save();
+  bool may_open = (saved & SPINLOCK_RFLAGS_IF) != 0;
+
+  if (__builtin_expect(__atomic_test_and_set(&lock->locked, __ATOMIC_ACQUIRE),
+                       0)) {
+    LOCKDIAG_SPIN_BEGIN(lock);
+    while (__atomic_test_and_set(&lock->locked, __ATOMIC_ACQUIRE)) {
+      if (may_open) {
+        hal_irq_enable();
+        while (__atomic_load_n(&lock->locked, __ATOMIC_RELAXED))
+          __asm__ volatile("pause" ::: "memory");
+        hal_irq_disable();
+      } else {
+        while (__atomic_load_n(&lock->locked, __ATOMIC_RELAXED))
+          __asm__ volatile("pause" ::: "memory");
+      }
+    }
+    LOCKDIAG_SPIN_END(lock);
   }
+  *flags = saved;
+  LOCKDIAG_HOLD(lock);
 }
 
 static inline void spinlock_release_restore(spinlock_t *lock, uint64_t flags) {
-  uint16_t serving = lock->now_serving + 1;
-  __atomic_store_n(&lock->now_serving, serving, __ATOMIC_RELEASE);
+  LOCKDIAG_UNHOLD(lock);
+  __atomic_clear(&lock->locked, __ATOMIC_RELEASE);
   hal_irq_restore((hal_irq_state_t)flags);
 }
 
+// Unlike a ticket lock, where this fails whenever anybody at all is queued,
+// this only fails when the lock is genuinely held.
 static inline bool spinlock_try_acquire(spinlock_t *lock) {
   hal_irq_state_t flags = hal_irq_save();
 
-  uint32_t current = __atomic_load_n(&lock->val, __ATOMIC_RELAXED);
-  uint16_t serving = (uint16_t)(current & 0xFFFF);
-  uint16_t next = (uint16_t)(current >> 16);
-
-  if (serving != next) {
+  if (__atomic_test_and_set(&lock->locked, __ATOMIC_ACQUIRE)) {
     hal_irq_restore(flags);
     return false;
   }
 
-  uint32_t updated = ((uint32_t)(next + 1) << 16) | serving;
-  if (__atomic_compare_exchange_n(&lock->val, &current, updated, false,
-                                  __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
-    lock->saved_flags = flags;
-    return true;
-  }
-
-  hal_irq_restore(flags);
-  return false;
+  lock->saved_flags = flags;
+  LOCKDIAG_HOLD(lock);
+  return true;
 }
 
 static inline bool spinlock_is_locked(spinlock_t *lock) {
-  uint32_t current = __atomic_load_n(&lock->val, __ATOMIC_RELAXED);
-  uint16_t serving = (uint16_t)(current & 0xFFFF);
-  uint16_t next = (uint16_t)(current >> 16);
-  return serving != next;
+  return __atomic_load_n(&lock->locked, __ATOMIC_RELAXED) != 0;
 }
 
 // ---------------------------------------------------------------------------
-// rawspinlock_t — ticket spinlock WITHOUT IRQ disable
+// rawspinlock_t — the same lock WITHOUT masking interrupts, held or waited on.
 //
 // Use this for locks that:
 //   1. Can be held while another CPU sends TLB shootdown IPIs (e.g. vmm_lock)
 //   2. Are never acquired from an IRQ handler
 //   3. Can be held for longer durations (page table walks, etc.)
 //
-// Spinning CPUs remain interruptible so they can handle IPIs. This prevents
-// the deadlock where CPU A holds a lock, sends a TLB shootdown IPI to CPU B,
-// but CPU B is spinning on that same lock with IRQs disabled and cannot ack.
+// Waiters stay interruptible so they can ack an IPI, and a holder never runs
+// with IF=0, so it can ack one too.
 // ---------------------------------------------------------------------------
 typedef struct {
-  union {
-    uint32_t val;
-    struct {
-      uint16_t now_serving;
-      uint16_t next_ticket;
-    };
-  };
+  volatile uint32_t locked;
 } rawspinlock_t;
 
-#define RAWSPINLOCK_INIT { .val = 0 }
+#define RAWSPINLOCK_INIT { .locked = 0 }
 
 static inline void rawspinlock_init(rawspinlock_t *lock) {
-  lock->val = 0;
+  __atomic_store_n(&lock->locked, 0, __ATOMIC_RELAXED);
 }
 
 static inline void rawspinlock_acquire(rawspinlock_t *lock) {
-  uint16_t my_ticket = __atomic_fetch_add(&lock->next_ticket, 1, __ATOMIC_RELAXED);
-  while (__atomic_load_n(&lock->now_serving, __ATOMIC_ACQUIRE) != my_ticket)
-    __asm__ volatile("pause" ::: "memory");
+  if (__builtin_expect(__atomic_test_and_set(&lock->locked, __ATOMIC_ACQUIRE),
+                       0)) {
+    LOCKDIAG_SPIN_BEGIN(lock);
+    while (__atomic_test_and_set(&lock->locked, __ATOMIC_ACQUIRE)) {
+      while (__atomic_load_n(&lock->locked, __ATOMIC_RELAXED))
+        __asm__ volatile("pause" ::: "memory");
+    }
+    LOCKDIAG_SPIN_END(lock);
+  }
+  LOCKDIAG_HOLD(lock);
 }
 
 static inline void rawspinlock_release(rawspinlock_t *lock) {
-  uint16_t serving = lock->now_serving + 1;
-  __atomic_store_n(&lock->now_serving, serving, __ATOMIC_RELEASE);
+  LOCKDIAG_UNHOLD(lock);
+  __atomic_clear(&lock->locked, __ATOMIC_RELEASE);
 }
 
 static inline bool rawspinlock_try_acquire(rawspinlock_t *lock) {
-  uint32_t current = __atomic_load_n(&lock->val, __ATOMIC_RELAXED);
-  uint16_t serving = (uint16_t)(current & 0xFFFF);
-  uint16_t next    = (uint16_t)(current >> 16);
-  if (serving != next)
+  if (__atomic_test_and_set(&lock->locked, __ATOMIC_ACQUIRE))
     return false;
-  uint32_t updated = ((uint32_t)(next + 1) << 16) | serving;
-  return __atomic_compare_exchange_n(&lock->val, &current, updated, false,
-                                     __ATOMIC_ACQUIRE, __ATOMIC_RELAXED);
+  LOCKDIAG_HOLD(lock);
+  return true;
 }
 
 static inline bool rawspinlock_is_locked(rawspinlock_t *lock) {
-  uint32_t current = __atomic_load_n(&lock->val, __ATOMIC_RELAXED);
-  return (uint16_t)(current & 0xFFFF) != (uint16_t)(current >> 16);
+  return __atomic_load_n(&lock->locked, __ATOMIC_RELAXED) != 0;
 }
 
 #endif

@@ -95,6 +95,8 @@ eventpoll_t *epoll_create(void) {
   // Fast targeted field initialization
   ep->fd = -1;
   ep->vfs_node = NULL;
+  ep->item_count = 0;
+  ep->items_high = 0;
   INIT_LIST_HEAD(&ep->rdllist);
   ep->rdllist_count = 0;
   wait_queue_init(&ep->wq);
@@ -111,6 +113,11 @@ void epoll_destroy(eventpoll_t *ep) {
     klog_puts("[WARN] epoll_destroy: NULL instance\n");
     return;
   }
+
+  /* A thread can be parked in epoll_wait_impl() on ep->wq.  Wake it and detach
+   * its entry before the pool slot is reused, so the stale entry cannot be
+   * attached to whatever instance reuses this slot next. */
+  wait_queue_wake_all(&ep->wq);
 
   // Free all watched items and release the VFS references acquired by
   // EPOLL_CTL_ADD.
@@ -134,6 +141,7 @@ void epoll_destroy(eventpoll_t *ep) {
     }
     ep->item_count = 0;
   }
+  ep->items_high = 0;
 
   int idx = (int)(ep - epoll_pool);
   if (idx >= 0 && idx < EPOLL_MAX_INSTANCES) {
@@ -289,6 +297,8 @@ int epoll_ctl_add(eventpoll_t *ep, int fd, struct epoll_event *event) {
   spinlock_acquire(&ep->lock);
   ep->items[fd] = epi;
   ep->item_count++;
+  if (fd >= ep->items_high)
+    ep->items_high = fd + 1;
   spinlock_release(&ep->lock);
 
   // Fast notification link
@@ -393,11 +403,13 @@ int epoll_wait_impl(eventpoll_t *ep, struct epoll_event *events, int maxevents,
   int returned = 0;
   struct thread *current = sched_get_current();
 
-  // Add to wait queue once for the duration of the wait
+  /* The wait entry is registered for each individual park, not for the whole
+   * call: wakers unlink entries when they wake them (see sched/wait.c), so an
+   * entry left linked across loop iterations would be gone after the first
+   * wake and later events would never wake this thread again. */
   wait_queue_entry_t entry;
   entry.thread = current;
   entry.next = NULL;
-  wait_queue_add(&ep->wq, &entry);
 
   uint64_t deadline_ticks = 0;
   if (timeout_ms > 0 && timeout_ms != -1) {
@@ -458,7 +470,8 @@ int epoll_wait_impl(eventpoll_t *ep, struct epoll_event *events, int maxevents,
       break;
 
     // 4. Check all watched items outside ep->lock for missed/level-triggered events
-    for (int _i = 0; _i < EPOLL_MAX_WATCHED; _i++) {
+    int items_high = __atomic_load_n(&ep->items_high, __ATOMIC_RELAXED);
+    for (int _i = 0; _i < items_high; _i++) {
       epitem_t *_epi = ep->items[_i];
       if (!_epi || _epi->on_ready_list)
         continue;
@@ -503,11 +516,17 @@ int epoll_wait_impl(eventpoll_t *ep, struct epoll_event *events, int maxevents,
       continue;
     }
 
+    /* Register under ep->lock, after the final check: a concurrent waker also
+     * holds ep->lock, so it either adds to the ready list before this check
+     * (we continue instead of blocking) or sees us in the queue and wakes us. */
+    wait_queue_add(&ep->wq, &entry);
+
     spinlock_release(&ep->lock);
 
     // 6. Yield execution
     sched_yield();
 
+    wait_queue_remove(&ep->wq, &entry);
     current->state = THREAD_RUNNING;
     current->wakeup_ticks = 0;
 
@@ -524,7 +543,6 @@ int epoll_wait_impl(eventpoll_t *ep, struct epoll_event *events, int maxevents,
     }
   }
 
-  wait_queue_remove(&ep->wq, &entry);
   current->state = THREAD_RUNNING;
   current->wakeup_ticks = 0;
 

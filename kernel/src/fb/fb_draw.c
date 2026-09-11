@@ -252,48 +252,28 @@ void fb_swap_buffer_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
     if (y + h > max_h) h = max_h - y;
 
     uint32_t pitch = fb_global.fix.line_length;
-    size_t copy_bytes = (size_t)w * 4;
 
-    /* Full-width contiguous swap: single bulk 64-bit copy across all rows */
+    /* The frontbuffer is write-combining (fb_map_wc), so stream the copy with
+     * non-temporal stores instead of one cached store per qword: a full-screen
+     * swap is 4-8 MB and cacheable stores to WC memory are the most expensive
+     * way to move it.  memcpy_to_wc() picks movnti on hardware and rep movsq
+     * under QEMU TCG, where emulating movnti is the slower option. */
     if (x == 0 && w == max_w) {
-        uint8_t *src = (uint8_t *)fb_global.backbuffer + (uint64_t)y * pitch;
-        uint8_t *dst = (uint8_t *)fb_global.screen_base + (uint64_t)y * pitch;
-        size_t total_bytes = (size_t)pitch * h;
-        size_t qwords = total_bytes >> 3;
-        uint64_t *d64 = (uint64_t *)dst;
-        const uint64_t *s64 = (const uint64_t *)src;
-        for (size_t q = 0; q < qwords; q++) {
-            d64[q] = s64[q];
+        memcpy_to_wc((uint8_t *)fb_global.screen_base + (uint64_t)y * pitch,
+                     (const uint8_t *)fb_global.backbuffer + (uint64_t)y * pitch,
+                     (size_t)pitch * h);
+    } else {
+        size_t row_bytes = (size_t)w * 4;
+        for (uint32_t r = 0; r < h; r++) {
+            memcpy_to_wc((uint8_t *)fb_global.screen_base + (uint64_t)(y + r) * pitch + (uint64_t)x * 4,
+                         (const uint8_t *)fb_global.backbuffer + (uint64_t)(y + r) * pitch + (uint64_t)x * 4,
+                         row_bytes);
         }
-        size_t rem = total_bytes & 7;
-        if (rem) {
-            uint8_t *drem = (uint8_t *)d64 + (qwords << 3);
-            const uint8_t *srem = (const uint8_t *)s64 + (qwords << 3);
-            for (size_t r = 0; r < rem; r++) {
-                drem[r] = srem[r];
-            }
-        }
-        return;
     }
 
-    for (uint32_t r = 0; r < h; r++) {
-        uint8_t *src = (uint8_t *)fb_global.backbuffer + (uint64_t)(y + r) * pitch + (uint64_t)x * 4;
-        uint8_t *dst = (uint8_t *)fb_global.screen_base + (uint64_t)(y + r) * pitch + (uint64_t)x * 4;
-        size_t qwords = copy_bytes >> 3;
-        uint64_t *d64 = (uint64_t *)dst;
-        const uint64_t *s64 = (const uint64_t *)src;
-        for (size_t q = 0; q < qwords; q++) {
-            d64[q] = s64[q];
-        }
-        size_t rem = copy_bytes & 7;
-        if (rem) {
-            uint8_t *drem = (uint8_t *)d64 + (qwords << 3);
-            const uint8_t *srem = (const uint8_t *)s64 + (qwords << 3);
-            for (size_t i = 0; i < rem; i++) {
-                drem[i] = srem[i];
-            }
-        }
-    }
+    /* Non-temporal stores retire out of order; fence them out before the
+     * display engine (or another CPU) is allowed to look at the aperture. */
+    __asm__ volatile("sfence" ::: "memory");
 }
 
 void fb_swap_buffer(void) {

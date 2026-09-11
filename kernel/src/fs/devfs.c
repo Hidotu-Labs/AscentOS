@@ -50,6 +50,7 @@ mount_vfs:
       klog_puts((char *)name);
       klog_puts("' in /dev\n");
       ramfs_mount_node(dev_dir, node);
+      vfs_close(dev_dir);
     } else {
       klog_puts("[VFS] Warning: /dev not found during registration of '");
       klog_puts((char *)name);

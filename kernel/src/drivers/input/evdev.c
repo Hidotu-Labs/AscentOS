@@ -18,6 +18,7 @@
 #include "../../drivers/timer/rtc.h"
 #include "../../fb/framebuffer.h"
 #include "../../fs/ramfs.h"
+#include "../../lock/lockdiag.h"
 #include "../../fs/vfs.h"
 #include "../../lib/string.h"
 #include "../../lock/spinlock.h"
@@ -99,6 +100,11 @@ bool evdev_report_key(evdev_device_t *dev, uint16_t code, bool pressed) {
 
   evdev_push_event(dev, EV_KEY, code,
                    pressed ? (was_pressed ? 2 : 1) : 0);
+
+  /* Sysrq-style hang report on demand (Right-Ctrl three times).  Called after the device
+   * lock is dropped so a dump never runs holding it, and from the same path
+   * both PS/2 and USB keyboards arrive through. */
+  lockdiag_keyboard_event(code, pressed);
   return true;
 }
 

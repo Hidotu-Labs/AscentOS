@@ -27,8 +27,6 @@
 // FD allocation helpers
 // ---------------------------------------------------------------------------
 
-#define FD_RESERVED ((vfs_node_t *)-1)
-
 int alloc_fd(struct thread *t) {
   if (!t || !t->files)
     return -1;
@@ -87,6 +85,24 @@ uint64_t sys_open_path(int dirfd, const char *path, uint64_t flags,
   if (!t)
     return (uint64_t)-1;
 
+  /* O_TMPFILE asks for an anonymous inode that is only linked into the
+   * namespace later (through linkat on /proc/self/fd).  AvoryOS has neither
+   * unlinked inodes nor /proc fd materialisation, and quietly accepting the
+   * request would hand back a descriptor for the *directory* itself: Qt's
+   * QTemporaryFile then reports an empty file name, which is what makes KIO's
+   * QLocalServer::listen("") fail and every KIO worker refuse to start.
+   * Answering like a pre-3.11 kernel lets those callers fall back to a named
+   * temporary file, which is the behaviour they all already implement.
+   *
+   * __O_TMPFILE shares its bit with O_PATH, so O_TMPFILE is only in play when
+   * the caller also asked for write access.  Reading the same bits as
+   * read-only plus O_DIRECTORY is an O_PATH handle, which Qt's QProcess uses
+   * for the child's working directory (open(dir, O_RDONLY|O_DIRECTORY|O_PATH)
+   * followed by fchdir) - rejecting that makes Konsole report
+   * "Could not start program '/bin/bash'". */
+  if ((flags & O_TMPFILE) == O_TMPFILE && (flags & O_ACCMODE) != O_RDONLY)
+    return (uint64_t)-95; // EOPNOTSUPP
+
   int fd;
 
   vfs_node_t *base_dir = fs_root;
@@ -103,6 +119,7 @@ uint64_t sys_open_path(int dirfd, const char *path, uint64_t flags,
   }
 
   vfs_node_t *node = NULL;
+  bool node_owned = false;
   const char *dev_path = NULL;
   if (strncmp(path, "/dev/", 5) == 0)
     dev_path = path + 5;
@@ -197,8 +214,10 @@ uint64_t sys_open_path(int dirfd, const char *path, uint64_t flags,
       node = fb_lookup_device((char *)dev_path);
   }
 
-  if (!node)
+  if (!node) {
     node = vfs_resolve_path_at(base_dir, path);
+    node_owned = node != NULL;
+  }
 
   if (!node) {
     if (flags & O_CREAT) {
@@ -214,6 +233,7 @@ uint64_t sys_open_path(int dirfd, const char *path, uint64_t flags,
           slash = p;
 
       vfs_node_t *parent = base_dir;
+      bool parent_owned = false;
       if (slash) {
         size_t parent_len = (size_t)(slash - path);
         if (parent_len == 0) {
@@ -225,10 +245,13 @@ uint64_t sys_open_path(int dirfd, const char *path, uint64_t flags,
             parent_path[i] = path[i];
           parent_path[parent_len] = '\0';
           parent = vfs_resolve_path_at(base_dir, parent_path);
+          parent_owned = parent != NULL;
         }
         size_t file_len = strlen(slash + 1);
-        if (file_len >= sizeof(file_name))
+        if (file_len >= sizeof(file_name)) {
+          if (parent_owned) vfs_close(parent);
           return (uint64_t)-14;
+        }
         strcpy(file_name, slash + 1);
       } else {
         size_t file_len = len;
@@ -239,28 +262,55 @@ uint64_t sys_open_path(int dirfd, const char *path, uint64_t flags,
 
       if (!parent)
         return (uint64_t)-2; // ENOENT
-      if ((parent->flags & FS_TYPE_MASK) != FS_DIRECTORY)
+      if ((parent->flags & FS_TYPE_MASK) != FS_DIRECTORY) {
+        if (parent_owned) vfs_close(parent);
         return (uint64_t)-20; // ENOTDIR
-      if (!vfs_access(parent, 3)) return (uint64_t)-13;
+      }
+      if (!vfs_access(parent, 3)) {
+        if (parent_owned) vfs_close(parent);
+        return (uint64_t)-13;
+      }
 
       mode &= ~t->umask;
-      if (vfs_create(parent, file_name, (uint16_t)mode) != 0)
+      if (vfs_create(parent, file_name, (uint16_t)mode) != 0) {
+        if (parent_owned) vfs_close(parent);
         return (uint64_t)-17;
+      }
 
       node = vfs_finddir(parent, file_name);
-      if (!node) return (uint64_t)-2;
+      if (!node) {
+        if (parent_owned) vfs_close(parent);
+        return (uint64_t)-2;
+      }
+      node_owned = true;
       uint32_t new_gid = (parent->mask & 02000) ? parent->gid : t->fsgid;
       vfs_chown(node, t->fsuid, new_gid);
+      if (parent_owned) vfs_close(parent);
     } else {
       return (uint64_t)-2; // ENOENT
     }
+  } else if ((flags & (O_CREAT | O_EXCL)) == (O_CREAT | O_EXCL)) {
+    if (node_owned) vfs_close(node);
+    return (uint64_t)-17; // EEXIST
   }
 
   uint32_t requested = 0;
   if ((flags & O_ACCMODE) == O_RDONLY) requested = 4;
   else if ((flags & O_ACCMODE) == O_WRONLY) requested = 2;
   else if ((flags & O_ACCMODE) == O_RDWR) requested = 6;
-  if (requested && !vfs_access(node, requested)) return (uint64_t)-13;
+  if (requested && !vfs_access(node, requested)) {
+    if (node_owned) vfs_close(node);
+    return (uint64_t)-13;
+  }
+
+  /* Directories are read-only descriptors (readdir(2) is the only thing you
+   * can do with one).  Returning a writable handle would let callers believe
+   * they created something inside the directory. */
+  if ((node->flags & FS_TYPE_MASK) == FS_DIRECTORY &&
+      (flags & O_ACCMODE) != O_RDONLY) {
+    if (node_owned) vfs_close(node);
+    return (uint64_t)-21; // EISDIR
+  }
 
   if ((flags & O_TRUNC) && (node->flags & FS_TYPE_MASK) == FS_FILE) {
     vfs_truncate(node, 0);
@@ -270,21 +320,32 @@ uint64_t sys_open_path(int dirfd, const char *path, uint64_t flags,
   /* Persistent metadata may provide a fresh per-open object.  DRM was the
    * first user of this pattern; driver capability handles use it as well. */
   if (node->open_instance) {
-    node = node->open_instance(node);
-    if (!node)
+    vfs_node_t *prev = node;
+    node = node->open_instance(prev);
+    if (!node) {
+      if (node_owned) vfs_close(prev);
       return (uint64_t)-12;
+    }
+    node_owned = false; // fresh per-open node owns no resolver reference
   } else if (drm_is_card_node(node)) {
+    vfs_node_t *prev = node;
     node = drm_create_client_node();
-    if (!node)
+    if (!node) {
+      if (node_owned) vfs_close(prev);
       return (uint64_t)-12;
+    }
+    node_owned = false; // fresh client node owns no resolver reference
   }
 
 open_done:
   fd = alloc_fd(t);
-  if (fd < 0)
+  if (fd < 0) {
+    if (node_owned) vfs_close(node);
     return (uint64_t)-24; // EMFILE
+  }
 
   vfs_open(node);
+  if (node_owned) vfs_close(node); // descriptor holds its own reference now
   t->fds[fd] = node;
   t->fd_offsets[fd] = 0;
   t->fd_flags[fd] = flags & ~(uint64_t)O_CLOEXEC;
@@ -1032,12 +1093,21 @@ static uint64_t sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,
     (void)arg;
     return 0;
   case F_GETLK:
+  case 12: // F_GETLK64
+  case 36: { // F_OFD_GETLK
+    /* This kernel does not track byte-range locks yet, but a probe must still
+     * answer honestly: callers pass their desired lock type in and treat the
+     * value left in l_type as the answer, so returning 0 without touching it
+     * makes every query look like a conflicting write lock is held (SQLite's
+     * WAL setup performs exactly this check).  Report F_UNLCK. */
+    if (arg && is_user_range((const void *)arg, 2))
+      *(volatile int16_t *)arg = 2; // F_UNLCK
+    return 0;
+  }
   case F_SETLK:
   case F_SETLKW:
-  case 12: // F_GETLK64
   case 13: // F_SETLK64
   case 14: // F_SETLKW64
-  case 36: // F_OFD_GETLK
   case 37: // F_OFD_SETLK
   case 38: // F_OFD_SETLKW
     return 0;
@@ -1175,8 +1245,10 @@ static uint64_t sys_mount(uint64_t source_ptr, uint64_t target_ptr,
     vfs_node_t *mountpoint = vfs_resolve_path(target);
     if (!mountpoint)
         return (uint64_t)-2;
-    if ((mountpoint->flags & FS_TYPE_MASK) != FS_DIRECTORY)
+    if ((mountpoint->flags & FS_TYPE_MASK) != FS_DIRECTORY) {
+        vfs_close(mountpoint);
         return (uint64_t)-20;
+    }
 
     const char *dev_name = source;
     if (strncmp(source, "/dev/", 5) == 0)
@@ -1192,14 +1264,21 @@ static uint64_t sys_mount(uint64_t source_ptr, uint64_t target_ptr,
         }
     }
 
-    if (!dev)
+    if (!dev) {
+        vfs_close(mountpoint);
         return (uint64_t)-6;
+    }
 
     if (ext4_mount(dev, mountpoint) == 0)
         return 0;
     if (ext2_mount(dev, mountpoint) == 0)
         return 0;
 
+    /* Both probes failed before touching mountpoint: drop our resolver ref.
+     * On success the filesystem adopts the node in place (clearing
+     * FS_PERSISTENT), so that reference is what keeps the mounted root alive
+     * and must not be dropped. */
+    vfs_close(mountpoint);
     return (uint64_t)-22;
 }
 

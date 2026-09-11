@@ -13,6 +13,7 @@
 #include "../mm/vmm.h"
 
 #include "../sched/sched.h"
+#include "../sched/wait.h"
 #include "../smp/cpu.h"
 #include "sys_io_shared.h"
 #include "syscall.h"
@@ -24,6 +25,7 @@ uint64_t futex_wake_user(uint32_t *uaddr, uint32_t count);
 extern void mm_reset_mmap_state(struct thread *t);
 void vma_list_init(struct vma_list *list);
 void vma_list_destroy(struct vma_list *list);
+static uint8_t nice_to_sched_priority(int nice);
 
 #define PR_SET_NAME 15
 #define PR_GET_NAME 16
@@ -99,7 +101,27 @@ extern void fork_return_to_userspace(struct syscall_regs *regs)
 extern spinlock_t tid_lock;
 extern struct thread *global_thread_list;
 
+/* Queues the child's exit signal on its parent, as Linux's do_notify_parent().
+ * Implemented in sys_signal.c. */
+extern void signal_notify_parent_exit(struct thread *child);
+
 struct pidfd_ctx { uint32_t pid; };
+
+/* Waiters that care about "some process changed state": pollers on a pidfd and
+ * blocked waitid(P_PIDFD) callers.  The parent-only wake in process_do_exit()
+ * cannot reach them - a pidfd may name any process in the system, and a parent
+ * cloned with CLONE_VFORK is still inside sys_clone() when its child exits, so
+ * it is not yet registered as a waiter.  One shared queue is enough because
+ * every waiter re-evaluates the thread list after being woken.
+ *
+ * Without this, QProcess::waitForFinished() (which Qt implements as
+ * waitid(P_PIDFD, ...) plus poll() on the same descriptor) can park forever.
+ * Note that this only covers Qt's pidfd path: QProcess with a
+ * childProcessModifier - every kpty spawn - uses the SIGCHLD handler instead,
+ * which is reported by signal_notify_parent_exit(). */
+static wait_queue_t pidfd_event_wait = { .lock = SPINLOCK_INIT, .head = NULL };
+
+void pidfd_wake_waiters(void) { wait_queue_wake_all(&pidfd_event_wait); }
 
 static bool pidfd_task_state(uint32_t pid, bool *exited) {
   bool found = false;
@@ -120,7 +142,11 @@ static int pidfd_poll(vfs_node_t *node, int events) {
   bool exited = true;
   if (!ctx) return -1;
   if (!pidfd_task_state(ctx->pid, &exited)) exited = true;
-  return exited ? (events & (POLLIN | 0x0040)) : 0;
+  /* A terminated pidfd is both readable and priority-readable, exactly like
+   * Linux.  Callers differ in which one they ask for: Qt's async watcher polls
+   * POLLIN while its blocking forkfd_wait path polls POLLPRI, and a poller
+   * asking only for POLLPRI would never be satisfied. */
+  return exited ? (events & (POLLIN | POLLPRI | POLLRDNORM)) : 0;
 }
 
 static void pidfd_close(vfs_node_t *node) {
@@ -128,6 +154,89 @@ static void pidfd_close(vfs_node_t *node) {
     kfree(node->device);
     node->device = NULL;
   }
+}
+
+/* A pidfd is recognised by its poll handler.  Without this check any descriptor
+ * whose node happens to carry a ->device (a pty, a drm client, ...) would be
+ * read as a struct pidfd_ctx by waitid(P_PIDFD), turning a stray file descriptor
+ * into a wait on an arbitrary process. */
+static struct pidfd_ctx *pidfd_ctx_of(vfs_node_t *node) {
+  if (!node || node->poll != pidfd_poll || !node->device)
+    return NULL;
+  return (struct pidfd_ctx *)node->device;
+}
+
+static void pidfd_abort(struct thread *t, int fd, vfs_node_t *node);
+
+/* Reserves a descriptor number and builds its pidfd node, without publishing
+ * either: clone(CLONE_PIDFD) has to reserve before the child exists (no
+ * allocation may fail after the child was created) and publish only after the
+ * child copied the parent's descriptor table (the pidfd must not leak into the
+ * child).  While reserved the descriptor is unreachable from user space. */
+static int64_t pidfd_reserve(struct thread *t, int *out_fd, vfs_node_t **out_node) {
+  int fd = alloc_fd(t);
+  if (fd < 0)
+    return (uint64_t)-24; // EMFILE
+  struct pidfd_ctx *ctx = kmalloc(sizeof(*ctx));
+  vfs_node_t *node = kmalloc(sizeof(*node));
+  if (!ctx || !node) {
+    if (ctx) kfree(ctx);
+    if (node) kfree(node);
+    pidfd_abort(t, fd, NULL);
+    return (uint64_t)-12; // ENOMEM
+  }
+  ctx->pid = 0;
+  vfs_node_init(node);
+  strcpy(node->name, "pidfd");
+  node->flags = FS_CHARDEV;
+  node->mask = 0600;
+  node->device = ctx;
+  node->poll = pidfd_poll;
+  node->close = pidfd_close;
+  /* So that poll()/ppoll() on the descriptor is woken by an exit instead of
+   * only noticing it the next time the poll loop happens to re-scan. */
+  node->wait_queue = &pidfd_event_wait;
+  *out_fd = fd;
+  *out_node = node;
+  return 0;
+}
+
+/* Gives the reserved descriptor the pid it names and installs it. */
+static void pidfd_publish(struct thread *t, int fd, vfs_node_t *node,
+                          uint32_t pid, uint64_t flags) {
+  const uint64_t PIDFD_NONBLOCK = 0x800;
+  struct pidfd_ctx *ctx = (struct pidfd_ctx *)node->device;
+  ctx->pid = pid;
+  spinlock_acquire(&t->files->lock);
+  t->fds[fd] = node;
+  spinlock_release(&t->files->lock);
+  t->fd_offsets[fd] = 0;
+  t->fd_flags[fd] = FD_FLAGS_CLOEXEC_BIT |
+                    (flags & PIDFD_NONBLOCK ? O_NONBLOCK : 0);
+}
+
+/* Undoes a reservation that was never published. */
+static void pidfd_abort(struct thread *t, int fd, vfs_node_t *node) {
+  if (node) {
+    if (node->device)
+      kfree(node->device);
+    kfree(node);
+  }
+  spinlock_acquire(&t->files->lock);
+  t->fds[fd] = NULL;
+  spinlock_release(&t->files->lock);
+  if ((uint32_t)fd < t->files->next_fd)
+    t->files->next_fd = (uint32_t)fd;
+}
+
+static int64_t pidfd_install(struct thread *t, uint32_t pid, uint64_t flags) {
+  int fd = -1;
+  vfs_node_t *node = NULL;
+  int64_t r = pidfd_reserve(t, &fd, &node);
+  if (r < 0)
+    return r;
+  pidfd_publish(t, fd, node, pid, flags);
+  return (uint64_t)fd;
 }
 
 static uint64_t sys_pidfd_open(uint64_t pid, uint64_t flags, uint64_t a2,
@@ -138,32 +247,7 @@ static uint64_t sys_pidfd_open(uint64_t pid, uint64_t flags, uint64_t a2,
     return (uint64_t)-22;
   bool exited = false;
   if (!pidfd_task_state((uint32_t)pid, &exited)) return (uint64_t)-3;
-  struct thread *current = sched_get_current();
-  int fd = alloc_fd(current);
-  if (fd < 0) return (uint64_t)-24;
-  struct pidfd_ctx *ctx = kmalloc(sizeof(*ctx));
-  vfs_node_t *node = kmalloc(sizeof(*node));
-  if (!ctx || !node) {
-    if (ctx) kfree(ctx);
-    if (node) kfree(node);
-    current->fds[fd] = NULL;
-    if ((uint32_t)fd < current->files->next_fd)
-      current->files->next_fd = (uint32_t)fd;
-    return (uint64_t)-12;
-  }
-  ctx->pid = (uint32_t)pid;
-  vfs_node_init(node);
-  strcpy(node->name, "pidfd");
-  node->flags = FS_CHARDEV;
-  node->mask = 0600;
-  node->device = ctx;
-  node->poll = pidfd_poll;
-  node->close = pidfd_close;
-  current->fds[fd] = node;
-  current->fd_offsets[fd] = 0;
-  current->fd_flags[fd] = FD_FLAGS_CLOEXEC_BIT |
-                          (flags & PIDFD_NONBLOCK ? O_NONBLOCK : 0);
-  return (uint64_t)fd;
+  return pidfd_install(sched_get_current(), (uint32_t)pid, flags);
 }
 
 // exit / exit_group (shared)
@@ -241,6 +325,7 @@ void process_do_exit(uint64_t status) {
       }
       spinlock_release(&tid_lock);
       current->state = THREAD_DEAD;
+      pidfd_wake_waiters();
       sched_queue_reap(current);
     } else {
       /* Serialize zombie publication with wait4's transition to BLOCKED. */
@@ -260,6 +345,12 @@ void process_do_exit(uint64_t status) {
       }
       spinlock_release(&tid_lock);
       klog_debug_puts("[EXITDBG] zombie published\n");
+      /* Anyone waiting on a pidfd for this process (poll or waitid(P_PIDFD))
+       * is woken here; they re-scan and observe the zombie. */
+      pidfd_wake_waiters();
+      /* ... and the parent's SIGCHLD handler runs here, the way Linux sends
+       * do_notify_parent() right after publishing the zombie. */
+      signal_notify_parent_exit(current);
     }
 
     /* A vfork parent is blocked inside sys_clone_internal(), before it can
@@ -441,8 +532,10 @@ static uint64_t sys_chdir(uint64_t path_ptr, uint64_t a1, uint64_t a2,
   if (!node)
     return (uint64_t)-2; // ENOENT
 
-  if ((node->flags & FS_TYPE_MASK) != FS_DIRECTORY)
+  if ((node->flags & FS_TYPE_MASK) != FS_DIRECTORY) {
+    vfs_close(node);
     return (uint64_t)-20; // ENOTDIR
+  }
   if (!vfs_access(node, 1)) {
     vfs_close(node);
     return (uint64_t)-13;
@@ -632,9 +725,10 @@ static uint64_t sys_waitid(uint64_t idtype_val, uint64_t id_val,
   uint32_t target_pid = id;
 
   if (idtype == P_PIDFD) {
-    if (id >= MAX_FDS || !current->fds[id] || !current->fds[id]->device)
+    struct pidfd_ctx *pctx =
+        (id < MAX_FDS && current->fds[id]) ? pidfd_ctx_of(current->fds[id]) : NULL;
+    if (!pctx)
       return (uint64_t)-9; // EBADF
-    struct pidfd_ctx *pctx = (struct pidfd_ctx *)current->fds[id]->device;
     target_pid = pctx->pid;
   }
 
@@ -760,7 +854,27 @@ static uint64_t sys_waitid(uint64_t idtype_val, uint64_t id_val,
     }
 
     if (should_block) {
+      /* A pidfd can name a process this one is not the parent of, so the
+       * parent-only wake above cannot be relied on here: queue on the shared
+       * pidfd wake-up, and keep a bounded fallback timer so a missed wake can
+       * never park the caller forever - the loop re-evaluates every round. */
+      wait_queue_entry_t pidfd_entry;
+      pidfd_entry.thread = current;
+      pidfd_entry.next = NULL;
+      bool on_pidfd_wq = false;
+
+      if (idtype == P_PIDFD) {
+        wait_queue_add(&pidfd_event_wait, &pidfd_entry);
+        on_pidfd_wq = true;
+        current->wakeup_ticks = lapic_timer_get_ticks() + 10;
+      }
+
       sched_yield();
+
+      if (on_pidfd_wq) {
+        wait_queue_remove(&pidfd_event_wait, &pidfd_entry);
+        current->wakeup_ticks = 0;
+      }
       /* waiting_for_child stays set — cleared at top of next iteration
        * after we reacquire tid_lock, same as sys_wait4. */
     }
@@ -776,7 +890,7 @@ static void exec_close_cloexec(struct thread *t) {
   for (int fd = 0; fd < MAX_FDS; fd++) {
     spinlock_acquire(&t->files->lock);
     vfs_node_t *node = t->fds[fd];
-    if (!node || node == (vfs_node_t *)-1 ||
+    if (!node || node == FD_RESERVED ||
         !(t->fd_flags[fd] & FD_FLAGS_CLOEXEC_BIT)) {
       spinlock_release(&t->files->lock);
       continue;
@@ -859,14 +973,26 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
     vfs_node_t *exec_base = (path[0] == '/') ? fs_root :
         (exec_thread && exec_thread->cwd_node ? exec_thread->cwd_node : fs_root);
     vfs_node_t *exec_node = vfs_resolve_path_at(exec_base, path);
-    if (!exec_node || !vfs_access(exec_node, 1)) {
+    int exec_err = 0;
+    if (!exec_node) {
+      exec_err = 2; // ENOENT
+    } else if (!vfs_access(exec_node, 1) ||
+               (exec_node->flags & FS_TYPE_MASK) == FS_DIRECTORY) {
+      exec_err = 13; // EACCES, and Linux also refuses to exec a directory
+    }
+    if (exec_err) {
       if (exec_node) vfs_close(exec_node);
+      klog_puts("[PROC] execve failed path=\"");
+      klog_puts(path);
+      klog_puts("\" errno=");
+      klog_uint64((uint64_t)exec_err);
+      klog_puts("\n");
       kfree(path);
       for (int i = 0; i < argc; i++) kfree(k_argv[i]);
       kfree(k_argv);
       for (int i = 0; i < envc; i++) kfree(k_envp[i]);
       kfree(k_envp);
-      return (uint64_t)-13;
+      return (uint64_t)(-exec_err);
     }
     exec_mode = exec_node->mask;
     exec_uid = exec_node->uid;
@@ -982,16 +1108,37 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
   uint64_t old_mmap_next_addr = old_mm->mmap_next_addr;
   bool shared_mm = false;
 
+  /* Pre-allocate the replacement address space.  Dropping the shared reference
+   * before knowing that this allocation succeeds is what made the -ENOMEM path
+   * below wrong: for a moment this thread held no reference at all to the mm it
+   * was still running on, so a sibling exiting in that window could free it
+   * under us. */
+  struct mm_struct *new_mm = NULL;
+  spinlock_acquire(&current->mm->lock);
+  bool may_be_shared = (current->mm->ref_count > 1);
+  spinlock_release(&current->mm->lock);
+  if (may_be_shared) {
+    new_mm = kmalloc(sizeof(struct mm_struct));
+    if (!new_mm) {
+      /* Nothing has been modified yet: free the execve scratch buffers and
+       * report the failure, staying on the current address space. */
+      kfree(path);
+      for (int i = 0; i < argc; i++)
+        kfree(k_argv[i]);
+      kfree(k_argv);
+      for (int i = 0; i < envc; i++)
+        kfree(k_envp[i]);
+      kfree(k_envp);
+      return (uint64_t)-12;
+    }
+  }
+
   // Unshare mm_struct if shared (e.g. after vfork or in a thread)
   spinlock_acquire(&current->mm->lock);
-  if (current->mm->ref_count > 1) {
+  if (new_mm && current->mm->ref_count > 1) {
     shared_mm = true;
     current->mm->ref_count--;
     spinlock_release(&current->mm->lock);
-
-    struct mm_struct *new_mm = kmalloc(sizeof(struct mm_struct));
-    if (!new_mm)
-      return (uint64_t)-12;
 
     vma_list_init(&new_mm->vmas);
     new_mm->ref_count = 1;
@@ -1005,6 +1152,9 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
     vma_list_init(&old_vmas);
   } else {
     spinlock_release(&current->mm->lock);
+    /* Every other owner is gone by now, so the pre-allocated mm is not needed. */
+    if (new_mm)
+      kfree(new_mm);
     // Save the old VMA list before destroying it — we need it to
     // identify MAP_SHARED pages when freeing the old address space.
     old_vmas = current->mm->vmas;
@@ -1019,10 +1169,12 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
   mm_reset_mmap_state(current);
 
   elf_info_t elf_info = {0};
-  tsc_probe_reset();
   TSC_BEGIN(execve_elf_load);
   if (!elf_load(path, new_pml4, &elf_info)) {
     TSC_END(execve_elf_load);
+    klog_puts("[PROC] execve failed path=\"");
+    klog_puts(path);
+    klog_puts("\" errno=8 (elf_load)\n");
     current->cr3 = old_cr3;
     __asm__ volatile("mov %0, %%cr3" ::"r"(current->cr3) : "memory");
     if (shared_mm) {
@@ -1062,7 +1214,6 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
   }
 
   TSC_END(execve_elf_load);
-  tsc_probe_dump();
 
   exec_close_cloexec(current);
 
@@ -1083,10 +1234,25 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
   current->pending_signals = 0;
   memset(current->signal_sender_pid, 0, sizeof(current->signal_sender_pid));
 
+  // The old address space is gone, so any robust list registered in it is too.
+  current->robust_list = 0;
+
   // We are now safely loaded into the new address space!
+  TSC_BEGIN(execve_stack);
   uint64_t user_rsp = process_build_initial_stack(
       ASCENTOS_USER_STACK_TOP, path, (const char **)k_argv,
       (const char **)k_envp, &elf_info);
+  TSC_END(execve_stack);
+
+  /* Probes are cumulative (fork stats must survive to be averaged), so print
+   * the first few launches; fork_probe_maybe_dump() covers later activity. */
+  {
+    static uint32_t exec_probe_dumps;
+    if (exec_probe_dumps < 4) {
+      exec_probe_dumps++;
+      tsc_probe_dump();
+    }
+  }
 
   // Do not release a vfork parent until exec has actually succeeded. The
   // child needs the shared address space intact to handle ENOEXEC fallbacks.
@@ -1113,6 +1279,17 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
     current->comm[ci] = '\0';
   }
 
+  // Automatic desktop interactive prioritization (KDE Plasma, KWin, Xorg)
+  if (strcmp(current->comm, "kwin_x11") == 0 ||
+      strcmp(current->comm, "kwin_wayland") == 0 ||
+      strcmp(current->comm, "kwin") == 0 ||
+      strcmp(current->comm, "plasmashell") == 0 ||
+      strcmp(current->comm, "Xorg") == 0 ||
+      strcmp(current->comm, "Xwayland") == 0) {
+    sched_set_priority(current, nice_to_sched_priority(-10), -10);
+    eevfd_set_slice(&current->se, EEVFD_INTERACTIVE_SLICE_NS);
+  }
+
   if (current->is_forked_child) {
     klog_proc_exec(current->tid, path);
   }
@@ -1128,10 +1305,14 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
   // We've already switched CR3, so this is safe.
   // We only free it if it was NOT shared (i.e. not a vfork/thread exec).
   if (old_cr3 != 0 && !shared_mm) {
+    TSC_BEGIN(exec_free_old);
     vmm_free_user_pages_vma(old_cr3, &old_vmas);
+    TSC_END(exec_free_old);
   }
   // Now destroy the old VMA tree nodes
+  TSC_BEGIN(exec_vma_destroy);
   vma_list_destroy(&old_vmas);
+  TSC_END(exec_vma_destroy);
 
   // Cleanup kernel-side copies
   for (int i = 0; i < argc; i++)
@@ -1199,6 +1380,16 @@ static void fork_child_entry(void) {
   fork_return_to_userspace(child_regs);
 }
 
+/* Fork is on the critical path of every shell command (bash does fork+exec).
+ * Print the cumulative probe table once a representative number of forks has
+ * happened so the clone cost is visible alongside the exec sections. */
+static void fork_probe_maybe_dump(void) {
+  static uint32_t forks;
+  uint32_t n = __atomic_add_fetch(&forks, 1, __ATOMIC_RELAXED);
+  if (n == 16 || n == 64)
+    tsc_probe_dump();
+}
+
 // sys_fork (raw handler — receives full register frame)
 uint64_t sys_fork(struct syscall_regs *regs) {
   // 1. Get current parent state
@@ -1207,8 +1398,11 @@ uint64_t sys_fork(struct syscall_regs *regs) {
 
   // 2. Clone the user address space with VMA awareness
   //    Shared mappings share physical pages, private mappings get copied
+  TSC_BEGIN(fork_clone);
   uint64_t child_cr3 = vmm_clone_user_mappings_vma(
       parent_pml4_phys, (parent && parent->mm) ? &parent->mm->vmas : NULL);
+  TSC_END(fork_clone);
+  fork_probe_maybe_dump();
 
   // 3. Allocate and populate the child's saved register state.
   //    RAX = 0 so the child sees fork() returning 0.
@@ -1255,11 +1449,15 @@ uint64_t sys_fork(struct syscall_regs *regs) {
   child->nice_value = parent->nice_value;
   eevfd_set_nice(&child->se, (int)child->nice_value);
   child->tgid = child->tid; // Fork creates a new process (new thread group)
+  /* Linux implements fork() as a clone whose exit signal is SIGCHLD, and the
+   * parent is notified through it.  Keep that visible here so the notification
+   * does not depend on which entry point created the child. */
+  child->clone_flags = SIGCHLD;
 
   // 6. Copy file descriptors from parent to child (with reference counting)
   if (parent) {
     for (int i = 0; i < MAX_FDS; i++) {
-      if (parent->fds[i]) {
+      if (parent->fds[i] && parent->fds[i] != FD_RESERVED) {
         child->fds[i] = parent->fds[i];
         child->fd_offsets[i] = parent->fd_offsets[i];
         child->fd_flags[i] = parent->fd_flags[i];
@@ -1286,6 +1484,11 @@ uint64_t sys_fork(struct syscall_regs *regs) {
       memcpy(child->mm->saved_auxv, parent->mm->saved_auxv,
              sizeof(child->mm->saved_auxv));
       child->mm->auxv_count = parent->mm->auxv_count;
+      memcpy(child->mm->saved_cmdline, parent->mm->saved_cmdline,
+             sizeof(child->mm->saved_cmdline));
+      child->mm->cmdline_len = parent->mm->cmdline_len;
+      child->mm->arg_start   = parent->mm->arg_start;
+      child->mm->arg_end     = parent->mm->arg_end;
     }
 
     memcpy(child->cwd_path, parent->cwd_path, sizeof(child->cwd_path));
@@ -1328,7 +1531,8 @@ uint64_t sys_fork(struct syscall_regs *regs) {
 
 static uint64_t sys_clone_internal(struct syscall_regs *regs, uint64_t flags,
                                    uint64_t child_stack, uint64_t ptid,
-                                   uint64_t ctid, uint64_t newtls) {
+                                   uint64_t ctid, uint64_t newtls,
+                                   uint64_t pidfd_slot) {
   struct thread *parent = sched_get_current();
   if (!parent || !parent->mm)
     return (uint64_t)-22;
@@ -1347,9 +1551,40 @@ static uint64_t sys_clone_internal(struct syscall_regs *regs, uint64_t flags,
       (!ctid || !vmm_is_user_addr_range_writable(ctid, sizeof(uint32_t))))
     return (uint64_t)-14;
 
+  /* clone(CLONE_PIDFD) hands the descriptor back through the parent_tid slot
+   * (clone3() has a field of its own for it).  Reserve it here, before the
+   * child exists, because no allocation may fail once the child has been
+   * created; it is installed only after the child copied the parent's
+   * descriptor table, so the pidfd does not leak into the child. */
+  int pidfd_fd = -1;
+  vfs_node_t *pidfd_node = NULL;
+  if (pidfd_slot) {
+    /* Linux refuses a pidfd for a thread, and one slot cannot report both the
+     * pidfd and the parent_tid. */
+    if (flags & CLONE_THREAD)
+      return (uint64_t)-22;
+    if ((flags & CLONE_PARENT_SETTID) && pidfd_slot == ptid)
+      return (uint64_t)-22;
+    if (!vmm_is_user_addr_range_writable(pidfd_slot, sizeof(int)))
+      return (uint64_t)-14;
+    int64_t pr = pidfd_reserve(parent, &pidfd_fd, &pidfd_node);
+    if (pr < 0)
+      return (uint64_t)pr;
+  }
+#define PIDFD_UNRESERVE()                                                      \
+  do {                                                                         \
+    if (pidfd_fd >= 0) {                                                       \
+      pidfd_abort(parent, pidfd_fd, pidfd_node);                               \
+      pidfd_fd = -1;                                                           \
+      pidfd_node = NULL;                                                       \
+    }                                                                          \
+  } while (0)
+
   struct syscall_regs *child_regs = kmalloc(sizeof(*child_regs));
-  if (!child_regs)
+  if (!child_regs) {
+    PIDFD_UNRESERVE();
     return (uint64_t)-12;
+  }
   memcpy(child_regs, regs, sizeof(*child_regs));
   child_regs->rax = 0;
   if (child_stack)
@@ -1360,9 +1595,12 @@ static uint64_t sys_clone_internal(struct syscall_regs *regs, uint64_t flags,
   bool private_mm = !(flags & CLONE_VM);
 
   if (private_mm) {
+    TSC_BEGIN(fork_clone);
     child_cr3 = vmm_clone_user_mappings_vma(
         (uint64_t *)parent->cr3, &parent->mm->vmas);
+    TSC_END(fork_clone);
     if (!child_cr3) {
+      PIDFD_UNRESERVE();
       kfree(child_regs);
       return (uint64_t)-12;
     }
@@ -1370,6 +1608,7 @@ static uint64_t sys_clone_internal(struct syscall_regs *regs, uint64_t flags,
     child_mm = kmalloc(sizeof(*child_mm));
     if (!child_mm) {
       vmm_free_user_pages_vma(child_cr3, &parent->mm->vmas);
+      PIDFD_UNRESERVE();
       kfree(child_regs);
       return (uint64_t)-12;
     }
@@ -1387,6 +1626,7 @@ static uint64_t sys_clone_internal(struct syscall_regs *regs, uint64_t flags,
   struct thread *child =
       sched_create_kernel_thread(fork_child_entry, cpu_get_current(), false);
   if (!child) {
+    PIDFD_UNRESERVE();
     if (private_mm) {
       vmm_free_user_pages_vma(child_cr3, &child_mm->vmas);
       if (child_mm->pcid) {
@@ -1430,12 +1670,18 @@ static uint64_t sys_clone_internal(struct syscall_regs *regs, uint64_t flags,
   child->gs_base = parent->gs_base;
   child->tid_address =
       (flags & CLONE_CHILD_CLEARTID) ? (uint64_t *)ctid : NULL;
+  // A new task starts from the parent's robust list, exactly like Linux; a
+  // fresh thread installs its own through set_robust_list(2).
+  child->robust_list = parent->robust_list;
 
   if (flags & CLONE_FILES) {
     sched_share_files(child, parent);
   } else {
     for (int i = 0; i < MAX_FDS; i++) {
-      if (!parent->fds[i])
+      /* FD_RESERVED is a descriptor another thread of this process is in the
+       * middle of allocating (including the pidfd reserved for CLONE_PIDFD
+       * below); it is not a file, and it must not reach the child. */
+      if (!parent->fds[i] || parent->fds[i] == FD_RESERVED)
         continue;
       child->fds[i] = parent->fds[i];
       child->fd_offsets[i] = parent->fd_offsets[i];
@@ -1479,7 +1725,14 @@ static uint64_t sys_clone_internal(struct syscall_regs *regs, uint64_t flags,
     __atomic_store_n((uint32_t *)ptid, child->tid, __ATOMIC_RELEASE);
   if ((flags & CLONE_CHILD_SETTID) && (flags & CLONE_VM))
     __atomic_store_n((uint32_t *)ctid, child->tid, __ATOMIC_RELEASE);
-
+  if (pidfd_fd >= 0) {
+    /* The child has copied the descriptor table by now, so the pidfd is only
+     * the parent's.  Publish it before the child runs: the whole point of a
+     * pidfd is to be able to watch a process that may already be gone. */
+    pidfd_publish(parent, pidfd_fd, pidfd_node, child->tid, 0);
+    int pidfd_user = pidfd_fd;
+    copy_to_user((void *)pidfd_slot, &pidfd_user, sizeof(int));
+  }
   bool vfork = (flags & CLONE_VFORK) != 0;
   if (vfork)
     parent->state = THREAD_BLOCKED;
@@ -1493,6 +1746,7 @@ static uint64_t sys_clone_internal(struct syscall_regs *regs, uint64_t flags,
   }
 
   return child->tid;
+#undef PIDFD_UNRESERVE
 }
 // sys_clone (syscall 56)
 uint64_t sys_clone(struct syscall_regs *regs) {
@@ -1505,14 +1759,19 @@ uint64_t sys_clone(struct syscall_regs *regs) {
   klog_debugf("[CLONE] flags=%llu stack=0x%llx\n",
               (unsigned long long)flags, (unsigned long long)child_stack);
 
-  return sys_clone_internal(regs, flags, child_stack, ptid, ctid, newtls);
+  /* Legacy clone() has no pidfd field: CLONE_PIDFD reports the descriptor
+   * through the parent_tid argument. */
+  uint64_t pidfd_slot = (flags & CLONE_PIDFD) ? ptid : 0;
+
+  return sys_clone_internal(regs, flags, child_stack, ptid, ctid, newtls,
+                            pidfd_slot);
 }
 
 // sys_vfork (syscall 58)
 uint64_t sys_vfork(struct syscall_regs *regs) {
   // vfork is essentially clone with shared VM and parent blocking.
   // Standard flags: CLONE_VM | CLONE_VFORK | SIGCHLD
-  return sys_clone_internal(regs, CLONE_VM | CLONE_VFORK | 17, 0, 0, 0, 0);
+  return sys_clone_internal(regs, CLONE_VM | CLONE_VFORK | 17, 0, 0, 0, 0, 0);
 }
 
 struct clone_args {
@@ -1561,17 +1820,8 @@ uint64_t sys_clone3(struct syscall_regs *regs) {
               (unsigned long long)kargs.stack_size, (unsigned long long)ptid,
               (unsigned long long)ctid, (unsigned long long)newtls);
 
-  uint64_t ret = sys_clone_internal(regs, flags, child_stack, ptid, ctid, newtls);
-  if ((int64_t)ret > 0 && (flags & CLONE_PIDFD) && kargs.pidfd) {
-    if (vmm_is_user_addr_range_writable(kargs.pidfd, sizeof(int))) {
-      uint64_t pfd = sys_pidfd_open(ret, 0, 0, 0, 0, 0);
-      if ((int64_t)pfd >= 0) {
-        int ifd = (int)pfd;
-        copy_to_user((void *)kargs.pidfd, &ifd, sizeof(int));
-      }
-    }
-  }
-
+  uint64_t ret = sys_clone_internal(regs, flags, child_stack, ptid, ctid, newtls,
+                                    (kargs.flags & CLONE_PIDFD) ? kargs.pidfd : 0);
   return ret;
 }
 
@@ -2379,6 +2629,9 @@ static uint64_t sys_getrlimit(uint64_t resource, uint64_t rlim_ptr, uint64_t a2,
   if (resource == 7) { // RLIMIT_NOFILE
     r->rlim_cur = MAX_FDS;
     r->rlim_max = MAX_FDS;
+  } else if (resource == 4) { // RLIMIT_CORE (default 0 on Linux)
+    r->rlim_cur = 0;
+    r->rlim_max = RLIM_INFINITY;
   }
 
   return 0;
@@ -2404,6 +2657,9 @@ static uint64_t sys_prlimit64(struct syscall_regs *regs) {
     if (resource == 7) { // RLIMIT_NOFILE
       old_limit->rlim_cur = MAX_FDS;
       old_limit->rlim_max = MAX_FDS;
+    } else if (resource == 4) { // RLIMIT_CORE
+      old_limit->rlim_cur = 0;
+      old_limit->rlim_max = RLIM_INFINITY;
     }
   }
 
@@ -2557,35 +2813,46 @@ static uint64_t sys_sched_getparam(uint64_t pid, uint64_t param_ptr,
   return 0;
 }
 
+#define SCHED_OTHER 0
+#define SCHED_FIFO  1
+#define SCHED_RR    2
+#define SCHED_BATCH 3
+#define SCHED_IDLE  5
+
 static uint64_t sys_sched_get_priority_max(uint64_t policy, uint64_t a1,
                                            uint64_t a2, uint64_t a3,
                                            uint64_t a4, uint64_t a5) {
-  (void)policy;
   (void)a1;
   (void)a2;
   (void)a3;
   (void)a4;
   (void)a5;
-  return 0;
+  uint64_t clean_policy = policy & ~0x40000000ULL;
+  if (clean_policy == SCHED_FIFO || clean_policy == SCHED_RR)
+    return 99;
+  if (clean_policy == SCHED_OTHER || clean_policy == SCHED_BATCH || clean_policy == SCHED_IDLE)
+    return 0;
+  return (uint64_t)-22; // EINVAL
 }
 
 static uint64_t sys_sched_get_priority_min(uint64_t policy, uint64_t a1,
                                            uint64_t a2, uint64_t a3,
                                            uint64_t a4, uint64_t a5) {
-  (void)policy;
   (void)a1;
   (void)a2;
   (void)a3;
   (void)a4;
   (void)a5;
-  return 0;
+  uint64_t clean_policy = policy & ~0x40000000ULL;
+  if (clean_policy == SCHED_FIFO || clean_policy == SCHED_RR)
+    return 1;
+  if (clean_policy == SCHED_OTHER || clean_policy == SCHED_BATCH || clean_policy == SCHED_IDLE)
+    return 0;
+  return (uint64_t)-22; // EINVAL
 }
 
 // sys_sched_getscheduler (syscall 145)
 // Returns the scheduling policy of the given process.
-// We always use SCHED_OTHER (0) since we don't support real-time schedulers.
-#define SCHED_OTHER 0
-
 static uint64_t sys_sched_getscheduler(uint64_t pid, uint64_t a1, uint64_t a2,
                                        uint64_t a3, uint64_t a4, uint64_t a5) {
   (void)a1;
@@ -2600,12 +2867,17 @@ static uint64_t sys_sched_getscheduler(uint64_t pid, uint64_t a1, uint64_t a2,
   if (!target)
     return (uint64_t)-3; // ESRCH
 
+  if (target->nice_value <= -10)
+    return SCHED_RR;
+  if (target->nice_value >= 10)
+    return SCHED_BATCH;
   return SCHED_OTHER;
 }
 
 // sys_sched_setscheduler (syscall 144)
 // Sets the scheduling policy and parameters for a process.
-// Stub: we accept SCHED_OTHER and reject real-time policies.
+// Maps real-time (SCHED_FIFO/SCHED_RR) to highest interactive priority,
+// and SCHED_BATCH to longer throughput slices.
 static uint64_t sys_sched_setscheduler(uint64_t pid, uint64_t policy,
                                        uint64_t param_ptr, uint64_t a3,
                                        uint64_t a4, uint64_t a5) {
@@ -2619,14 +2891,46 @@ static uint64_t sys_sched_setscheduler(uint64_t pid, uint64_t policy,
   if (!target)
     return (uint64_t)-3; // ESRCH
 
+  if (current->euid != 0 && current->uid != target->uid &&
+      current->euid != target->uid)
+    return (uint64_t)-1; // EPERM
+
   if (!param_ptr || !vmm_is_user_addr_range_valid(param_ptr, sizeof(int)))
     return (uint64_t)-14; // EFAULT
 
-  // Only SCHED_OTHER (0) is supported
-  if (policy != SCHED_OTHER)
-    return (uint64_t)-22; // EINVAL
+  int sched_priority = *(int *)param_ptr;
+  uint64_t clean_policy = policy & ~0x40000000ULL; // Mask SCHED_RESET_ON_FORK
 
-  return 0;
+  if (clean_policy == SCHED_FIFO || clean_policy == SCHED_RR) {
+    if (sched_priority < 1 || sched_priority > 99)
+      return (uint64_t)-22; // EINVAL
+    // Map RT priority (1..99) to highest interactive priority (nice -20..-10)
+    int nice = -20 + (99 - sched_priority) / 10;
+    if (nice < -20) nice = -20;
+    if (nice > -10) nice = -10;
+    sched_set_priority(target, nice_to_sched_priority(nice), (int8_t)nice);
+    eevfd_set_slice(&target->se, EEVFD_LATENCY_SLICE_NS);
+    return 0;
+  } else if (clean_policy == SCHED_BATCH) {
+    if (sched_priority != 0) return (uint64_t)-22;
+    int nice = 5;
+    sched_set_priority(target, nice_to_sched_priority(nice), (int8_t)nice);
+    eevfd_set_slice(&target->se, EEVFD_BATCH_SLICE_NS);
+    return 0;
+  } else if (clean_policy == SCHED_IDLE) {
+    if (sched_priority != 0) return (uint64_t)-22;
+    int nice = 19;
+    sched_set_priority(target, nice_to_sched_priority(nice), (int8_t)nice);
+    eevfd_set_slice(&target->se, EEVFD_MAX_SLICE_NS);
+    return 0;
+  } else if (clean_policy == SCHED_OTHER) {
+    if (sched_priority != 0)
+      return (uint64_t)-22; // EINVAL
+    sched_set_priority(target, nice_to_sched_priority(0), 0);
+    return 0;
+  }
+
+  return (uint64_t)-22; // EINVAL
 }
 
 // sys_setpriority (syscall 141)
@@ -2674,15 +2978,84 @@ static uint64_t sys_getpriority(uint64_t which, uint64_t who, uint64_t a2,
   return (uint64_t)(20 - target->nice_value);
 }
 
+/* sizeof(struct robust_list_head) on x86-64: list.next, futex_offset and
+ * list_op_pending.  Linux rejects every other length with EINVAL. */
+#define ROBUST_LIST_HEAD_LEN 24
+
 static uint64_t sys_set_robust_list(uint64_t head, uint64_t len, uint64_t a2,
                                     uint64_t a3, uint64_t a4, uint64_t a5) {
-  (void)head;
-  (void)len;
   (void)a2;
   (void)a3;
   (void)a4;
   (void)a5;
-  // Stub for glibc compatibility
+
+  struct thread *current = sched_get_current();
+  if (!current)
+    return (uint64_t)-22; // EINVAL
+
+  if (len != ROBUST_LIST_HEAD_LEN)
+    return (uint64_t)-22; // EINVAL
+  if (head && !vmm_is_user_addr_range_valid(head, len))
+    return (uint64_t)-14; // EFAULT
+
+  current->robust_list = head;
+  return 0;
+}
+
+// get_robust_list(pid, &head, &len): read back the list registered with
+// set_robust_list(2).  baloo_file, gdb and friends ask for it on startup;
+// pid 0 refers to the calling thread.
+static uint64_t sys_get_robust_list(uint64_t pid_val, uint64_t head_ptr,
+                                    uint64_t len_ptr, uint64_t a3, uint64_t a4,
+                                    uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+
+  struct thread *current = sched_get_current();
+  if (!current)
+    return (uint64_t)-22; // EINVAL
+
+  if (!head_ptr || !len_ptr ||
+      !vmm_is_user_addr_range_writable(head_ptr, sizeof(uint64_t)) ||
+      !vmm_is_user_addr_range_writable(len_ptr, sizeof(uint64_t)))
+    return (uint64_t)-14; // EFAULT
+
+  int32_t pid = (int32_t)pid_val;
+  if (pid < 0)
+    return (uint64_t)-22; // EINVAL
+
+  extern struct thread *global_thread_list;
+  extern spinlock_t tid_lock;
+  uint64_t head = 0;
+  bool found = false;
+
+  spinlock_acquire(&tid_lock);
+  if (pid == 0) {
+    head = current->robust_list;
+    found = true;
+  } else {
+    // A tid, not a tgid: robust lists are per thread.
+    for (struct thread *t = global_thread_list; t; t = t->global_next) {
+      if (t->tid != (uint32_t)pid)
+        continue;
+      // Linux asks for ptrace_may_access(); same owner is the closest match.
+      if (current->euid != 0 && t->uid != current->uid &&
+          t->euid != current->euid)
+        break;
+      head = t->robust_list;
+      found = true;
+      break;
+    }
+  }
+  spinlock_release(&tid_lock);
+
+  if (!found)
+    return (uint64_t)-3; // ESRCH
+
+  uint64_t len = ROBUST_LIST_HEAD_LEN;
+  copy_to_user((void *)head_ptr, &head, sizeof(head));
+  copy_to_user((void *)len_ptr, &len, sizeof(len));
   return 0;
 }
 
@@ -2938,6 +3311,7 @@ void syscall_register_process(void) {
   syscall_register(SYS_SETPRIORITY, sys_setpriority);
   syscall_register(SYS_GETPRIORITY, sys_getpriority);
   syscall_register(SYS_SET_ROBUST_LIST, sys_set_robust_list);
+  syscall_register(SYS_GET_ROBUST_LIST, sys_get_robust_list);
   syscall_register(SYS_REBOOT, sys_reboot);
   syscall_register(SYS_PIDFD_OPEN, sys_pidfd_open);
   syscall_register(SYS_GETCPU, sys_getcpu);

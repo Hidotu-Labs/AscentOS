@@ -7,9 +7,12 @@ DISK_IMG="${ROOT_DIR}/disk.img"
 BUILD_DIR="${ROOT_DIR}/build/alpine"
 POPULATE_SCRIPT="${ROOT_DIR}/scripts/populate-ext2-dir.sh"
 
+ALPINE_BRANCH="v3.21"
+# QtBase/modules that contain the QSystemLocale post-destruction fix (6.8.3+).
+QT6_BRANCH="v3.22"
 ALPINE_VERSION="3.21.0"
 ALPINE_TARBALL="alpine-minirootfs-${ALPINE_VERSION}-x86_64.tar.gz"
-ALPINE_URL="https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/x86_64/${ALPINE_TARBALL}"
+ALPINE_URL="https://dl-cdn.alpinelinux.org/alpine/${ALPINE_BRANCH}/releases/x86_64/${ALPINE_TARBALL}"
 
 mkdir -p "${BUILD_DIR}"
 
@@ -19,19 +22,39 @@ if [ ! -f "${BUILD_DIR}/${ALPINE_TARBALL}" ]; then
     curl -L "${ALPINE_URL}" -o "${BUILD_DIR}/${ALPINE_TARBALL}"
 fi
 
-# 2. Extract rootfs to a temporary location if not already present
+# 2. Extract rootfs to a temporary location if not already present.
+#    A rootfs built for a different release branch is discarded first: the
+#    package markers below are keyed by branch, but files that only existed in
+#    the old branch would otherwise survive and shadow their replacements.
 ROOTFS_DIR="${BUILD_DIR}/rootfs"
+ROOTFS_RELEASE=""
+if [ -f "${ROOTFS_DIR}/etc/alpine-release" ]; then
+    ROOTFS_RELEASE="$(cat "${ROOTFS_DIR}/etc/alpine-release")"
+fi
+case "${ROOTFS_RELEASE}" in
+    "${ALPINE_BRANCH#v}."*)
+        # Already the selected branch.
+        ;;
+    "")
+        # No rootfs yet; the extraction below creates it.
+        ;;
+    *)
+        echo "[*] rootfs is Alpine ${ROOTFS_RELEASE}, switching to ${ALPINE_BRANCH}; rebuilding it from scratch..."
+        rm -rf "${ROOTFS_DIR}"
+        ;;
+esac
 if [ ! -d "${ROOTFS_DIR}/etc" ]; then
     echo "[*] extracting Alpine rootfs to ${ROOTFS_DIR}..."
     mkdir -p "${ROOTFS_DIR}"
     tar -xzf "${BUILD_DIR}/${ALPINE_TARBALL}" -C "${ROOTFS_DIR}"
 fi
+printf '%s\n' "${ALPINE_BRANCH}" > "${ROOTFS_DIR}/etc/avoryos-alpine-branch"
 
 # 3. Helper to download and install Alpine packages manually
 install_apk() {
     local PKG_NAME=$1
     local REPO=$2
-    local BRANCH=${3:-"v3.21"}
+    local BRANCH=${3:-"${ALPINE_BRANCH}"}
     local PKG_MARKER="${ROOTFS_DIR}/etc/avoryos-pkg/${BRANCH}-${REPO}-${PKG_NAME}"
     
     if [ -f "${PKG_MARKER}" ]; then
@@ -65,7 +88,18 @@ install_apk() {
     # APK files are 3 concatenated gzip streams (signature + control + data).
     # tar --ignore-zeros -xz processes all streams in the concatenation.
     tar --ignore-zeros -xzf "${BUILD_DIR}/${APK_FILENAME}" -C "${ROOTFS_DIR}" --warning=no-unknown-keyword 2>/dev/null || true
-    
+
+    # The control stream also unpacks its metadata into the root of the rootfs
+    # (/.PKGINFO, hook scripts, ...).  Drop them again: a stray /.flatpak-info
+    # makes KF6's KSandbox::isFlatpak() answer true, and konsole then boots
+    # each session through its sandbox code path (it shells out to "getent"
+    # and blocks in QProcess::waitForFinished()), which stops it opening.
+    for stray in .PKGINFO .SIGN.* .pre-install .post-install .pre-upgrade \
+                 .post-upgrade .pre-deinstall .post-deinstall .trigger \
+                 .flatpak-info; do
+        rm -f "${ROOTFS_DIR}"/${stray}
+    done
+
     # Mark as installed
     mkdir -p "${ROOTFS_DIR}/etc/avoryos-pkg"
     touch "${PKG_MARKER}"
@@ -105,10 +139,17 @@ install_apk "libxft" "main"
 install_apk "libgomp" "main"
 install_apk "double-conversion" "community"
 install_apk "libb2" "community"
-install_apk "qt6-qtbase" "community"
-install_apk "qt6-qtbase-x11" "community"
-install_apk "qt6-qtwayland" "community"
-install_apk "qt6-qtsvg" "community"
+# QtBase v3.21 ships 6.8.2, which segfaults (null-this QReadWriteLock) whenever
+# QSystemLocale::query() runs after the QSystemLocaleData global static has been
+# destroyed, e.g. from a static destructor during process exit.  Upstream fixed
+# it in qtbase commit d5c5f9f3529b ("QSystemLocale: bail out if accessed
+# post-destruction"), first released in Qt 6.8.3.  v3.22 is the first Alpine
+# branch carrying 6.8.3, so pull the QtBase packages from there; the rest of the
+# rootfs stays on v3.21 (Qt keeps ABI compatibility across patch releases).
+install_apk "qt6-qtbase" "community" "${QT6_BRANCH}"
+install_apk "qt6-qtbase-x11" "community" "${QT6_BRANCH}"
+install_apk "qt6-qtwayland" "community" "${QT6_BRANCH}"
+install_apk "qt6-qtsvg" "community" "${QT6_BRANCH}"
 install_apk "kconfig" "community"
 install_apk "kconfigwidgets" "community"
 install_apk "kcoreaddons" "community"
@@ -486,6 +527,7 @@ install_apk "galculator" "community"
 install_apk "gnome-calculator" "community"
 install_apk "libadwaita" "community"
 install_apk "appstream" "community"
+install_apk "appstream-qt" "community"
 install_apk "libxmlb" "community"
 install_apk "yaml" "main"
 install_apk "graphene" "main"
@@ -514,9 +556,15 @@ install_apk "opusfile" "main"
 # ffmpeg libs (for additional codec support)
 install_apk "ffmpeg-libavcodec" "community"
 install_apk "ffmpeg-libavformat" "community"
+# libasyncns is needed by libpulsecommon (inside libpulse)
+install_apk "libasyncns" "community"
 install_apk "libpulse" "community"
+# libpulse-mainloop-glib carries libpulse-mainloop-glib.so.0 (needed by pulseaudio-qt)
+install_apk "libpulse-mainloop-glib" "community"
 
 install_apk "xkeyboard-config" "main"
+# setxkbmap binary: the Plasma keyboard KCM uses it to apply layouts
+install_apk "setxkbmap" "community"
 install_apk "font-dejavu" "main"
 install_apk "sl" "community"
 install_apk "gifsicle" "community"
@@ -624,6 +672,12 @@ install_apk "lightdm" "community"
 install_apk "lightdm-gtk-greeter" "community"
 install_apk "lxdm" "community"
 install_apk "xinit" "community"
+# xinit 1.4.2 depends on xauth, mcookie, xmodmap and xrdb.  Packages are
+# unpacked here without apk dependency resolution, so pull them in explicitly;
+# without mcookie/xauth, startx(1) aborts with "Couldn't create cookie".
+install_apk "mcookie" "main"
+install_apk "xauth" "community"
+install_apk "xmodmap" "community"
 ln -sf elogind/libelogind-shared-252.so "${ROOTFS_DIR}/usr/lib/libelogind-shared-252.so" 2>/dev/null || true
 
 # Patch lightdm-gtk-greeter embedded UI signal for GreeterMenuBar (bypasses missing signal in standalone GtkBuilder load)
@@ -787,7 +841,7 @@ install_apk "capstone-dev" "community" "edge"
 # WebKitGTK (GTK 3 / libsoup 3 ABI)
 #
 # Packages are extracted manually by install_apk(), so apk cannot resolve the
-# shared-library providers for us. Keep WebKitGTK on the same v3.21 branch as
+# shared-library providers for us. Keep WebKitGTK on the same release branch as
 # GTK and install its non-core runtime providers explicitly before the engine.
 echo "[*] Installing WebKitGTK and dependencies..."
 install_apk "bubblewrap" "main"
@@ -852,6 +906,12 @@ install_apk "font-noto" "community"
 install_apk "font-noto-emoji" "community"
 install_apk "musl-locales" "main"
 install_apk "tzdata" "main"
+# Point the system at a real zone.  Without /etc/localtime and /etc/timezone,
+# Qt's QTimeZone::systemTimeZone() comes back invalid: the Plasma digital clock
+# renders blank and its calendar popup shows day 0.  The CMOS RTC is read as
+# UTC by the kernel, so default to UTC (change the link to your zone if needed).
+ln -sf /usr/share/zoneinfo/UTC "${ROOTFS_DIR}/etc/localtime"
+printf '%s\n' UTC > "${ROOTFS_DIR}/etc/timezone"
 install_apk "alacritty" "community"
 
 
@@ -1013,13 +1073,62 @@ Section "InputDevice"
 EndSection
 EOF
 
-# 4b. Inject Openbox / LXDE startup config
-echo "[*] Configuring Openbox as default X11 session..."
+# 4b. Configure the default X11 session for startx(1): KDE Plasma 6.
+# Alpine's startx runs $HOME/.xinitrc; root's home is / on AvoryOS.  Plasma
+# needs a session D-Bus and a private XDG_RUNTIME_DIR, neither of which a
+# bare startx provides, so set both up here before handing off.
+echo "[*] Configuring KDE Plasma 6 as default X11 session..."
 
 mkdir -p "${ROOTFS_DIR}/etc/skel"
 cat > "${ROOTFS_DIR}/etc/skel/.xinitrc" << 'EOF'
 #!/bin/sh
-exec openbox-session
+# AvoryOS default X11 session (startx): KDE Plasma 6 on Xorg.
+export XDG_SESSION_TYPE=x11
+export XDG_CURRENT_DESKTOP=KDE
+export XDG_SESSION_DESKTOP=KDE
+export DESKTOP_SESSION=plasma
+export QT_QPA_PLATFORM=xcb
+export KDE_FULL_SESSION=true
+
+# AvoryOS does not set up /run/user/<uid>; use a private dir under /tmp.
+if [ -z "$XDG_RUNTIME_DIR" ]; then
+    XDG_RUNTIME_DIR="/tmp/runtime-$(id -u)"
+    export XDG_RUNTIME_DIR
+fi
+mkdir -p "$XDG_RUNTIME_DIR" && chmod 0700 "$XDG_RUNTIME_DIR"
+
+# startx registers a second xauth entry for "<hostname>:0" (a TCP/hostname
+# entry) next to the local ":0" entry.  AvoryOS sessions only use the local
+# display, so drop the hostname entry.  xauth stores/prints the local entry as
+# "<hostname>/unix:0" -- that one is the :0 entry and is kept.
+if [ -n "$XAUTHORITY" ] && command -v xauth >/dev/null 2>&1; then
+    xauth remove "$(uname -n):0" 2>/dev/null || true
+fi
+
+# startx starts neither bus.  The system bus must exist or every solid/UPower/
+# UDisks/ModemManager backend fails with "Not connected to D-Bus server"
+# before Plasma finishes loading; solid then retries it in a loop.
+if [ ! -s /etc/machine-id ]; then
+    if command -v dbus-uuidgen >/dev/null 2>&1; then
+        dbus-uuidgen --ensure=/etc/machine-id 2>/dev/null || true
+    fi
+fi
+mkdir -p /run/dbus /var/run
+[ -e /var/run/dbus ] || ln -sf /run/dbus /var/run/dbus 2>/dev/null || true
+if [ -z "$DBUS_SYSTEM_BUS_ADDRESS" ]; then
+    DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket
+    export DBUS_SYSTEM_BUS_ADDRESS
+fi
+if [ ! -S /run/dbus/system_bus_socket ] && command -v dbus-daemon >/dev/null 2>&1; then
+    dbus-daemon --system --fork 2>/dev/null || true
+fi
+
+# startplasma-x11 expects a session bus; startx does not start one.
+if [ -n "$DBUS_SESSION_BUS_ADDRESS" ]; then
+    exec startplasma-x11
+else
+    exec dbus-run-session -- startplasma-x11
+fi
 EOF
 chmod +x "${ROOTFS_DIR}/etc/skel/.xinitrc"
 
@@ -1512,8 +1621,8 @@ icon=/usr/share/weston/icon_terminal.png
 path=/usr/bin/weston-terminal
 
 [launcher]
-icon=/usr/share/pixmaps/xfce4-session.png
-path=/usr/bin/start-xfce4-wayland
+icon=/usr/share/pixmaps/sddm.png
+path=/usr/bin/sddm
 
 [launcher]
 icon=/usr/share/pixmaps/netsurf.xpm
@@ -1536,6 +1645,257 @@ ln -sf /bin/busybox "${ROOTFS_DIR}/usr/bin/zip"
 # 4d. Configure local users and groups without shadow databases
 echo "[*] Configuring passwd/group databases (no shadow)..."
 "${ROOT_DIR}/scripts/configure-accounts.sh" "${ROOTFS_DIR}"
+
+# ── KDE PLASMA 6 Desktop Environment ─────────────────────────────────────────
+# Plasma 6 runs natively on Wayland via kwin_wayland, or on X11 via kwin_x11.
+# All packages are from the selected Alpine branch (${ALPINE_BRANCH} community).
+echo "[*] Installing KDE Plasma 6 core..."
+
+# --- KDE Frameworks 6 (KF6) runtime libraries ---
+# These are shared by kwin, plasma-workspace and plasma-desktop.
+install_apk "kauth" "community"
+install_apk "kbookmarks" "community"
+install_apk "kcmutils" "community"
+install_apk "kcompletion" "community"
+install_apk "kcontacts" "community"
+install_apk "kdnssd" "community"
+install_apk "kglobalaccel" "community"
+install_apk "kholidays" "community"
+install_apk "kidletime" "community"
+install_apk "kjobwidgets" "community"
+install_apk "kio" "community"
+install_apk "kio-extras" "community"
+install_apk "knewstuff" "community"
+install_apk "kpackage" "community"
+install_apk "kparts" "community"
+install_apk "kpeople" "community"
+install_apk "krunner" "community"
+install_apk "kservice" "community"
+install_apk "ktextwidgets" "community"
+install_apk "kwallet" "community"
+install_apk "kwalletmanager" "community"
+install_apk "kwindowsystem" "community"
+# solid-libs carries libKF6Solid.so.6 (needed by libKF6KIOGui.so.6)
+install_apk "solid-libs" "community"
+# solid-libs links libimobiledevice and libplist for iOS device detection
+install_apk "libplist" "community"
+# libimobiledevice-glue carries libimobiledevice-glue-1.0.so.0 (needed by libusbmuxd)
+install_apk "libimobiledevice-glue" "community"
+# libusbmuxd carries libusbmuxd-2.0.so.7 (needed by libimobiledevice)
+install_apk "libusbmuxd" "community"
+install_apk "libimobiledevice" "community"
+# kstatusnotifieritem carries libKF6StatusNotifierItem.so.6 (needed by kwalletmanager)
+install_apk "kstatusnotifieritem" "community"
+install_apk "networkmanager" "community"
+install_apk "networkmanager-wifi" "community"
+install_apk "networkmanager-tui" "community"
+# libKF6NetworkManagerQt.so.6 (needed by kded networkmanagement + plasmavault modules)
+install_apk "networkmanager-qt" "community"
+install_apk "modemmanager" "community"
+# libKF6ModemManagerQt.so.6 (needed by kded networkmanagement module)
+install_apk "modemmanager-qt" "community"
+install_apk "mobile-broadband-provider-info" "community"
+
+# --- Plasma 6 infrastructure ---
+install_apk "kdecoration" "community"
+install_apk "layer-shell-qt" "community"
+install_apk "libkscreen" "community"
+install_apk "libksysguard" "community"
+# libsensors.so.5 (needed by libKSysGuardSystemStats.so.2)
+install_apk "lm-sensors-libs" "main"
+# libnl-3.so.200 and libpcap.so.1 (needed by libksysguard network/process stats)
+install_apk "libnl3" "main"
+install_apk "libpcap" "main"
+install_apk "plasma5support" "community"
+install_apk "plasma-activities" "community"
+install_apk "plasma-activities-libs" "community"
+install_apk "plasma-activities-stats" "community"
+
+# --- kwin hard runtime dependencies ---
+# libKF6Svg.so.6
+install_apk "ksvg" "community"
+# libKWaylandClient.so.6
+install_apk "kwayland" "community"
+# libKGlobalAccelD.so.0
+install_apk "kglobalacceld" "community"
+# libKScreenLocker.so.6
+install_apk "kscreenlocker" "community"
+# libQt6Sensors.so.6
+install_apk "qt6-qtsensors" "community" "${QT6_BRANCH}"
+# libqaccessibilityclient-qt6.so.0
+install_apk "libqaccessibilityclient" "community"
+
+# --- kwin QML/plugin runtime deps ---
+# breeze carries org.kde.breeze decoration plugin
+install_apk "breeze-cursors" "community"
+install_apk "breeze" "community"
+# frameworkintegration carries libKF6Style.so.6 (required by breeze6.so Qt6 style plugin)
+install_apk "frameworkintegration" "community"
+# qqc2-desktop-style and qqc2-breeze-style provide native styling for QtQuick Controls 2 / QML
+install_apk "qqc2-desktop-style" "community"
+install_apk "qqc2-breeze-style" "community"
+# kirigami-libs carries libKirigami2.so (QML C++ backend)
+install_apk "kirigami-libs" "community"
+install_apk "kirigami" "community"
+# kirigami-addons provides org.kde.kirigamiaddons.formcard and org.kde.kirigamiaddons.components (needed by Kickoff and Plasma Welcome)
+install_apk "kirigami-addons" "community"
+# kpipewire carries the screencast plugin
+install_apk "pipewire" "community"
+install_apk "kpipewire" "community"
+# PipeWire audio infrastructure
+install_apk "pipewire-libs" "community"
+install_apk "pipewire-pulse" "community"
+install_apk "wireplumber" "community"
+install_apk "wireplumber-libs" "community"
+install_apk "pulseaudio-utils" "community"
+# libKF6PulseAudioQt.so.5 (needed by kded audioshortcutsservice module)
+install_apk "pulseaudio-qt" "community"
+install_apk "avahi-libs" "main"
+install_apk "bluez" "main"
+install_apk "bluez-libs" "main"
+# qt6-qtshadertools carries libQt6ShaderTools.so.6
+install_apk "qt6-qtshadertools" "community" "${QT6_BRANCH}"
+# qt6-qt5compat carries GraphicalEffects QML plugin
+install_apk "icu-data-full" "main"
+install_apk "qt6-qt5compat" "community" "${QT6_BRANCH}"
+
+# --- KWin (Wayland + X11 compositor / window manager) ---
+install_apk "kwin" "community"
+
+# --- Core Plasma workspace shell (includes startplasma-x11, startplasma-wayland) ---
+install_apk "plasma-workspace" "community"
+install_apk "plasma-workspace-libs" "community"
+install_apk "plasma-workspace-wallpapers" "community"
+# X11 session support for startplasma-x11
+install_apk "plasma-workspace-x11" "community"
+
+# --- Plasma desktop shell ---
+install_apk "plasma-desktop" "community"
+
+# --- Plasma system components ---
+install_apk "bluedevil" "community"
+# libKF6BluezQt.so.6 (needed by kded bluedevil module)
+install_apk "bluez-qt" "community"
+install_apk "drkonqi" "community"
+install_apk "kinfocenter" "community"
+install_apk "kscreen" "community"
+install_apk "milou" "community"
+install_apk "plasma-disks" "community"
+install_apk "plasma-firewall" "community"
+install_apk "plasma-integration" "community"
+install_apk "plasma-nm" "community"
+install_apk "plasma-pa" "community"
+install_apk "plasma-systemmonitor" "community"
+install_apk "plasma-vault" "community"
+install_apk "plasma-welcome" "community"
+install_apk "powerdevil" "community"
+install_apk "systemsettings" "community"
+
+# --- Plasma addons ---
+install_apk "kdeplasma-addons" "community"
+install_apk "libplasma" "community"
+
+# --- KDE applications commonly expected in a Plasma session ---
+# dolphin and dependencies
+install_apk "musl-fts" "main"
+install_apk "lmdb" "main"
+install_apk "dolphin" "community"
+# konsole and dependencies
+install_apk "knotifyconfig" "community"
+install_apk "attica" "community"
+install_apk "syndication" "community"
+install_apk "konsole" "community"
+# kate and dependencies
+install_apk "syntax-highlighting" "community"
+install_apk "ktexteditor" "community"
+install_apk "kuserfeedback" "community"
+install_apk "kate-common" "community"
+install_apk "kate" "community"
+# kdbusaddons
+install_apk "kdbusaddons" "community"
+install_apk "kfind" "community"
+# ark and dependencies
+install_apk "kfilemetadata" "community"
+install_apk "libarchive" "main"
+install_apk "libzip" "community"
+install_apk "lrzip" "community"
+install_apk "unzip" "main"
+install_apk "zip" "main"
+install_apk "zstd" "main"
+install_apk "ark" "community"
+# okular and dependencies
+install_apk "okular-common" "community"
+install_apk "phonon-qt6" "community"
+install_apk "purpose" "community"
+install_apk "qt6-qtspeech" "community" "${QT6_BRANCH}"
+install_apk "threadweaver" "community"
+install_apk "libdjvulibre" "community"
+install_apk "poppler" "main"
+install_apk "poppler-qt6" "community"
+install_apk "libspectre" "community"
+install_apk "kpty" "community"
+install_apk "kdegraphics-mobipocket" "community"
+install_apk "libqca-qt6" "community"
+install_apk "discount" "community"
+install_apk "hunspell" "main"
+install_apk "sonnet" "community"
+install_apk "okular" "community"
+install_apk "spectacle" "community"
+# gwenview and dependencies
+install_apk "exiv2" "community"
+install_apk "libraw" "community"
+install_apk "libkdcraw" "community"
+install_apk "kcolorpicker" "community"
+install_apk "kimageannotator" "community"
+install_apk "kitemmodels" "community"
+install_apk "lcms2" "main"
+install_apk "kimageformats" "community"
+install_apk "gwenview" "community"
+install_apk "kdeconnect" "community"
+
+# --- SDDM display manager ---
+echo "[*] Installing SDDM display manager..."
+install_apk "sddm" "community"
+install_apk "sddm-breeze" "community"
+install_apk "qt6-qtdeclarative" "community" "${QT6_BRANCH}"
+# libQt6Positioning.so.6 (needed by kded colorcorrectlocationupdater module)
+install_apk "qt6-qtpositioning" "community" "${QT6_BRANCH}"
+install_apk "qt6-qtimageformats" "community" "${QT6_BRANCH}"
+install_apk "qt6-qtmultimedia" "community" "${QT6_BRANCH}"
+install_apk "qt6-qtnetworkauth" "community" "${QT6_BRANCH}"
+install_apk "qt6-qtvirtualkeyboard" "community" "${QT6_BRANCH}"
+
+# --- KDE Frameworks 6 extras ---
+install_apk "baloo" "community"
+install_apk "baloo-widgets" "community"
+install_apk "kded" "community"
+install_apk "kdialog" "community"
+install_apk "kde-cli-tools" "community"
+install_apk "kde-gtk-config" "community"
+install_apk "kmenuedit" "community"
+install_apk "ksystemlog" "community"
+install_apk "ksystemstats" "community"
+install_apk "kactivitymanagerd" "community"
+# libqsqlite.so (QSQLITE database driver for kactivitymanagerd & plasma-activities-stats)
+install_apk "qt6-qtbase-sqlite" "community" "${QT6_BRANCH}"
+
+# --- Additional KDE Plasma 6 runtime dependencies ---
+# libAppStreamQt.so.3 (needed by kickoff launcher kicker plugin)
+install_apk "appstream-qt" "community"
+# libKExiv2Qt6.so.0 (needed by wallpaper image plugin)
+install_apk "libkexiv2" "community"
+# libKF6UnitConversion.so.6 (needed by weather plugin)
+install_apk "kunitconversion" "community"
+# libQCoro6DBus.so.0 (needed by brightness control & plasma-nm)
+install_apk "qcoro" "community"
+# libnm.so.0 (needed by plasma-nm)
+install_apk "libnm" "community"
+# libpolkit-qt6-core-1.so.1 (needed by plasma-localegen-helper)
+install_apk "polkit-qt6" "community"
+install_apk "kdeclarative" "community"
+install_apk "oxygen" "community"
+install_apk "xdg-utils" "community"
+install_apk "desktop-file-utils" "community"
 
 # 5. Inject custom binaries
 echo "[*] Injecting custom binaries into rootfs..."

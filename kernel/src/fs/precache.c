@@ -12,12 +12,6 @@
 static const char *const essential_files[] = {
     "/lib/ld-musl-x86_64.so.1",
     "/lib/libc.musl-x86_64.so.1",
-    "/lib/libgtk-3.so.0",
-    "/lib/libgdk-3.so.0",
-    "/lib/libglib-2.0.so.0",
-    "/lib/libgobject-2.0.so.0",
-    "/lib/libgio-2.0.so.0",
-    "/lib/libcairo.so.2",
     NULL
 };
 

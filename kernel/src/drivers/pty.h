@@ -24,6 +24,12 @@
 
 #define TIOCGPGRP 0x540F
 #define TIOCSPGRP 0x5410
+/* Bytes waiting to be read.  TIOCINQ and FIONREAD are the same request on Linux
+ * (0x541B).  kpty asks this before every read of the master and skips the read
+ * outright when the ioctl fails, so without it a terminal shows nothing at all
+ * while the shell behind it keeps running. */
+#define TIOCINQ 0x541B
+#define FIONREAD 0x541B
 
 // PTY ioctl commands (Linux compatible)
 #define TIOCGPTN 0x80045430   // Get PTY number

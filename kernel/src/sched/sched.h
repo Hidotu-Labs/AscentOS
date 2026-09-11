@@ -28,6 +28,25 @@ struct mm_struct {
   spinlock_t lock;         // Lock for thread-safe MM state updates
   uint64_t saved_auxv[64]; // Auxiliary vector (type, val pairs)
   uint32_t auxv_count;     // Number of uint64_t entries
+  /*
+   * argv snapshot for /proc/<pid>/cmdline, stored exactly as Linux stores it:
+   * the argument strings back to back, each NUL terminated.  Userspace matches
+   * command lines against this blob (busybox/procps `pgrep -f`, `pkill -f`,
+   * `ps`, jps, and every "already running?" guard in the desktop scripts), so
+   * substituting comm here silently breaks any pattern that contains a path -
+   * e.g. Alpine's pipewire-launcher waits for `pgrep -f /usr/bin/pipewire`,
+   * which can never match the 15-character name "pipewire" and therefore spins
+   * exec'ing sleep+pgrep once per second forever.
+   *
+   * Bounded copy: a caller with a megabyte of argv must not be able to grow
+   * per-process kernel memory, and no reader needs more than the invocation.
+   * arg_start/arg_end are the user VA bounds of the real blob (what Linux
+   * reports so setproctitle() can be supported later).
+   */
+  char     saved_cmdline[512];
+  uint32_t cmdline_len; // Valid bytes in saved_cmdline (0 = unknown/kernel thread)
+  uint64_t arg_start;   // User VA of argv[0] string
+  uint64_t arg_end;     // User VA just past the last argv string
 };
 
 
@@ -167,10 +186,18 @@ struct thread {
   uint32_t sid;                // Session ID
   int exit_status;             // Status code when exiting (for wait4)
   uint64_t *tid_address;       // Pointer to user-space TID for set_tid_address
+  uint64_t robust_list;        // Futex robust-list head from set_robust_list(2)
   struct thread *global_next;  // Used to link all threads together
   struct thread *rq_next;      // Next thread in circular run queue
   struct thread *rq_prev;      // Previous thread in circular run queue
   bool on_runqueue;            // Protected by owning CPU queue_lock
+  /* Deferred preemption request.  Set by sched_wakeup() when a thread more
+   * eligible than whatever is running becomes runnable on *this* CPU, and
+   * consumed by sched_check_resched() at interrupt/syscall exit.  Without it
+   * a same-CPU wake had to wait for the next LAPIC tick (~1 ms) before the
+   * woken thread ran, which is the dominant cost of every X11 request/reply
+   * round trip and every input event. */
+  volatile bool need_resched;
   uint8_t queued_priority;     // Queue containing this thread
   uint64_t ready_since_ms;     // Start of current runnable wait
   struct thread *reap_next;    // Used for automatic reaping of detached threads
@@ -251,6 +278,15 @@ struct thread {
   uint64_t last_syscall_num;
   uint64_t last_syscall_args[6];
   int64_t last_syscall_ret;
+
+  // Futex parking diagnostics (lock/lockdiag.c).  A thread blocked on a futex
+  // with no timeout armed is the shape of a lost wakeup, and these three are
+  // what let the hang report name it.  Appended at the end: assembly pins
+  // offsets earlier in this struct, not these.
+  uint64_t blocked_since_ms; // 0 when not parked in futex_wait()
+  bool in_futex_wait;
+  bool blocked_reported; // already named once by the stuck-waiter warning
+  uint32_t futex_bucket; // futex_hash bucket, 0xFFFFFFFF when not waiting
 };
 
 /*
@@ -288,6 +324,10 @@ struct thread *sched_create_kernel_thread(void (*entry_point)(void),
 void sched_tick(struct registers *regs);
 void sched_yield_user(void);
 
+/* Deferred preemption point for the interrupt and syscall return paths.
+ * to_user is true when the caller is about to return to ring 3. */
+void sched_check_resched(bool to_user);
+
 // Returns the current thread *for the CPU currently executing this code*
 struct thread *sched_get_current(void);
 
@@ -304,6 +344,12 @@ bool sched_get_thread_snapshot(uint32_t tid,
                                struct sched_thread_snapshot *snapshot);
 size_t sched_read_thread_auxv(uint32_t tid, uint32_t offset, uint32_t size,
                               uint8_t *buffer);
+/* /proc/<pid>/cmdline backing store: copies out of the argv snapshot taken at
+ * exec.  Returns bytes copied (0 once past the end / no argv recorded). */
+size_t sched_read_thread_cmdline(uint32_t tid, uint32_t offset, uint32_t size,
+                                 uint8_t *buffer);
+/* Total readable length of that snapshot, or 0 if there is none. */
+size_t sched_thread_cmdline_size(uint32_t tid);
 bool sched_get_nth_thread_tid(uint32_t index, uint32_t *tid);
 bool sched_get_nth_open_fd(uint32_t tid, uint32_t index, uint32_t *fd);
 bool sched_get_fd_path_snapshot(uint32_t tid, uint32_t fd, char *path,

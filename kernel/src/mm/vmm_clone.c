@@ -92,18 +92,25 @@ static uint64_t *clone_table(uint64_t *src_table_phys, int level, size_t start,
   return (uint64_t *)new_table_phys;
 }
 
-// Return true when `vaddr` falls inside a MAP_SHARED VMA.
-static bool is_shared_vma(struct vma_list *vmas, uint64_t vaddr) {
-  if (!vmas)
-    return false;
-  struct vma *vma = vma_find(vmas, vaddr);
-  return vma && (vma->flags & MAP_SHARED);
+// Return the VMA containing `vaddr`, using a one-entry cache.  The page walk
+// visits leaf pages in ascending address order, so consecutive pages almost
+// always fall in the same VMA; caching the last hit avoids an AVL lookup for
+// every single mapped page.
+static struct vma *find_vma_cached(struct vma_list *vmas, uint64_t vaddr,
+                                   struct vma **cache) {
+  if (*cache && vaddr >= (*cache)->start && vaddr < (*cache)->end)
+    return *cache;
+  struct vma *found = vma_find(vmas, vaddr);
+  if (found)
+    *cache = found;
+  return found;
 }
 
 static uint64_t *clone_table_vma(uint64_t *src_table_phys, int level,
                                  size_t start, size_t end,
                                  struct vma_list *vmas, uint64_t base_addr,
-                                 size_t *cow_count) {
+                                 size_t *cow_count,
+                                 struct vma **vma_cache) {
   void *new_table_phys = pmm_alloc();
   if (!new_table_phys)
     return NULL;
@@ -123,7 +130,8 @@ static uint64_t *clone_table_vma(uint64_t *src_table_phys, int level,
     if (src_virt[i] & PAGE_FLAG_PS) {
       if (level == 2) {
         uint64_t child_base = base_addr | ((uint64_t)i << 21);
-        if (is_shared_vma(vmas, child_base)) {
+        struct vma *hv = find_vma_cached(vmas, child_base, vma_cache);
+        if (hv && (hv->flags & MAP_SHARED)) {
           new_virt[i] = src_virt[i];
         } else {
           void *new_huge = pmm_alloc_huge_page();
@@ -160,8 +168,15 @@ static uint64_t *clone_table_vma(uint64_t *src_table_phys, int level,
       uint64_t page_vaddr = base_addr | (i << 12);
       uint64_t phys = src_virt[i] & PAGE_MASK;
 
-      if (phys == vmm_get_vsyscall_page_phys() || is_shared_vma(vmas, page_vaddr)) {
-        // Shared/vDSO: alias the physical frame.
+      struct vma *pvma = find_vma_cached(vmas, page_vaddr, vma_cache);
+      bool shared = pvma && (pvma->flags & MAP_SHARED);
+
+      if (phys == vmm_get_vsyscall_page_phys() || shared) {
+        // Shared/vDSO: alias the physical frame.  Page-cache-backed shared
+        // mappings carry one PMM reference per PTE, so the child's copy needs
+        // its own; device-backed frames are owned by their backing object.
+        if (shared && (pvma->flags & MAP_PAGECACHE) && pmm_is_managed(phys))
+          pmm_incref((void *)phys);
         new_virt[i] = src_virt[i];
       } else {
         // Private: CoW — mark both sides read-only and bump the refcount.
@@ -183,7 +198,7 @@ static uint64_t *clone_table_vma(uint64_t *src_table_phys, int level,
       uint64_t *child_src_phys = (uint64_t *)(src_virt[i] & PAGE_MASK);
       uint64_t *child_new_phys =
           clone_table_vma(child_src_phys, level - 1, 0, 512, vmas, child_base,
-                          cow_count);
+                          cow_count, vma_cache);
       if (!child_new_phys)
         return NULL;
 
@@ -196,12 +211,11 @@ static uint64_t *clone_table_vma(uint64_t *src_table_phys, int level,
 }
 
 uint64_t vmm_clone_user_mappings(uint64_t *src_pml4_phys) {
-  rawspinlock_t *lock = vmm_get_lock();
-  rawspinlock_acquire(lock);
+  vmm_lock_acquire();
 
   void *new_pml4_phys = pmm_alloc();
   if (!new_pml4_phys) {
-    rawspinlock_release(lock);
+    vmm_lock_release();
     return 0;
   }
 
@@ -221,7 +235,7 @@ uint64_t vmm_clone_user_mappings(uint64_t *src_pml4_phys) {
     uint64_t *child_src_phys = (uint64_t *)(src_pml4_virt[i] & PAGE_MASK);
     uint64_t *child_new_phys = clone_table(child_src_phys, 3, 0, 512);
     if (!child_new_phys) {
-      rawspinlock_release(lock);
+      vmm_lock_release();
       return 0;
     }
 
@@ -233,18 +247,17 @@ uint64_t vmm_clone_user_mappings(uint64_t *src_pml4_phys) {
   for (size_t i = 256; i < 512; i++)
     new_pml4_virt[i] = src_pml4_virt[i];
 
-  rawspinlock_release(lock);
+  vmm_lock_release();
   return (uint64_t)new_pml4_phys;
 }
 
 uint64_t vmm_clone_user_mappings_vma(uint64_t *src_pml4_phys,
                                      struct vma_list *vmas) {
-  rawspinlock_t *lock = vmm_get_lock();
-  rawspinlock_acquire(lock);
+  vmm_lock_acquire();
 
   void *new_pml4_phys = pmm_alloc();
   if (!new_pml4_phys) {
-    rawspinlock_release(lock);
+    vmm_lock_release();
     return 0;
   }
 
@@ -255,6 +268,7 @@ uint64_t vmm_clone_user_mappings_vma(uint64_t *src_pml4_phys,
     new_pml4_virt[i] = 0;
 
   size_t cow_count = 0;
+  struct vma *vma_cache = NULL;
 
   // Clone user half with VMA awareness.
   for (size_t i = 0; i < 256; i++) {
@@ -269,10 +283,11 @@ uint64_t vmm_clone_user_mappings_vma(uint64_t *src_pml4_phys,
       base_addr |= 0xFFFF000000000000ULL;
 
     uint64_t *child_src_phys = (uint64_t *)(src_pml4_virt[i] & PAGE_MASK);
-    uint64_t *child_new_phys =
-        clone_table_vma(child_src_phys, 3, 0, 512, vmas, base_addr, &cow_count);
+    uint64_t *child_new_phys = clone_table_vma(child_src_phys, 3, 0, 512, vmas,
+                                               base_addr, &cow_count,
+                                               &vma_cache);
     if (!child_new_phys) {
-      rawspinlock_release(lock);
+      vmm_lock_release();
       return 0;
     }
 
@@ -287,21 +302,23 @@ uint64_t vmm_clone_user_mappings_vma(uint64_t *src_pml4_phys,
   // If any pages were converted to CoW, issue a single batched TLB shootdown
   // instead of thousands of serial per-page IPI interrupts!
   if (cow_count > 0) {
-    tlb_shootdown_all();
+    /* Requested, not waited for: vmm_lock is still held here, and every target
+     * reaches its page fault handler through that lock.  The broadcast goes out
+     * from vmm_lock_release(), a few instructions later on this same core. */
+    tlb_flush_deferred_all();
   }
 
-  rawspinlock_release(lock);
+  vmm_lock_release();
   return (uint64_t)new_pml4_phys;
 }
 
 
 uint64_t *vmm_create_pml4(void) {
-  rawspinlock_t *lock = vmm_get_lock();
-  rawspinlock_acquire(lock);
+  vmm_lock_acquire();
 
   void *new_pml4_phys = pmm_alloc();
   if (!new_pml4_phys) {
-    rawspinlock_release(lock);
+    vmm_lock_release();
     return NULL;
   }
 
@@ -317,6 +334,6 @@ uint64_t *vmm_create_pml4(void) {
   for (size_t i = 256; i < 512; i++)
     new_pml4_virt[i] = src_pml4_virt[i];
 
-  rawspinlock_release(lock);
+  vmm_lock_release();
   return (uint64_t *)new_pml4_phys;
 }

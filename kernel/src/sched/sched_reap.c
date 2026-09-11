@@ -18,6 +18,9 @@
 // forced-exit thread stack is released.
 void futex_remove_thread_waiters(struct thread *thread);
 
+// Wakes poll()/waitid(P_PIDFD) waiters; see sys_process.c.
+void pidfd_wake_waiters(void);
+
 // Threads in a CLONE_THREAD group are not wait4() children. Queue them for
 // destruction after they have switched off their kernel stacks.
 static struct thread *reap_queue = NULL;
@@ -294,6 +297,10 @@ void sched_terminate_thread_group(struct thread *current) {
   } else {
     spinlock_release(&tid_lock);
   }
+
+  /* The leader is now a zombie and the siblings are DEAD: tell anyone waiting
+   * on a pidfd for this process group. */
+  pidfd_wake_waiters();
 
   if (killed) {
     klog_debug_puts("[EXIT_GROUP] queued sibling threads: ");

@@ -19,9 +19,8 @@ uint32_t ext2_read_impl(vfs_node_t *node, uint32_t offset, uint32_t size,
     size = inode.i_size - offset;
 
   uint32_t bytes_read = 0;
-  uint8_t *block_buf  = kmalloc(mnt->block_size);
-  if (!block_buf)
-    return 0;
+  uint8_t *block_buf  = NULL;
+  bool is_user = is_user_ptr((uint64_t)buffer);
 
   while (bytes_read < size) {
     uint32_t current_offset  = offset + bytes_read;
@@ -33,27 +32,38 @@ uint32_t ext2_read_impl(vfs_node_t *node, uint32_t offset, uint32_t size,
 
     uint32_t disk_block = ext2_get_block_num(mnt, &inode, logical_block);
     if (disk_block == 0) {
-      if (is_user_ptr((uint64_t)buffer))
+      if (is_user)
         clear_user(buffer + bytes_read, to_copy);
       else
         memset(buffer + bytes_read, 0, to_copy);
     } else {
-      ext2_read_block(mnt, disk_block, block_buf);
-      if (is_user_ptr((uint64_t)buffer)) {
-        unsigned long uncopied = copy_to_user(buffer + bytes_read, block_buf + offset_in_block, to_copy);
-        if (uncopied > 0) {
-          bytes_read += (to_copy - (uint32_t)uncopied);
-          break;
-        }
+      // Direct zero-copy: if reading a full block directly into kernel memory, read directly into destination
+      if (!is_user && offset_in_block == 0 && to_copy == mnt->block_size) {
+        ext2_read_block(mnt, disk_block, buffer + bytes_read);
       } else {
-        memcpy(buffer + bytes_read, block_buf + offset_in_block, to_copy);
+        if (!block_buf) {
+          block_buf = kmalloc(mnt->block_size);
+          if (!block_buf)
+            break;
+        }
+        ext2_read_block(mnt, disk_block, block_buf);
+        if (is_user) {
+          unsigned long uncopied = copy_to_user(buffer + bytes_read, block_buf + offset_in_block, to_copy);
+          if (uncopied > 0) {
+            bytes_read += (to_copy - (uint32_t)uncopied);
+            break;
+          }
+        } else {
+          memcpy(buffer + bytes_read, block_buf + offset_in_block, to_copy);
+        }
       }
     }
 
     bytes_read += to_copy;
   }
 
-  kfree(block_buf);
+  if (block_buf)
+    kfree(block_buf);
   return bytes_read;
 }
 
@@ -396,8 +406,17 @@ int ext2_rmdir_impl(vfs_node_t *node, char *name) {
   if (!ext2_dir_is_empty(mnt, target_ino))
     return -1;
 
-  if (ext2_remove_dir_entry(mnt, node->inode, name))
+  /* This path used to update the bitmaps/inode and the group descriptor
+   * outside any transaction.  Run it as one transaction so the removal is
+   * journaled as a unit and the lazy allocator counters are flushed once by
+   * ext3_journal_stop(). */
+  if (ext3_journal_start(mnt) != 0)
     return -1;
+
+  if (ext2_remove_dir_entry(mnt, node->inode, name)) {
+    ext3_journal_stop(mnt);
+    return -1;
+  }
 
   ext2_free_all_blocks(mnt, &inode);
   inode.i_links_count = 0;
@@ -415,8 +434,9 @@ int ext2_rmdir_impl(vfs_node_t *node, char *name) {
   uint32_t group = (target_ino - 1) / mnt->inodes_per_group;
   if (mnt->bgdt[group].bg_used_dirs_count > 0)
     mnt->bgdt[group].bg_used_dirs_count--;
-  ext2_write_bgdt(mnt);
+  ext2_mark_metadata_dirty(mnt);
 
+  ext3_journal_stop(mnt);
   return 0;
 }
 

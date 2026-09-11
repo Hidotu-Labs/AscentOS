@@ -90,6 +90,10 @@ typedef struct eventpoll {
   // Watched FDs - simple array for O(1) lookup
   epitem_t *items[EPOLL_MAX_WATCHED];
   int item_count;
+  /* Highest fd index ever used + 1.  Only grows while the instance is alive,
+   * so the missed-wakeup rescan in epoll_wait_impl() can walk this instead of
+   * all EPOLL_MAX_WATCHED slots on every pass. */
+  int items_high;
   
   // Ready list - FDs with events pending
   struct list_head rdllist;    // Ready list head

@@ -11,6 +11,7 @@
 #include "lib/string.h"
 #include "mm/heap.h"
 #include "mm/pmm.h"
+#include "mm/tlb_shootdown.h"
 #include "sched/sched.h"
 #include "smp/cpu.h"
 #include <stdint.h>
@@ -47,6 +48,9 @@ uint32_t procfs_meminfo_read(vfs_node_t *node, uint32_t offset, uint32_t size,
   memcpy(buffer, buf + offset, size);
   return size;
 }
+
+static uint32_t procfs_tlbstats_read(vfs_node_t *node, uint32_t offset,
+                                     uint32_t size, uint8_t *buffer);
 
 static uint32_t procfs_drmstats_read(vfs_node_t *node, uint32_t offset,
                                      uint32_t size, uint8_t *buffer) {
@@ -166,9 +170,47 @@ static uint32_t procfs_drmstats_read(vfs_node_t *node, uint32_t offset,
   return size;
 }
 
+/* /proc/tlb_stats - what TLB invalidation is costing the system.
+ *
+ * Compare handler_full_flushes against shootdowns: every single-page
+ * invalidation currently makes every other core throw away all of its
+ * non-global translations, so the second number is a per-page multiplier on
+ * cache-miss cost elsewhere in the system. ack_wait_ns is time spent holding
+ * the global vmm_lock's neighbour (shootdown_lock) while spinning for peers. */
+static uint32_t procfs_tlbstats_read(vfs_node_t *node, uint32_t offset,
+                                     uint32_t size, uint8_t *buffer) {
+  char buf[512];
+  tlb_shootdown_stats_t s;
+  tlb_shootdown_get_stats(&s);
+
+  uint64_t avg_ns = s.shootdowns ? s.ack_wait_ns / s.shootdowns : 0;
+  int len = snprintf(buf, sizeof(buf),
+      "shootdowns: %llu\n"
+      "ipis_sent: %llu\n"
+      "broadcast_all: %llu\n"
+      "handler_full_flushes: %llu\n"
+      "ack_wait_ms: %llu\n"
+      "average_ack_wait_us: %llu\n"
+      "max_ack_wait_us: %llu\n",
+      (unsigned long long)s.shootdowns,
+      (unsigned long long)s.ipis_sent,
+      (unsigned long long)s.broadcast_all,
+      (unsigned long long)s.handler_full_flushes,
+      (unsigned long long)(s.ack_wait_ns / 1000000ULL),
+      (unsigned long long)(avg_ns / 1000ULL),
+      (unsigned long long)(s.max_ack_wait_ns / 1000ULL));
+
+  node->length = (uint32_t)len;
+  if (offset >= (uint32_t)len)
+    return 0;
+  if (offset + size > (uint32_t)len)
+    size = (uint32_t)len - offset;
+  memcpy(buffer, buf + offset, size);
+  return size;
+}
+
 uint32_t procfs_cpuinfo_read(vfs_node_t *node, uint32_t offset, uint32_t size,
-                             uint8_t *buffer) {
-  // 16KB is plenty for 64 cores
+                             uint8_t *buffer) {  // 16KB is plenty for 64 cores
   char *buf = kmalloc(16384);
   if (!buf)
     return 0;
@@ -717,16 +759,30 @@ static uint32_t procfs_pid_status_read(vfs_node_t *node, uint32_t offset,
   return size;
 }
 
-// /proc/<pid>/cmdline read
-
+/*
+ * /proc/<pid>/cmdline - the argv blob captured at exec, arguments NUL separated
+ * exactly like Linux.  Readers match command lines against this content
+ * (pgrep/pkill -f, ps, jps, every "is it already running?" guard in the desktop
+ * scripts), so it has to carry the full path the process was invoked with.
+ *
+ * Falls back to comm only when no argv was recorded - a kernel thread, or the
+ * window after a fresh exec's address space was reset but before its stack was
+ * built - so readers get a usable name instead of an empty file.
+ */
 static uint32_t procfs_pid_cmdline_read(vfs_node_t *node, uint32_t offset,
                                         uint32_t size, uint8_t *buffer) {
   uint32_t pid = node->impl;
+
+  size_t total = sched_thread_cmdline_size(pid);
+  if (total > 0) {
+    node->length = (uint32_t)total;
+    return (uint32_t)sched_read_thread_cmdline(pid, offset, size, buffer);
+  }
+
   struct sched_thread_snapshot t;
   if (!sched_get_thread_snapshot(pid, &t))
     return 0;
 
-  // Return comm as argv[0] (NUL-terminated, as Linux does)
   const char *cmd = t.comm[0] ? t.comm : "unknown";
   uint32_t len = (uint32_t)strlen(cmd) + 1; // include NUL
   node->length = len;
@@ -735,6 +791,35 @@ static uint32_t procfs_pid_cmdline_read(vfs_node_t *node, uint32_t offset,
   if (offset + size > len)
     size = len - offset;
   memcpy(buffer, cmd + offset, size);
+  return size;
+}
+
+/*
+ * /proc/<pid>/comm - the thread name, newline terminated.  This is the file
+ * pgrep/pkill match against when -f is NOT given, and it is deliberately
+ * distinct from cmdline: comm is capped at 15 characters and holds a bare
+ * name, never a path.
+ */
+static uint32_t procfs_pid_comm_read(vfs_node_t *node, uint32_t offset,
+                                     uint32_t size, uint8_t *buffer) {
+  uint32_t pid = node->impl;
+  struct sched_thread_snapshot t;
+  if (!sched_get_thread_snapshot(pid, &t))
+    return 0;
+
+  char line[18]; // comm (15) + '\n' + slack
+  uint32_t len = (uint32_t)strlen(t.comm);
+  if (len > sizeof(t.comm) - 1)
+    len = sizeof(t.comm) - 1;
+  memcpy(line, t.comm, len);
+  line[len++] = '\n';
+
+  node->length = len;
+  if (offset >= len)
+    return 0;
+  if (offset + size > len)
+    size = len - offset;
+  memcpy(buffer, line + offset, size);
   return size;
 }
 
@@ -854,11 +939,13 @@ static struct dirent *procfs_pid_fd_readdir(vfs_node_t *node, uint32_t index) {
   if (index == 0) {
     strcpy(d.name, ".");
     d.ino = node->inode;
+    d.d_type = DT_DIR;
     return &d;
   }
   if (index == 1) {
     strcpy(d.name, "..");
     d.ino = node->inode;
+    d.d_type = DT_DIR;
     return &d;
   }
 
@@ -867,6 +954,7 @@ static struct dirent *procfs_pid_fd_readdir(vfs_node_t *node, uint32_t index) {
     return NULL;
   snprintf(d.name, sizeof(d.name), "%u", fd);
   d.ino = (pid << 16) | fd;
+  d.d_type = DT_LNK; // /proc/<pid>/fd/N entries are symlinks
   return &d;
 }
 
@@ -975,6 +1063,19 @@ static vfs_node_t *make_pid_dir(uint32_t pid) {
     cmdline_node->length = 256;
     cmdline_node->read = procfs_pid_cmdline_read;
     ramfs_mount_node(dir, cmdline_node);
+  }
+
+  // comm — what pgrep/pkill match without -f (distinct from cmdline)
+  vfs_node_t *comm_node = kmalloc(sizeof(vfs_node_t));
+  if (comm_node) {
+    vfs_node_init(comm_node);
+    strcpy(comm_node->name, "comm");
+    comm_node->flags = FS_FILE;
+    comm_node->mask = 0444;
+    comm_node->impl = pid;
+    comm_node->length = 16;
+    comm_node->read = procfs_pid_comm_read;
+    ramfs_mount_node(dir, comm_node);
   }
 
   // statm — memory usage in pages (VIRT/RES for htop)
@@ -1171,11 +1272,13 @@ static struct dirent *procfs_root_readdir(vfs_node_t *node, uint32_t index) {
   if (index == 0) {
     strcpy(procfs_dent.name, ".");
     procfs_dent.ino = node->inode;
+    procfs_dent.d_type = DT_DIR;
     return &procfs_dent;
   }
   if (index == 1) {
     strcpy(procfs_dent.name, "..");
     procfs_dent.ino = node->inode;
+    procfs_dent.d_type = DT_DIR;
     return &procfs_dent;
   }
 
@@ -1198,6 +1301,7 @@ static struct dirent *procfs_root_readdir(vfs_node_t *node, uint32_t index) {
   if (curr) {
     strcpy(procfs_dent.name, curr->node->name);
     procfs_dent.ino = curr->node->inode;
+    procfs_dent.d_type = vfs_dtype(curr->node->flags);
     return &procfs_dent;
   }
 
@@ -1212,6 +1316,7 @@ static struct dirent *procfs_root_readdir(vfs_node_t *node, uint32_t index) {
     return NULL;
   snprintf(procfs_dent.name, sizeof(procfs_dent.name), "%u", pid);
   procfs_dent.ino = 0x10000 + pid;
+  procfs_dent.d_type = DT_DIR;
   return &procfs_dent;
 }
 
@@ -1294,6 +1399,7 @@ void procfs_init(void) {
 
     // Apply the mount: anyone looking up 'proc' will now get our virtual root
     vfs_mount_ex(proc_dir, procfs_root, "proc", "procfs");
+    vfs_close(proc_dir);
 
     // Add /proc/meminfo
     vfs_node_t *meminfo_node = kmalloc(sizeof(vfs_node_t));
@@ -1318,6 +1424,18 @@ void procfs_init(void) {
       drmstats_node->read = procfs_drmstats_read;
       drmstats_node->length = 2048;
       ramfs_mount_node(procfs_root, drmstats_node);
+    }
+
+    // Add /proc/tlbstats: what TLB invalidation costs (mm/tlb_shootdown.c)
+    vfs_node_t *tlbstats_node = kmalloc(sizeof(vfs_node_t));
+    if (tlbstats_node) {
+      vfs_node_init(tlbstats_node);
+      strncpy(tlbstats_node->name, "tlbstats", 127);
+      tlbstats_node->flags = FS_FILE | FS_PERSISTENT;
+      tlbstats_node->mask = 0444;
+      tlbstats_node->read = procfs_tlbstats_read;
+      tlbstats_node->length = 512;
+      ramfs_mount_node(procfs_root, tlbstats_node);
     }
 
     // Add /proc/cpuinfo
@@ -1539,13 +1657,17 @@ static uint32_t procfs_net_dev_read(vfs_node_t *node, uint32_t offset,
     struct net_device *dev = net_device_default();
     if (dev) {
         pos += snprintf(buf + pos, 2048 - pos,
-            "%6s: %llu %llu    0    0    0     0          0         0"
-            " %llu %llu    0    0    0     0       0          0\n",
+            "%6s: %llu %llu %llu %llu    0     0          0         0"
+            " %llu %llu %llu %llu    0     0       0          0\n",
             dev->name,
             (unsigned long long)dev->stats.rx_bytes,
             (unsigned long long)dev->stats.rx_packets,
+            (unsigned long long)(dev->stats.rx_errors + dev->stats.rx_overflows),
+            (unsigned long long)dev->stats.rx_dropped,
             (unsigned long long)dev->stats.tx_bytes,
-            (unsigned long long)dev->stats.tx_packets);
+            (unsigned long long)dev->stats.tx_packets,
+            (unsigned long long)dev->stats.tx_errors,
+            (unsigned long long)dev->stats.tx_dropped);
     }
 
     node->length = (uint32_t)pos;

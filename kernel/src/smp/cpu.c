@@ -156,8 +156,20 @@ void ap_main(void) {
   klog_hex32(current->apic_id);
   klog_puts(") ONLINE.\n");
 
-  // Endless loop, waiting for IPIs or scheduler interrupts
+  // Endless loop, waiting for IPIs or scheduler interrupts.
+  //
+  // The LAPIC is one-shot and only armed when this CPU has a deadline, so an
+  // idle AP used to park in hlt forever and take exactly one tick ever.  That
+  // made the BSP the only core running the hang detector (and the only core
+  // polling the serial trigger): if the BSP stalled, the machine went silent
+  // with no report at all.  Re-arming a slow deadline keeps every core taking
+  // one tick a second, which is enough for all of them to notice a hang and
+  // enough for any of them to read the serial console.
   while (1) {
+    /* rearm_if_earlier(), not arm_at(): a sleeping thread's deadline may have
+     * been armed by sched_arm_next_deadline() on the way into this idle loop,
+     * and a plain rearm here would push that wakeup out to a full second. */
+    lapic_timer_rearm_if_earlier(lapic_timer_get_ms() + 1000);
     hal_cpu_halt();
   }
 }

@@ -1,4 +1,5 @@
 #include "ext3.h"
+#include "fs/ext2/ext2_internal.h"
 #include "console/klog.h"
 #include "lib/string.h"
 #include "sched/sched.h"
@@ -182,12 +183,23 @@ int ext3_journal_block(ext2_mount_t *mnt, uint32_t block_nr, const void *data) {
 
 int ext3_journal_stop(ext2_mount_t *mnt) {
   ext3_journal_state_t *trans = ext3_journal_state(mnt);
-  if (!trans->active)
+  if (!trans->active) {
+    /* A mount without a journal has no commit point, so write back the lazy
+     * allocator counters here.  On journaled mounts stop() is only reached by
+     * the transaction owner, which takes the commit path below. */
+    if (!(mnt->sb.s_feature_compat & EXT3_FEATURE_COMPAT_HAS_JOURNAL))
+      ext2_flush_metadata(mnt);
     return 0;
+  }
   if (trans->depth > 1) {
     trans->depth--;
     return 0;
   }
+
+  /* All group-descriptor and superblock changes made by this transaction are
+   * written once, before the descriptor is finalised, so recovery replays
+   * them together with the bitmap blocks. */
+  ext2_flush_metadata(mnt);
 
   if (trans->blocks_in_trans > 0) {
     uint32_t last_tag_off =

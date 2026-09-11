@@ -60,6 +60,11 @@ void vmm_unmap_page(uint64_t *pml4, uint64_t virtual_addr);
 // Returns true if the address is mapped with a huge page (PS bit set on PD/PDPT)
 bool vmm_is_huge_page(uint64_t *pml4, uint64_t virtual_addr);
 
+// Replaces a 2 MB leaf mapping with 512 4 KB entries so that only part of it
+// can be torn down.  Returns false only if the page table for the split could
+// not be allocated; true also when the address was already 4 KB mapped.
+bool vmm_split_huge_page(uint64_t *pml4, uint64_t virtual_addr);
+
 // Frees empty page tables (PT, PD, PDPT) upwards if they contain no valid
 // entries
 void vmm_free_empty_tables(uint64_t *pml4, uint64_t virtual_addr);
@@ -155,7 +160,20 @@ uint64_t vmm_get_vsyscall_page_phys(void);
 #include "../lock/spinlock.h"
 
 // Returns a pointer to the VMM spinlock owned by vmm_map.c.
+//
+// Prefer vmm_lock_acquire()/vmm_lock_release() below: this is only for code
+// that has to reason about the lock itself.
 rawspinlock_t *vmm_get_lock(void);
+
+// Instrumented acquisition of vmm_lock.  vmm_lock is the lock the page fault
+// handler also needs, so a holder that blocks while holding it stops every
+// core that faults — which makes "who holds it, since when, and from where"
+// the first question any hang report has to answer.  Acquire through these
+// wrappers so lockdiag can answer it.
+void vmm_lock_acquire_at(uint64_t caller_ip);
+void vmm_lock_release(void);
+#define vmm_lock_acquire()                                                     \
+  vmm_lock_acquire_at((uint64_t)__builtin_return_address(0))
 
 // Returns the physical address of the permanent kernel PML4.
 uint64_t *vmm_get_kernel_pml4(void);

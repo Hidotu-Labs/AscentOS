@@ -81,11 +81,14 @@ typedef struct {
 } __attribute__((packed)) ahci_prdt_entry_t;
 
 // AHCI Command Table
+#define AHCI_PRDT_MAX_ENTRIES 8
+#define AHCI_PRDT_MAX_BYTES (4u * 1024 * 1024) /* 22-bit DBC field */
+
 typedef struct {
     uint8_t  cfis[64];  // Command FIS
     uint8_t  acmd[16];  // ATAPI command, 12 or 16 bytes
     uint8_t  rsv[48];   // Reserved
-    ahci_prdt_entry_t prdt_entry[1]; // PRDT entries (minimum 1, dynamically sized in practice)
+    ahci_prdt_entry_t prdt_entry[AHCI_PRDT_MAX_ENTRIES];
 } __attribute__((packed)) ahci_command_table_t;
 
 // AHCI Port Registers

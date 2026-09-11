@@ -151,6 +151,11 @@ typedef struct {
     uint8_t *data;
   } cache[EXT2_CACHE_SIZE];
   spinlock_t cache_lock;
+  /* Group-descriptor table and superblock counters are mutated in memory by
+   * the block/inode allocators.  The on-disk copies are only updated once per
+   * journal transaction (ext2_flush_metadata, called from
+   * ext3_journal_stop), not after every single allocation. */
+  bool metadata_dirty;
   ext3_journal_state_t journal;
 } ext2_mount_t;
 

@@ -8,6 +8,7 @@
 #include "../lib/tsc.h"
 #include "../drivers/usb/xhci.h"
 #include "../io/io.h"
+#include "../lock/lockdiag.h"
 #include "../sched/sched.h"
 #include "../smp/cpu.h"
 #include "../mm/vmm.h"
@@ -77,6 +78,11 @@ void lapic_timer_handler(struct registers *regs) {
     // may switch to another thread, and we need to keep receiving timer
     // interrupts. Double EOI (here + in isr_handler) is harmless.
     lapic_write(LAPIC_EOI, 0);
+
+    /* Hang detector.  Runs after EOI so a report cannot wedge the local
+     * LAPIC in-service bit, and before the scheduler because the report wants
+     * to describe the machine exactly as it is. */
+    lockdiag_tick();
 
     // Call the scheduler. Every core handles its own preemption.
     // Safety check: only yield if we have a valid cpu structure and a thread to switch from.

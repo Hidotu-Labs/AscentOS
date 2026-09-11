@@ -60,6 +60,17 @@ static inline void serial_enqueue_locked(char c) {
   serial_head = next;
 }
 
+/* How much is queued but not yet on the wire.  The ring is drained only by the
+ * BSP's timer tick, so a nonzero count that keeps growing means the BSP has
+ * stopped ticking - which would make the log stop mid-sentence on a kernel that
+ * is otherwise still running, and is the first thing to rule out when a hang
+ * report never appears. */
+uint32_t serial_pending_bytes(void) {
+  uint32_t head = __atomic_load_n(&serial_head, __ATOMIC_RELAXED);
+  uint32_t tail = __atomic_load_n(&serial_tail, __ATOMIC_RELAXED);
+  return (uint32_t)((head - tail) & SERIAL_BUF_MASK);
+}
+
 // Drain as many queued bytes as the UART FIFO can accept right now (non-blocking)
 void serial_flush(void) {
   spinlock_acquire(&serial_lock);
@@ -170,6 +181,14 @@ void serial_write_sync(const char *data, size_t length) {
 }
 
 int serial_received(void) { return inb(COM1 + 5) & 1; }
+
+/* Non-blocking read: -1 when nothing is waiting.  Used by the hang-report
+ * trigger, which polls from the timer tick and must never stall. */
+int serial_try_get_char(void) {
+  if (!(inb(COM1 + 5) & 1))
+    return -1;
+  return (int)(uint8_t)inb(COM1);
+}
 
 char serial_get_char(void) {
   while (serial_received() == 0) {

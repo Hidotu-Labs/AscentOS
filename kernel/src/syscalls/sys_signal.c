@@ -493,8 +493,18 @@ static uint64_t sys_rt_sigreturn(struct syscall_regs *sregs) {
 }
 
 // Signal Delivery
+extern bool process_core_dump_enabled;
 extern void process_dump_core(struct thread *t, struct registers *regs,
                               int sig);
+
+/* Signals whose default disposition is to be discarded rather than to terminate
+ * or stop the process.  Both the delivery path and anyone queueing a signal have
+ * to agree on this list: Linux drops such signals before they ever reach a
+ * pending mask, and a pending-but-inert signal is not harmless here because a
+ * blocking poll() reports EINTR for it. */
+static bool signal_default_is_ignore(int sig) {
+  return sig == SIGCHLD || sig == SIGURG || sig == SIGWINCH;
+}
 
 void signal_deliver(struct registers *regs) {
   struct thread *current = sched_get_current();
@@ -536,7 +546,7 @@ void signal_deliver(struct registers *regs) {
     return;
   if (sa->sa_handler == (void *)SIG_DFL) {
     // Signals whose default action is "ignore"
-    if (sig == SIGCHLD || sig == SIGURG || sig == SIGWINCH)
+    if (signal_default_is_ignore(sig))
       return;
     // SIGTTIN (21) and SIGTTOU (22): default action is STOP.
     // We don't have a full STOP/CONT implementation yet, so we ignore these
@@ -552,7 +562,9 @@ void signal_deliver(struct registers *regs) {
     if (sig == SIGQUIT || sig == SIGILL || sig == SIGTRAP || sig == SIGABRT ||
         sig == SIGFPE || sig == SIGSEGV || sig == SIGBUS || sig == SIGSYS) {
       isr_report_user_fault(regs, sig, current->fault_addr);
-      process_dump_core(current, regs, sig);
+      if (process_core_dump_enabled) {
+        process_dump_core(current, regs, sig);
+      }
     }
 
     sched_terminate_thread_group(current);
@@ -817,9 +829,69 @@ void signal_send(struct thread *t, int sig) {
   signal_notify_thread(t, sig);
 }
 
-// Send signal to all processes in a process group
-void signal_send_pgid(uint32_t pgid, int sig) {
+/* Report a child's death to its parent, as Linux's do_notify_parent() does: the
+ * exit signal recorded at clone time (SIGCHLD for fork() and clone(SIGCHLD)) is
+ * queued on every thread of the parent's thread group - a signal is a process
+ * property, and this kernel keeps pending sets per thread and clears them
+ * group-wide on delivery - and the threads that can take it are woken.
+ *
+ * This is what Qt's forkfd "fork fallback" is built on, and QProcess takes that
+ * path for every spawn that installs a childProcessModifier, which is every
+ * KPtyProcess/kpty spawn and therefore every Konsole session.  There is no pidfd
+ * on that path at all: the parent blocks on a pipe that only the SIGCHLD handler
+ * ever writes after reaping the child, and QProcess::waitForFinished() waits on
+ * it with an infinite timeout.  Without SIGCHLD the pipe stays empty forever, so
+ * Konsole's shell child used to park inside KPty::login() - which runs the
+ * utempter helper through exactly such a nested QProcess - and never got as far
+ * as execve("/bin/bash"), leaving the tab on "Could not start program".
+ */
+void signal_notify_parent_exit(struct thread *child) {
+  if (!child || !child->parent)
+    return;
+
+  /* Threads of a thread group are not waitable children and are never reported
+   * to the parent; Linux notifies for the group leader only. */
+  if (child->clone_flags & CLONE_THREAD)
+    return;
+
+  int sig = (int)(child->clone_flags & 0xff); // CSIGNAL
   if (sig <= 0 || sig > 64)
+    return;
+
+  struct thread *parent = child->parent;
+
+  /* Never queue a signal the parent will not act on: Linux drops ignored signals
+   * before they reach the pending mask, and here a pending signal also means a
+   * spurious -EINTR from a blocking poll(). */
+  struct k_sigaction *pa = &parent->signal_handlers[sig - 1];
+  if (pa->sa_handler == (void *)SIG_IGN)
+    return;
+  if (pa->sa_handler == (void *)SIG_DFL && signal_default_is_ignore(sig))
+    return;
+
+  extern struct thread *global_thread_list;
+  extern spinlock_t tid_lock;
+  uint64_t bit = 1ULL << (sig - 1);
+  uint32_t child_pid = child->tgid ? child->tgid : child->tid;
+
+  spinlock_acquire(&tid_lock);
+  for (struct thread *t = global_thread_list; t; t = t->global_next) {
+    if (t->tgid != parent->tgid)
+      continue;
+    t->pending_signals |= bit;
+    /* Delivered as SI_USER-style info from the child, which is what a
+     * SIGCHLD handler expects to see in si_pid. */
+    t->signal_sender_pid[sig - 1] = child_pid;
+    /* A thread that blocks the signal keeps it pending for the ones that do not,
+     * so waking it would only churn the scheduler. */
+    if (!(t->signal_mask & bit))
+      signal_notify_thread(t, sig);
+  }
+  spinlock_release(&tid_lock);
+}
+
+// Send signal to all processes in a process group
+void signal_send_pgid(uint32_t pgid, int sig) {  if (sig <= 0 || sig > 64)
     return;
 
   extern struct thread *global_thread_list;
@@ -1079,7 +1151,10 @@ static int signalfd_poll(vfs_node_t *node, int events) {
 
 static void signalfd_close(vfs_node_t *node) {
   if (node->device) {
-    kfree(node->device);
+    signalfd_ctx_t *ctx = (signalfd_ctx_t *)node->device;
+    /* Wake and detach waiters before freeing the context that owns the queue. */
+    wait_queue_wake_all(&ctx->wq);
+    kfree(ctx);
     node->device = NULL;
   }
 }
@@ -1120,7 +1195,18 @@ static uint64_t sys_signalfd4(uint64_t fd, uint64_t mask_ptr, uint64_t sizemask,
   (void)a4;
   (void)a5;
   (void)sizemask;
-  (void)flags;
+#ifndef SFD_NONBLOCK
+#define SFD_NONBLOCK 04000
+#endif
+#ifndef SFD_CLOEXEC
+#define SFD_CLOEXEC  02000000
+#endif
+  /* Same encodings the descriptor layer uses: bit 24 carries FD_CLOEXEC
+   * (FD_FLAGS_CLOEXEC_BIT in sys_io_shared.h), O_NONBLOCK is a status flag. */
+#define SIGNALFD_O_NONBLOCK 0x800
+#define SIGNALFD_FD_FLAGS_CLOEXEC_BIT (1u << 24)
+  if (flags & ~(uint64_t)(SFD_CLOEXEC | SFD_NONBLOCK))
+    return (uint64_t)-22; // EINVAL
 
   struct thread *t = sched_get_current();
   if (!t)
@@ -1169,6 +1255,11 @@ static uint64_t sys_signalfd4(uint64_t fd, uint64_t mask_ptr, uint64_t sizemask,
 
   t->fds[new_fd] = node;
   t->fd_offsets[new_fd] = 0;
+  /* Explicit descriptor flags: the slot may have been reused.  Bit 24 is the
+   * FD_CLOEXEC bit the descriptor layer uses (FD_FLAGS_CLOEXEC_BIT). */
+  t->fd_flags[new_fd] =
+      (flags & SFD_NONBLOCK ? SIGNALFD_O_NONBLOCK : 0) |
+      (flags & SFD_CLOEXEC ? SIGNALFD_FD_FLAGS_CLOEXEC_BIT : 0);
 
   return (uint64_t)new_fd;
 }

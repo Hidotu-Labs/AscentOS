@@ -264,6 +264,10 @@ void socket_destroy(socket_t *sock) {
 
   // Free wait queue
   if (sock->wait_queue) {
+    /* Waking is attempted by every family's destroy handler, but do it here as
+     * well: this is the last point before the queue memory goes away, and
+     * wait_queue_wake_all() detaches entries so nothing can touch it after. */
+    wait_queue_wake_all((wait_queue_t *)sock->wait_queue);
     kfree(sock->wait_queue);
     sock->wait_queue = NULL;
   }

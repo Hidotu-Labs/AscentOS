@@ -567,6 +567,12 @@ void syscall_dispatcher(struct syscall_regs *regs) {
     klog_puts("\n");
   }
 
+  /* Deferred preemption.  Syscalls run with IF masked (IA32_FMASK), so no
+   * interrupt can interrupt this return path: if this syscall woke a more
+   * eligible thread on this CPU - an X11 client writing a request that wakes
+   * the server - this is the only place it gets serviced promptly. */
+  sched_check_resched(true);
+
   /* Signal frame conversion copies the complete register set. Keep it off the
    * syscall hot path unless this thread can actually deliver a signal. */
   if (t && (t->pending_signals & ~t->signal_mask))

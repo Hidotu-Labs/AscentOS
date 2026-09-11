@@ -70,18 +70,77 @@ static void safe_unmap_and_free(uint64_t *pml4, uint64_t va, uint64_t phys,
   // Step 1: remove the PTE.  After this the frame is unreachable via this VA.
   vmm_unmap_page(pml4, va);
 
-  // Step 2: only now is it safe to recycle the frame.
+  /* Step 2: only now is it safe to recycle the frame - and only if removing
+   * the PTE actually succeeded.  vmm_unmap_page() silently declines anything
+   * under a 1 GB leaf, and freeing a frame that is still mapped hands live
+   * memory to the next allocation. */
   if (free_phys && phys != 0) {
-    pmm_free((void *)phys);
+    if (vmm_virt_to_phys(pml4, va) == 0)
+      pmm_free((void *)phys);
   }
+}
+
+/* Does this process own the frame at @va (anonymous private mapping)?
+ *
+ * @mm_locked says whether the caller already holds mm->lock.  The VMA tree is
+ * walked under that lock because another thread's mmap()/mprotect() can free
+ * the very node we are reading; callers that hold the lock must not have it
+ * taken again (these locks are not recursive), and callers that do not hold it
+ * must not have it skipped. */
+static bool range_page_is_ours(struct thread *t, uint64_t va, bool mm_locked) {
+  if (!t || !t->mm)
+    return false;
+
+  bool ours;
+  if (mm_locked) {
+    struct vma *v = vma_find(&t->mm->vmas, va);
+    ours = (v && v->fd == -1 && (v->flags & MAP_PRIVATE) &&
+            (v->flags & MAP_ANONYMOUS));
+  } else {
+    spinlock_acquire(&t->mm->lock);
+    struct vma *v = vma_find(&t->mm->vmas, va);
+    ours = (v && v->fd == -1 && (v->flags & MAP_PRIVATE) &&
+            (v->flags & MAP_ANONYMOUS));
+    spinlock_release(&t->mm->lock);
+  }
+  return ours;
+}
+
+/* Does this VA fall in a generic file-mapping VMA whose PTEs hold a PMM
+ * reference to their page-cache frame?  Those references must be dropped on
+ * unmap (pmm_free_page() is pmm_decref()).  Driver-mapped frames (GEM,
+ * framebuffer, tmpfs) are owned by their backing object and are left alone. */
+static bool range_page_is_pagecache(struct thread *t, uint64_t va,
+                                    bool mm_locked) {
+  if (!t || !t->mm)
+    return false;
+
+  bool ours;
+  if (mm_locked) {
+    struct vma *v = vma_find(&t->mm->vmas, va);
+    ours = v && (v->flags & MAP_PAGECACHE);
+  } else {
+    spinlock_acquire(&t->mm->lock);
+    struct vma *v = vma_find(&t->mm->vmas, va);
+    ours = v && (v->flags & MAP_PAGECACHE);
+    spinlock_release(&t->mm->lock);
+  }
+  return ours;
 }
 
 // teardown_range:
 //   Unmap [base, base+len) and free anonymous private frames.
 //   Used by both MAP_FIXED pre-teardown and munmap proper.
 //   Does NOT touch the VMA list — callers manage that themselves.
+//
+//   @mm_locked: true when the caller holds t->mm->lock.  Passing true keeps the
+//   whole teardown atomic against the caller's own VMA edits, but it also means
+//   the per-page TLB shootdowns are issued while holding an interrupt-masked
+//   lock - a CPU faulting into this same address space then waits for that lock
+//   and cannot acknowledge the IPI.  Callers that do not need the atomicity
+//   should pass false.
 static void teardown_range(uint64_t *pml4, struct thread *t, uint64_t base,
-                           uint64_t len, const char *ctx) {
+                           uint64_t len, bool mm_locked, const char *ctx) {
   uint64_t end = base + len;
 
   for (uint64_t va = base; va < end; va += PAGE_SIZE) {
@@ -93,31 +152,42 @@ static void teardown_range(uint64_t *pml4, struct thread *t, uint64_t base,
 
     // Detect a 2 MB PS-bit huge page: the VA is 2MB-aligned and phys is
     // the base of the huge block (no intra-page offset).
-    // vmm_unmap_page now handles this correctly — it clears the PDE and frees
-    // all 512 pages via pmm_free_pages in one shot. Skip the remaining 511
-    // sub-page VAs inside this huge mapping to avoid redundant work.
 #define HUGE_2MB (2ULL * 1024 * 1024)
     if (vmm_is_huge_page(pml4, va)) {
-      // 2 MB PS-bit huge page. vmm_unmap_page clears the PDE and frees all
-      // 512 constituent frames via pmm_free_pages in one shot. Skip forward
-      // past the remaining sub-page VAs inside this huge mapping.
-      vmm_unmap_page(pml4, va);
-      uint64_t next_huge = (va & ~(HUGE_2MB - 1)) + HUGE_2MB;
-      va = (next_huge <= end ? next_huge : end) - PAGE_SIZE;
-      continue;
+      uint64_t block = va & ~(HUGE_2MB - 1);
+      uint64_t block_end = block + HUGE_2MB;
+
+      /* Bulk release only when the whole 2 MB block is going away *and* we own
+       * the frames in it.  vmm_unmap_page() releases all 512 frames without
+       * asking anybody, so a file-backed or MAP_SHARED huge mapping has to go
+       * down the split path below and be released page by page with
+       * free_phys == false. */
+      if (va == block && block_end <= end &&
+          range_page_is_ours(t, va, mm_locked)) {
+        // vmm_unmap_page clears the PDE and frees all 512 constituent frames
+        // via pmm_free_pages in one shot.  Skip forward past the sub-page VAs
+        // we just released.
+        vmm_unmap_page(pml4, va);
+        va = block_end - PAGE_SIZE;
+        continue;
+      }
+
+      /* Only part of the huge mapping is inside [base, end).  Clearing the PDE
+       * here would release frames the caller still owns - munmap(base + 0x1000,
+       * 0x1000) used to hand 2 MB back to the PMM while the process kept using
+       * it, and those frames were then handed to somebody else.  Split the
+       * block into 4 KB pages and let the per-page path below free just the
+       * requested ones. */
+      if (!vmm_split_huge_page(pml4, va))
+        continue; // OOM: keep the mapping intact rather than free live frames
     }
 #undef HUGE_2MB
 
 
-    // Only free frames we own: anonymous private mappings.
-    bool free_phys = false;
-    if (t && t->mm) {
-      struct vma *v = vma_find(&t->mm->vmas, va);
-      if (v && v->fd == -1 && (v->flags & MAP_PRIVATE) &&
-          (v->flags & MAP_ANONYMOUS)) {
-        free_phys = true;
-      }
-    }
+    // Only free frames we own: anonymous private mappings, plus page-cache
+    // file frames (pmm_free_page() is a decref for those).
+    bool free_phys = range_page_is_ours(t, va, mm_locked) ||
+                     range_page_is_pagecache(t, va, mm_locked);
 
     safe_unmap_and_free(pml4, va, phys, free_phys, ctx);
   }
@@ -153,6 +223,9 @@ uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot, uint64_t flags,
     return E_INVAL;
   }
 
+  /* Kernel-internal VMA bits are never accepted from user space. */
+  flags &= ~MAP_PAGECACHE;
+
   bool is_shared = (map_type == MAP_SHARED || map_type == 0x03);
   bool is_private = (map_type == MAP_PRIVATE);
   if (length == 0) {
@@ -176,8 +249,11 @@ uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot, uint64_t flags,
     }
     vaddr = addr;
 
-    // Tear down any existing mappings in the target range
-    teardown_range(pml4, current_thread, vaddr, aligned_len,
+    // Tear down any existing mappings in the target range.  teardown_range()
+    // does its own short-lived mm->lock for the VMA lookups it needs; taking
+    // the lock here as well would keep it held across every per-page TLB
+    // shootdown in the range.
+    teardown_range(pml4, current_thread, vaddr, aligned_len, false,
                    "MAP_FIXED teardown");
     if (current_thread && current_thread->mm) {
       spinlock_acquire(&current_thread->mm->lock);
@@ -247,28 +323,47 @@ uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot, uint64_t flags,
       return E_BADF;
     }
     vfs_node_t *node = current_thread->fds[fd];
-    if (!node->mmap) {
-      return E_INVAL;
+
+    if (node->mmap) {
+      // Pass MAP_FIXED to internal handler to ensure it respects our vaddr
+      uint64_t result =
+          node->mmap(node, vaddr, length, prot, flags | MAP_FIXED, offset);
+      if (result == MAP_FAILED || result == (uint64_t)-1)
+        return E_NOMEM;
+
+      if (current_thread && current_thread->mm) {
+        spinlock_acquire(&current_thread->mm->lock);
+        int vma_idx =
+            vma_add(&current_thread->mm->vmas, result, result + aligned_len, prot,
+                    flags, (int)fd, offset, node, 0);
+        spinlock_release(&current_thread->mm->lock);
+        if (vma_idx < 0) {
+          return E_NOMEM;
+        }
+      }
+
+      return result;
     }
 
-    // Pass MAP_FIXED to internal handler to ensure it respects our vaddr
-    uint64_t result =
-        node->mmap(node, vaddr, length, prot, flags | MAP_FIXED, offset);
-    if (result == MAP_FAILED || result == (uint64_t)-1)
+    /* Regular file without a driver mmap handler: demand-page it through the
+     * VMA page-cache path.  The fault handler already serves these (shared and
+     * private, read-only and writable), so this is what makes file mmap work
+     * for SQLite WAL, QFile::map, and friends. */
+    if ((node->flags & FS_TYPE_MASK) != FS_FILE)
+      return E_INVAL;
+    if (offset & (PAGE_SIZE - 1))
+      return E_INVAL;
+    if (!current_thread->mm)
       return E_NOMEM;
 
-    if (current_thread && current_thread->mm) {
-      spinlock_acquire(&current_thread->mm->lock);
-      int vma_idx =
-          vma_add(&current_thread->mm->vmas, result, result + aligned_len, prot,
-                  flags, (int)fd, offset, node, 0);
-      spinlock_release(&current_thread->mm->lock);
-      if (vma_idx < 0) {
-        return E_NOMEM;
-      }
-    }
-
-    return result;
+    spinlock_acquire(&current_thread->mm->lock);
+    int vma_idx = vma_add(&current_thread->mm->vmas, vaddr,
+                          vaddr + aligned_len, prot,
+                          flags | MAP_PAGECACHE, (int)fd, offset, node, 0);
+    spinlock_release(&current_thread->mm->lock);
+    if (vma_idx < 0)
+      return E_NOMEM;
+    return vaddr;
   }
 
   // Reject non-anonymous mappings with no fd
@@ -326,17 +421,13 @@ uint64_t sys_munmap(uint64_t addr, uint64_t length, uint64_t a2, uint64_t a3,
   uint64_t aligned_len = PAGE_ALIGN_UP(length);
   uint64_t *pml4 = vmm_get_active_pml4();
 
-  spinlock_acquire(&current->mm->lock);
-  struct vma *first_vma = vma_find_overlap(&current->mm->vmas, addr, addr + aligned_len);
-  bool is_shared = first_vma && (first_vma->flags & MAP_SHARED);
-  (void)is_shared;
-  spinlock_release(&current->mm->lock);
-
-
-  // Unmap and free
-  // teardown_range handles the unmap-before-free ordering and guards.
-  // It consults the VMA list to decide whether each frame is owned by us.
-  teardown_range(pml4, current, addr, aligned_len, "sys_munmap");
+  // Unmap and free.  teardown_range() takes mm->lock itself, for as long as it
+  // needs to read the VMA tree: a second thread's mmap()/mprotect() can free
+  // the very node it is reading.  It must not be called with that lock held,
+  // because every unmap in the range issues a TLB shootdown and waits for the
+  // other CPUs, and a CPU faulting into this address space is waiting on the
+  // same lock with interrupts masked.
+  teardown_range(pml4, current, addr, aligned_len, false, "sys_munmap");
 
   // Remove VMAs
   spinlock_acquire(&current->mm->lock);
@@ -522,7 +613,8 @@ static uint64_t sys_mremap(uint64_t old_addr, uint64_t old_size,
     if (aligned_new < aligned_old) {
       uint64_t trim_base = old_addr + aligned_new;
       uint64_t trim_len = aligned_old - aligned_new;
-      teardown_range(pml4, current, trim_base, trim_len, "mremap shrink");
+      teardown_range(pml4, current, trim_base, trim_len, true,
+                     "mremap shrink");
       vma_remove(&current->mm->vmas, trim_base, trim_base + trim_len);
     }
     spinlock_release(&current->mm->lock);
@@ -576,7 +668,7 @@ static uint64_t sys_mremap(uint64_t old_addr, uint64_t old_size,
       }
 
       /* Keep the file alive while replacing the old VMA reference. */
-      vma_file->refcount++;
+      vfs_node_ref(vma_file);
       vma_remove(&current->mm->vmas, old_addr, old_addr + aligned_old);
       int add_ret =
           vma_add(&current->mm->vmas, old_addr, old_addr + aligned_new, prot,
@@ -640,8 +732,9 @@ static uint64_t sys_mremap(uint64_t old_addr, uint64_t old_size,
       return E_NOMEM;
     }
 
-    vma_file->refcount++;
-    teardown_range(pml4, current, old_addr, aligned_old, "mremap file move");
+    vfs_node_ref(vma_file);
+    teardown_range(pml4, current, old_addr, aligned_old, true,
+                   "mremap file move");
     vma_remove(&current->mm->vmas, old_addr, old_addr + aligned_old);
     int add_ret =
         vma_add(&current->mm->vmas, new_addr, new_addr + aligned_new, prot,
@@ -687,7 +780,7 @@ static uint64_t sys_mremap(uint64_t old_addr, uint64_t old_size,
   }
 
   // Tear down old mapping.
-  teardown_range(pml4, current, old_addr, aligned_old, "mremap move");
+  teardown_range(pml4, current, old_addr, aligned_old, true, "mremap move");
   vma_remove(&current->mm->vmas, old_addr, old_addr + aligned_old);
 
   // Register new VMA.
@@ -750,9 +843,15 @@ static uint64_t sys_madvise(uint64_t addr, uint64_t len, uint64_t advice,
     uint64_t *pml4 = (uint64_t *)current->cr3;
     if (!pml4)
       pml4 = vmm_get_active_pml4();
-    teardown_range(pml4, current, addr, aligned_len, "madvise DONTNEED");
-    tlb_shootdown_all();
+    /* mm->lock goes back before the teardown: teardown_range() must not run
+     * with it held, because each page it unmaps issues a TLB shootdown and
+     * waits for every other CPU, while a CPU faulting into this address space
+     * waits on this same lock with interrupts masked by the fault gate. */
     spinlock_release(&current->mm->lock);
+    teardown_range(pml4, current, addr, aligned_len, false,
+                   "madvise DONTNEED");
+    /* Belt-and-braces flush, also outside the lock. */
+    tlb_shootdown_all();
     return 0;
   }
 
@@ -855,6 +954,12 @@ void mm_reset_mmap_state(struct thread *t) {
   if (!t || !t->mm)
     return;
   t->mm->mmap_next_addr = MMAP_REGION_BASE;
+  /* A new program inherits the address space bookkeeping but not the identity
+   * of the old one: until build_user_stack() records the new argv, /proc must
+   * report no command line rather than the previous program's. */
+  t->mm->cmdline_len = 0;
+  t->mm->arg_start   = 0;
+  t->mm->arg_end     = 0;
 }
 
 // Allocate a virtual address range from the mmap region for device mmap

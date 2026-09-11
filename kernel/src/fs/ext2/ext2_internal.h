@@ -14,6 +14,11 @@
 int  ext2_write_superblock(ext2_mount_t *mnt);
 int  ext2_write_bgdt(ext2_mount_t *mnt);
 
+/* Lazy metadata counters: allocators mark the mount dirty, the journal commit
+ * (or an explicit flush when no transaction is active) writes bgdt + sb. */
+void ext2_mark_metadata_dirty(ext2_mount_t *mnt);
+void ext2_flush_metadata(ext2_mount_t *mnt);
+
 uint32_t ext2_get_block_num(ext2_mount_t *mnt, ext2_inode_t *inode,
                             uint32_t logical_block);
 int      ext2_set_block_num(ext2_mount_t *mnt, ext2_inode_t *inode,

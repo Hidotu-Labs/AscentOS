@@ -1877,12 +1877,15 @@ static struct dirent *drm_dri_readdir(vfs_node_t *dir, uint32_t index) {
   if (index == 0) {
     strcpy(entry.name, ".");
     entry.ino = dir->inode;
+    entry.d_type = DT_DIR;
   } else if (index == 1) {
     strcpy(entry.name, "..");
     entry.ino = dir->inode;
+    entry.d_type = DT_DIR;
   } else if (index == 2) {
     strcpy(entry.name, "card0");
     entry.ino = (226U << 8) | 0U;
+    entry.d_type = DT_CHR;
   } else {
     return NULL;
   }

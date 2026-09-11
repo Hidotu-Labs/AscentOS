@@ -1,6 +1,7 @@
 #include "ext2_internal.h"
 #include "drivers/timer/rtc.h"
 #include "fs/ext4/ext4_extent.h"
+#include "console/klog.h"
 
 uint32_t ext2_current_time(void) {
   return (uint32_t)rtc_get_timestamp();
@@ -25,8 +26,13 @@ int ext2_read_block(ext2_mount_t *mnt, uint32_t block_num, void *buffer) {
   uint64_t lba         = byte_offset / 512;
   uint32_t sectors     = mnt->block_size / 512;
   int err = mnt->dev->read_sectors(mnt->dev, lba, sectors, buffer);
-  if (err)
+  if (err) {
+    static uint32_t err_count;
+    if (__atomic_add_fetch(&err_count, 1, __ATOMIC_RELAXED) <= 8)
+      klogf("[EXT2] block %u read failed: lba=%llu sectors=%u err=%d\n",
+            block_num, (unsigned long long)lba, sectors, err);
     return err;
+  }
 
   spinlock_acquire(&mnt->cache_lock);
   if (mnt->cache[idx].data && mnt->cache[idx].num == block_num) {
@@ -102,6 +108,35 @@ int ext2_write_bgdt(ext2_mount_t *mnt) {
 
   kfree(tmp);
   return 0;
+}
+
+/*
+ * Lazy bgdt/superblock writeback.
+ *
+ * A single block allocation used to rewrite the complete group-descriptor
+ * table *and* the superblock, each inside its own journal transaction, so
+ * creating a 1 MiB file rewrote the same counters hundreds of times.  The
+ * allocators now only adjust the in-memory copies and set a dirty flag;
+ * ext3_journal_stop() calls ext2_flush_metadata() once per transaction, which
+ * keeps the crash-recovery guarantees (the bgdt/superblock blocks are added
+ * to the same descriptor as the bitmap change) while collapsing the writes.
+ *
+ * The exchange is atomic: a thread that marks the mount dirty during a flush
+ * leaves the flag set, so the next commit writes the newer counters.
+ */
+void ext2_mark_metadata_dirty(ext2_mount_t *mnt) {
+  if (!mnt)
+    return;
+  __atomic_store_n(&mnt->metadata_dirty, true, __ATOMIC_RELAXED);
+}
+
+void ext2_flush_metadata(ext2_mount_t *mnt) {
+  if (!mnt)
+    return;
+  if (!__atomic_exchange_n(&mnt->metadata_dirty, false, __ATOMIC_RELAXED))
+    return;
+  ext2_write_bgdt(mnt);
+  ext2_write_superblock(mnt);
 }
 
 #define EXT2_INODE_STACK_BUF_MAX 4096
@@ -457,8 +492,7 @@ uint32_t ext2_alloc_block_hint(ext2_mount_t *mnt, uint32_t goal) {
 
         mnt->bgdt[g].bg_free_blocks_count--;
         mnt->sb.s_free_blocks_count--;
-        ext2_write_bgdt(mnt);
-        ext2_write_superblock(mnt);
+        ext2_mark_metadata_dirty(mnt);
 
         uint32_t allocated_block = g * mnt->sb.s_blocks_per_group + b +
                                    mnt->sb.s_first_data_block;
@@ -486,8 +520,7 @@ uint32_t ext2_alloc_block_hint(ext2_mount_t *mnt, uint32_t goal) {
 
           mnt->bgdt[g].bg_free_blocks_count--;
           mnt->sb.s_free_blocks_count--;
-          ext2_write_bgdt(mnt);
-          ext2_write_superblock(mnt);
+          ext2_mark_metadata_dirty(mnt);
 
           uint32_t allocated_block = g * mnt->sb.s_blocks_per_group + b +
                                      mnt->sb.s_first_data_block;
@@ -536,8 +569,7 @@ uint32_t ext2_alloc_inode(ext2_mount_t *mnt) {
 
         mnt->bgdt[g].bg_free_inodes_count--;
         mnt->sb.s_free_inodes_count--;
-        ext2_write_bgdt(mnt);
-        ext2_write_superblock(mnt);
+        ext2_mark_metadata_dirty(mnt);
 
         ext3_journal_stop(mnt);
         kfree(bitmap);
@@ -584,8 +616,7 @@ int ext2_free_block(ext2_mount_t *mnt, uint32_t block_num) {
 
   mnt->bgdt[group].bg_free_blocks_count++;
   mnt->sb.s_free_blocks_count++;
-  ext2_write_bgdt(mnt);
-  ext2_write_superblock(mnt);
+  ext2_mark_metadata_dirty(mnt);
   return 0;
 }
 
@@ -614,8 +645,7 @@ int ext2_free_inode(ext2_mount_t *mnt, uint32_t inode_num) {
 
   mnt->bgdt[group].bg_free_inodes_count++;
   mnt->sb.s_free_inodes_count++;
-  ext2_write_bgdt(mnt);
-  ext2_write_superblock(mnt);
+  ext2_mark_metadata_dirty(mnt);
   return 0;
 }
 

@@ -1,9 +1,11 @@
 #include "vfs.h"
+#include "../apic/lapic_timer.h"
 #include "../console/klog.h"
 #include "../lib/string.h"
 #include "../mm/heap.h"
 #include "../mm/pmm.h"
 #include "../sched/sched.h"
+#include "../sched/wait.h"
 #include "arch/uaccess.h"
 
 #define PHYS_TO_VIRT(p) ((void *)((uint64_t)(p) + pmm_get_hhdm_offset()))
@@ -19,12 +21,40 @@ static uint64_t cache_stamp(void) {
 
 static uint64_t cache_key(uint32_t offset) { return (uint64_t)(offset >> 12); }
 
+/* Every leaf of a vfs_node page-cache tree must point at a live vfs_page_t.
+ * The trees have been observed holding wild values after a kernel-heap
+ * use-after-free, and the old test (`value >= 0xFFFF800000000000`) accepted
+ * any high address, including unmapped ones.  Check the address really is a
+ * managed-RAM page (so dereferencing it cannot page-fault) and carries the
+ * live marker before touching any of its fields. */
+static bool page_value_valid(const void *value) {
+  const vfs_page_t *page = (const vfs_page_t *)value;
+  if (!page || (uint64_t)page & 7 || !pmm_kernel_ptr_is_managed(page))
+    return false;
+  return page->magic == VFS_PAGE_MAGIC;
+}
+
+static uint64_t cache_invalid_values;
+
+static void cache_report_invalid_value(const void *value) {
+  uint64_t count =
+      __atomic_add_fetch(&cache_invalid_values, 1, __ATOMIC_RELAXED);
+  if (count <= 8) {
+    klog_puts(KLOG_CLR_YELLOW
+              "[VFS] WARNING: page cache tree holds an invalid entry "
+              KLOG_CLR_RESET);
+    klog_hex64((uint64_t)value);
+    klog_puts("\n");
+  }
+}
+
 size_t vfs_cache_page_count(void) {
   return (size_t)__atomic_load_n(&vfs_cached_pages, __ATOMIC_RELAXED);
 }
 
 static void cache_page_release(vfs_page_t *page) {
   pmm_free_page((void *)page->frame_phys);
+  page->magic = 0;
   kfree(page);
 }
 
@@ -64,6 +94,7 @@ vfs_page_t *vfs_cache_insert(vfs_node_t *node, uint32_t offset,
   if (!new_page)
     return NULL;
   memset(new_page, 0, sizeof(*new_page));
+  new_page->magic = VFS_PAGE_MAGIC;
   new_page->offset = offset;
   new_page->frame_phys = frame;
   new_page->uptodate = true;
@@ -117,6 +148,7 @@ vfs_page_t *vfs_cache_get_or_create(vfs_node_t *node, uint32_t offset) {
     return NULL;
   }
   memset(candidate, 0, sizeof(*candidate));
+  candidate->magic = VFS_PAGE_MAGIC;
   candidate->offset = offset;
   candidate->frame_phys = (uint64_t)frame;
   candidate->loading = true;
@@ -177,7 +209,85 @@ vfs_page_t *vfs_cache_get_or_create(vfs_node_t *node, uint32_t offset) {
   return page;
 }
 
-#define MAX_READAHEAD_PAGES 32u
+#define MAX_READAHEAD_PAGES 64u
+#define READAHEAD_SCRATCH_CHUNK 32u
+
+/*
+ * Fill `count` consecutive cache frames starting at file offset `offset`.
+ *
+ * The fast path reads the whole run through one physically contiguous scratch
+ * block so the filesystem/block layer issues a single large transfer.  When
+ * the PMM cannot supply that block (fragmentation), fall back to smaller
+ * scratch chunks before resorting to one page per call; a huge window must
+ * never degrade into hundreds of tiny commands.
+ *
+ * Returns the number of pages that were completely filled.  On a short read
+ * the caller must drop the remaining pages: caching zeros for a failed
+ * transfer would let a process execute garbage.
+ */
+static void vfs_readahead_warn_short(uint32_t off, uint32_t got,
+                                     uint32_t want) {
+  static uint32_t warned;
+  if (__atomic_add_fetch(&warned, 1, __ATOMIC_RELAXED) <= 4)
+    klogf("[VFS] readahead short read: off=%u got=%u want=%u (pages dropped)\n",
+          off, got, want);
+}
+
+static uint32_t vfs_cache_fill_pages(vfs_node_t *node, uint32_t offset,
+                                     vfs_page_t **pages, uint32_t count) {
+  if (!node || !node->read || !count)
+    return 0;
+
+  uint32_t done = 0;
+  while (done < count) {
+    uint32_t chunk = count - done;
+    if (chunk > READAHEAD_SCRATCH_CHUNK)
+      chunk = READAHEAD_SCRATCH_CHUNK;
+
+    uint32_t chunk_off = offset + done * PAGE_SIZE;
+    uint8_t *scratch = chunk > 1 ? pmm_alloc_pages(chunk) : NULL;
+
+    if (scratch) {
+      uint8_t *scratch_virt = (uint8_t *)PHYS_TO_VIRT((uint64_t)scratch);
+      uint32_t want = chunk * PAGE_SIZE;
+      uint32_t valid = node->length > chunk_off ? node->length - chunk_off : 0;
+      uint32_t ask = want < valid ? want : valid;
+      uint32_t got = ask ? node->read(node, chunk_off, ask, scratch_virt) : 0;
+      if (got > ask)
+        got = ask;
+      if (got < ask) {
+        vfs_readahead_warn_short(chunk_off, got, ask);
+        pmm_free_pages(scratch, chunk);
+        return done;
+      }
+      if (got < want)
+        memset(scratch_virt + got, 0, want - got);
+
+      for (uint32_t i = 0; i < chunk; i++) {
+        memcpy(PHYS_TO_VIRT(pages[done + i]->frame_phys),
+               scratch_virt + (size_t)i * PAGE_SIZE, PAGE_SIZE);
+      }
+      pmm_free_pages(scratch, chunk);
+      done += chunk;
+      continue;
+    }
+
+    /* One page (or an exhausted PMM): read directly into the frame. */
+    uint32_t page_off = offset + done * PAGE_SIZE;
+    uint32_t avail = node->length > page_off ? node->length - page_off : 0;
+    uint32_t to_read = avail > PAGE_SIZE ? PAGE_SIZE : avail;
+    void *frame_virt = PHYS_TO_VIRT(pages[done]->frame_phys);
+    uint32_t read = to_read ? node->read(node, page_off, to_read, frame_virt) : 0;
+    if (read < to_read) {
+      vfs_readahead_warn_short(page_off, read, to_read);
+      return done;
+    }
+    if (read < PAGE_SIZE)
+      memset((uint8_t *)frame_virt + read, 0, PAGE_SIZE - read);
+    done++;
+  }
+  return done;
+}
 
 uint32_t vfs_cache_readahead(vfs_node_t *node, uint32_t offset, uint32_t max_bytes) {
   if (!node || !node->read || !max_bytes || offset >= node->length)
@@ -197,6 +307,11 @@ uint32_t vfs_cache_readahead(vfs_node_t *node, uint32_t offset, uint32_t max_byt
   if (max_pages == 0)
     return 0;
 
+  /* Skip any already-cached leading pages, then prefetch the first run of
+   * missing pages.  This matters for the async exec worker: the ELF header
+   * read leaves page 0 cached, and bailing on that alone would make the whole
+   * first window a no-op. */
+  uint32_t start_index = 0;
   uint32_t missing_count = 0;
   spinlock_acquire(&node->pages_lock);
   for (uint32_t i = 0; i < max_pages; i++) {
@@ -205,11 +320,11 @@ uint32_t vfs_cache_readahead(vfs_node_t *node, uint32_t offset, uint32_t max_byt
       break;
     vfs_page_t *existing = radix_tree_lookup(&node->pages, cache_key(page_off));
     if (existing) {
-      if (i == 0) {
-        spinlock_release(&node->pages_lock);
-        return 0;
+      if (missing_count == 0) {
+        start_index = i + 1; /* leading present page: keep looking */
+        continue;
       }
-      break;
+      break; /* end of the first missing run */
     }
     missing_count++;
   }
@@ -217,6 +332,8 @@ uint32_t vfs_cache_readahead(vfs_node_t *node, uint32_t offset, uint32_t max_byt
 
   if (missing_count <= 1)
     return 0;
+
+  uint32_t first_off = offset + start_index * PAGE_SIZE;
 
   void *frames[MAX_READAHEAD_PAGES] = {0};
   vfs_page_t *candidates[MAX_READAHEAD_PAGES] = {0};
@@ -232,7 +349,8 @@ uint32_t vfs_cache_readahead(vfs_node_t *node, uint32_t offset, uint32_t max_byt
       break;
     }
     memset(candidates[i], 0, sizeof(vfs_page_t));
-    candidates[i]->offset = offset + i * PAGE_SIZE;
+    candidates[i]->magic = VFS_PAGE_MAGIC;
+    candidates[i]->offset = first_off + i * PAGE_SIZE;
     candidates[i]->frame_phys = (uint64_t)frames[i];
     candidates[i]->loading = true;
     candidates[i]->refs = 1;
@@ -246,7 +364,7 @@ uint32_t vfs_cache_readahead(vfs_node_t *node, uint32_t offset, uint32_t max_byt
   uint32_t inserted = 0;
   spinlock_acquire(&node->pages_lock);
   for (uint32_t i = 0; i < allocated; i++) {
-    uint32_t page_off = offset + i * PAGE_SIZE;
+    uint32_t page_off = first_off + i * PAGE_SIZE;
     vfs_page_t *existing = radix_tree_lookup(&node->pages, cache_key(page_off));
     if (existing || radix_tree_insert(&node->pages, cache_key(page_off), candidates[i])) {
       break;
@@ -264,28 +382,167 @@ uint32_t vfs_cache_readahead(vfs_node_t *node, uint32_t offset, uint32_t max_byt
   if (inserted == 0)
     return 0;
 
-  for (uint32_t i = 0; i < inserted; i++) {
-    uint32_t page_off = offset + i * PAGE_SIZE;
-    uint32_t avail = node->length > page_off ? node->length - page_off : 0;
-    uint32_t to_read = avail > PAGE_SIZE ? PAGE_SIZE : avail;
-    void *frame_virt = PHYS_TO_VIRT(candidates[i]->frame_phys);
-    uint32_t read = to_read ? node->read(node, page_off, to_read, frame_virt) : 0;
-    if (read < PAGE_SIZE)
-      memset((uint8_t *)frame_virt + read, 0, PAGE_SIZE - read);
-  }
+  /* Bulk-read the missing window into the candidate frames. */
+  uint32_t filled = vfs_cache_fill_pages(node, first_off, candidates, inserted);
 
   spinlock_acquire(&node->pages_lock);
   for (uint32_t i = 0; i < inserted; i++) {
-    candidates[i]->uptodate = true;
+    candidates[i]->uptodate = (i < filled);
     candidates[i]->loading = false;
   }
   spinlock_release(&node->pages_lock);
+
+  /* Pages that could not be read must not stay in the tree as valid zeros;
+   * drop them so a later attempt can retry instead of poisoning the file. */
+  for (uint32_t i = filled; i < inserted; i++) {
+    vfs_cache_invalidate(node, candidates[i]->offset);
+  }
 
   for (uint32_t i = 0; i < inserted; i++) {
     vfs_cache_put(node, candidates[i]);
   }
 
-  return inserted * PAGE_SIZE;
+  return filled * PAGE_SIZE;
+}
+
+/* ── Asynchronous prefetch queue ──────────────────────────────────────────
+ * execve() queues the file-backed parts of a new program here instead of
+ * blocking until every window has been read.  A kernel thread runs the
+ * existing synchronous vfs_cache_readahead() while the process is already
+ * starting: pages are inserted with loading=true, so a demand fault on a page
+ * the worker is filling waits for it instead of issuing a second read.
+ */
+#define VFS_PREFETCH_QUEUE_MAX 64u
+
+struct vfs_prefetch_job {
+  vfs_node_t *node;
+  uint32_t offset;
+  uint32_t length;
+  struct vfs_prefetch_job *next;
+};
+
+static spinlock_t vfs_prefetch_lock = SPINLOCK_INIT;
+static struct vfs_prefetch_job *vfs_prefetch_head;
+static struct vfs_prefetch_job *vfs_prefetch_tail;
+static uint32_t vfs_prefetch_depth;
+static wait_queue_t vfs_prefetch_wait;
+static volatile int vfs_prefetch_up;
+static volatile int vfs_prefetch_starting;
+
+static void vfs_prefetch_worker(void) {
+  struct thread *self = sched_get_current();
+  for (;;) {
+    struct vfs_prefetch_job *job = NULL;
+
+    spinlock_acquire(&vfs_prefetch_lock);
+    if (vfs_prefetch_head) {
+      job = vfs_prefetch_head;
+      vfs_prefetch_head = job->next;
+      if (!vfs_prefetch_head)
+        vfs_prefetch_tail = NULL;
+      vfs_prefetch_depth--;
+    }
+    spinlock_release(&vfs_prefetch_lock);
+
+    if (!job) {
+      if (!self)
+        return;
+      wait_queue_entry_t entry = { .thread = self, .next = NULL };
+
+      /* Block first, then link: a wake that lands between the two must not be
+       * overwritten by a later THREAD_BLOCKED store (lost-wakeup race). */
+      self->state = THREAD_BLOCKED;
+      wait_queue_add(&vfs_prefetch_wait, &entry);
+
+      spinlock_acquire(&vfs_prefetch_lock);
+      bool have_work = vfs_prefetch_head != NULL;
+      spinlock_release(&vfs_prefetch_lock);
+      if (have_work) {
+        self->state = THREAD_RUNNING;
+        wait_queue_remove(&vfs_prefetch_wait, &entry);
+        continue;
+      }
+
+      self->wakeup_ticks = lapic_timer_get_ticks() + 100;
+      sched_yield();
+      self->wakeup_ticks = 0;
+      self->state = THREAD_RUNNING;
+      wait_queue_remove(&vfs_prefetch_wait, &entry);
+      continue;
+    }
+
+    vfs_cache_readahead(job->node, job->offset, job->length);
+    vfs_close(job->node);
+    kfree(job);
+  }
+}
+
+static void vfs_prefetch_start(void) {
+  if (__atomic_load_n(&vfs_prefetch_up, __ATOMIC_ACQUIRE))
+    return;
+
+  int expected = 0;
+  if (!__atomic_compare_exchange_n(&vfs_prefetch_starting, &expected, 1, false,
+                                   __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+    return;
+
+  wait_queue_init(&vfs_prefetch_wait);
+  struct thread *worker =
+      sched_create_kernel_thread(vfs_prefetch_worker, NULL, true);
+  if (worker) {
+    strcpy(worker->comm, "vfs-prefetch");
+    __atomic_store_n(&vfs_prefetch_up, 1, __ATOMIC_RELEASE);
+  } else {
+    __atomic_store_n(&vfs_prefetch_starting, 0, __ATOMIC_RELEASE);
+  }
+}
+
+void vfs_cache_prefetch_async(vfs_node_t *node, uint32_t offset,
+                              uint32_t length) {
+  if (!node || !length)
+    return;
+
+  vfs_prefetch_start();
+  if (!__atomic_load_n(&vfs_prefetch_up, __ATOMIC_ACQUIRE)) {
+    /* No worker (early boot or OOM): keep the caller synchronous. */
+    vfs_cache_readahead(node, offset, length);
+    return;
+  }
+
+  struct vfs_prefetch_job *job = kmalloc(sizeof(*job));
+  if (!job) {
+    vfs_cache_readahead(node, offset, length);
+    return;
+  }
+
+  vfs_open(node);
+  job->node = node;
+  job->offset = offset;
+  job->length = length;
+  job->next = NULL;
+
+  bool queued = false;
+  spinlock_acquire(&vfs_prefetch_lock);
+  if (vfs_prefetch_depth < VFS_PREFETCH_QUEUE_MAX) {
+    if (vfs_prefetch_tail)
+      vfs_prefetch_tail->next = job;
+    else
+      vfs_prefetch_head = job;
+    vfs_prefetch_tail = job;
+    vfs_prefetch_depth++;
+    queued = true;
+  }
+  spinlock_release(&vfs_prefetch_lock);
+
+  if (!queued) {
+    /* Queue full: leave the pages to demand paging rather than blocking the
+     * caller. */
+    vfs_close(node);
+    kfree(job);
+    return;
+  }
+
+  wait_queue_wake_one(&vfs_prefetch_wait);
 }
 
 uint32_t vfs_cache_read(vfs_node_t *node, uint32_t offset, uint32_t size,
@@ -368,8 +625,10 @@ struct key_batch {
 static bool collect_keys(uint64_t key, void *value, void *opaque) {
   struct key_batch *batch = opaque;
   vfs_page_t *page = value;
-  if (!page || (uint64_t)page < 0xFFFF800000000000ULL)
+  if (!page_value_valid(page)) {
+    cache_report_invalid_value(value);
     return true;
+  }
   if (key < batch->first || key > batch->last)
     return true;
   if (batch->unused_only &&
@@ -413,10 +672,47 @@ void vfs_cache_invalidate_range(vfs_node_t *node, uint32_t offset,
   spinlock_release(&node->pages_lock);
 }
 
+void vfs_cache_update_or_invalidate(vfs_node_t *node, uint32_t offset,
+                                    uint32_t length, const uint8_t *buffer) {
+  if (!node || !length)
+    return;
+
+  uint32_t written = 0;
+  while (written < length) {
+    uint32_t cur_offset = offset + written;
+    uint32_t page_offset = cur_offset & (PAGE_SIZE - 1);
+    uint32_t to_copy = PAGE_SIZE - page_offset;
+    if (to_copy > length - written)
+      to_copy = length - written;
+
+    spinlock_acquire(&node->pages_lock);
+    vfs_page_t *page = radix_tree_lookup(&node->pages, cache_key(cur_offset));
+    if (page && page->frame_phys && !page->loading && !page->evicted) {
+      if (page->uptodate) {
+        void *page_virt = PHYS_TO_VIRT(page->frame_phys);
+        if (buffer) {
+          if (is_user_ptr((uint64_t)buffer))
+            copy_from_user((uint8_t *)page_virt + page_offset, buffer + written, to_copy);
+          else
+            memcpy((uint8_t *)page_virt + page_offset, buffer + written, to_copy);
+        }
+        page->last_used = cache_stamp();
+      } else {
+        cache_remove_range(node, cache_key(cur_offset), cache_key(cur_offset), false);
+      }
+    }
+    spinlock_release(&node->pages_lock);
+
+    written += to_copy;
+  }
+}
+
 static void cache_destroy_value(void *value) {
   vfs_page_t *page = value;
-  if (!page || (uint64_t)page < 0xFFFF800000000000ULL)
+  if (!page_value_valid(page)) {
+    cache_report_invalid_value(value);
     return;
+  }
   page->evicted = true;
   __atomic_sub_fetch(&vfs_cached_pages, 1, __ATOMIC_RELAXED);
   if (!page->refs)
@@ -424,7 +720,7 @@ static void cache_destroy_value(void *value) {
 }
 
 void vfs_cache_clear(vfs_node_t *node) {
-  if (!node || (uint64_t)node < 0xFFFF800000000000ULL)
+  if (!vfs_node_is_alive(node))
     return;
   spinlock_acquire(&node->pages_lock);
   radix_tree_destroy(&node->pages, cache_destroy_value);
@@ -432,7 +728,7 @@ void vfs_cache_clear(vfs_node_t *node) {
 }
 
 void vfs_cache_clear_unused(vfs_node_t *node) {
-  if (!node || (uint64_t)node < 0xFFFF800000000000ULL || !(node->flags & FS_PAGE_CACHE))
+  if (!vfs_node_is_alive(node) || !(node->flags & FS_PAGE_CACHE))
     return;
   spinlock_acquire(&node->pages_lock);
   cache_remove_range(node, 0, UINT64_MAX, true);
@@ -447,8 +743,10 @@ struct reclaim_search {
 
 static bool find_reclaimable(uint64_t key, void *value, void *opaque) {
   vfs_page_t *page = value;
-  if (!page || (uint64_t)page < 0xFFFF800000000000ULL)
+  if (!page_value_valid(page)) {
+    cache_report_invalid_value(value);
     return true;
+  }
   struct reclaim_search *search = opaque;
   if (page->refs || page->dirty || page->loading || page->writeback ||
       pmm_get_ref((void *)page->frame_phys) != 1)
@@ -503,6 +801,10 @@ static bool find_dirty(uint64_t key, void *value, void *opaque) {
   (void)key;
   struct dirty_search *search = opaque;
   vfs_page_t *page = value;
+  if (!page_value_valid(page)) {
+    cache_report_invalid_value(value);
+    return true;
+  }
   if (!page->dirty || page->loading || page->writeback)
     return true;
   page->writeback = true;

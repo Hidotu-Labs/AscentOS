@@ -7,12 +7,34 @@
 #define EEVFD_NICE_0_WEIGHT    1024U
 #define EEVFD_NICE_0_WMULT     4194304U /* 2^22 */
 
-#define EEVFD_BASE_SLICE_NS     1000000ULL  /* 1.0 ms default scheduling slice for ultra-low latency rendering */
-#define EEVFD_MIN_SLICE_NS       500000ULL  /* 0.5 ms minimum slice */
-#define EEVFD_MAX_SLICE_NS     20000000ULL  /* 20 ms maximum slice */
-#define EEVFD_LATENCY_SLICE_NS   500000ULL  /* 0.5 ms for interactive/low-latency */
-#define EEVFD_MIN_GRANULARITY_NS    500000ULL  /* 0.5 ms minimum execution floor */
-#define EEVFD_WAKEUP_GRANULARITY_NS 500000ULL  /* 0.5 ms wakeup preemption threshold */
+#define EEVFD_BASE_SLICE_NS          3000000ULL  /* 3.0 ms default scheduling slice */
+#define EEVFD_MIN_SLICE_NS            500000ULL  /* 0.5 ms minimum slice */
+#define EEVFD_MAX_SLICE_NS          20000000ULL  /* 20 ms maximum slice */
+#define EEVFD_INTERACTIVE_SLICE_NS   1000000ULL  /* 1.0 ms for interactive/low-latency tasks */
+#define EEVFD_LATENCY_SLICE_NS        500000ULL  /* 0.5 ms for ultra-low latency */
+#define EEVFD_BATCH_SLICE_NS         6000000ULL  /* 6.0 ms for background/batch tasks */
+#define EEVFD_MIN_GRANULARITY_NS      500000ULL  /* 0.5 ms standard minimum execution floor */
+#define EEVFD_INTERACTIVE_MIN_GRANULARITY_NS 100000ULL /* 0.1 ms execution floor for interactive preemption */
+#define EEVFD_WAKEUP_GRANULARITY_NS   500000ULL  /* 0.5 ms wakeup preemption threshold */
+
+/**
+ * Calculates dynamic physical slice duration based on nice value.
+ * Negative nice (interactive) gets shorter slice (1.0ms - 2.8ms) -> earlier deadlines -> scheduled sooner.
+ * Nice 0 (default) gets 3.0ms base slice -> good cache locality.
+ * Positive nice (batch) gets longer slice (3.3ms - 6.0ms) -> higher throughput, fewer context switches.
+ */
+static inline uint64_t eevfd_calc_slice_for_nice(int nice) {
+    if (nice <= -10)
+        return EEVFD_INTERACTIVE_SLICE_NS;
+    if (nice < 0) {
+        return EEVFD_INTERACTIVE_SLICE_NS + (uint64_t)(nice + 10) * 200000ULL;
+    }
+    if (nice == 0)
+        return EEVFD_BASE_SLICE_NS;
+    if (nice >= 10)
+        return EEVFD_BATCH_SLICE_NS;
+    return EEVFD_BASE_SLICE_NS + (uint64_t)nice * 300000ULL;
+}
 
 /* Nice range is [-20, 19], mapped to index [0, 39] */
 #define NICE_TO_INDEX(nice) ((int)((nice) + 20))

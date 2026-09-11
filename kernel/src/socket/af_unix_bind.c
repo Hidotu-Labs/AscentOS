@@ -48,14 +48,18 @@ static int unix_bind_fs(unix_sock_t *usk, struct sockaddr_un *sun, int addrlen) 
 
   struct thread *current_thread = sched_get_current();
   vfs_node_t *cwd_node = fs_root;
+  vfs_node_t *cwd_owned = NULL;
   if (current_thread && current_thread->cwd_path[0]) {
     cwd_node = vfs_resolve_path(current_thread->cwd_path);
     if (!cwd_node)
       cwd_node = fs_root;
+    else
+      cwd_owned = cwd_node;
   }
 
   vfs_node_t *parent = vfs_resolve_path_at(cwd_node, parent_path);
   if (!parent) {
+    if (cwd_owned) vfs_close(cwd_owned);
     klog_puts("[WARN] unix_bind_fs: parent directory not found\n");
     return -2; // ENOENT
   }
@@ -67,30 +71,45 @@ static int unix_bind_fs(unix_sock_t *usk, struct sockaddr_un *sun, int addrlen) 
       klog_puts("[INFO] unix_bind_fs: unlinking stale socket node: ");
       klog_puts(sun->sun_path);
       klog_puts("\n");
+      /* vfs_unlink frees the node outright in ramfs/tmpfs; do not touch
+       * `existing` after this. */
       vfs_unlink(parent, name);
+      existing = NULL;
     } else {
       klog_puts("[WARN] unix_bind_fs: address already in use: ");
       klog_puts(sun->sun_path);
       klog_puts("\n");
+      vfs_close(existing);
+      vfs_close(parent);
+      if (cwd_owned) vfs_close(cwd_owned);
       return -EADDRINUSE;
     }
   }
 
-  if (!current_thread || !vfs_access(parent, 3))
+  if (!current_thread || !vfs_access(parent, 3)) {
+    vfs_close(parent);
+    if (cwd_owned) vfs_close(cwd_owned);
     return -13; // EACCES
+  }
 
   uint16_t mode = (uint16_t)(0777 & ~current_thread->umask);
   int ret = vfs_mknod(parent, name, mode, FS_SOCKET, usk->parent);
-  if (ret < 0)
+  if (ret < 0) {
+    vfs_close(parent);
+    if (cwd_owned) vfs_close(cwd_owned);
     return ret;
+  }
 
   vfs_node_t *fs_node = vfs_finddir(parent, name);
-  if (!fs_node)
+  if (!fs_node) {
+    vfs_close(parent);
+    if (cwd_owned) vfs_close(cwd_owned);
     return -2; // ENOENT
+  }
   vfs_chown(fs_node, current_thread->fsuid,
             current_thread->fsgid);
 
-  usk->bound_vnode = fs_node;
+  usk->bound_vnode = fs_node; // reference transferred to the socket
 
   memcpy(&usk->addr, sun, addrlen);
   usk->addr_len = addrlen;
@@ -105,6 +124,8 @@ static int unix_bind_fs(unix_sock_t *usk, struct sockaddr_un *sun, int addrlen) 
   klog_puts("[OK] unix_bind: bound to filesystem path: ");
   klog_puts(sun->sun_path);
   klog_puts("\n");
+  vfs_close(parent);
+  if (cwd_owned) vfs_close(cwd_owned);
   return 0;
 }
 

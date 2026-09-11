@@ -78,11 +78,22 @@ void idt_init(void) {
   uint8_t flags = 0x8E; // Present, Ring 0, Interrupt Gate
   uint16_t sel = 0x08;  // Kernel Code Segment
 
+  /*
+   * #BP and #OF are the only exceptions raised directly by user-mode
+   * instructions (int3 and into).  Their gates must have DPL 3: with a
+   * DPL 0 gate the CPU turns a user "int3" into a #GP whose error code is
+   * the gate selector ((3 << 3) | 2 = 0x1A), which then looks nothing like
+   * a breakpoint.  GLib's G_BREAKPOINT() is a plain int3, so this is what
+   * a g_error()/g_assert() in a user program used to crash with.  Linux
+   * gives these two gates DPL 3 for the same reason.
+   */
+  uint8_t user_flags = flags | 0x60; // Present, Ring 3, Interrupt Gate
+
   idt_set_gate(0, (uint64_t)isr0, sel, flags);
   idt_set_gate(1, (uint64_t)isr1, sel, flags);
   idt_set_gate(2, (uint64_t)isr2, sel, flags);
-  idt_set_gate(3, (uint64_t)isr3, sel, flags);
-  idt_set_gate(4, (uint64_t)isr4, sel, flags);
+  idt_set_gate(3, (uint64_t)isr3, sel, user_flags);
+  idt_set_gate(4, (uint64_t)isr4, sel, user_flags);
   idt_set_gate(5, (uint64_t)isr5, sel, flags);
   idt_set_gate(6, (uint64_t)isr6, sel, flags);
   idt_set_gate(7, (uint64_t)isr7, sel, flags);

@@ -2,6 +2,19 @@
 #include "fs/ext4/ext4_dir_index.h"
 #include "fs/ext4/ext4_extent.h"
 
+static uint8_t ext2_dirent_dtype(uint8_t file_type) {
+  switch (file_type) {
+  case 1: return DT_REG;  /* EXT2_FT_REG_FILE */
+  case 2: return DT_DIR;
+  case 3: return DT_CHR;
+  case 4: return DT_BLK;
+  case 5: return DT_FIFO;
+  case 6: return DT_SOCK;
+  case 7: return DT_LNK;
+  default: return DT_UNKNOWN;
+  }
+}
+
 struct dirent *ext2_readdir_impl(vfs_node_t *node, uint32_t index) {
   ext2_mount_t *mnt = (ext2_mount_t *)node->device;
   if (!mnt)
@@ -61,6 +74,7 @@ struct dirent *ext2_readdir_impl(vfs_node_t *node, uint32_t index) {
         memcpy(d.name, entry->name, name_len);
         d.name[name_len] = '\0';
         d.ino = entry->inode;
+        d.d_type = ext2_dirent_dtype(entry->file_type);
         node->readdir_cursor_index = index + 1;
         node->readdir_cursor_offset = byte_pos + entry->rec_len;
         kfree(block_buf);
@@ -91,13 +105,36 @@ vfs_node_t *ext2_finddir_impl(vfs_node_t *node, char *name) {
   if (ext2_read_inode(mnt, node->inode, &dir_inode))
     return NULL;
 
+  uint32_t name_len = strlen(name);
+
+  /* Fast HTree directory index lookup for ext4 directories */
+  if (dir_inode.i_flags & EXT2_INDEX_FL) {
+    int found_ino = ext4_htree_find_entry(mnt, &dir_inode, name, name_len);
+    if (found_ino > 0) {
+      ext2_inode_t target_inode;
+      if (ext2_read_inode(mnt, (uint32_t)found_ino, &target_inode))
+        return NULL;
+
+      vfs_node_t *result =
+          ext2_make_vfs_node(mnt, (uint32_t)found_ino, &target_inode);
+      if (result) {
+        uint32_t copy_len = name_len > 127 ? 127 : name_len;
+        memcpy(result->name, name, copy_len);
+        result->name[copy_len] = '\0';
+      }
+      return result;
+    } else if (found_ino == 0) {
+      return NULL;
+    }
+    /* found_ino < 0: fallback to linear scan */
+  }
+
   uint8_t *block_buf = kmalloc(mnt->block_size);
   if (!block_buf)
     return NULL;
 
   uint32_t dir_size = dir_inode.i_size;
   uint32_t byte_pos = 0;
-  uint32_t name_len = strlen(name);
 
   while (byte_pos < dir_size) {
     uint32_t logical_block   = byte_pos / mnt->block_size;
@@ -496,7 +533,7 @@ int ext2_mkdir_impl(vfs_node_t *node, char *name, uint16_t permission) {
 
   uint32_t group = (new_ino - 1) / mnt->inodes_per_group;
   mnt->bgdt[group].bg_used_dirs_count++;
-  ext2_write_bgdt(mnt);
+  ext2_mark_metadata_dirty(mnt);
 
   ext3_journal_stop(mnt);
   return 0;

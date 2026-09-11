@@ -17,14 +17,29 @@
 #define O_WRONLY 1
 #define O_RDWR 2
 #define O_CREAT 0x40
+#define O_EXCL 0x80
 #define O_TRUNC 0x200
 #define O_ACCMODE 3
 #define O_APPEND 0x400
 #define O_NONBLOCK 0x800
+#define O_DIRECTORY 0x10000
 #define O_CLOEXEC 0x80000
+
+/* O_PATH shares its bit with __O_TMPFILE, exactly like Linux (both 010000000).
+ * A request is an O_TMPFILE only when the directory bit is set with it *and*
+ * the caller asked for write access; read-only + O_DIRECTORY is an O_PATH
+ * handle, which is what QProcess opens for a child's working directory. */
+#define __O_TMPFILE 0x400000
+#define O_PATH 0x400000
+#define O_TMPFILE (__O_TMPFILE | O_DIRECTORY)
 
 /* FD_CLOEXEC packed into fd_flags[] above the status-flag range */
 #define FD_FLAGS_CLOEXEC_BIT (1u << 24)
+
+/* Placeholder a descriptor slot carries between reserving the number and
+ * installing the node, so a concurrent fork or lookup never sees a half-built
+ * descriptor that looks like a real file. */
+#define FD_RESERVED ((vfs_node_t *)-1)
 
 #define FD_CLOEXEC 1
 
@@ -231,18 +246,6 @@ extern uint32_t next_instance_id;
 extern uint32_t next_watch_id;
 
 // ---------------------------------------------------------------------------
-// dirent types
-// ---------------------------------------------------------------------------
-#define DT_UNKNOWN 0
-#define DT_FIFO 1
-#define DT_CHR 2
-#define DT_DIR 4
-#define DT_BLK 6
-#define DT_REG 8
-#define DT_LNK 10
-#define DT_SOCK 12
-
-// ---------------------------------------------------------------------------
 // iovec (shared by readv/writev)
 // ---------------------------------------------------------------------------
 struct user_iovec {
@@ -270,9 +273,12 @@ void fill_kstat(struct kstat *ks, vfs_node_t *node);
 
 // vfs_resolve_symlink_node: resolve WITHOUT following the final symlink.
 // Defined in sys_fs.c; used by sys_stat.c and sys_fs.c.
+// Returns an owned reference, or NULL.
 vfs_node_t *vfs_resolve_symlink_node(vfs_node_t *base, const char *path);
 
-// resolve_parent_and_name helper (defined in sys_fs.c)
+// resolve_parent_and_name helper (defined in sys_fs.c).
+// Returns an owned reference to the parent directory (caller must vfs_close),
+// or NULL.
 vfs_node_t *resolve_parent_and_name(const char *path, char *name_out,
                                     size_t name_size);
 

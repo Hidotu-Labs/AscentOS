@@ -67,6 +67,7 @@ static uint64_t sys_stat(uint64_t path_ptr, uint64_t statbuf_ptr, uint64_t a2,
 
     struct thread *t = sched_get_current();
     vfs_node_t *node  = NULL;
+    bool node_owned   = false;
 
     if (strncmp(path, "/dev/", 5) == 0)
         node = fb_lookup_device((char *)path + 5);
@@ -75,11 +76,14 @@ static uint64_t sys_stat(uint64_t path_ptr, uint64_t statbuf_ptr, uint64_t a2,
         vfs_node_t *cwd = (path[0] == '/') ? fs_root
                           : (t->cwd_node ? t->cwd_node : fs_root);
         node = vfs_resolve_path_at(cwd, path);
+        node_owned = node != NULL;
     }
     if (!node) {
         return (uint64_t)-2;
     }
     fill_kstat(ks, node);
+    if (node_owned)
+        vfs_close(node);
     return 0;
 }
 
@@ -93,16 +97,21 @@ static uint64_t sys_lstat(uint64_t path_ptr, uint64_t statbuf_ptr, uint64_t a2,
 
     struct thread *t = sched_get_current();
     vfs_node_t *base  = fs_root;
+    vfs_node_t *cwd   = NULL;
     if (t && path[0] != '/' && t->cwd_path[0]) {
-        vfs_node_t *cwd = vfs_resolve_path_at(fs_root, t->cwd_path);
+        cwd = vfs_resolve_path_at(fs_root, t->cwd_path);
         if (cwd) base = cwd;
     }
 
     vfs_node_t *node = vfs_resolve_symlink_node(base, path);
-    if (!node)
+    if (!node) {
+        if (cwd) vfs_close(cwd);
         return sys_stat(path_ptr, statbuf_ptr, a2, a3, a4, a5);
+    }
 
     fill_kstat(ks, node);
+    vfs_close(node);
+    if (cwd) vfs_close(cwd);
     return 0;
 }
 
@@ -134,12 +143,15 @@ static uint64_t sys_statx(uint64_t dirfd, uint64_t path_ptr, uint64_t flags,
     if (!t) return (uint64_t)-1;
 
     vfs_node_t *node = NULL;
+    bool node_owned = false;
+    vfs_node_t *base_owned = NULL;
     if (path && path[0] != '\0') {
         vfs_node_t *base_dir = fs_root;
         if (path[0] != '/') {
             if ((int)dirfd == AT_FDCWD) {
                 base_dir = vfs_resolve_path_at(fs_root, t->cwd_path);
                 if (!base_dir) base_dir = fs_root;
+                else base_owned = base_dir;
             } else {
                 if ((int)dirfd < 0 || (int)dirfd >= MAX_FDS || !t->fds[dirfd])
                     return (uint64_t)-9;
@@ -147,11 +159,13 @@ static uint64_t sys_statx(uint64_t dirfd, uint64_t path_ptr, uint64_t flags,
             }
         }
         node = vfs_resolve_path_at(base_dir, path);
+        node_owned = node != NULL;
     } else {
         if (flags & AT_EMPTY_PATH) {
             if ((int)dirfd == AT_FDCWD) {
                 node = vfs_resolve_path_at(fs_root, t->cwd_path);
                 if (!node) node = fs_root;
+                else node_owned = true;
             } else {
                 if ((int)dirfd < 0 || (int)dirfd >= MAX_FDS || !t->fds[dirfd])
                     return (uint64_t)-9;
@@ -161,7 +175,10 @@ static uint64_t sys_statx(uint64_t dirfd, uint64_t path_ptr, uint64_t flags,
             return (uint64_t)-14;
         }
     }
-    if (!node) return (uint64_t)-2;
+    if (!node) {
+        if (base_owned) vfs_close(base_owned);
+        return (uint64_t)-2;
+    }
 
     memset(stx, 0, sizeof(struct statx));
     stx->stx_mask    = STATX_BASIC_STATS;
@@ -186,6 +203,8 @@ static uint64_t sys_statx(uint64_t dirfd, uint64_t path_ptr, uint64_t flags,
     stx->stx_atime.tv_sec = (int64_t)node->atime;
     stx->stx_mtime.tv_sec = (int64_t)node->mtime;
     stx->stx_ctime.tv_sec = (int64_t)node->ctime;
+    if (node_owned) vfs_close(node);
+    if (base_owned) vfs_close(base_owned);
     return 0;
 }
 
@@ -213,11 +232,13 @@ static uint64_t sys_newfstatat(uint64_t dirfd, uint64_t pathname_ptr,
     if (!path) return (uint64_t)-14;
 
     vfs_node_t *base_dir = fs_root;
+    vfs_node_t *base_owned = NULL;
     if (path[0] != '/') {
         if ((int)dirfd == AT_FDCWD) {
             if (t->cwd_path[0]) {
                 base_dir = vfs_resolve_path_at(fs_root, t->cwd_path);
                 if (!base_dir) base_dir = fs_root;
+                else base_owned = base_dir;
             }
         } else {
             if ((int)dirfd < 0 || (int)dirfd >= MAX_FDS || !t->fds[dirfd])
@@ -229,6 +250,7 @@ static uint64_t sys_newfstatat(uint64_t dirfd, uint64_t pathname_ptr,
     }
 
     vfs_node_t *node = NULL;
+    bool node_owned = false;
     if (strncmp(path, "/dev/", 5) == 0)
         node = fb_lookup_device((char *)path + 5);
 
@@ -236,10 +258,16 @@ static uint64_t sys_newfstatat(uint64_t dirfd, uint64_t pathname_ptr,
         node = (flags & AT_SYMLINK_NOFOLLOW)
                ? vfs_resolve_symlink_node(base_dir, path)
                : vfs_resolve_path_at(base_dir, path);
-        if (!node) return (uint64_t)-2;
+        node_owned = node != NULL;
+        if (!node) {
+            if (base_owned) vfs_close(base_owned);
+            return (uint64_t)-2;
+        }
     }
 
     fill_kstat(ks, node);
+    if (node_owned) vfs_close(node);
+    if (base_owned) vfs_close(base_owned);
     return 0;
 }
 
@@ -291,22 +319,9 @@ static uint64_t sys_getdents64(uint64_t fd, uint64_t dirp, uint64_t count,
         entry->d_ino    = de->ino;
         entry->d_off    = (uint64_t)(index + 1);
         entry->d_reclen = (uint16_t)entry_size;
-
-        vfs_node_t *child = vfs_finddir(node, de->name);
-        if (child) {
-            switch (child->flags & FS_TYPE_MASK) {
-            case FS_FILE:      entry->d_type = DT_REG;  break;
-            case FS_DIRECTORY: entry->d_type = DT_DIR;  break;
-            case FS_CHARDEV:   entry->d_type = DT_CHR;  break;
-            case FS_BLOCKDEV:  entry->d_type = DT_BLK;  break;
-            case FS_SYMLINK:   entry->d_type = DT_LNK;  break;
-            default:           entry->d_type = DT_UNKNOWN; break;
-            }
-        } else {
-            entry->d_type = DT_UNKNOWN;
-        }
-        if (child)
-            vfs_close(child);
+        /* The backend already classified the entry; asking the VFS to resolve
+         * every name again was the quadratic part of a directory listing. */
+        entry->d_type   = de->d_type;
 
         strcpy(entry->d_name, de->name);
         written += entry_size;

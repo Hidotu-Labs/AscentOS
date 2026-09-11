@@ -199,11 +199,11 @@ int unix_setsockopt_impl(socket_t *sock, int level, int optname,
     size_t old_size  = usk->recv_buf_size;
     size_t available = (tail - head + old_size) % old_size;
 
-    for (size_t i = 0; i < available && i < (size_t)val; i++)
-      new_buf[i] = usk->recv_buf[(head + i) % old_size];
+    size_t keep = available < (size_t)val ? available : (size_t)val;
+    unix_ring_consume(usk->recv_buf, old_size, head, new_buf, keep);
 
     usk->recv_buf_head = 0;
-    usk->recv_buf_tail = available < (size_t)val ? available : (size_t)val;
+    usk->recv_buf_tail = keep;
     kfree(usk->recv_buf);
     usk->recv_buf      = new_buf;
     usk->recv_buf_size = (size_t)val;
@@ -327,6 +327,13 @@ int unix_setsockopt_impl(socket_t *sock, int level, int optname,
 
   case 9: // SO_KEEPALIVE
     klog_puts("[OK] unix_setsockopt: SO_KEEPALIVE\n");
+    return 0;
+
+  case 12: // SO_PRIORITY
+    /* Linux accepts SO_PRIORITY for every socket family; AF_UNIX has no
+     * priority to apply, so it is accepted and ignored.  libpulse sets it on
+     * its native-protocol socket; rejecting it only produced noise. */
+    klog_puts("[OK] unix_setsockopt: SO_PRIORITY\n");
     return 0;
 
   case 31: // SO_PEERSEC

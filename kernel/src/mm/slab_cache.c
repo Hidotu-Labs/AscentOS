@@ -294,7 +294,18 @@ void kmem_cache_free(kmem_cache_t *cache, void *obj) {
   }
 
   // Calculate object index
-  uint64_t offset = (uint64_t)obj - (page_base + sizeof(struct slab_page));
+  uint64_t object_base = page_base + sizeof(struct slab_page);
+  if ((uint64_t)obj < object_base) {
+    klog_puts("[SLAB] ERROR: Object points inside slab metadata!\n");
+    spinlock_release(&slab_global_lock);
+    return;
+  }
+  uint64_t offset = (uint64_t)obj - object_base;
+  if (offset % cache->obj_aligned != 0) {
+    klog_puts("[SLAB] ERROR: Object is not aligned to its cache!\n");
+    spinlock_release(&slab_global_lock);
+    return;
+  }
   uint32_t idx = offset / cache->obj_aligned;
 
   if (idx >= s->total_count) {

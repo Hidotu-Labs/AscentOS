@@ -109,7 +109,15 @@ static int eventfd_poll(vfs_node_t *node, int events) {
 }
 
 static void eventfd_close(vfs_node_t *node) {
-    if (node && node->device) { kfree(node->device); node->device = NULL; }
+    if (node && node->device) {
+        eventfd_ctx_t *ctx = (eventfd_ctx_t *)node->device;
+        /* Detach every waiter before the context goes away: the waker clears
+         * each entry's queue back-pointer, so a thread that was parked here
+         * (or is cleaned up later at exit) never dereferences freed memory. */
+        wait_queue_wake_all(&ctx->wq);
+        kfree(ctx);
+        node->device = NULL;
+    }
 }
 
 static uint64_t sys_eventfd2(uint64_t initval, uint64_t flags, uint64_t a2,
@@ -117,6 +125,9 @@ static uint64_t sys_eventfd2(uint64_t initval, uint64_t flags, uint64_t a2,
     (void)a2; (void)a3; (void)a4; (void)a5;
     struct thread *t = sched_get_current();
     if (!t) return (uint64_t)-1;
+    /* EFD_CLOEXEC is a descriptor flag, not a status flag (see pipe2). */
+    if (flags & ~(uint64_t)(EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE))
+        return (uint64_t)-22; // EINVAL
 
     int fd = alloc_fd(t);
     if (fd < 0) return (uint64_t)-24;
@@ -143,7 +154,8 @@ static uint64_t sys_eventfd2(uint64_t initval, uint64_t flags, uint64_t a2,
 
     t->fds[fd]        = node;
     t->fd_offsets[fd] = 0;
-    t->fd_flags[fd]   = flags;
+    t->fd_flags[fd]   = (flags & EFD_NONBLOCK ? O_NONBLOCK : 0) |
+                        (flags & EFD_CLOEXEC ? FD_FLAGS_CLOEXEC_BIT : 0);
     return fd;
 }
 
@@ -281,6 +293,7 @@ static void timerfd_close(vfs_node_t *node) {
     if (node && node->device) {
         timerfd_ctx_t *ctx = (timerfd_ctx_t *)node->device;
         timerfd_unregister(ctx);
+        wait_queue_wake_all(&ctx->wq);
         ctx->node = NULL;
         kfree(ctx);
         node->device = NULL;
@@ -565,9 +578,23 @@ static void pipe_close(vfs_node_t *node) {
 
 static uint64_t sys_pipe2(uint64_t pipefd_ptr, uint64_t flags, uint64_t a2,
                            uint64_t a3, uint64_t a4, uint64_t a5) {
-    (void)flags; (void)a2; (void)a3; (void)a4; (void)a5;
+    (void)a2; (void)a3; (void)a4; (void)a5;
+    /* O_CLOEXEC is a descriptor flag and must not be confused with the status
+     * flags stored in fd_flags[]; O_NONBLOCK is a status flag.  Unknown flags
+     * have to be rejected rather than swallowed: Qt's forkfd probes for
+     * O_NOSIGPIPE by expecting EINVAL, and a silently ignored O_CLOEXEC lets a
+     * caller believe the descriptor cannot survive execve.  That is how the
+     * QProcess "child started" pipe used to leak into bash: the parent's
+     * poll() for the end-of-file never fired, its 30 second wait expired, and
+     * Konsole reported "Could not start program '/bin/bash'" over a shell that
+     * was in fact running. */
+#ifndef O_ASYNC
+#define O_ASYNC 0x2000
+#endif
+    const uint64_t PIPE_SUPPORTED_FLAGS = O_CLOEXEC | O_NONBLOCK | O_ASYNC;
     int *pipefd = (int *)pipefd_ptr;
     if (!pipefd) return (uint64_t)-14;
+    if (flags & ~PIPE_SUPPORTED_FLAGS) return (uint64_t)-22; // EINVAL
 
     struct thread *t = sched_get_current();
     if (!t) return (uint64_t)-1;
@@ -621,8 +648,15 @@ static uint64_t sys_pipe2(uint64_t pipefd_ptr, uint64_t flags, uint64_t a2,
     t->fds[fd_read] = read_node;
     t->fds[fd_write] = write_node;
     t->fd_offsets[fd_read]  = t->fd_offsets[fd_write]  = 0;
-    t->fd_flags[fd_read]    = (flags & ~O_ACCMODE) | O_RDONLY;
-    t->fd_flags[fd_write]   = (flags & ~O_ACCMODE) | O_WRONLY;
+    /* Translate O_CLOEXEC into the descriptor flag exec_close_cloexec() looks
+     * for instead of leaving it in the status flags, where it does nothing. */
+    const uint64_t pipe_status = flags & ~(uint64_t)(O_ACCMODE | O_CLOEXEC);
+    t->fd_flags[fd_read]  = pipe_status | O_RDONLY;
+    t->fd_flags[fd_write] = pipe_status | O_WRONLY;
+    if (flags & O_CLOEXEC) {
+        t->fd_flags[fd_read]  |= FD_FLAGS_CLOEXEC_BIT;
+        t->fd_flags[fd_write] |= FD_FLAGS_CLOEXEC_BIT;
+    }
     pipefd[0] = fd_read;
     pipefd[1] = fd_write;
     return 0;
@@ -689,8 +723,18 @@ static uint64_t sys_inotify_init(uint64_t a1, uint64_t a2, uint64_t a3,
 
 static uint64_t sys_inotify_init1(uint64_t flags, uint64_t a2, uint64_t a3,
                                    uint64_t a4, uint64_t a5, uint64_t a6) {
-    (void)flags; (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
-    return sys_inotify_init(0, 0, 0, 0, 0, 0);
+    (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
+    /* IN_NONBLOCK and IN_CLOEXEC are defined to be O_NONBLOCK and O_CLOEXEC. */
+    if (flags & ~(uint64_t)(O_CLOEXEC | O_NONBLOCK))
+        return (uint64_t)-22; // EINVAL
+    uint64_t fd = sys_inotify_init(0, 0, 0, 0, 0, 0);
+    if ((int64_t)fd >= 0 && fd < MAX_FDS) {
+        struct thread *t = sched_get_current();
+        if (t && (flags & O_NONBLOCK)) t->fd_flags[fd] |= O_NONBLOCK;
+        if (t && (flags & O_CLOEXEC))
+            t->fd_flags[fd] |= FD_FLAGS_CLOEXEC_BIT;
+    }
+    return fd;
 }
 
 static uint64_t sys_inotify_add_watch(uint64_t fd, uint64_t pathname,
@@ -873,7 +917,7 @@ static uint64_t memfd_mmap(vfs_node_t *node, uint64_t addr, uint64_t length,
 static uint64_t sys_memfd_create(uint64_t name_ptr, uint64_t flags_arg,
                                   uint64_t a2, uint64_t a3, uint64_t a4,
                                   uint64_t a5) {
-    (void)flags_arg; (void)a2; (void)a3; (void)a4; (void)a5;
+    (void)a2; (void)a3; (void)a4; (void)a5;
     struct thread *t = sched_get_current();
     if (!t) return (uint64_t)-1;
 
@@ -914,6 +958,9 @@ static uint64_t sys_memfd_create(uint64_t name_ptr, uint64_t flags_arg,
 
     t->fds[fd]        = node;
     t->fd_offsets[fd] = 0;
+    /* Set the descriptor flags explicitly: the slot may still hold the flags of
+     * whatever descriptor number was reused. */
+    t->fd_flags[fd]   = (flags_arg & MFD_CLOEXEC) ? FD_FLAGS_CLOEXEC_BIT : 0;
     fd_path_set(t, fd, node_name);
 
     return (uint64_t)fd;

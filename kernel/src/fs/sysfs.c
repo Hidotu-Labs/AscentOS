@@ -306,12 +306,15 @@ void sysfs_init(void) {
 
   // Create a fresh ramfs root and mount it over /sys — same pattern as procfs
   vfs_node_t *sysfs_root = kmalloc(sizeof(vfs_node_t));
-  if (!sysfs_root)
+  if (!sysfs_root) {
+    vfs_close(sys_dir);
     return;
+  }
   vfs_node_init(sysfs_root);
   strcpy(sysfs_root->name, "sys");
   ramfs_mount_on(sysfs_root);
   vfs_mount(sys_dir, sysfs_root);
+  vfs_close(sys_dir);
 
   // /sys/bus/pci/devices
   vfs_node_t *bus_dir = sysfs_mkdir(sysfs_root, "bus");
@@ -648,8 +651,8 @@ void sysfs_init(void) {
     if (!udev_dir)
       udev_dir = sysfs_mkdir(run_dir, "udev");
 
-    vfs_node_t *data_dir = vfs_finddir(udev_dir, "data");
-    if (!data_dir)
+    vfs_node_t *data_dir = udev_dir ? vfs_finddir(udev_dir, "data") : NULL;
+    if (!data_dir && udev_dir)
       data_dir = sysfs_mkdir(udev_dir, "data");
 
     if (data_dir) {
@@ -671,6 +674,10 @@ void sysfs_init(void) {
     // detect that unprivileged user namespaces are not available and use their
     // native non-sandboxed process execution path automatically.
     sysfs_mkfile(run_dir, ".containerenv", "engine=avoryos\n");
+
+    if (data_dir) vfs_close(data_dir);
+    if (udev_dir) vfs_close(udev_dir);
+    vfs_close(run_dir);
   }
 
   klog_puts("[OK] SysFS initialized at /sys\n");

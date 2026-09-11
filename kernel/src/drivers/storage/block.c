@@ -164,6 +164,7 @@ int block_register(struct block_device *dev) {
       node->device = dev;
       node->read = block_vfs_read;
       ramfs_mount_node(dev_dir, node);
+      vfs_close(dev_dir);
     }
   }
 
@@ -224,10 +225,13 @@ void block_repopulate_devices(void) {
         new_node->device = dev;
         new_node->read = block_vfs_read;
         new_node->length = node->length;
+        vfs_close(new_node);
       }
       kfree(node);
     } else {
       ramfs_mount_node(dev_dir, node);
     }
   }
+
+  vfs_close(dev_dir);
 }

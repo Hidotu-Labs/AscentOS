@@ -19,6 +19,8 @@ typedef struct {
 // For directories, device points to this
 typedef struct {
   child_node_t *children;
+  child_node_t *cursor;       // sequential readdir resume point
+  uint32_t cursor_index;      // child index the cursor points at
 } ramfs_dir_t;
 
 // Initialize the root ramfs and mount it to fs_root

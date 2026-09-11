@@ -4,6 +4,8 @@
 #include "../lib/string.h"
 #include "../mm/heap.h"
 #include "../mm/pmm.h"
+#include "../mm/vma.h"
+#include "../mm/vmm.h"
 #include "arch/uaccess.h"
 
 #define PHYS_TO_VIRT(p) ((void *)((uint64_t)(p) + pmm_get_hhdm_offset()))
@@ -63,26 +65,76 @@ static void tmpfs_uncharge_bytes(tmpfs_sb_t *sb, uint64_t bytes) {
 }
 
 static tmpfs_page_t *tmpfs_get_page(tmpfs_file_t *file, uint32_t page_index) {
-    tmpfs_page_t *p = file->pages;
-    while (p) {
-        if (p->page_index == page_index)
-            return p;
-        p = p->next;
+    if (!file)
+        return NULL;
+    return (tmpfs_page_t *)radix_tree_lookup(&file->pages, page_index);
+}
+
+/* radix_tree_for_each_range() visits leaves in ascending key order and stops
+ * when the callback returns false, so recording the first value is "lowest
+ * page index >= from".  The callback runs under the tree's own lock and must
+ * not mutate the tree. */
+struct tmpfs_first_page {
+    tmpfs_page_t *page;
+};
+
+static bool tmpfs_find_first_page(uint64_t index, void *value, void *context) {
+    (void)index;
+    struct tmpfs_first_page *first = (struct tmpfs_first_page *)context;
+    if (!first->page)
+        first->page = (tmpfs_page_t *)value;
+    return false;
+}
+
+/* Caller holds file->lock.  Unlinks the lowest-index page at or after `from`
+ * from the tree and returns it; the frame is released by the caller outside
+ * the lock. */
+static tmpfs_page_t *tmpfs_take_page_locked(tmpfs_file_t *file, uint32_t from) {
+    struct tmpfs_first_page first = { NULL };
+    radix_tree_for_each_range(&file->pages, from, UINT32_MAX,
+                              tmpfs_find_first_page, &first);
+    if (!first.page)
+        return NULL;
+    return (tmpfs_page_t *)radix_tree_delete(&file->pages,
+                                             first.page->page_index);
+}
+
+#define TMPFS_PAGE_BATCH 64
+
+/* Remove up to `max` pages with index >= from into out[].  Called with
+ * file->lock held; frames are still owned by the caller. */
+static uint32_t tmpfs_take_pages_locked(tmpfs_file_t *file, uint32_t from,
+                                        tmpfs_page_t **out, uint32_t max) {
+    uint32_t n = 0;
+    while (n < max) {
+        tmpfs_page_t *p = tmpfs_take_page_locked(file, from);
+        if (!p)
+            break;
+        out[n++] = p;
     }
-    return NULL;
+    return n;
+}
+
+static void tmpfs_release_pages(tmpfs_page_t **pages, uint32_t n) {
+    for (uint32_t i = 0; i < n; i++) {
+        tmpfs_page_t *p = pages[i];
+        if (p->phys && pmm_is_managed(p->phys))
+            pmm_free_page((void *)p->phys);
+        kfree(p);
+    }
 }
 
 static tmpfs_page_t *tmpfs_get_or_alloc_page(tmpfs_file_t *file,
                                                uint32_t page_index) {
+    if (!file)
+        return NULL;
     tmpfs_sb_t *sb = file->sb;
 
     spinlock_acquire(&file->lock);
     tmpfs_page_t *p = tmpfs_get_page(file, page_index);
-    if (p) {
-        spinlock_release(&file->lock);
-        return p;
-    }
     spinlock_release(&file->lock);
+    if (p)
+        return p;
 
     if (!tmpfs_charge_bytes(sb, PAGE_SIZE))
         return NULL;
@@ -102,41 +154,45 @@ static tmpfs_page_t *tmpfs_get_or_alloc_page(tmpfs_file_t *file,
     }
     np->page_index = page_index;
     np->phys       = (uint64_t)frame;
-    np->next       = NULL;
 
     spinlock_acquire(&file->lock);
-    tmpfs_page_t *existing = tmpfs_get_page(file, page_index);
-    if (existing) {
+    if (radix_tree_insert(&file->pages, page_index, np) != 0) {
+        /* Lost a race (another thread inserted the page first) or the tree
+         * could not allocate a node: keep whichever page is already there. */
+        tmpfs_page_t *existing = tmpfs_get_page(file, page_index);
         spinlock_release(&file->lock);
         pmm_free_page(frame);
         tmpfs_uncharge_bytes(sb, PAGE_SIZE);
         kfree(np);
         return existing;
     }
-    np->next    = file->pages;
-    file->pages = np;
     file->num_pages++;
     spinlock_release(&file->lock);
     return np;
 }
 
 static void tmpfs_free_all_pages(tmpfs_file_t *file) {
+    if (!file)
+        return;
     tmpfs_sb_t *sb = file->sb;
 
-    spinlock_acquire(&file->lock);
-    tmpfs_page_t *p = file->pages;
-    file->pages     = NULL;
-    uint32_t count  = file->num_pages;
-    file->num_pages = 0;
-    spinlock_release(&file->lock);
+    tmpfs_page_t *batch[TMPFS_PAGE_BATCH];
+    uint64_t freed = 0;
+    for (;;) {
+        spinlock_acquire(&file->lock);
+        uint32_t n = tmpfs_take_pages_locked(file, 0, batch, TMPFS_PAGE_BATCH);
+        if (n <= file->num_pages)
+            file->num_pages -= n;
+        else
+            file->num_pages = 0;
+        spinlock_release(&file->lock);
 
-    while (p) {
-        tmpfs_page_t *next = p->next;
-        pmm_free_page((void *)p->phys);
-        kfree(p);
-        p = next;
+        if (!n)
+            break;
+        freed += n;
+        tmpfs_release_pages(batch, n);
     }
-    tmpfs_uncharge_bytes(sb, (uint64_t)count * PAGE_SIZE);
+    tmpfs_uncharge_bytes(sb, freed * PAGE_SIZE);
 }
 
 static uint32_t tmpfs_read(vfs_node_t *node, uint32_t offset, uint32_t size,
@@ -259,6 +315,81 @@ static int tmpfs_fallocate(vfs_node_t *node, int mode, uint32_t offset, uint32_t
     return tmpfs_truncate(node, needed);
 }
 
+/*
+ * Shared mmap of a tmpfs file.
+ *
+ * The frames of a tmpfs file belong to the file, exactly like the storage
+ * behind a memfd or a GEM dumb buffer.  vmm_free_user_pages() only skips
+ * pmm_free_page() for VMAs that carry MAP_SHARED, because the backing object -
+ * not the mapping - owns the frame.  Serving a *private* mapping of these
+ * frames would therefore hand live tmpfs storage back to the page allocator
+ * when the mapping's owner exits, so private mappings are refused instead of
+ * quietly accepted; they already fail with EINVAL today because tmpfs had no
+ * mmap handler at all.  Everything that needs this path maps shared:
+ * shm_open()+ftruncate()+mmap() (POSIX shm), X11 MIT-SHM, Qt QSharedMemory and
+ * Mesa's shared cache files.
+ *
+ * Callers must supply a concrete address (sys_mmap resolves one and sets
+ * MAP_FIXED before calling any node->mmap, and the mremap/grow paths do too).
+ */
+static uint64_t tmpfs_mmap(vfs_node_t *node, uint64_t addr, uint64_t length,
+                           uint64_t prot, uint64_t flags, uint64_t offset) {
+    if (!node || (node->flags & FS_TYPE_MASK) != FS_FILE || !node->device)
+        return (uint64_t)-1;
+    if (!(flags & MAP_SHARED) || length == 0 || (offset & (PAGE_SIZE - 1)))
+        return (uint64_t)-1;
+    if (addr == 0 || !(flags & MAP_FIXED))
+        return (uint64_t)-1;
+
+    tmpfs_file_t *file  = (tmpfs_file_t *)node->device;
+    uint64_t      pml4v = (uint64_t)vmm_get_active_pml4();
+    if (!pml4v)
+        return (uint64_t)-1;
+    uint64_t *pml4 = (uint64_t *)pml4v;
+
+    uint64_t aligned_len = (length + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+
+    /* Like Linux's shmem mmap, a shared mapping past EOF extends the file so
+     * the tail is real storage rather than a later fault.  tmpfs_truncate()
+     * both allocates the pages (subject to the mount's byte budget) and keeps
+     * node->length consistent for readers. */
+    uint64_t map_end = offset + aligned_len;
+    if (map_end > node->length) {
+        if (map_end > UINT32_MAX)
+            return (uint64_t)-1;
+        if (tmpfs_truncate(node, (uint32_t)map_end) != 0)
+            return (uint64_t)-1;
+    }
+
+    uint64_t page_flags = PAGE_FLAG_PRESENT | PAGE_FLAG_USER;
+    if (prot & 0x2) // PROT_WRITE
+        page_flags |= PAGE_FLAG_RW;
+    if (!(prot & 0x4)) // PROT_EXEC absent
+        page_flags |= PAGE_FLAG_NX;
+
+    uint32_t first_page = (uint32_t)(offset / PAGE_SIZE);
+    uint64_t page_count = aligned_len / PAGE_SIZE;
+
+    for (uint64_t i = 0; i < page_count; i++) {
+        tmpfs_page_t *pg = tmpfs_get_or_alloc_page(file, first_page + (uint32_t)i);
+        if (!pg)
+            return (uint64_t)-1;
+
+        uint64_t va = addr + i * PAGE_SIZE;
+        if (vmm_map_page_if_unmapped(pml4, va, pg->phys, page_flags))
+            continue;
+
+        /* Already mapped: acceptable only if it is the very same tmpfs frame
+         * (a repeated or overlapping remap), never someone else's page. */
+        if (vmm_virt_to_phys(pml4, va) == pg->phys)
+            continue;
+
+        return (uint64_t)-1;
+    }
+
+    return addr;
+}
+
 static int tmpfs_truncate(vfs_node_t *node, uint32_t new_len) {
     if (!node || (node->flags & FS_TYPE_MASK) != FS_FILE || !node->device)
         return -1;
@@ -292,35 +423,36 @@ static int tmpfs_truncate(vfs_node_t *node, uint32_t new_len) {
         }
     } else {
         uint32_t first_free = (new_len + PAGE_SIZE - 1) / PAGE_SIZE;
-        spinlock_acquire(&file->lock);
-        tmpfs_page_t *prev = NULL;
-        tmpfs_page_t *p    = file->pages;
-        while (p) {
-            if (p->page_index >= first_free) {
-                tmpfs_page_t *next = p->next;
-                if (prev)
-                    prev->next = next;
-                else
-                    file->pages = next;
-                pmm_free_page((void *)p->phys);
-                kfree(p);
-                file->num_pages--;
-                tmpfs_uncharge_bytes(file->sb, PAGE_SIZE);
-                p = next;
-            } else {
-                prev = p;
-                p    = p->next;
-            }
+
+        tmpfs_page_t *batch[TMPFS_PAGE_BATCH];
+        uint64_t freed = 0;
+        for (;;) {
+            spinlock_acquire(&file->lock);
+            uint32_t n = tmpfs_take_pages_locked(file, first_free, batch,
+                                                 TMPFS_PAGE_BATCH);
+            if (n <= file->num_pages)
+                file->num_pages -= n;
+            else
+                file->num_pages = 0;
+            spinlock_release(&file->lock);
+
+            if (!n)
+                break;
+            freed += n;
+            tmpfs_release_pages(batch, n);
         }
+        tmpfs_uncharge_bytes(file->sb, freed * PAGE_SIZE);
+
         if (new_len % PAGE_SIZE != 0) {
+            spinlock_acquire(&file->lock);
             tmpfs_page_t *pg = tmpfs_get_page(file, new_len / PAGE_SIZE);
             if (pg) {
                 uint8_t *virt = (uint8_t *)PHYS_TO_VIRT(pg->phys);
                 uint32_t tail = new_len % PAGE_SIZE;
                 memset(virt + tail, 0, PAGE_SIZE - tail);
             }
+            spinlock_release(&file->lock);
         }
-        spinlock_release(&file->lock);
     }
 
     node->length = new_len;
@@ -367,24 +499,40 @@ static struct dirent *tmpfs_readdir(vfs_node_t *node, uint32_t index) {
     if (index == 0) {
         strcpy(d.name, ".");
         d.ino = node->inode;
+        d.d_type = DT_DIR;
         return &d;
     }
     if (index == 1) {
         strcpy(d.name, "..");
         d.ino = node->inode;
+        d.d_type = DT_DIR;
         return &d;
     }
 
     index -= 2;
     tmpfs_dir_t   *dir  = (tmpfs_dir_t *)node->device;
-    tmpfs_child_t *curr = dir->children;
-    for (uint32_t i = 0; i < index && curr; i++)
-        curr = curr->next;
+
+    /* getdents walks indices in sequence.  Resuming from the per-directory
+     * cursor makes each step O(1); anything else (random access, two readers
+     * interleaving) safely falls back to a scan from the head. */
+    tmpfs_child_t *cursor = dir->cursor;
+    uint32_t cursor_index = dir->cursor_index;
+    tmpfs_child_t *curr;
+    if (cursor && index == cursor_index + 1) {
+        curr = cursor->next;
+    } else {
+        curr = dir->children;
+        for (uint32_t i = 0; i < index && curr; i++)
+            curr = curr->next;
+    }
+    dir->cursor = curr;
+    dir->cursor_index = index;
 
     if (curr) {
         strncpy(d.name, curr->node->name, 127);
         d.name[127] = '\0';
         d.ino = curr->node->inode;
+        d.d_type = vfs_dtype(curr->node->flags);
         return &d;
     }
     return NULL;
@@ -484,7 +632,7 @@ static vfs_node_t *tmpfs_make_node(tmpfs_sb_t *sb, const char *name,
             tmpfs_free_inode(sb);
             return NULL;
         }
-        f->pages     = NULL;
+        radix_tree_init(&f->pages);
         f->num_pages = 0;
         f->sb        = sb;
         spinlock_init(&f->lock);
@@ -493,6 +641,7 @@ static vfs_node_t *tmpfs_make_node(tmpfs_sb_t *sb, const char *name,
         n->write    = tmpfs_write;
         n->truncate = tmpfs_truncate;
         n->fallocate = tmpfs_fallocate;
+        n->mmap     = tmpfs_mmap;
     } else if (type == FS_DIRECTORY) {
         tmpfs_dir_t *d = kmalloc(sizeof(tmpfs_dir_t));
         if (!d) {
@@ -501,6 +650,8 @@ static vfs_node_t *tmpfs_make_node(tmpfs_sb_t *sb, const char *name,
             return NULL;
         }
         d->children = NULL;
+        d->cursor   = NULL;
+        d->cursor_index = 0;
         d->sb       = sb;
         n->device   = d;
         n->readdir  = tmpfs_readdir;
@@ -772,6 +923,7 @@ void tmpfs_mount_at_sized(const char *path, uint64_t max_bytes,
 
     vfs_node_t *root = tmpfs_create_root(sb);
     if (!root) {
+        vfs_close(mountpoint);
         kfree(sb);
         klog_puts(KLOG_CLR_RED "[ FAIL ]" KLOG_CLR_RESET
                                " tmpfs: failed to create root node\n");
@@ -794,6 +946,7 @@ void tmpfs_mount_at_sized(const char *path, uint64_t max_bytes,
     klog_puts("MB inodes=");
     klog_uint64(sb->max_inodes);
     klog_puts(")\n");
+    vfs_close(mountpoint);
 }
 
 void tmpfs_mount_at(const char *path) {

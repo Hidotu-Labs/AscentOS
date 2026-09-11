@@ -11,17 +11,33 @@ uint32_t ext4_read_impl(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_
     if (!mnt) return 0;
 
     ext2_inode_t inode;
-    if (ext2_read_inode(mnt, node->inode, &inode)) return 0;
+    if (ext2_read_inode(mnt, node->inode, &inode)) {
+        static uint32_t inode_errs;
+        if (__atomic_add_fetch(&inode_errs, 1, __ATOMIC_RELAXED) <= 8)
+            klogf("[EXT4] inode %u read failed\n", node->inode);
+        return 0;
+    }
 
     if (!ext4_inode_has_extents(&inode))
         return ext2_read_impl(node, offset, size, buffer);
 
-    if (offset >= inode.i_size) return 0;
+    if (offset >= inode.i_size) {
+        static uint32_t eof_errs;
+        if (__atomic_add_fetch(&eof_errs, 1, __ATOMIC_RELAXED) <= 8)
+            klogf("[EXT4] read past EOF: off=%u i_size=%llu\n", offset,
+                  (unsigned long long)inode.i_size);
+        return 0;
+    }
     if (offset + size > inode.i_size) size = inode.i_size - offset;
 
     uint32_t bytes_read = 0;
     uint8_t *block_buf = kmalloc(mnt->block_size);
-    if (!block_buf) return 0;
+    if (!block_buf) {
+        static uint32_t alloc_errs;
+        if (__atomic_add_fetch(&alloc_errs, 1, __ATOMIC_RELAXED) <= 8)
+            klogf("[EXT4] block buffer allocation failed\n");
+        return 0;
+    }
 
     bool is_user = is_user_ptr((uint64_t)buffer);
 
@@ -70,8 +86,14 @@ uint32_t ext4_read_impl(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_
             uint64_t lba = (uint64_t)disk_block * (mnt->block_size / 512);
             uint32_t sectors = to_read_blocks * (mnt->block_size / 512);
             int err = mnt->dev->read_sectors(mnt->dev, lba, sectors, buffer + bytes_read);
-            if (err != 0)
+            if (err != 0) {
+                static uint32_t data_errs;
+                if (__atomic_add_fetch(&data_errs, 1, __ATOMIC_RELAXED) <= 8)
+                    klogf("[EXT4] data read failed: off=%u lba=%llu sectors=%u err=%d\n",
+                          offset + bytes_read, (unsigned long long)lba,
+                          sectors, err);
                 break;
+            }
             bytes_read += to_read_blocks * mnt->block_size;
         } else {
             uint32_t done_in_run = 0;
@@ -434,10 +456,8 @@ int ext4_statfs_impl(vfs_node_t *node, struct statfs_buf *buf) {
         return -1;
 
     ext2_mount_t *mnt = (ext2_mount_t *)node->device;
-    uint8_t sb_buf[1024];
-    if (mnt->dev->read_sectors(mnt->dev, 2, 2, sb_buf) == 0)
-        memcpy(&mnt->sb, sb_buf, sizeof(mnt->sb));
-
+    /* Free counts are maintained in memory between flushes; re-reading the
+     * on-disk superblock here would resurrect stale values. */
     uint64_t block_size = 1024ULL << mnt->sb.s_log_block_size;
     buf->f_type = 0xEF53;
     buf->f_bsize = block_size;

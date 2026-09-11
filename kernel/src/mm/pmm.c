@@ -48,6 +48,131 @@ static uint64_t physical_memory_offset = 0;
 static struct limine_memmap_response *internal_memmap = NULL;
 static uint64_t zero_page_phys = 0;
 
+/* ---------------------------------------------------------------------------
+ * Buddy free-list integrity
+ *
+ * Free-list links live inside the pages themselves: `struct buddy_block` sits
+ * at offset 0 of a free page.  If a page is ever handed out while it is still
+ * linked - a double free, or a free of a frame that is already parked in a
+ * per-CPU cache - the next owner's memset overwrites the node and the next
+ * list walk follows a NULL or wild pointer into a kernel-mode fault.  Because
+ * that walk runs under b_zone.lock, a fatal fault there also leaves the lock
+ * held forever, which is what turns one bad frame into a hung machine.
+ *
+ * These helpers only trust a node that actually looks like a member of the
+ * free list for its order; at the first bad link the list is cut there and
+ * the event is reported, so one stale frame costs a few pages instead of the
+ * whole system.  All of them run with b_zone.lock held.
+ * ------------------------------------------------------------------------- */
+
+static inline int bitmap_test(uint8_t *bm, size_t bit);
+
+static volatile uint64_t buddy_corruption_reports;
+
+static void buddy_report_corruption(const char *what, size_t order,
+                                    const struct list_head *node) {
+  uint64_t n =
+      __atomic_add_fetch(&buddy_corruption_reports, 1, __ATOMIC_RELAXED);
+  if (n <= 8) {
+    klog_puts(KLOG_CLR_RED "[PMM] CORRUPTION: " KLOG_CLR_RESET);
+    klog_puts(what);
+    klog_puts(" in free_list[");
+    klog_uint64(order);
+    klog_puts("] node=");
+    klog_hex64((uint64_t)node);
+    klog_puts(" - cutting the list at the last good link\n");
+  }
+}
+
+/* A block is believable when it is a managed-RAM page aligned to its order,
+ * its order field agrees, its bitmap bit still says "free", and its links are
+ * reciprocal (a stale non-NULL pair left over from an old life fails the last
+ * test).  The bitmap check is what catches a page handed out while it is still
+ * linked: its content may not have been overwritten yet, but the bitmap was
+ * updated under this same lock. */
+static bool buddy_node_valid(const struct list_head *node, size_t order) {
+  uint64_t addr = (uint64_t)node;
+  struct list_head *head = &b_zone.free_list[order];
+  uint64_t block_size = (uint64_t)1 << (order + 12);
+  struct buddy_block *block = (struct buddy_block *)node;
+
+  if (!node || !pmm_kernel_ptr_is_managed(node))
+    return false;
+  if (addr & (block_size - 1))
+    return false;
+  if (block->order != order)
+    return false;
+
+  uint64_t pfn = (addr - physical_memory_offset) / PAGE_SIZE;
+  if (pfn < lowest_page || pfn >= highest_page ||
+      bitmap_test(bitmap, pfn - lowest_page))
+    return false;
+
+  uint64_t next = (uint64_t)block->node.next;
+  uint64_t prev = (uint64_t)block->node.prev;
+  if (next != (uint64_t)head && !pmm_kernel_ptr_is_managed((void *)next))
+    return false;
+  if (prev != (uint64_t)head && !pmm_kernel_ptr_is_managed((void *)prev))
+    return false;
+
+  return block->node.next->prev == node && block->node.prev->next == node;
+}
+
+/* True when the list has a valid first node.  Drops corrupted head nodes
+ * (keeping a believable successor when there is one) so callers proceed. */
+static bool buddy_list_nonempty(size_t order) {
+  struct list_head *head = &b_zone.free_list[order];
+
+  for (;;) {
+    struct list_head *first = head->next;
+    if (first == head)
+      return false;
+    if (buddy_node_valid(first, order))
+      return true;
+
+    buddy_report_corruption("first link", order, first);
+    if (pmm_kernel_ptr_is_managed(first)) {
+      struct list_head *next = first->next;
+      if (next != head && pmm_kernel_ptr_is_managed(next)) {
+        head->next = next;
+        next->prev = head;
+        continue; // the successor may still be a good block
+      }
+    }
+    INIT_LIST_HEAD(head);
+    return false;
+  }
+}
+
+static struct buddy_block *buddy_list_pop(size_t order) {
+  if (!buddy_list_nonempty(order))
+    return NULL;
+  struct buddy_block *block =
+      list_first_entry(&b_zone.free_list[order], struct buddy_block, node);
+  list_del(&block->node);
+  return block;
+}
+
+/* Walk one entire list, cutting it at the first node that fails validation.
+ * The valid prefix is preserved so only the corrupted tail is dropped. */
+static void buddy_list_validate(size_t order) {
+  struct list_head *head = &b_zone.free_list[order];
+  struct list_head *prev = head;
+  struct list_head *pos = head->next;
+  uint64_t steps = 0;
+
+  while (pos != head) {
+    if (++steps > page_count || !buddy_node_valid(pos, order)) {
+      buddy_report_corruption("link", order, pos);
+      prev->next = head;
+      head->prev = prev;
+      return;
+    }
+    prev = pos;
+    pos = pos->next;
+  }
+}
+
 static inline void bitmap_clear(uint8_t *bm, size_t bit) {
   bm[bit / 8] &= ~(1 << (bit % 8));
 }
@@ -143,6 +268,7 @@ size_t pmm_get_free_pages(void) {
   spinlock_acquire(&b_zone.lock);
   for (int order = 0; order < MAX_ORDER; order++) {
     struct list_head *pos;
+    buddy_list_validate(order);
     list_for_each(pos, &b_zone.free_list[order]) {
       free_pages += (1ULL << order);
     }
@@ -156,6 +282,13 @@ static void buddy_free_internal(uint64_t phys, size_t order);
 // Internal function to add a free block to the buddy system
 __attribute__((optimize("O3"))) static void buddy_free_internal(uint64_t phys, size_t order) {
   uint64_t pfn = phys / PAGE_SIZE;
+
+  /* A misaligned free cannot be a buddy block of this order; inserting it
+   * would make the split math below hand out overlapping ranges. */
+  if (phys & (((uint64_t)1 << (order + 12)) - 1)) {
+    buddy_report_corruption("misaligned free", order, (void *)phys);
+    return;
+  }
 
   // Clear bitmap for this block
   bitmap_clear_range(bitmap, pfn, (1ULL << order));
@@ -173,18 +306,26 @@ __attribute__((optimize("O3"))) static void buddy_free_internal(uint64_t phys, s
       break;
 
     struct buddy_block *buddy = virt_to_buddy(buddy_pfn * PAGE_SIZE);
-    if (buddy->order == order && buddy->node.next && buddy->node.prev) {
+    if (buddy_node_valid(&buddy->node, order)) {
       // It's in the same order list, coalesce
       list_del(&buddy->node);
       pfn = (pfn < buddy_pfn) ? pfn : buddy_pfn;
       order++;
     } else {
-      // Free but split into smaller blocks; wait for them to coalesce up
+      // Free but split into smaller blocks, or its node is stale; wait for
+      // the pieces to coalesce up rather than deleting a link we do not own.
       break;
     }
   }
 
   struct buddy_block *block = virt_to_buddy(pfn * PAGE_SIZE);
+  if (buddy_node_valid(&block->node, order)) {
+    /* Already linked at this order: this is a double free.  Re-adding the
+     * same node would corrupt the list, so report and leave it alone. */
+    buddy_report_corruption("double free of linked block", order,
+                            &block->node);
+    return;
+  }
   block->order = order;
   list_add_tail(&block->node, &b_zone.free_list[order]);
 }
@@ -387,7 +528,7 @@ __attribute__((optimize("O3"))) void *pmm_alloc_pages(size_t count) {
   spinlock_acquire(&b_zone.lock);
 
   size_t cur_order = order;
-  while (cur_order < MAX_ORDER && list_empty(&b_zone.free_list[cur_order])) {
+  while (cur_order < MAX_ORDER && !buddy_list_nonempty(cur_order)) {
     cur_order++;
   }
 
@@ -443,6 +584,8 @@ void *pmm_alloc_pages_range(size_t count, uint64_t min_phys_addr,
     struct buddy_block *found_block = NULL;
     uint64_t target_phys = 0;
     struct list_head *pos;
+
+    buddy_list_validate(cur_order);
 
     list_for_each(pos, &b_zone.free_list[cur_order]) {
       struct buddy_block *block = list_entry(pos, struct buddy_block, node);
@@ -509,17 +652,18 @@ void pmm_pcp_init(void) {
 
 static void *pmm_alloc_page_locked(void) {
   size_t cur_order = 0;
-  while (cur_order < MAX_ORDER && list_empty(&b_zone.free_list[cur_order])) {
+  struct buddy_block *block = NULL;
+
+  while (cur_order < MAX_ORDER) {
+    block = buddy_list_pop(cur_order);
+    if (block)
+      break;
     cur_order++;
   }
 
-  if (cur_order == MAX_ORDER) {
+  if (!block) {
     return NULL; // OOM
   }
-
-  struct buddy_block *block =
-      list_first_entry(&b_zone.free_list[cur_order], struct buddy_block, node);
-  list_del(&block->node);
 
   uint64_t pfn = buddy_to_phys(block) / PAGE_SIZE;
 
@@ -613,19 +757,43 @@ __attribute__((optimize("O3"))) void pmm_free_pages(void *ptr, size_t count) {
 
   spinlock_acquire(&b_zone.lock);
 
-  // Check refcounts for the range. We only free pages whose refcount hits zero.
-  // NOTE: pmm_free_pages with count > 1 is currently only used for
-  // non-refcounted internal kernel allocations (like reclaiming bootloader
-  // memory). For user pages (CoW), we always use pmm_decref (which calls
-  // pmm_free_page).
-  for (size_t i = 0; i < (1ULL << order); i++) {
-    uint16_t r = __atomic_load_n(&refcounts[pfn + i - lowest_page], __ATOMIC_RELAXED);
-    if (r > 0) {
-      __atomic_fetch_sub(&refcounts[pfn + i - lowest_page], 1, __ATOMIC_ACQ_REL);
+  /*
+   * Refcounts, not the bitmap, record ownership: a page parked in a per-CPU
+   * cache still has its bitmap bit set but its refcount has already reached
+   * zero (see pmm_decref).  Freeing such a page here would put it on the
+   * buddy free list while it is also queued for hand-out, and the first owner
+   * to zero it would overwrite the list node.  Require every page in the
+   * block to be owned before dropping any reference, and only return the
+   * block to the buddy when every reference in it is gone.
+   */
+  size_t n = 1ULL << order;
+  bool owned = true;
+  for (size_t i = 0; i < n; i++) {
+    if (__atomic_load_n(&refcounts[pfn + i - lowest_page],
+                        __ATOMIC_RELAXED) == 0) {
+      owned = false;
+      break;
+    }
+  }
+  if (!owned) {
+    spinlock_release(&b_zone.lock);
+    return; // already free (or parked in a PCP cache)
+  }
+
+  bool all_last = true;
+  for (size_t i = 0; i < n; i++) {
+    uint16_t r =
+        __atomic_load_n(&refcounts[pfn + i - lowest_page], __ATOMIC_RELAXED);
+    if (r == 1) {
+      __atomic_store_n(&refcounts[pfn + i - lowest_page], 0, __ATOMIC_RELAXED);
+    } else {
+      all_last = false;
+      __atomic_fetch_sub(&refcounts[pfn + i - lowest_page], 1,
+                         __ATOMIC_ACQ_REL);
     }
   }
 
-  if (refcounts[pfn - lowest_page] == 0) {
+  if (all_last) {
     buddy_free_internal(addr, order);
   }
 
@@ -639,6 +807,13 @@ bool pmm_is_managed(uint64_t phys) {
   if (pfn < lowest_page || pfn >= highest_page || managed_bitmap == NULL)
     return false;
   return bitmap_test(managed_bitmap, pfn - lowest_page);
+}
+
+bool pmm_kernel_ptr_is_managed(const void *ptr) {
+  uint64_t v = (uint64_t)ptr;
+  if (!v || v < physical_memory_offset)
+    return false;
+  return pmm_is_managed(v - physical_memory_offset);
 }
 
 void pmm_incref(void *ptr) {
@@ -667,7 +842,16 @@ __attribute__((optimize("O3"))) void pmm_decref(void *ptr) {
     return;
   }
 
-  // Refcount is now 0
+  // Refcount is now 0.  The bitmap is the backstop against a stale reference
+  // dropping the last count on a page that the buddy allocator already owns:
+  // parking it in a PCP cache while it is still linked would re-create the
+  // very corruption this path exists to avoid.  The read is unlocked on the
+  // fast path on purpose; only a double-free can race it, and in that case
+  // refusing to park the page is the correct answer anyway.
+  if (!bitmap_test(bitmap, pfn - lowest_page)) {
+    return; // already on the buddy free list
+  }
+
   if (!pcp_initialized) {
     spinlock_acquire(&b_zone.lock);
     buddy_free_internal((uint64_t)ptr, 0);

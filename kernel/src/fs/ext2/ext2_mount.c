@@ -66,10 +66,8 @@ static int ext2_statfs_impl(vfs_node_t *node, struct statfs_buf *buf) {
   if (!mnt)
     return -1;
 
-  uint8_t sb_buf[1024];
-  if (mnt->dev->read_sectors(mnt->dev, 2, 2, sb_buf) == 0)
-    memcpy(&mnt->sb, sb_buf, sizeof(ext2_superblock_t));
-
+  /* Free counts are maintained in memory between flushes; re-reading the
+   * on-disk superblock here would resurrect stale values. */
   uint64_t block_size = (uint64_t)(1024 << mnt->sb.s_log_block_size);
 
   buf->f_type    = 0xEF53;

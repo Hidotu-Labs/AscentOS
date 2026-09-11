@@ -260,5 +260,8 @@ void watchdog_init(void) {
                       NULL, watchdog_vfs_ioctl,
                       NULL, &g_watchdog, 0, 0);
 
+  if (dev_dir)
+    vfs_close(dev_dir);
+
   klog_puts(KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET " Watchdog driver initialized (/dev/watchdog, /dev/watchdog0, default=60s)\n");
 }

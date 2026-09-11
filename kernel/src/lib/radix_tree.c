@@ -1,6 +1,7 @@
 #include "lib/radix_tree.h"
 #include "lib/string.h"
 #include "mm/heap.h"
+#include "mm/pmm.h"
 
 #define RADIX_ENOMEM 12
 #define RADIX_EEXIST 17
@@ -48,6 +49,25 @@ static unsigned radix_slot(uint64_t index, uint8_t level) {
                     (RADIX_TREE_SLOTS - 1));
 }
 
+/* A stored child pointer is only treated as a node when it is an aligned
+ * kernel address backed by managed RAM.  Leaf values are opaque to the tree,
+ * but every intermediate slot must point at a real node: the page cache's
+ * trees have been observed holding wild values after a kernel-heap
+ * use-after-free, and dereferencing one turns a recoverable data corruption
+ * into a fatal ring-0 page fault. */
+static bool radix_ptr_is_node(const void *ptr) {
+  if (!ptr || ((uint64_t)ptr & (sizeof(void *) - 1)) != 0)
+    return false;
+  return pmm_kernel_ptr_is_managed(ptr);
+}
+
+static void radix_reset_corrupt_tree(struct radix_tree *tree) {
+  tree->root = NULL;
+  tree->height = 0;
+  tree->entries = 0;
+  tree->nodes = 0;
+}
+
 void radix_tree_init_with_allocator(
     struct radix_tree *tree, const struct radix_tree_allocator *allocator) {
   if (!tree)
@@ -68,12 +88,13 @@ void radix_tree_init(struct radix_tree *tree) {
 
 static void *radix_lookup_locked(const struct radix_tree *tree,
                                  uint64_t index) {
-  if (!tree->root || radix_required_height(index) > tree->height)
+  if (!radix_ptr_is_node(tree->root) ||
+      radix_required_height(index) > tree->height)
     return NULL;
   const struct radix_tree_node *node = tree->root;
   for (uint8_t level = tree->height - 1; level > 0; level--) {
     node = node->slots[radix_slot(index, level)];
-    if (!node)
+    if (!radix_ptr_is_node(node))
       return NULL;
   }
   return node->slots[radix_slot(index, 0)];
@@ -100,6 +121,8 @@ int radix_tree_insert(struct radix_tree *tree, uint64_t index, void *value) {
   if (!tree || !value)
     return -RADIX_EINVAL;
   spinlock_acquire(&tree->lock);
+  if (tree->root && !radix_ptr_is_node(tree->root))
+    radix_reset_corrupt_tree(tree);
   if (radix_lookup_locked(tree, index)) {
     spinlock_release(&tree->lock);
     return -RADIX_EEXIST;
@@ -122,13 +145,16 @@ int radix_tree_insert(struct radix_tree *tree, uint64_t index, void *value) {
     struct radix_tree_node *node = tree->root;
     for (uint8_t level = tree->height - 1; level > 0; level--) {
       unsigned slot = radix_slot(index, level);
-      if (!node->slots[slot]) {
+      struct radix_tree_node *child = node->slots[slot];
+      if (!radix_ptr_is_node(child)) {
+        /* Missing or corrupt branch: attach the fresh subtree here, exactly
+         * as for an empty slot.  A wild pointer can never be followed. */
         attach_parent = node;
         attach_slot = slot;
         branch_count = level;
         break;
       }
-      node = node->slots[slot];
+      node = child;
     }
     if (!branch_count) {
       unsigned slot = radix_slot(index, 0);
@@ -205,14 +231,15 @@ void *radix_tree_replace(struct radix_tree *tree, uint64_t index, void *value) {
   if (!tree || !value)
     return NULL;
   spinlock_acquire(&tree->lock);
-  if (!tree->root || radix_required_height(index) > tree->height) {
+  if (!radix_ptr_is_node(tree->root) ||
+      radix_required_height(index) > tree->height) {
     spinlock_release(&tree->lock);
     return NULL;
   }
   struct radix_tree_node *node = tree->root;
   for (uint8_t level = tree->height - 1; level > 0; level--) {
     node = node->slots[radix_slot(index, level)];
-    if (!node) {
+    if (!radix_ptr_is_node(node)) {
       spinlock_release(&tree->lock);
       return NULL;
     }
@@ -229,7 +256,10 @@ void *radix_tree_delete(struct radix_tree *tree, uint64_t index) {
   if (!tree)
     return NULL;
   spinlock_acquire(&tree->lock);
-  if (!tree->root || radix_required_height(index) > tree->height) {
+  if (tree->root && !radix_ptr_is_node(tree->root))
+    radix_reset_corrupt_tree(tree);
+  if (!radix_ptr_is_node(tree->root) ||
+      radix_required_height(index) > tree->height) {
     spinlock_release(&tree->lock);
     return NULL;
   }
@@ -241,7 +271,7 @@ void *radix_tree_delete(struct radix_tree *tree, uint64_t index) {
     unsigned slot = radix_slot(index, level);
     slots[level] = slot;
     node = node->slots[slot];
-    if (!node) {
+    if (!radix_ptr_is_node(node)) {
       spinlock_release(&tree->lock);
       return NULL;
     }
@@ -286,6 +316,8 @@ void *radix_tree_delete(struct radix_tree *tree, uint64_t index) {
 static void radix_destroy_node(struct radix_tree *tree,
                                struct radix_tree_node *node, uint8_t level,
                                void (*release)(void *)) {
+  if (!radix_ptr_is_node(node))
+    return;
   for (unsigned i = 0; i < RADIX_TREE_SLOTS; i++) {
     if (!node->slots[i])
       continue;
@@ -304,6 +336,8 @@ void radix_tree_destroy(struct radix_tree *tree,
   if (!tree)
     return;
   spinlock_acquire(&tree->lock);
+  if (tree->root && !radix_ptr_is_node(tree->root))
+    radix_reset_corrupt_tree(tree);
   if (tree->root)
     radix_destroy_node(tree, tree->root, tree->height - 1, release);
   tree->root = NULL;
@@ -316,7 +350,7 @@ void radix_tree_destroy(struct radix_tree *tree,
 static bool radix_iter_node(struct radix_tree_node *node, uint8_t level,
                             uint64_t prefix, uint64_t first, uint64_t last,
                             radix_tree_iter_fn callback, void *context) {
-  if (!node || (uint64_t)node < 0xFFFF800000000000ULL)
+  if (!radix_ptr_is_node(node))
     return false;
   for (unsigned i = 0; i < RADIX_TREE_SLOTS; i++) {
     if (!node->slots[i])
@@ -326,7 +360,7 @@ static bool radix_iter_node(struct radix_tree_node *node, uint8_t level,
       if (key >= first && key <= last && !callback(key, node->slots[i], context))
         return false;
     } else {
-      if ((uint64_t)node->slots[i] < 0xFFFF800000000000ULL)
+      if (!radix_ptr_is_node(node->slots[i]))
         continue;
       if (!radix_iter_node(node->slots[i], level - 1, key, first, last,
                            callback, context)) {
@@ -358,7 +392,7 @@ bool radix_tree_for_each(struct radix_tree *tree, radix_tree_iter_fn callback,
 static bool radix_validate_node(const struct radix_tree_node *node,
                                 uint8_t level, uint64_t *nodes,
                                 uint64_t *entries) {
-  if (!node)
+  if (!radix_ptr_is_node(node))
     return false;
   unsigned count = 0;
   for (unsigned i = 0; i < RADIX_TREE_SLOTS; i++) {

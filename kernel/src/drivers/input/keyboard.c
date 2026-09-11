@@ -1,4 +1,5 @@
 #include "drivers/input/keyboard.h"
+#include "../../lock/lockdiag.h"
 #include "hal/hal.h"
 #include "../../console/console.h"
 #include "../../console/klog.h"
@@ -85,6 +86,11 @@ static void scancode_buffer_push(uint8_t scancode, uint8_t is_extended,
 
 void keyboard_push_scancode(uint8_t scancode, bool extended, bool release) {
   scancode_buffer_push(scancode, extended ? 1 : 0, release ? 1 : 0);
+  /* Sysrq-style hang report on demand (Right-Ctrl three times).  This is the one keyboard
+   * funnel both the PS/2 and USB drivers call unconditionally, so the trigger
+   * works even with no X server and no evdev device - which is exactly when the
+   * machine is hardest to inspect. */
+  lockdiag_keyboard_scancode(scancode, extended, release);
 }
 
 void keyboard_push_bytes(const char *bytes, uint32_t len) {

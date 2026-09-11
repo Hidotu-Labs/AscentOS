@@ -1,5 +1,7 @@
 #include "vmm.h"
 #include "../console/klog.h"
+#include "../lib/tsc.h"
+#include "../lock/lockdiag.h"
 #include "../lock/spinlock.h"
 #include "pmm.h"
 #include "tlb_shootdown.h"
@@ -12,6 +14,96 @@
 static rawspinlock_t vmm_lock = RAWSPINLOCK_INIT;
 
 rawspinlock_t *vmm_get_lock(void) { return &vmm_lock; }
+
+/* --------------------------------------------------------------------------
+ * vmm_lock acquisition wrappers
+ *
+ * vmm_lock is the lock the page fault handler also needs, which makes it the
+ * one lock whose holder can stop the entire machine: every other core faults
+ * continuously, and a fault handler runs with interrupts masked (the IDT uses
+ * interrupt gates), so while it spins here it cannot even take an IPI.
+ *
+ * Every acquisition therefore goes through here, where lockdiag can name the
+ * holder, how long it has been held and where it was taken from.  Uncontended
+ * acquisitions cost no rdtsc and no extra atomic: the try-acquire below *is*
+ * the acquisition, and the contended path is the one worth measuring.
+ * -------------------------------------------------------------------------- */
+void vmm_lock_acquire_at(uint64_t caller_ip) {
+  if (rawspinlock_try_acquire(&vmm_lock)) {
+    lockdiag_spot_take(LOCKDIAG_SPOT_VMM, 0, caller_ip);
+    return;
+  }
+  uint64_t t0 = rdtsc();
+  rawspinlock_acquire(&vmm_lock);
+  lockdiag_spot_take(LOCKDIAG_SPOT_VMM, rdtsc() - t0, caller_ip);
+}
+
+/* --------------------------------------------------------------------------
+ * Deferred work that a vmm_lock critical section cannot do itself
+ *
+ * Two things must happen after a page-table change but cannot happen inside the
+ * lock: waiting for remote TLB acknowledgements (a target core reaches its page
+ * fault handler through vmm_lock, so waiting here while holding it is a
+ * deadlock), and handing emptied page-table frames back to the allocator (they
+ * must not be reused until the invalidations have landed).  Both are parked here
+ * and performed from vmm_lock_release(), off the lock.
+ * -------------------------------------------------------------------------- */
+#define VMM_PENDING_TABLES 64
+
+static void *vmm_pending_tables[MAX_CPUS][VMM_PENDING_TABLES];
+static uint32_t vmm_pending_table_count[MAX_CPUS];
+
+static int vmm_pending_slot(void) {
+  struct cpu_info *c = cpu_get_current();
+  if (!c || c->cpu_id >= MAX_CPUS)
+    return -1;
+  return (int)c->cpu_id;
+}
+
+static void vmm_defer_table_free(void *phys) {
+  int slot = vmm_pending_slot();
+  if (slot < 0) {
+    pmm_free_page(phys); /* early boot: nothing else can be walking tables */
+    return;
+  }
+  hal_irq_state_t flags = hal_irq_save();
+  uint32_t n = vmm_pending_table_count[slot];
+  if (n < VMM_PENDING_TABLES) {
+    vmm_pending_tables[slot][n] = phys;
+    vmm_pending_table_count[slot] = n + 1;
+    hal_irq_restore(flags);
+    return;
+  }
+  hal_irq_restore(flags);
+  pmm_free_page(phys); /* list full: fall back to freeing where it has always */
+}                      /* been freed, rather than losing the request        */
+
+static void vmm_drain_pending(void) {
+  /* Order matters: invalidate, then release the frames. */
+  tlb_flush_deferred_drain();
+
+  int slot = vmm_pending_slot();
+  if (slot < 0)
+    return;
+  for (;;) {
+    hal_irq_state_t flags = hal_irq_save();
+    uint32_t n = vmm_pending_table_count[slot];
+    if (n == 0) {
+      hal_irq_restore(flags);
+      break;
+    }
+    void *phys = vmm_pending_tables[slot][n - 1];
+    vmm_pending_table_count[slot] = n - 1;
+    hal_irq_restore(flags);
+    pmm_free_page(phys);
+  }
+}
+
+void vmm_lock_release(void) {
+  lockdiag_spot_drop(LOCKDIAG_SPOT_VMM);
+  rawspinlock_release(&vmm_lock);
+  vmm_drain_pending();
+}
 
 // ---------------------------------------------------------------------------
 // Internal helpers (no locking — caller must hold vmm_lock)
@@ -132,7 +224,7 @@ static bool vmm_map_page_nolock(uint64_t *pml4, uint64_t virtual_addr,
   pt_virt[pt_index] = (physical_addr & PAGE_MASK) | flags | PAGE_FLAG_PRESENT;
 
   if (flush_tlb)
-    tlb_shootdown_page(virtual_addr);
+    tlb_flush_deferred(virtual_addr, (uint64_t)pml4);
 
   return true;
 }
@@ -156,39 +248,87 @@ static bool vmm_page_present_nolock(uint64_t *pml4, uint64_t virtual_addr) {
   return pt && (pt[pt_index] & PAGE_FLAG_PRESENT);
 }
 
+// Caller holds vmm_lock. Returns the leaf entry covering virtual_addr, or 0
+// when there is none. A 2 MB mapping is returned with PAGE_FLAG_PS still set,
+// which is how callers tell that the page is covered by a huge mapping rather
+// than by its own 4 KB entry.
+static uint64_t vmm_leaf_entry_nolock(uint64_t *pml4, uint64_t virtual_addr) {
+  size_t pml4_index = (virtual_addr >> 39) & 0x1FF;
+  size_t pdpt_index = (virtual_addr >> 30) & 0x1FF;
+  size_t pd_index = (virtual_addr >> 21) & 0x1FF;
+  size_t pt_index = (virtual_addr >> 12) & 0x1FF;
+
+  uint64_t *pml4_virt = (uint64_t *)PHYS_TO_VIRT((uint64_t)pml4 & PAGE_MASK);
+  uint64_t *pdpt = get_next_level(pml4_virt, pml4_index, false, 4);
+  if (!pdpt || !(pdpt[pdpt_index] & PAGE_FLAG_PRESENT)) return 0;
+  if (pdpt[pdpt_index] & PAGE_FLAG_PS) return pdpt[pdpt_index];
+  uint64_t *pd = get_next_level(pdpt, pdpt_index, false, 3);
+  if (!pd || !(pd[pd_index] & PAGE_FLAG_PRESENT)) return 0;
+  if (pd[pd_index] & PAGE_FLAG_PS) return pd[pd_index];
+  uint64_t *pt = get_next_level(pd, pd_index, false, 2);
+  if (!pt) return 0;
+  return pt[pt_index];
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
 bool vmm_map_page(uint64_t *pml4, uint64_t virtual_addr, uint64_t physical_addr,
                   uint64_t flags) {
-  rawspinlock_acquire(&vmm_lock);
-  // In SMP mode, other CPUs running threads of this address space may have cached
-  // intermediate non-present paging structures. Invalidate TLB if replacing or SMP > 1.
-  bool replacing = vmm_page_present_nolock(pml4, virtual_addr);
-  bool flush = replacing || (cpu_get_count() > 1);
+  vmm_lock_acquire();
+  /*
+   * Only *replacing* a present mapping can leave a stale translation behind.
+   * This used to be `replacing || (cpu_get_count() > 1)`, which forced a
+   * broadcast-and-wait shootdown for every single page installed on any SMP
+   * system - and every such shootdown made all other cores flush their entire
+   * non-global TLB (see mm/tlb_shootdown.c). Installing a fresh mapping needs
+   * no invalidation at all: nothing could have cached a translation for an
+   * address that has never been translated.
+   *
+   * This shows up wherever pages are mapped in volume - process startup,
+   * demand paging, and the per-page fb/GEM mmaps - because the acknowledgement
+   * spin happens while holding vmm_lock, which the page fault path also needs.
+   */
+  uint64_t want = (physical_addr & PAGE_MASK) | flags | PAGE_FLAG_PRESENT;
+  uint64_t cur = vmm_leaf_entry_nolock(pml4, virtual_addr);
+
+  /* Re-mapping a page to precisely what it already is needs neither a write nor
+   * an invalidation: no core can be caching a translation that differs from the
+   * one already in the table.  The hardware sets A and D, so those two bits are
+   * not a difference.  Without this, every driver that re-maps a BAR or an
+   * already-mapped HHDM RAM page on probe paid one broadcast-and-wait shootdown
+   * per page - virtio-gpu's 8 MB BAR0 alone is 2048 of them at boot. */
+  if ((cur & PAGE_FLAG_PRESENT) && !(cur & PAGE_FLAG_PS) &&
+      ((cur ^ want) & ~(PAGE_FLAG_A | PAGE_FLAG_D)) == 0) {
+    vmm_lock_release();
+    return true;
+  }
+
+  bool replacing = (cur & PAGE_FLAG_PRESENT) != 0;
   bool ok = vmm_map_page_nolock(pml4, virtual_addr, physical_addr, flags,
-                                flush);
-  rawspinlock_release(&vmm_lock);
+                                replacing);
+  vmm_lock_release();
   return ok;
 }
 
 bool vmm_map_page_if_unmapped(uint64_t *pml4, uint64_t virtual_addr,
                              uint64_t physical_addr, uint64_t flags) {
-  rawspinlock_acquire(&vmm_lock);
+  vmm_lock_acquire();
   if (vmm_page_present_nolock(pml4, virtual_addr)) {
-    rawspinlock_release(&vmm_lock);
+    vmm_lock_release();
     return false;
   }
-  bool flush = (cpu_get_count() > 1);
-  bool ok = vmm_map_page_nolock(pml4, virtual_addr, physical_addr, flags, flush);
-  rawspinlock_release(&vmm_lock);
+  /* Unreachable-by-construction replacement: the check above already returned
+     for a present leaf, so this is always a fresh mapping. */
+  bool ok = vmm_map_page_nolock(pml4, virtual_addr, physical_addr, flags, false);
+  vmm_lock_release();
   return ok;
 }
 
 bool vmm_map_huge_page(uint64_t *pml4, uint64_t virtual_addr,
                        uint64_t physical_addr, uint64_t flags) {
-  rawspinlock_acquire(&vmm_lock);
+  vmm_lock_acquire();
   bool success = false;
 
   size_t pml4_index = (virtual_addr >> 39) & 0x1FF;
@@ -210,11 +350,11 @@ bool vmm_map_huge_page(uint64_t *pml4, uint64_t virtual_addr,
 
   pd_virt[pd_index] =
       (physical_addr & PAGE_MASK) | flags | PAGE_FLAG_PRESENT | PAGE_FLAG_PS;
-  tlb_shootdown_page(virtual_addr);
+  tlb_flush_deferred(virtual_addr, (uint64_t)pml4);
   success = true;
 
 unlock:
-  rawspinlock_release(&vmm_lock);
+  vmm_lock_release();
   return success;
 }
 
@@ -241,7 +381,7 @@ bool vmm_map_range(uint64_t *pml4, uint64_t virtual_addr,
   if (pages == 0)
     return true;
 
-  rawspinlock_acquire(&vmm_lock);
+  vmm_lock_acquire();
 
   for (size_t i = 0; i < pages; i++) {
     // flush_tlb=false: these are fresh (non-present → present) mappings.
@@ -250,12 +390,12 @@ bool vmm_map_range(uint64_t *pml4, uint64_t virtual_addr,
                              virtual_addr  + (i * 4096),
                              physical_addr + (i * 4096),
                              flags, false)) {
-      rawspinlock_release(&vmm_lock);
+      vmm_lock_release();
       return false;
     }
   }
 
-  rawspinlock_release(&vmm_lock);
+  vmm_lock_release();
   return true;
 }
 
@@ -293,8 +433,8 @@ void vmm_free_empty_tables(uint64_t *pml4, uint64_t virtual_addr) {
 
   if (pt_empty) {
     pd_virt[pd_index] = 0;
-    tlb_shootdown_page(virtual_addr);
-    pmm_free_page((void *)pt_phys);
+    tlb_flush_deferred(virtual_addr, (uint64_t)pml4);
+    vmm_defer_table_free((void *)pt_phys);
 
     bool pd_empty = true;
     for (int i = 0; i < 512; i++) {
@@ -306,8 +446,8 @@ void vmm_free_empty_tables(uint64_t *pml4, uint64_t virtual_addr) {
 
     if (pd_empty) {
       pdpt_virt[pdpt_index] = 0;
-      tlb_shootdown_page(virtual_addr);
-      pmm_free_page((void *)pd_phys);
+      tlb_flush_deferred(virtual_addr, (uint64_t)pml4);
+      vmm_defer_table_free((void *)pd_phys);
 
       bool pdpt_empty = true;
       for (int i = 0; i < 512; i++) {
@@ -319,15 +459,15 @@ void vmm_free_empty_tables(uint64_t *pml4, uint64_t virtual_addr) {
 
       if (pdpt_empty) {
         pml4_virt[pml4_index] = 0;
-        tlb_shootdown_page(virtual_addr);
-        pmm_free_page((void *)pdpt_phys);
+        tlb_flush_deferred(virtual_addr, (uint64_t)pml4);
+        vmm_defer_table_free((void *)pdpt_phys);
       }
     }
   }
 }
 
 void vmm_unmap_page(uint64_t *pml4, uint64_t virtual_addr) {
-  rawspinlock_acquire(&vmm_lock);
+  vmm_lock_acquire();
 
   size_t pml4_index = (virtual_addr >> 39) & 0x1FF;
   size_t pdpt_index = (virtual_addr >> 30) & 0x1FF;
@@ -358,15 +498,15 @@ void vmm_unmap_page(uint64_t *pml4, uint64_t virtual_addr) {
     // lock-order inversion (pmm_free_pages acquires b_zone.lock).
     uint64_t huge_phys = pd_entry & 0xFFFFFFFE00000ULL;
     pd_virt[pd_index] = 0;
-    tlb_shootdown_page(virtual_addr & ~0x1FFFFFULL);
-    rawspinlock_release(&vmm_lock);
+    tlb_flush_deferred(virtual_addr & ~0x1FFFFFULL, (uint64_t)pml4);
+    vmm_lock_release();
     pmm_free_pages((void *)huge_phys, 512);
     return;
   }
 
   uint64_t *pt_virt = (uint64_t *)PHYS_TO_VIRT(pd_entry & PAGE_MASK);
   pt_virt[pt_index] = 0;
-  tlb_shootdown_page(virtual_addr);
+  tlb_flush_deferred(virtual_addr, (uint64_t)pml4);
 
   if (pml4_index < 256 ||
       (pml4_index >= 256 && virtual_addr < KERNEL_HEAP_BASE)) {
@@ -374,7 +514,75 @@ void vmm_unmap_page(uint64_t *pml4, uint64_t virtual_addr) {
   }
 
 unlock:
-  rawspinlock_release(&vmm_lock);
+  vmm_lock_release();
+}
+
+
+/*
+ * vmm_split_huge_page - replace a 2 MB leaf mapping with 512 equivalent 4 KB
+ * page-table entries.
+ *
+ * Tearing down part of a huge mapping must not release the frames the caller
+ * still owns, but clearing the PDE drops all 512 of them at once.  Splitting
+ * first lets the caller unmap exactly the range it asked for.
+ *
+ * Returns true when the address is described by a 4 KB page table on return
+ * (including when it already was), and false only when the table for the split
+ * could not be allocated.
+ */
+bool vmm_split_huge_page(uint64_t *pml4, uint64_t virtual_addr) {
+  bool actually_split = false;
+  bool ok = true;
+
+  vmm_lock_acquire();
+
+  size_t pml4_index = (virtual_addr >> 39) & 0x1FF;
+  size_t pdpt_index = (virtual_addr >> 30) & 0x1FF;
+  size_t pd_index   = (virtual_addr >> 21) & 0x1FF;
+
+  uint64_t *pml4_virt = (uint64_t *)PHYS_TO_VIRT((uint64_t)pml4 & PAGE_MASK);
+  if (!(pml4_virt[pml4_index] & PAGE_FLAG_PRESENT))
+    goto out;
+  uint64_t *pdpt_virt =
+      (uint64_t *)PHYS_TO_VIRT(pml4_virt[pml4_index] & PAGE_MASK);
+  uint64_t pdpt_entry = pdpt_virt[pdpt_index];
+  if (!(pdpt_entry & PAGE_FLAG_PRESENT))
+    goto out;
+  if (pdpt_entry & PAGE_FLAG_PS) {
+    /* A 1 GB leaf.  vmm_unmap_page() refuses to unmap anything below one and
+     * this function cannot split one, so reporting success would have the
+     * caller release a frame that is still mapped. */
+    ok = false;
+    goto out;
+  }
+
+  uint64_t *pd_virt = (uint64_t *)PHYS_TO_VIRT(pdpt_entry & PAGE_MASK);
+  if (!(pd_virt[pd_index] & PAGE_FLAG_PRESENT))
+    goto out;
+  if (!(pd_virt[pd_index] & PAGE_FLAG_PS))
+    goto out; // already 4 KB granularity
+
+  // get_next_level() performs the in-place leaf-to-table conversion, including
+  // the PAT bit relocation between the huge-page and PTE encodings.
+  if (!get_next_level(pd_virt, pd_index, true, 2)) {
+    ok = false;
+    goto out;
+  }
+  actually_split = true;
+
+out:
+  vmm_lock_release();
+
+  if (actually_split) {
+    /* Replacing a leaf PDE with a table pointer does not invalidate the
+     * large-page translation other CPUs have already cached, and one invlpg
+     * for a single 4 KB page inside it is not enough to clear all 512.  This is
+     * a rare path (only hit when a huge mapping is partially torn down), so a
+     * full flush is the cheap way to be sure. */
+    tlb_shootdown_all();
+  }
+
+  return ok;
 }
 
 

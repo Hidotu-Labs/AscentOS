@@ -12,6 +12,7 @@
 #include "cpu/isr.h"
 #include "cpu/pic.h"
 #include "cpu/tsc.h"
+#include "lock/lockdiag.h"
 #include "drivers/audio/ac97.h"
 #include "drivers/audio/alsa_emu.h"
 #include "drivers/audio/audio_dsp.h"
@@ -309,6 +310,12 @@ void kmain(void) {
   vmm_init_vsyscall_page();
   klog_puts("     Active CR3 Page Map hooked.\n");
   pcid_init();
+
+  /* Re-type the framebuffer aperture as write-combining before the boot log
+   * and the console start blitting through it.  Idempotent; also called from
+   * fb_init() if this ordering ever changes. */
+  fb_map_wc();
+
   heap_init();
 
   /* ── LinuxKPI Phase 1a stress test ── */
@@ -411,6 +418,11 @@ void kmain_high_half(void) {
 
     tlb_shootdown_init();
 
+    /* Hang/deadlock report.  Registered before the APs are brought online so
+     * every core can already answer the liveness probe, and the heartbeat
+     * grace period is measured from here. */
+    lockdiag_init();
+
     cpu_init_aps();
   } else {
     klog_puts(KLOG_CLR_YELLOW
@@ -504,6 +516,22 @@ mount_success:
   ramfs_mount_at("/dev");
   tmpfs_mount_at("/tmp");
   ramfs_mount_at("/run");
+
+  /* POSIX shared memory.  shm_open(), X11 MIT-SHM, Qt's QSharedMemory and
+   * Mesa's shared caches all expect a real memory-backed filesystem here;
+   * without it, window pixel data falls back to travelling through AF_UNIX
+   * socket buffers one copy at a time.  The directory has to exist inside the
+   * freshly mounted /dev first, because tmpfs_mount_at() can only create a
+   * single path component and would otherwise mkdir "/shm" at the root. */
+  {
+    vfs_node_t *dev_dir = vfs_resolve_path("/dev");
+    if (dev_dir) {
+      if (dev_dir->mkdir)
+        dev_dir->mkdir(dev_dir, "shm", 01777);
+      vfs_close(dev_dir);
+    }
+    tmpfs_mount_at_sized("/dev/shm", TMPFS_SHM_MAX_BYTES, TMPFS_SHM_MAX_INODES);
+  }
   fault_init();
 
   extern void sysfs_init(void);
@@ -538,6 +566,8 @@ mount_success:
   pty_register_devices();
   extern void watchdog_init(void);
   watchdog_init();
+  extern void rfkill_init(void);
+  rfkill_init();
   procfs_init();
 
 mount_fail:
@@ -555,6 +585,13 @@ mount_fail:
   net_core_init();
   rtl8139_phase1_init();
 
+#if LOCKDIAG_SELFTEST
+  /* Renders a full hang report on a healthy machine, so the report itself is
+   * tested somewhere other than an actual hang. */
+  extern void test_lockdiag_selftest(void);
+  test_lockdiag_selftest();
+#endif
+
   struct thread *init_thread =
       sched_create_kernel_thread(init_thread_entry, cpu_get_bsp(), true);
   if (!init_thread) {
@@ -570,6 +607,14 @@ mount_fail:
   sched_yield();
 
   for (;;) {
+    /* Fallback idle tick.  This loop is the BSP's idle context, and the BSP
+     * tick is what drains the serial ring (serial_flush), drives
+     * watchdog_tick()/xhci_msix_watchdog() and processes ITIMER_REAL.  Without
+     * a timer armed here the BSP stops taking ticks the moment it goes idle:
+     * lockdiag then sees a stale heartbeat, and every BSP-only service above
+     * goes silent.  rearm_if_earlier() - not arm_at() - so a scheduler
+     * deadline armed just before the switch to idle is never pushed out. */
+    lapic_timer_rearm_if_earlier(lapic_timer_get_ms() + 1000);
     hal_cpu_halt();
   }
 }

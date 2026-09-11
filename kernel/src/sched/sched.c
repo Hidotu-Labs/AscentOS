@@ -242,12 +242,12 @@ __attribute__((optimize("O3"))) void sched_enqueue_thread(struct thread *t, stru
     target_cpu = cpu_get_bsp();
   }
 
-  hal_irq_disable();
+  hal_irq_state_t irq_flags = hal_irq_save();
   spinlock_acquire(&target_cpu->queue_lock);
 
   if (t->on_runqueue || t->se.on_rq) {
     spinlock_release(&target_cpu->queue_lock);
-    hal_irq_enable();
+    hal_irq_restore(irq_flags);
     return;
   }
 
@@ -267,13 +267,21 @@ __attribute__((optimize("O3"))) void sched_enqueue_thread(struct thread *t, stru
 
   if (kick_cpu && lapic_is_ready()) {
     struct cpu_info *self = cpu_get_current();
-    if (target_cpu == self)
+    if (target_cpu == self) {
+      /* Prefer an immediate hand-over at the next reschedule point over
+       * waiting a full tick; the rearm stays as the backstop. */
+      if (running)
+        __atomic_store_n(&running->need_resched, true, __ATOMIC_RELEASE);
       lapic_timer_rearm_if_earlier(lapic_timer_get_ms() + 1);
-    else
+    } else {
       lapic_send_ipi(target_cpu->apic_id, IPI_VECTOR_RESCHEDULE);
+    }
   }
 
-  hal_irq_enable();
+  /* Restore the caller's interrupt state: some callers (wait-queue wakes from
+   * IRQ context) enter with IF=0, and unconditionally enabling here left an
+   * interrupt window inside their critical section. */
+  hal_irq_restore(irq_flags);
 }
 
 __attribute__((optimize("O3"))) static void sched_balance(struct cpu_info *cpu) {
@@ -527,6 +535,48 @@ __attribute__((optimize("O3"))) void sched_yield_user(void) {
   sched_schedule(true);
 }
 
+/*
+ * Deferred preemption point.
+ *
+ * sched_wakeup()/sched_enqueue_thread() set need_resched on whatever thread is
+ * running on this CPU when a more eligible thread becomes runnable here.  That
+ * is only a request: the CPU is handed over at the next safe boundary, which is
+ * what this function is for.  Callers must have already issued their EOI,
+ * because switching away here can keep the vector in-service for a long time
+ * (see ipi_reschedule_handler).
+ *
+ * Deliberately narrow so it cannot destabilise anything:
+ *   - to_user == false only switches when this CPU is sitting in its idle loop,
+ *     i.e. there is no kernel-mode driver state to preempt.  Preempting an
+ *     arbitrary kernel context remains the job of the tick and of the
+ *     reschedule IPI, both of which already worked.
+ *   - the LAPIC rearm in the wakeup paths is left in place, so a request that
+ *     is missed for any reason costs latency, never a lost wakeup.
+ */
+__attribute__((optimize("O3"))) void sched_check_resched(bool to_user) {
+  struct cpu_info *cpu = cpu_get_current();
+  if (!cpu || !cpu->current_thread)
+    return;
+
+  struct thread *t = cpu->current_thread;
+  if (!__atomic_load_n(&t->need_resched, __ATOMIC_ACQUIRE))
+    return;
+
+  if (!to_user && !t->is_idle)
+    return;
+
+  /* Dying or already-blocked threads are leaving the CPU on their own. */
+  if (t->state != THREAD_RUNNING)
+    return;
+
+  /* Never re-enter the scheduler from inside a context switch. */
+  if (__atomic_load_n(&cpu->switching_from, __ATOMIC_ACQUIRE))
+    return;
+
+  __atomic_store_n(&t->need_resched, false, __ATOMIC_RELEASE);
+  sched_yield();
+}
+
 __attribute__((optimize("O3"))) void sched_tick(struct registers *regs) {
   (void)regs;
   struct cpu_info *cpu = cpu_get_current();
@@ -537,11 +587,17 @@ __attribute__((optimize("O3"))) void sched_tick(struct registers *regs) {
     cpu->ticks = now;
 
     if (cpu == cpu_get_bsp()) {
-      /* Walk the global thread list without holding tid_lock the entire time.
-       * We snapshot each thread pointer with a relaxed load; threads are only
-       * removed from the list under tid_lock in an unrelated path, so the
-       * worst case is we miss a timer for one tick — acceptable jitter. */
-      struct thread *t = __atomic_load_n(&global_thread_list, __ATOMIC_ACQUIRE);
+      /* ITIMER_REAL expiry has to be walked under tid_lock.  The list is only
+       * unlinked under that lock (sched_thread.c), but sched_reap_thread()
+       * releases it and then kfree()s the thread, so the previous lock-free
+       * walk could follow t->global_next through a freed slab object - and
+       * signal_send() would then write into memory the allocator had already
+       * handed to someone else.  signal_send_pgid() below signals threads the
+       * same way, under the same lock, so this is the established order and
+       * not a new one. */
+      extern spinlock_t tid_lock;
+      spinlock_acquire(&tid_lock);
+      struct thread *t = global_thread_list;
       while (t) {
         if (t->it_real_next && now >= t->it_real_next) {
           signal_send(t, SIGALRM);
@@ -553,8 +609,9 @@ __attribute__((optimize("O3"))) void sched_tick(struct registers *regs) {
             t->it_real_value = 0;
           }
         }
-        t = __atomic_load_n(&t->global_next, __ATOMIC_RELAXED);
+        t = t->global_next;
       }
+      spinlock_release(&tid_lock);
     }
 
     hal_irq_state_t flags = hal_irq_save();
@@ -764,6 +821,11 @@ __attribute__((optimize("O3"))) void sched_wakeup(struct thread *t) {
           if (should_kick)
             send_ipi = true;
         } else if (should_kick) {
+          /* Same CPU: ask the running thread to hand over at its next
+           * interrupt/syscall exit instead of waiting up to a full tick.
+           * `running` is never t here (that case is still_current above). */
+          if (running)
+            __atomic_store_n(&running->need_resched, true, __ATOMIC_RELEASE);
           rearm_local = true;
         }
       } else {

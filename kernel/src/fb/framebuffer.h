@@ -12,6 +12,7 @@ struct vfs_node;
 
 /* ── Lifecycle & Hardware Setup ──────────────────────────────────────────── */
 void fb_init(struct limine_framebuffer *framebuffer);
+void fb_map_wc(void);
 void fb_register_vfs(void);
 void fb_detect_drm_backend(void);
 

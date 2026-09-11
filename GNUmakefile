@@ -83,11 +83,6 @@ ALPINE_SYSROOT := $(CURDIR)/build/alpine/rootfs
 ALPINE_STAMP := $(CURDIR)/build/alpine/.built
 
 $(ALPINE_STAMP): scripts/setup-alpine.sh
-	@if [ ! -d "$(ALPINE_SYSROOT)/usr/include" ]; then \
-		echo "[*] Setting up Alpine rootfs..."; \
-		chmod +x scripts/setup-alpine.sh && \
-		./scripts/setup-alpine.sh; \
-	fi
 	@mkdir -p $(dir $(ALPINE_STAMP))
 	@touch $(ALPINE_STAMP)
 
@@ -460,11 +455,12 @@ AetherDE/demo-client/aether-window: AetherDE/demo-client/main.c $(ALPINE_STAMP) 
 		$(GTK3_LDFLAGS)
 
 
-# Create a 64MB ext2 disk image with sample files for testing
+# Create a 5GB ext4 disk image with sample files for testing
 disk.img: GNUmakefile userland/winoptions userland/icewm-menu $(ALPINE_STAMP)
 disk.img: scripts/configure-accounts.sh userland/avory-account userland/test_accounts.sh userland/avory-login.elf
 disk.img:  userland/dns_lookup.elf
 disk.img: userland/test_clone_futex.elf
+disk.img: userland/test_futex_pi.elf
 disk.img: userland/test_unix_sockets.elf
 disk.img: userland/test_syscall_speed.elf
 disk.img: userland/test_hugepages.elf
@@ -477,6 +473,9 @@ disk.img: userland/test_vdso_bench.elf
 disk.img: userland/test_lazy_fpu.elf
 disk.img: userland/test_heap_smp.elf
 disk.img: userland/test_dcache.elf
+disk.img: userland/test_tmpfile.elf
+disk.img: userland/test_child_notify.elf
+disk.img: userland/test_pty_master.elf
 disk.img: userland/test_uaccess_bench.elf
 disk.img: userland/proc_bench.elf
 disk.img: userland/test_watchdog.elf
@@ -487,7 +486,7 @@ disk.img: $(BASH_STAMP) $(COREUTILS_STAMP) $(ALPINE_STAMP) $(QUAKE2_BUNDLE_FILES
 disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets/mc9.mp3 assets/train.mp3 assets/test.bmp assets/test.tar assets/room.png assets/logo.png assets/linus.gif assets/video.mp4 userland/forkit.elf userland/about.elf userland/hello_glibc.elf userland/booter.elf userland/reboot.elf userland/shutdown.elf userland/apm.elf userland/test_cpp.elf  userland/kilo.elf  userland/ls.elf userland/lspci.elf userland/lsblk.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/asplay.elf userland/kria.elf userland/doom.elf userland/doom_x11.elf userland/gtk_test.elf userland/qt5_test.elf userland/sdl3_test.elf userland/tglgears_fb.elf userland/tglgears_drm.elf userland/tglhello_drm.elf userland/test_mem_stress.elf userland/classicube.elf userland/terrain.png userland/texpacks/classicube.zip initrd/startx.sh initrd/startw.sh initrd/weston.ini AetherDE/x11-wm/AetherWM AetherDE/aether-dock/aether-dock AetherDE/aether-panel/aether-panel AetherDE/wayland-compositor/aether-compositor AetherDE/demo-client/aether-window AetherDE/scripts/sax11.sh AetherDE/scripts/sawayland.sh userland/avoryd.elf $(AVORYD_CONFIG_FILES)
 	@echo "Creating root filesystem (ext4)..."
 	rm -f ./part.img
-	dd if=/dev/zero of=./part.img bs=1M count=4095
+	dd if=/dev/zero of=./part.img bs=1M count=5119
 	mkfs.ext4 -F -b 1024 -I 128 \
 		-O extent,filetype,has_journal,dir_index,^64bit,^metadata_csum,^flex_bg,^huge_file,^dir_nlink,^extra_isize,^metadata_csum_seed,^orphan_file \
 		./part.img
@@ -648,8 +647,16 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 		echo "write userland/test_mem_stress.elf bin/test_mem_stress"; \
 		echo "rm bin/test_clone_futex"; \
 		echo "write userland/test_clone_futex.elf bin/test_clone_futex"; \
+		echo "rm bin/test_futex_pi"; \
+		echo "write userland/test_futex_pi.elf bin/test_futex_pi"; \
 		echo "rm bin/test_unix_sockets"; \
 		echo "write userland/test_unix_sockets.elf bin/test_unix_sockets"; \
+		echo "rm bin/test_tmpfile"; \
+		echo "write userland/test_tmpfile.elf bin/test_tmpfile"; \
+		echo "rm bin/test_child_notify"; \
+		echo "write userland/test_child_notify.elf bin/test_child_notify"; \
+		echo "rm bin/test_pty_master"; \
+		echo "write userland/test_pty_master.elf bin/test_pty_master"; \
 		echo "rm bin/test_syscall_speed"; \
 		echo "write userland/test_syscall_speed.elf bin/test_syscall_speed"; \
 		echo "rm bin/test_hugepages"; \
@@ -975,6 +982,9 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 		echo "set_inode_field bin/test_lazy_fpu mode 0100755"; \
 		echo "set_inode_field bin/test_heap_smp mode 0100755"; \
 		echo "set_inode_field bin/test_dcache mode 0100755"; \
+		echo "set_inode_field bin/test_tmpfile mode 0100755"; \
+		echo "set_inode_field bin/test_child_notify mode 0100755"; \
+		echo "set_inode_field bin/test_pty_master mode 0100755"; \
 		echo "set_inode_field bin/test_uaccess_bench mode 0100755"; \
 		echo "set_inode_field bin/test_readahead mode 0100755"; \
 		echo "set_inode_field home/avory uid 1000"; \
@@ -982,7 +992,7 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 	} | debugfs -w ./part.img >/dev/null 2>&1 || true
 
 	@echo "Creating partitioned disk image (MBR)..."
-	dd if=/dev/zero of=disk.img bs=1M count=4096
+	dd if=/dev/zero of=disk.img bs=1M count=5120
 	echo '2048,,L,*' | sfdisk disk.img >/dev/null 2>&1 || (parted -s disk.img mklabel msdos && parted -s disk.img mkpart primary ext3 1MiB 100% && parted -s disk.img set 1 boot on)
 	dd if=./part.img of=disk.img bs=1M seek=1 conv=notrunc
 	rm -f ./part.img
@@ -1252,9 +1262,25 @@ userland/test_clone_futex.elf: userland/test_clone_futex.c userland/test_clone_f
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/test_clone_futex.c userland/test_clone_futex_trampoline.S -o userland/test_clone_futex.elf
 
+userland/test_futex_pi.elf: userland/test_futex_pi.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_futex_pi.c -o userland/test_futex_pi.elf -lpthread -lm
+
 userland/test_unix_sockets.elf: userland/test_unix_sockets.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/test_unix_sockets.c -o userland/test_unix_sockets.elf
+
+userland/test_tmpfile.elf: userland/test_tmpfile.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_tmpfile.c -o userland/test_tmpfile.elf
+
+userland/test_child_notify.elf: userland/test_child_notify.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_child_notify.c -o userland/test_child_notify.elf
+
+userland/test_pty_master.elf: userland/test_pty_master.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_pty_master.c -o userland/test_pty_master.elf
 
 userland/test_syscall_speed.elf: userland/test_syscall_speed.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \

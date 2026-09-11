@@ -41,7 +41,7 @@ void eevfd_entity_init(struct sched_entity *se, int nice, uint64_t slice_ns) {
     se->nice_value = (int8_t)nice;
     se->weight = nice_to_weight(nice);
     se->wmult = nice_to_wmult(nice);
-    se->slice_ns = slice_ns ? slice_ns : EEVFD_BASE_SLICE_NS;
+    se->slice_ns = slice_ns ? slice_ns : eevfd_calc_slice_for_nice(nice);
     se->vruntime = 0;
     se->deadline = 0;
     se->min_deadline = 0;
@@ -59,7 +59,7 @@ void eevfd_set_nice(struct sched_entity *se, int nice) {
     se->weight = nice_to_weight(nice);
     se->wmult = nice_to_wmult(nice);
     if (!se->custom_slice)
-        se->slice_ns = EEVFD_BASE_SLICE_NS;
+        se->slice_ns = eevfd_calc_slice_for_nice(nice);
     /* Recalculate deadline */
     se->deadline = calc_deadline(se->vruntime, se->slice_ns, se->weight, se->wmult);
     se->min_deadline = se->deadline;
@@ -352,17 +352,31 @@ bool eevfd_check_preempt(struct eevfd_rq *rq, struct sched_entity *curr,
     if (curr->vruntime >= curr->deadline)
         return true;
 
+    /* Determine if woken entity is interactive / latency-sensitive:
+     * - higher priority (more weight)
+     * - negative nice value
+     * - shorter allocated slice */
+    bool interactive = (woken->weight > curr->weight ||
+                        woken->nice_value < 0 ||
+                        woken->slice_ns < curr->slice_ns);
+
+    uint64_t min_gran = interactive ? EEVFD_INTERACTIVE_MIN_GRANULARITY_NS
+                                    : EEVFD_MIN_GRANULARITY_NS;
+
     /* Enforce minimum execution granularity floor before allowing preemption */
     uint64_t now_ns = lapic_timer_get_ns();
     if (curr->exec_start_ns && now_ns > curr->exec_start_ns) {
         uint64_t exec_delta = now_ns - curr->exec_start_ns;
-        if (exec_delta < EEVFD_MIN_GRANULARITY_NS)
+        if (exec_delta < min_gran)
             return false;
     }
 
-    uint64_t gran_v = calc_slice_vruntime(EEVFD_WAKEUP_GRANULARITY_NS, woken->weight, woken->wmult);
+    /* For interactive/higher-priority tasks, drop the wakeup granularity barrier */
+    uint64_t gran_v = (interactive && woken->deadline <= curr->deadline)
+                          ? 0
+                          : calc_slice_vruntime(EEVFD_WAKEUP_GRANULARITY_NS, woken->weight, woken->wmult);
 
-    /* Condition 2: Woken task is eligible and its deadline is significantly earlier than curr */
+    /* Condition 2: Woken task is eligible and its deadline is earlier than curr */
     if (woken->vruntime <= rq->vtime && (woken->deadline + gran_v) <= curr->deadline)
         return true;
 

@@ -118,6 +118,8 @@ void fault_init(void) {
       node->read = fault_dev_read;
       node->poll = fault_dev_poll;
       node->wait_queue = fault_wait_queue;
+      vfs_close(node);
     }
+    vfs_close(dev);
   }
 }

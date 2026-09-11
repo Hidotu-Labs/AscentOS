@@ -15,6 +15,18 @@
 
 #define SOCKET_FD_FLAGS_CLOEXEC_BIT (1u << 24)
 
+/* Linux distinguishes a closed/invalid descriptor (EBADF) from a valid
+ * descriptor whose underlying object is not a socket (ENOTSOCK).  Libraries
+ * depend on the difference: PulseAudio's pa_write() tries send() first and
+ * only falls back to write() when errno is ENOTSOCK, so answering EBADF for
+ * its wakeup pipe makes every libpulse mainloop wakeup fail.  GLib probes
+ * stderr with getpeername() for the same reason. */
+static uint64_t socket_eno_notsock(int fd) {
+  struct thread *current = sched_get_current();
+  bool fd_exists = current && fd >= 0 && fd < MAX_FDS && current->fds[fd];
+  return fd_exists ? (uint64_t)-88 : (uint64_t)-9;
+}
+
 static int copy_sockaddr_out(uint64_t addr_ptr, uint64_t addrlen_ptr,
                              const struct sockaddr *kaddr, int kaddrlen) {
   if (!addr_ptr || !addrlen_ptr)
@@ -146,7 +158,7 @@ static uint64_t sys_bind(uint64_t sockfd, uint64_t addr_ptr, uint64_t addrlen,
 
   socket_t *sock = socket_from_fd(fd);
   if (!sock) {
-    return (uint64_t)-9; // EBADF
+    return socket_eno_notsock(fd);
   }
 
   uint8_t kaddr_buf[128];
@@ -189,7 +201,7 @@ static uint64_t sys_connect(uint64_t sockfd, uint64_t addr_ptr,
   // Get socket from FD
   socket_t *sock = socket_from_fd(fd);
   if (!sock) {
-    return (uint64_t)-9; // EBADF
+    return socket_eno_notsock(fd);
   }
 
   // Copy sockaddr safely into kernel stack buffer before reading fields
@@ -223,7 +235,7 @@ static uint64_t sys_listen(uint64_t sockfd, uint64_t backlog, uint64_t _arg2,
   // Get socket from FD
   socket_t *sock = socket_from_fd(fd);
   if (!sock) {
-    return (uint64_t)-9; // EBADF
+    return socket_eno_notsock(fd);
   }
 
   int ret = socket_listen(sock, (int)backlog);
@@ -242,7 +254,7 @@ static uint64_t sys_accept_impl(uint64_t sockfd, uint64_t addr_ptr,
   // Get socket from FD
   socket_t *sock = socket_from_fd(fd);
   if (!sock) {
-    return (uint64_t)-9; // EBADF
+    return socket_eno_notsock(fd);
   }
 
   // Accept connection
@@ -334,7 +346,7 @@ static uint64_t sys_sendto(uint64_t sockfd, uint64_t buf_ptr, uint64_t len,
   // Get socket from FD
   socket_t *sock = socket_from_fd(fd);
   if (!sock) {
-    return (uint64_t)-9; // EBADF
+    return socket_eno_notsock(fd);
   }
   if (!socket_try_get(sock))
     return (uint64_t)-9;
@@ -373,7 +385,7 @@ static uint64_t sys_recvfrom(uint64_t sockfd, uint64_t buf_ptr, uint64_t len,
   // Get socket from FD
   socket_t *sock = socket_from_fd(fd);
   if (!sock) {
-    return (uint64_t)-9; // EBADF
+    return socket_eno_notsock(fd);
   }
   if (!socket_try_get(sock))
     return (uint64_t)-9;
@@ -427,7 +439,7 @@ static uint64_t sys_sendmsg(uint64_t sockfd, uint64_t msg_ptr, uint64_t flags,
   // Get socket from FD
   socket_t *sock = socket_from_fd(fd);
   if (!sock) {
-    return (uint64_t)-9; // EBADF
+    return socket_eno_notsock(fd);
   }
 
   struct msghdr *msg = (struct msghdr *)msg_ptr;
@@ -520,7 +532,7 @@ static uint64_t sys_recvmsg(uint64_t sockfd, uint64_t msg_ptr, uint64_t flags,
   // Get socket from FD
   socket_t *sock = socket_from_fd(fd);
   if (!sock) {
-    return (uint64_t)-9; // EBADF
+    return socket_eno_notsock(fd);
   }
 
   struct msghdr *msg = (struct msghdr *)msg_ptr;
@@ -713,7 +725,7 @@ static uint64_t sys_shutdown(uint64_t sockfd, uint64_t how, uint64_t _arg2,
   // Get socket from FD
   socket_t *sock = socket_from_fd(fd);
   if (!sock) {
-    return (uint64_t)-9; // EBADF
+    return socket_eno_notsock(fd);
   }
   if (!socket_try_get(sock))
     return (uint64_t)-9;
@@ -741,7 +753,7 @@ static uint64_t sys_getsockopt(uint64_t sockfd, uint64_t level,
   int fd = (int)sockfd;
   socket_t *sock = socket_from_fd(fd);
   if (!sock)
-    return (uint64_t)-9;
+    return socket_eno_notsock(fd);
 
   if (!is_user_ptr(optval_ptr) || !is_user_ptr(optlen_ptr))
     return (uint64_t)-14;
@@ -813,7 +825,7 @@ static uint64_t sys_setsockopt(uint64_t sockfd, uint64_t level,
   // Get socket from FD
   socket_t *sock = socket_from_fd(fd);
   if (!sock) {
-    return (uint64_t)-9; // EBADF
+    return socket_eno_notsock(fd);
   }
 
   // Validate pointer
@@ -899,7 +911,7 @@ static uint64_t sys_getsockname(uint64_t sockfd, uint64_t addr_ptr,
   // Get socket from FD
   socket_t *sock = socket_from_fd(fd);
   if (!sock) {
-    return (uint64_t)-9; // EBADF
+    return socket_eno_notsock(fd);
   }
   if (!socket_try_get(sock))
     return (uint64_t)-9;
@@ -964,17 +976,9 @@ static uint64_t sys_getpeername(uint64_t sockfd, uint64_t addr_ptr,
   // Get socket from FD
   socket_t *sock = socket_from_fd(fd);
   if (!sock) {
-    struct thread *current = sched_get_current();
-    bool fd_exists = current && fd >= 0 && fd < MAX_FDS && current->fds[fd];
-    klog_debugf("[GETPEERNAME] %s fd=%lld tid=%u comm=%s\n",
-                fd_exists ? "ENOTSOCK" : "EBADF",
-                (long long)fd,
-                current ? current->tid : 0,
-                current ? current->comm : "none");
-    // Linux distinguishes a closed/invalid descriptor (EBADF) from a valid
-    // descriptor whose underlying object is not a socket (ENOTSOCK). GLib
-    // deliberately probes stderr with getpeername() and relies on ENOTSOCK.
-    return (uint64_t)(fd_exists ? -88 : -9);
+    // GLib deliberately probes stderr with getpeername() and relies on
+    // ENOTSOCK for a valid descriptor that is not a socket.
+    return socket_eno_notsock(fd);
   }
   if (!socket_try_get(sock))
     return (uint64_t)-9;

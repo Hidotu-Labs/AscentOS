@@ -92,7 +92,7 @@ struct thread *sched_create_kernel_thread(void (*entry)(void),
     t->cpu_affinity = ~0ULL;
 
   t->state = THREAD_READY;
-  eevfd_entity_init(&t->se, 0, EEVFD_BASE_SLICE_NS);
+  eevfd_entity_init(&t->se, 0, 0);
   t->priority = SCHED_PRIORITY_DEFAULT;
   t->static_priority = SCHED_PRIORITY_DEFAULT;
   t->nice_value = 0;
@@ -258,6 +258,39 @@ size_t sched_read_thread_auxv(uint32_t tid, uint32_t offset, uint32_t size,
   memcpy(buffer, ((uint8_t *)t->mm->saved_auxv) + offset, size);
   spinlock_release(&tid_lock);
   return size;
+}
+
+size_t sched_read_thread_cmdline(uint32_t tid, uint32_t offset, uint32_t size,
+                                uint8_t *buffer) {
+  if (!buffer || size == 0)
+    return 0;
+
+  spinlock_acquire(&tid_lock);
+  struct thread *t = find_thread_by_tid_locked(tid);
+  if (!t || !t->mm || t->mm->cmdline_len == 0) {
+    spinlock_release(&tid_lock);
+    return 0;
+  }
+
+  size_t total = t->mm->cmdline_len;
+  if (offset >= total) {
+    spinlock_release(&tid_lock);
+    return 0;
+  }
+  if (offset + size > total)
+    size = total - offset;
+
+  memcpy(buffer, ((uint8_t *)t->mm->saved_cmdline) + offset, size);
+  spinlock_release(&tid_lock);
+  return size;
+}
+
+size_t sched_thread_cmdline_size(uint32_t tid) {
+  spinlock_acquire(&tid_lock);
+  struct thread *t = find_thread_by_tid_locked(tid);
+  size_t total = (t && t->mm) ? t->mm->cmdline_len : 0;
+  spinlock_release(&tid_lock);
+  return total;
 }
 
 bool sched_get_nth_thread_tid(uint32_t index, uint32_t *tid) {

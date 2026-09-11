@@ -83,12 +83,17 @@ unix_sock_t *unix_find_socket_by_addr(struct sockaddr_un *addr, int addrlen) {
     if (!node && addr->sun_path[0] == '/') {
       node = vfs_resolve_path(addr->sun_path);
     }
+    unix_sock_t *found = NULL;
     if (node && ((node->flags & FS_TYPE_MASK) == FS_SOCKET) && node->device) {
       socket_t *sock = (socket_t *)node->device;
       unix_sock_t *usk = sock ? (unix_sock_t *)sock->sk : NULL;
       if (af_unix_sock_live(usk, &sock))
-        return usk;
+        found = usk;
     }
+    if (node)
+      vfs_close(node);
+    if (found)
+      return found;
   }
 
   return NULL;
@@ -138,11 +143,15 @@ unix_sock_t *unix_find_socket_by_addr_ref(struct sockaddr_un *addr, int addrlen)
     if (!node && addr->sun_path[0] == '/') {
       node = vfs_resolve_path(addr->sun_path);
     }
+    unix_sock_t *found = NULL;
     if (node && ((node->flags & FS_TYPE_MASK) == FS_SOCKET) && node->device) {
       socket_t *sock = (socket_t *)node->device;
       unix_sock_t *usk = sock ? (unix_sock_t *)sock->sk : NULL;
-      return af_unix_sock_ref(usk);
+      found = af_unix_sock_ref(usk);
     }
+    if (node)
+      vfs_close(node);
+    return found;
   }
 
   return NULL;
@@ -172,6 +181,10 @@ int unix_unbind_by_path(const char *path) {
     if (strcmp(usk->addr.sun_path, path) == 0) {
       list_del(&usk->bind_node);
       usk->addr_len = 0;
+      /* The caller unlinks right after this, and filesystem backends free the
+       * node outright, so stop pointing at it: unix_destroy() must not touch a
+       * dangling vnode, and there is nothing left to vfs_close. */
+      usk->bound_vnode = NULL;
       found = 1;
       break;
     }

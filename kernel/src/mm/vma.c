@@ -21,7 +21,7 @@ static inline void vma_node_free(struct vma *v) {
 
 static inline void vma_file_ref(void *file_node) {
   if (file_node)
-    ((vfs_node_t *)file_node)->refcount++;
+    vfs_node_ref((vfs_node_t *)file_node);
 }
 
 static inline void vma_file_unref(void *file_node) {

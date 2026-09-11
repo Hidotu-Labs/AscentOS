@@ -1,4 +1,5 @@
 #include "drivers/gpu/virtio_gpu/virtio_gpu.h"
+#include "../../../lock/lockdiag.h"
 #include "apic/lapic_timer.h"
 #include "cpu/irq.h"
 #include "sched/sched.h"
@@ -106,9 +107,9 @@ static bool gpu_command_locked(
 }
 static bool
 gpu_command(const void *req, uint32_t req_len, void *resp, uint32_t resp_len, uint32_t *resp_type) {
-    spinlock_acquire(&gpu_poll_lock);
+    LOCKDIAG_SPOT_LOCK(LOCKDIAG_SPOT_GPU_POLL, &gpu_poll_lock);
     bool ok = gpu_command_locked(req, req_len, resp, resp_len, resp_type);
-    spinlock_release(&gpu_poll_lock);
+    LOCKDIAG_SPOT_UNLOCK(LOCKDIAG_SPOT_GPU_POLL, &gpu_poll_lock);
     return ok;
 }
 static struct pci_device *find_gpu(void) {
@@ -660,6 +661,7 @@ bool virtio_gpu_phase3_stress_test(uint32_t cycles, uint32_t frames) {
 struct virtio_gpu_gem {
     uint32_t resource_id, width, height, pitch, inflight;
     bool attached;
+    bool host_valid; // a full-frame TRANSFER to the host has been submitted
 };
 
 #define PRESENT_SLOT_SIZE 128U
@@ -672,9 +674,9 @@ static bool present_batch(uint32_t head,
                           const struct virtio_gpu_rect *scan_rect) {
     if (!gpu.initialized || !gpu.present_dma || !rect)
         return false;
-    spinlock_acquire(&gpu_poll_lock);
+    LOCKDIAG_SPOT_LOCK(LOCKDIAG_SPOT_GPU_POLL, &gpu_poll_lock);
     if (gpu.command_busy) {
-        spinlock_release(&gpu_poll_lock);
+        LOCKDIAG_SPOT_UNLOCK(LOCKDIAG_SPOT_GPU_POLL, &gpu_poll_lock);
         return false;
     }
     uint32_t count = change_scanout ? 3U : 2U;
@@ -770,7 +772,7 @@ static bool present_batch(uint32_t head,
     } else
         gpu.stats.present_failures++;
     gpu.command_busy = false;
-    spinlock_release(&gpu_poll_lock);
+    LOCKDIAG_SPOT_UNLOCK(LOCKDIAG_SPOT_GPU_POLL, &gpu_poll_lock);
     return ok;
 }
 
@@ -809,10 +811,10 @@ static bool handle_async_completion(void *cookie, uint32_t used_len) {
     struct vfs_node *event_node = NULL;
     struct drm_event_vblank ev;
     bool send_event = false;
-    spinlock_acquire(&gpu_present_lock);
+    LOCKDIAG_SPOT_LOCK(LOCKDIAG_SPOT_GPU_PRESENT, &gpu_present_lock);
     if (!slot->in_use || command >= slot->command_count) {
         gpu.stats.invalid_responses++;
-        spinlock_release(&gpu_present_lock);
+        LOCKDIAG_SPOT_UNLOCK(LOCKDIAG_SPOT_GPU_PRESENT, &gpu_present_lock);
         return true;
     }
     struct virtio_gpu_ctrl_hdr *resp =
@@ -877,7 +879,7 @@ static bool handle_async_completion(void *cookie, uint32_t used_len) {
                            : "[VIRTIO-GPU] FAIL: Phase 5 runtime stress counters\n");
         }
     }
-    spinlock_release(&gpu_present_lock);
+    LOCKDIAG_SPOT_UNLOCK(LOCKDIAG_SPOT_GPU_PRESENT, &gpu_present_lock);
     if (send_event)
         drm_file_send_event(event_file, &ev, event_node);
     return true;
@@ -949,7 +951,7 @@ static bool cursor_submit_locked(
 
 static bool cursor_submit(
     uint32_t type, uint32_t resource_id, int32_t x, int32_t y, int32_t hot_x, int32_t hot_y) {
-    spinlock_acquire(&gpu_cursor_lock);
+    LOCKDIAG_SPOT_LOCK(LOCKDIAG_SPOT_GPU_CURSOR, &gpu_cursor_lock);
     bool ok = cursor_submit_locked(type, resource_id, x, y, hot_x, hot_y);
     if (!ok && type == VIRTIO_GPU_CMD_MOVE_CURSOR) {
         cursor_pending_move = true;
@@ -958,7 +960,7 @@ static bool cursor_submit(
         gpu.stats.cursor_coalesced++;
         ok = true;
     }
-    spinlock_release(&gpu_cursor_lock);
+    LOCKDIAG_SPOT_UNLOCK(LOCKDIAG_SPOT_GPU_CURSOR, &gpu_cursor_lock);
     return ok;
 }
 
@@ -969,7 +971,7 @@ static void gpu_drain_cursor_completions(void) {
         if (!virtq_poll_complete(&gpu.cursorq, &cookie, &used))
             break;
         (void)used;
-        spinlock_acquire(&gpu_cursor_lock);
+        LOCKDIAG_SPOT_LOCK(LOCKDIAG_SPOT_GPU_CURSOR, &gpu_cursor_lock);
         struct gpu_cursor_slot *slot = (struct gpu_cursor_slot *)cookie;
         if ((uintptr_t)slot < (uintptr_t)cursor_slots ||
             (uintptr_t)slot >= (uintptr_t)(cursor_slots + GPU_CURSOR_SLOTS) || !slot->in_use)
@@ -1003,7 +1005,7 @@ static void gpu_drain_cursor_completions(void) {
             klog_puts("[VIRTIO-GPU] PASS: Phase 7 10000000 cursor moves, shape/hotspot churn, "
                       "independent cursorq\n");
         }
-        spinlock_release(&gpu_cursor_lock);
+        LOCKDIAG_SPOT_UNLOCK(LOCKDIAG_SPOT_GPU_CURSOR, &gpu_cursor_lock);
     }
 }
 
@@ -1019,7 +1021,7 @@ static bool cursor_submit_important(
 }
 
 static void gpu_drain_completions(void) {
-    spinlock_acquire(&gpu_poll_lock);
+    LOCKDIAG_SPOT_LOCK(LOCKDIAG_SPOT_GPU_POLL, &gpu_poll_lock);
     for (;;) {
         void *cookie = NULL;
         uint32_t used = 0;
@@ -1028,7 +1030,7 @@ static void gpu_drain_completions(void) {
         if (!handle_async_completion(cookie, used))
             gpu.stats.invalid_responses++;
     }
-    spinlock_release(&gpu_poll_lock);
+    LOCKDIAG_SPOT_UNLOCK(LOCKDIAG_SPOT_GPU_POLL, &gpu_poll_lock);
 }
 
 static void gpu_handle_config_event(void) {
@@ -1136,7 +1138,7 @@ static bool async_present_submit(uint32_t head,
     if (!gpu_worker_started || !owner || !rect)
         return false;
     uint32_t id = owner->resource_id;
-    spinlock_acquire(&gpu_present_lock);
+    LOCKDIAG_SPOT_LOCK(LOCKDIAG_SPOT_GPU_PRESENT, &gpu_present_lock);
     uint32_t index = GPU_ASYNC_SLOTS;
     for (uint32_t i = 0; i < GPU_ASYNC_SLOTS; i++)
         if (!async_slots[i].in_use) {
@@ -1145,7 +1147,7 @@ static bool async_present_submit(uint32_t head,
         }
     if (index == GPU_ASYNC_SLOTS) {
         gpu.stats.async_dropped++;
-        spinlock_release(&gpu_present_lock);
+        LOCKDIAG_SPOT_UNLOCK(LOCKDIAG_SPOT_GPU_PRESENT, &gpu_present_lock);
         return false;
     }
     struct gpu_async_slot *slot = &async_slots[index];
@@ -1227,7 +1229,7 @@ static bool async_present_submit(uint32_t head,
         }
         slot->has_event = false;
         gpu.stats.async_dropped++;
-        spinlock_release(&gpu_present_lock);
+        LOCKDIAG_SPOT_UNLOCK(LOCKDIAG_SPOT_GPU_PRESENT, &gpu_present_lock);
         return false;
     }
     async_in_flight++;
@@ -1236,7 +1238,7 @@ static bool async_present_submit(uint32_t head,
     gpu.stats.present_batches++;
     gpu.stats.async_submitted++;
     gpu.stats.damage_pixels += (uint64_t)rect->width * rect->height;
-    spinlock_release(&gpu_present_lock);
+    LOCKDIAG_SPOT_UNLOCK(LOCKDIAG_SPOT_GPU_PRESENT, &gpu_present_lock);
     virtq_kick(&gpu.controlq);
     return true;
 }
@@ -1278,7 +1280,7 @@ static void virtio_gpu_cursor_update(uint32_t crtc_id,
     cursor_active_head = drm_crtc_scanout_id(crtc_id);
     if (cursor_active_head >= VIRTIO_GPU_MAX_SCANOUTS)
         cursor_active_head = 0;
-    spinlock_acquire(&gpu_cursor_shape_lock);
+    LOCKDIAG_SPOT_LOCK(LOCKDIAG_SPOT_GPU_SHAPE, &gpu_cursor_shape_lock);
     bool shape = (flags & DRM_MODE_CURSOR_BO) || gem != cursor_last_gem ||
                  width != cursor_last_width || height != cursor_last_height ||
                  pitch != cursor_last_pitch || hot_x != cursor_last_hot_x ||
@@ -1286,23 +1288,23 @@ static void virtio_gpu_cursor_update(uint32_t crtc_id,
     if (!gem) {
         if (cursor_visible || (flags & DRM_MODE_CURSOR_BO))
             cursor_submit_important(VIRTIO_GPU_CMD_UPDATE_CURSOR, 0, x, y, hot_x, hot_y);
-        spinlock_acquire(&gpu_cursor_lock);
+        LOCKDIAG_SPOT_LOCK(LOCKDIAG_SPOT_GPU_CURSOR, &gpu_cursor_lock);
         cursor_visible = false;
-        spinlock_release(&gpu_cursor_lock);
+        LOCKDIAG_SPOT_UNLOCK(LOCKDIAG_SPOT_GPU_CURSOR, &gpu_cursor_lock);
         cursor_last_gem = NULL;
-        spinlock_release(&gpu_cursor_shape_lock);
+        LOCKDIAG_SPOT_UNLOCK(LOCKDIAG_SPOT_GPU_SHAPE, &gpu_cursor_shape_lock);
         return;
     }
     if (!width || !height || width > 64 || height > 64 || !gem->virt_addr) {
         gpu.stats.cursor_failures++;
-        spinlock_release(&gpu_cursor_shape_lock);
+        LOCKDIAG_SPOT_UNLOCK(LOCKDIAG_SPOT_GPU_SHAPE, &gpu_cursor_shape_lock);
         return;
     }
     if (!pitch)
         pitch = width * 4U;
     if (pitch < width * 4U) {
         gpu.stats.cursor_failures++;
-        spinlock_release(&gpu_cursor_shape_lock);
+        LOCKDIAG_SPOT_UNLOCK(LOCKDIAG_SPOT_GPU_SHAPE, &gpu_cursor_shape_lock);
         return;
     }
     bool ok = true;
@@ -1321,9 +1323,9 @@ static void virtio_gpu_cursor_update(uint32_t crtc_id,
     } else
         ok = cursor_submit(VIRTIO_GPU_CMD_MOVE_CURSOR, cursor_resource_id, x, y, hot_x, hot_y);
     if (ok) {
-        spinlock_acquire(&gpu_cursor_lock);
+        LOCKDIAG_SPOT_LOCK(LOCKDIAG_SPOT_GPU_CURSOR, &gpu_cursor_lock);
         cursor_visible = true;
-        spinlock_release(&gpu_cursor_lock);
+        LOCKDIAG_SPOT_UNLOCK(LOCKDIAG_SPOT_GPU_CURSOR, &gpu_cursor_lock);
         cursor_last_gem = gem;
         cursor_last_width = width;
         cursor_last_height = height;
@@ -1331,7 +1333,7 @@ static void virtio_gpu_cursor_update(uint32_t crtc_id,
         cursor_last_hot_x = hot_x;
         cursor_last_hot_y = hot_y;
     }
-    spinlock_release(&gpu_cursor_shape_lock);
+    LOCKDIAG_SPOT_UNLOCK(LOCKDIAG_SPOT_GPU_SHAPE, &gpu_cursor_shape_lock);
 }
 
 bool virtio_gpu_phase7_start(void) {
@@ -1556,22 +1558,22 @@ static struct drm_framebuffer *virtio_gpu_active_fb(struct drm_device *dev,
 static void virtio_gpu_queue_flip(
     struct drm_file *file, struct vfs_node *node, uint32_t crtc, uint32_t fb, uint64_t user_data) {
     (void)fb;
-    spinlock_acquire(&gpu_present_lock);
+    LOCKDIAG_SPOT_LOCK(LOCKDIAG_SPOT_GPU_PRESENT, &gpu_present_lock);
     gpu.pending_flip_file = file;
     gpu.pending_flip_node = node;
     gpu.pending_flip_crtc_id = crtc;
     gpu.pending_flip_user_data = user_data;
     gpu.pending_flip = true;
-    spinlock_release(&gpu_present_lock);
+    LOCKDIAG_SPOT_UNLOCK(LOCKDIAG_SPOT_GPU_PRESENT, &gpu_present_lock);
 }
 static void virtio_gpu_complete_flip(uint32_t head) {
     struct drm_file *file;
     struct vfs_node *node;
     uint64_t user_data;
     uint32_t crtc_id, sequence;
-    spinlock_acquire(&gpu_present_lock);
+    LOCKDIAG_SPOT_LOCK(LOCKDIAG_SPOT_GPU_PRESENT, &gpu_present_lock);
     if (!gpu.pending_flip || drm_crtc_scanout_id(gpu.pending_flip_crtc_id) != head) {
-        spinlock_release(&gpu_present_lock);
+        LOCKDIAG_SPOT_UNLOCK(LOCKDIAG_SPOT_GPU_PRESENT, &gpu_present_lock);
         return;
     }
     file = gpu.pending_flip_file;
@@ -1582,7 +1584,7 @@ static void virtio_gpu_complete_flip(uint32_t head) {
     gpu.pending_flip = false;
     gpu.pending_flip_file = NULL;
     gpu.pending_flip_node = NULL;
-    spinlock_release(&gpu_present_lock);
+    LOCKDIAG_SPOT_UNLOCK(LOCKDIAG_SPOT_GPU_PRESENT, &gpu_present_lock);
     struct drm_event_vblank ev;
     memset(&ev, 0, sizeof(ev));
     uint64_t ms = lapic_timer_get_ms();
@@ -1621,6 +1623,7 @@ static void virtio_gpu_commit_damage(struct drm_device *dev,
         gpu.queued_scanout_resource_id = vg->resource_id;
     bool change = queued != vg->resource_id;
     struct virtio_gpu_rect r = {0, 0, vg->width, vg->height};
+    bool have_damage = false;
     if (clips && n) {
         uint32_t x1 = vg->width, y1 = vg->height, x2 = 0, y2 = 0;
         for (uint32_t i = 0; i < n; i++) {
@@ -1649,26 +1652,38 @@ static void virtio_gpu_commit_damage(struct drm_device *dev,
             r.y = y1;
             r.width = x2 - x1;
             r.height = y2 - y1;
+            have_damage = true;
         }
     }
-    /* A newly selected host resource may contain pixels from an older frame.
-     * Populate all of it before SET_SCANOUT; damage is valid only while the
-     * same resource remains selected. */
-    if (change) {
+    /* Selecting a different host resource normally needs a full upload: the
+     * resource may still hold pixels from an older frame.  Once a full upload
+     * has been submitted the host copy is valid, and if the DRM layer supplied
+     * the damage accumulated since (it only does so when the framebuffer was
+     * already scanned out and damage was recorded for it), a partial transfer
+     * is enough.  Virtqueue commands are processed in order, so a later
+     * partial transfer can never overtake the full one that preceded it. */
+    bool full = change && !(vg->host_valid && have_damage);
+    if (full) {
         r.x = 0;
         r.y = 0;
         r.width = vg->width;
         r.height = vg->height;
     }
-    uint64_t off = change ? 0 : ((uint64_t)r.y * vg->pitch + (uint64_t)r.x * 4ULL);
-    if (async_present_submit(head, vg, &r, off, change, &view))
+    uint64_t off = full ? 0 : ((uint64_t)r.y * vg->pitch + (uint64_t)r.x * 4ULL);
+    if (async_present_submit(head, vg, &r, off, change, &view)) {
+        if (full)
+            vg->host_valid = true;
         return;
-    if (present_batch(head, vg->resource_id, &r, off, change, &view) && change) {
+    }
+    bool presented = present_batch(head, vg->resource_id, &r, off, change, &view);
+    if (presented && change) {
         gpu.head_resource[head] = vg->resource_id;
         if (head == 0)
             gpu.scanout_resource_id = vg->resource_id;
         gpu.owns_scanout = true;
     }
+    if (presented && full)
+        vg->host_valid = true;
     virtio_gpu_complete_flip(head);
 }
 static uint32_t gpu_append_dec(char *buf, uint32_t pos, uint32_t cap, uint32_t v) {
