@@ -585,6 +585,27 @@ mount_success:
   rfkill_init();
   procfs_init();
 
+  /* LinuxKPI bring-up: run the Phase 0 self-test, then every registered
+   * initcall (module_init-style drivers bind here once they are imported). */
+  extern void linuxkpi_test_phase0(void);
+  extern void linuxkpi_run_initcalls(void);
+  linuxkpi_test_phase0();
+#ifdef LINUXKPI_LINUX_IMPORTED
+  extern void linuxkpi_xarray_init(void);
+  extern void linuxkpi_time_init(void);
+  extern void linuxkpi_workqueue_init(void);
+  extern void linuxkpi_rcu_init(void);
+  extern void linuxkpi_run_boot_tests(void);
+  linuxkpi_xarray_init();
+  linuxkpi_time_init();
+  linuxkpi_workqueue_init();
+  linuxkpi_rcu_init();
+  /* The Phase 1 suites sleep; run them in a kernel thread instead of the
+   * idle context kmain_high_half runs in. */
+  linuxkpi_run_boot_tests();
+#endif
+  linuxkpi_run_initcalls();
+
 mount_fail:
 
   sb16_init();

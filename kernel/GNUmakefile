@@ -81,7 +81,7 @@ override CPPFLAGS += -DLOCKDIAG_SELFTEST=1
 endif
 
 # NVMe controller self-tests at boot (disable/enable/Identify cycles).  Used by
-# scripts/nvme-stress.sh; a normal build compiles them out.
+# scripts/nvme/nvme-stress.sh; a normal build compiles them out.
 #
 #   make NVME_SELFTEST=1                    50 cycles (default)
 #   make NVME_SELFTEST=1 NVME_SELFTEST_CYCLES=1000
@@ -165,6 +165,59 @@ override CPPFLAGS := \
     -MMD \
     -MP
 
+# ── Imported Linux sources (Phase 0) ─────────────────────────────────────────
+#
+# kernel/linux/ holds a pinned upstream Linux subset vendored by
+# scripts/linux-import.sh.  The script also writes kernel/linux/Makefile.files,
+# which lists the upstream .c files compiled into the kernel; both the tree and
+# the fragment are absent until the script has run, and the kernel builds fine
+# without them (LINUX_OBJ stays empty).
+#
+# Imported code gets its own include path order: the real Linux headers win,
+# and the legacy stub headers in src/include are deliberately NOT on the path,
+# so a missing import fails loudly instead of silently using a stub.
+LINUX_OBJ :=
+LINUX_CPPFLAGS :=
+LINUX_CFLAGS :=
+-include linux/Makefile.files
+ifneq ($(linux-obj-y),)
+    override LINUX_OBJ := \
+        $(addprefix obj-$(ARCH)/linux/,$(linux-obj-y:.c=.c.o))
+    override LINUX_CPPFLAGS := \
+        -I linuxkpi/include \
+        -I linux/arch/x86/include \
+        -I linux/arch/x86/include/generated \
+        -I linux/include \
+        -I linux/arch/x86/include/uapi \
+        -I linux/arch/x86/include/generated/uapi \
+        -I linux/include/uapi \
+        -I limine-protocol/include \
+        -isystem freestnd-c-hdrs/include \
+        -D__KERNEL__ \
+        -include linux/include/linux/compiler-version.h \
+        -include linux/include/linux/kconfig.h \
+        $(filter -D%,$(CPPFLAGS)) \
+        -MMD \
+        -MP
+    override LINUX_CFLAGS := \
+        -fno-strict-aliasing \
+        -fno-common \
+        -Wno-unused-parameter \
+        -Wno-unused-function \
+        -Wno-unused-but-set-variable \
+        -Wno-sign-compare \
+        -Wno-missing-field-initializers
+    override CPPFLAGS += -DLINUXKPI_LINUX_IMPORTED=1
+
+    # AvoryOS-authored LinuxKPI implementations and Linux-API boot tests.
+    # Both are compiled only when the Linux tree exists, because they include
+    # the real Linux headers.  See the pattern rules below.
+    KPI_SRCFILES := $(shell find -L linuxkpi/src -type f -name '*.c' 2>/dev/null | LC_ALL=C sort)
+    KPI_OBJ := $(addprefix obj-$(ARCH)/,$(KPI_SRCFILES:.c=.c.o))
+    LINUX_TEST_SRCFILES := $(shell find -L src/tests/linuxkpi/linux -type f -name '*.c' 2>/dev/null | LC_ALL=C sort)
+    LINUX_TEST_OBJ := $(addprefix obj-$(ARCH)/,$(LINUX_TEST_SRCFILES:.c=.c.o))
+endif
+
 ifeq ($(ARCH),x86_64)
     override NASMFLAGS := \
         $(patsubst -g,-g -F dwarf,$(NASMFLAGS)) \
@@ -204,6 +257,9 @@ override SRCFILES := $(shell find -L src cc-runtime/src -type f -not -path 'src/
 override SRCFILES += $(shell find -L src/arch/$(ARCH) -type f 2>/dev/null | LC_ALL=C sort)
 
 override CFILES := $(filter-out src/syscalls/vdso.c,$(filter %.c,$(SRCFILES)))
+# Linux-API tests are compiled with Linux headers by a dedicated rule below;
+# keep them out of the native compile when the tree is absent.
+override CFILES := $(filter-out src/tests/linuxkpi/linux/%,$(CFILES))
 override ASFILES := $(filter %.S,$(SRCFILES))
 ifeq ($(ARCH),x86_64)
 override NASMFILES := $(filter %.asm,$(SRCFILES))
@@ -212,7 +268,9 @@ override OBJ := $(addprefix obj-$(ARCH)/,$(CFILES:.c=.c.o) $(ASFILES:.S=.S.o))
 ifeq ($(ARCH),x86_64)
 override OBJ += $(addprefix obj-$(ARCH)/,$(NASMFILES:.asm=.asm.o))
 endif
+override OBJ += $(KPI_OBJ) $(LINUX_TEST_OBJ)
 override HEADER_DEPS := $(addprefix obj-$(ARCH)/,$(CFILES:.c=.c.d) $(ASFILES:.S=.S.d))
+override HEADER_DEPS += $(LINUX_OBJ:.o=.d) $(KPI_OBJ:.o=.d) $(LINUX_TEST_OBJ:.o=.d)
 
 .PHONY: all
 all: bin-$(ARCH)/$(OUTPUT)
@@ -226,13 +284,33 @@ obj-$(ARCH)/src/syscalls/vdso_blob.asm.o: src/syscalls/vdso_blob.asm src/syscall
 	mkdir -p "$(dir $@)"
 	nasm -I src/syscalls/ $(NASMFLAGS) $< -o $@
 
-bin-$(ARCH)/$(OUTPUT): GNUmakefile linker-scripts/$(ARCH).lds $(OBJ)
+bin-$(ARCH)/$(OUTPUT): GNUmakefile linker-scripts/$(ARCH).lds $(OBJ) $(LINUX_OBJ)
 	mkdir -p "$(dir $@)"
-	$(LD) $(LDFLAGS) $(OBJ) -o $@
+	$(LD) $(LDFLAGS) $(OBJ) $(LINUX_OBJ) -o $@
 
 obj-$(ARCH)/%.c.o: %.c GNUmakefile
 	mkdir -p "$(dir $@)"
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c $< -o $@
+
+# Imported Linux sources.  This pattern is more specific than the generic one
+# above, so make prefers it for obj-$(ARCH)/linux/... targets.
+obj-$(ARCH)/linux/%.c.o: linux/%.c GNUmakefile
+	mkdir -p "$(dir $@)"
+	$(CC) $(CFLAGS) $(LINUX_CPPFLAGS) $(LINUX_CFLAGS) -c $< -o $@
+
+ifneq ($(linux-obj-y),)
+# AvoryOS LinuxKPI implementations.  They speak the Linux API (real Linux
+# headers with linuxkpi/include overlaid first) and may also include native
+# kernel headers via -I src when they need AvoryOS primitives.
+obj-$(ARCH)/linuxkpi/src/%.c.o: linuxkpi/src/%.c GNUmakefile
+	mkdir -p "$(dir $@)"
+	$(CC) $(CFLAGS) $(LINUX_CPPFLAGS) $(LINUX_CFLAGS) -I src -I src/include -c $< -o $@
+
+# Boot tests that are written against the Linux API directly.
+obj-$(ARCH)/src/tests/linuxkpi/linux/%.c.o: src/tests/linuxkpi/linux/%.c GNUmakefile
+	mkdir -p "$(dir $@)"
+	$(CC) $(CFLAGS) $(LINUX_CPPFLAGS) $(LINUX_CFLAGS) -I src -I src/include -c $< -o $@
+endif
 
 obj-$(ARCH)/%.S.o: %.S GNUmakefile
 	mkdir -p "$(dir $@)"

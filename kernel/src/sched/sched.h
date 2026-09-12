@@ -288,6 +288,11 @@ struct thread {
   bool in_futex_wait;
   bool blocked_reported; // already named once by the stuck-waiter warning
   uint32_t futex_bucket; // futex_hash bucket, 0xFFFFFFFF when not waiting
+
+  /* LinuxKPI use only (kernel/src/linuxkpi/native_sched.c): start argument
+   * for kernel threads.  Appended at the end: assembly pins offsets earlier
+   * in this struct, not these. */
+  void *kpi_data;
 };
 
 /*

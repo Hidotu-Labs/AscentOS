@@ -84,6 +84,13 @@ void lapic_timer_handler(struct registers *regs) {
      * to describe the machine exactly as it is. */
     lockdiag_tick();
 
+    /* LinuxKPI time base: advance jiffies.  Defined by the imported LinuxKPI
+     * layer (linuxkpi/src/time.c); absent when the Linux tree is not
+     * imported, hence the guarded weak reference. */
+    extern void linuxkpi_timer_tick(void) __attribute__((weak));
+    if (linuxkpi_timer_tick)
+        linuxkpi_timer_tick();
+
     // Call the scheduler. Every core handles its own preemption.
     // Safety check: only yield if we have a valid cpu structure and a thread to switch from.
     if (cpu && cpu->current_thread) {

@@ -23,6 +23,41 @@ SECTIONS {
         *(.text .text.*)
     } :text
 
+    /* LinuxKPI initcalls (module_init and friends).  Upstream Linux places
+     * these function pointers in .initcall<level>.init sections.  The walker
+     * in kernel/src/linuxkpi/init.c iterates __initcall_start..__initcall_end
+     * in link order; the per-level symbols mirror what Linux's do_initcalls()
+     * expects if we ever import it.  KEEP is mandatory: --gc-sections would
+     * otherwise discard the sections and their referenced functions. */
+    .initcall : ALIGN(16) {
+        __initcall_start = .;
+        __initcall0_start = .;
+        KEEP(*(.initcall0.init))
+        KEEP(*(.initcall0s.init))
+        __initcall1_start = .;
+        KEEP(*(.initcall1.init))
+        KEEP(*(.initcall1s.init))
+        __initcall2_start = .;
+        KEEP(*(.initcall2.init))
+        KEEP(*(.initcall2s.init))
+        __initcall3_start = .;
+        KEEP(*(.initcall3.init))
+        KEEP(*(.initcall3s.init))
+        __initcall4_start = .;
+        KEEP(*(.initcall4.init))
+        KEEP(*(.initcall4s.init))
+        __initcall5_start = .;
+        KEEP(*(.initcall5.init))
+        KEEP(*(.initcall5s.init))
+        __initcall6_start = .;
+        KEEP(*(.initcall6.init))
+        KEEP(*(.initcall6s.init))
+        __initcall7_start = .;
+        KEEP(*(.initcall7.init))
+        KEEP(*(.initcall7s.init))
+        __initcall_end = .;
+    } :text
+
     . = ALIGN(0x1000);
 
     .rodata : {
@@ -31,6 +66,10 @@ SECTIONS {
         __start___ex_table = .;
         KEEP(*(__ex_table))
         __stop___ex_table = .;
+        . = ALIGN(8);
+        __start___bug_table = .;
+        KEEP(*(__bug_table))
+        __stop___bug_table = .;
     } :rodata
 
     . = ALIGN(0x1000);

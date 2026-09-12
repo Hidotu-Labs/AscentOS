@@ -1,0 +1,54 @@
+#ifndef __AVORY_LINUXKPI_RCUPDATE_H
+#define __AVORY_LINUXKPI_RCUPDATE_H
+
+/* Linux <linux/rcupdate.h> overlay.
+ *
+ * Read side: per-CPU nesting counter (linuxkpi/src/rcu.c).  Grace periods are
+ * detected by polling those counters, so a reader that blocks or is preempted
+ * keeps the grace period open; callbacks are invoked by a dedicated kthread.
+ * This is correct but not yet optimized (no tree RCU, no expedited IPI path).
+ */
+
+#include <linux/compiler.h>
+#include <linux/list.h>
+#include <linux/types.h>
+
+/* struct rcu_head / rcu_callback_t come from <linux/types.h> upstream
+ * (struct callback_head plus `#define rcu_head callback_head`). */
+
+void __kpi_rcu_read_lock(void);
+void __kpi_rcu_read_unlock(void);
+
+#define rcu_read_lock() __kpi_rcu_read_lock()
+#define rcu_read_unlock() __kpi_rcu_read_unlock()
+
+#define rcu_dereference(p) READ_ONCE(p)
+#define rcu_dereference_raw(p) READ_ONCE(p)
+#define rcu_dereference_check(p, c) ((void)(c), READ_ONCE(p))
+#define rcu_dereference_protected(p, c) ((void)(c), (p))
+#define rcu_access_pointer(p) READ_ONCE(p)
+#define rcu_assign_pointer(p, v)                                              \
+  do {                                                                        \
+    WRITE_ONCE((p), (v));                                                     \
+  } while (0)
+#define RCU_INIT_POINTER(p, v)                                                \
+  do {                                                                        \
+    (p) = (v);                                                                \
+  } while (0)
+
+void call_rcu(struct rcu_head *head, rcu_callback_t func);
+void rcu_barrier(void);
+void synchronize_rcu(void);
+void synchronize_rcu_expedited(void);
+
+/* Bring-up: start the callback kthread. */
+void linuxkpi_rcu_init(void);
+
+#define list_for_each_entry_rcu(pos, head, member)                            \
+  list_for_each_entry(pos, head, member)
+#define list_for_each_entry_safe_rcu(pos, n, head, member)                    \
+  list_for_each_entry_safe(pos, n, head, member)
+#define hlist_for_each_entry_rcu(pos, head, member)                           \
+  hlist_for_each_entry(pos, head, member)
+
+#endif /* __AVORY_LINUXKPI_RCUPDATE_H */

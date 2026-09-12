@@ -1,0 +1,20 @@
+# Upstream Linux .c files compiled into the kernel (paths relative to
+# kernel/linux/).  scripts/linux-import.sh turns this into
+# kernel/linux/Makefile.files, which kernel/GNUmakefile includes.
+#
+# Phase 0 ships a single leaf library file so the import/build plumbing is
+# proven end to end.  Later phases add DRM core, TTM, amdgpu, ...
+
+# Phase 1: pure algorithm libraries that need no kernel integration beyond
+# basic types/macros.  Heavier library imports (bitmap, kfifo, xarray, idr)
+# arrive once the slab/spinlock/RCU LinuxKPI cores exist.
+lib/math/div64.c
+lib/find_bit.c
+lib/list_sort.c
+lib/math/gcd.c
+lib/math/int_sqrt.c
+
+# Phase 1 containers/primitives that sit on the slab, lock and RCU overlays.
+lib/xarray.c
+lib/refcount.c
+lib/siphash.c

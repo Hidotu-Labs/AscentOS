@@ -1,0 +1,29 @@
+# Paths copied verbatim from the pinned Linux tree into kernel/linux/.
+#
+# One path per line; directories are copied recursively.  Keep this list as
+# small as possible and grow it when a phase actually needs more source.
+# Entries are relative to the Linux tree root.
+
+# Phase 0: enough headers to compile standalone library files and the first
+# LinuxKPI glue.  Phase 1+ adds lib/, drivers/gpu/drm/, drivers/dma-buf/, ...
+include
+arch/x86/include
+lib/math/div64.c
+
+# Phase 1: pure algorithm libraries with no kernel-integration dependencies.
+lib/find_bit.c
+lib/list_sort.c
+lib/math/gcd.c
+lib/math/int_sqrt.c
+
+# Phase 1 containers and primitives on top of the LinuxKPI slab/lock/RCU
+# cores.  lib/radix-tree.h is the private header xarray.c includes by name.
+# lib/idr.c waits for the full radix-tree.c import (needs timers/hrtimer).
+lib/xarray.c
+lib/refcount.c
+lib/siphash.c
+lib/radix-tree.h
+
+# Kbuild generates <generated/timeconst.h> from HZ; the import script derives
+# it from this script instead of hand-writing constants.
+kernel/time/timeconst.bc
