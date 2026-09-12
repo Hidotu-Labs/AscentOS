@@ -3,6 +3,7 @@
 #include "console/klog.h"
 #include "lib/string.h"
 #include "lock/spinlock.h"
+#include "mm/heap.h"
 #include "net/tcp.h"
 #include "sched/sched.h"
 #include "sched/wait.h"
@@ -37,6 +38,7 @@ static struct net_packet *alloc_locked(void) {
     init_pool_locked();
   if (free_top > 0) {
     uint32_t idx = free_stack[--free_top];
+    used[idx] = true;
     pool[idx].device = NULL;
     pool[idx].length = 0;
     return &pool[idx];
@@ -46,7 +48,11 @@ static struct net_packet *alloc_locked(void) {
 static void free_locked(struct net_packet *p) {
   if (p >= pool && p < pool + NET_PACKET_POOL_SIZE) {
     if (free_top < NET_PACKET_POOL_SIZE) {
-      free_stack[free_top++] = (uint32_t)(p - pool);
+      uint32_t idx = (uint32_t)(p - pool);
+      if (used[idx]) {
+        used[idx] = false;
+        free_stack[free_top++] = idx;
+      }
     }
   }
 }
@@ -58,26 +64,20 @@ static bool push_locked(struct net_packet *p) {
   head = next;
   return true;
 }
-static struct net_packet *pop(void) {
-  spinlock_acquire(&lock);
-  if (tail == head) {
-    spinlock_release(&lock);
-    return NULL;
-  }
-  struct net_packet *p = queue[tail];
-  tail = (tail + 1) % NET_PACKET_POOL_SIZE;
-  spinlock_release(&lock);
-  return p;
-}
-static void release(struct net_packet *p) {
-  spinlock_acquire(&lock);
-  free_locked(p);
-  spinlock_release(&lock);
-}
 
 static void net_worker(void) {
   struct thread *self = sched_get_current();
-  wait_queue_entry_t entry = {.thread = self, .next = NULL};
+  /* Heap, not stack: a waker on another CPU walks worker_wait until it takes
+   * the queue lock, and a stack slot would be recycled by the next loop
+   * iteration while that walk is still in flight.  Kernel workers never exit,
+   * so the entry has the same lifetime as the thread. */
+  wait_queue_entry_t *entry = kmalloc(sizeof(*entry));
+  if (!entry) {
+    klog_puts("[NET] worker wait-entry allocation failed\n");
+    return;
+  }
+  memset(entry, 0, sizeof(*entry));
+  entry->thread = self;
   struct net_packet *batch[128];
   for (;;) {
     size_t count = 0;
@@ -103,8 +103,7 @@ static void net_worker(void) {
       }
     }
 
-    tcp_timer_tick(lapic_timer_get_ticks());
-    wait_queue_add(&worker_wait, &entry);
+    wait_queue_add(&worker_wait, entry);
     spinlock_acquire(&lock);
     bool empty = (head == tail);
     if (empty) {
@@ -116,7 +115,20 @@ static void net_worker(void) {
       sched_yield();
       self->wakeup_ticks = 0;
     }
-    wait_queue_remove(&worker_wait, &entry);
+    wait_queue_remove(&worker_wait, entry);
+  }
+}
+
+/* Dedicated TCP timer so RX processing never has to drive retransmission
+ * timers on the packet hot path. */
+static void net_timer_worker(void) {
+  struct thread *self = sched_get_current();
+  for (;;) {
+    tcp_timer_tick(lapic_timer_get_ticks());
+    self->state = THREAD_SLEEPING;
+    self->wakeup_ticks = lapic_timer_get_ticks() + 10;
+    sched_yield();
+    self->wakeup_ticks = 0;
   }
 }
 
@@ -147,6 +159,7 @@ bool net_rx_submit_irq(struct net_device *dev, const void *frame, size_t len) {
   p->device = dev;
   p->length = (uint16_t)len;
   memcpy(p->data, frame, len);
+  bool was_empty = (head == tail);
   if (!push_locked(p)) {
     free_locked(p);
     dev->stats.rx_dropped++;
@@ -163,7 +176,10 @@ bool net_rx_submit_irq(struct net_device *dev, const void *frame, size_t len) {
   dev->stats.rx_packets++;
   dev->stats.rx_bytes += len;
   spinlock_release(&lock);
-  wait_queue_wake_one(&worker_wait);
+  if (was_empty)
+    wait_queue_wake_all(&worker_wait);
+  else
+    wait_queue_wake_one(&worker_wait);
   return true;
 }
 
@@ -232,15 +248,35 @@ void net_core_init(void) {
 }
 
 void net_core_start_worker(void) {
-  struct thread *worker = sched_create_kernel_thread(net_worker, cpu_get_current(), true);
-  if (!worker) {
-    ready = false;
-    klog_puts("[NET] worker creation failed\n");
+  uint32_t cpus = cpu_get_count();
+  uint32_t workers = (cpus > 1) ? 2 : 1;
+  if (workers > 4)
+    workers = 4;
+
+  for (uint32_t i = 0; i < workers; i++) {
+    struct thread *worker =
+        sched_create_kernel_thread(net_worker, cpu_get_current(), true);
+    if (!worker) {
+      ready = false;
+      klog_puts("[NET] worker creation failed\n");
+      return;
+    }
+    strcpy(worker->comm, "net-worker");
+    sched_set_priority(worker, 0, -20);
+  }
+  klog_puts("[NET] rx workers started\n");
+}
+
+void net_core_start_timer(void) {
+  struct thread *timer =
+      sched_create_kernel_thread(net_timer_worker, cpu_get_current(), true);
+  if (!timer) {
+    klog_puts("[NET] tcp timer creation failed\n");
     return;
   }
-  strcpy(worker->comm, "net-worker");
-  sched_set_priority(worker, 0, -20);
-  klog_puts("[NET] worker started\n");
+  strcpy(timer->comm, "tcp-timer");
+  sched_set_priority(timer, 0, -10);
+  klog_puts("[NET] tcp timer started\n");
 }
 
 void net_print_stats(const struct net_device *dev) {

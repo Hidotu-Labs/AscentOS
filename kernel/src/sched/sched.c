@@ -85,10 +85,20 @@ void sched_deadline_expire_locked(struct cpu_info *cpu, uint64_t now) {
       t->wakeup_ticks = 0;
       t->ready_since_ms = still_current ? 0 : now;
       if (!still_current) {
-        eevfd_place_entity(&cpu->eevfd, &t->se, false);
-        eevfd_enqueue_entity(&cpu->eevfd, &t->se);
-        t->on_runqueue = true;
-        cpu->runnable_count++;
+        /* The runqueue that receives the thread is the one whose deadline
+         * queue it was just popped from, but a concurrent sched_wakeup() may
+         * have re-targeted it to another CPU.  Pin cpu_index to the runqueue
+         * it actually lands in, otherwise a later remove_from_runqueue() /
+         * sched_set_priority() operates on the wrong CPU's tree.
+         * Also never insert an entity a racing wakeup already linked: a
+         * second rb_insert turns the runqueue tree into a cycle. */
+        if (!t->se.on_rq) {
+          t->cpu_index = cpu->cpu_id;
+          eevfd_place_entity(&cpu->eevfd, &t->se, false);
+          eevfd_enqueue_entity(&cpu->eevfd, &t->se);
+          t->on_runqueue = true;
+          cpu->runnable_count++;
+        }
       }
     } else {
       t->wakeup_ticks = 0;
@@ -425,6 +435,7 @@ __attribute__((optimize("O3"))) static void sched_schedule(bool voluntary_yield)
           prev->se.min_deadline = prev->se.deadline;
         }
       }
+      prev->cpu_index = cpu->cpu_id;
       eevfd_enqueue_entity(&cpu->eevfd, &prev->se);
       prev->on_runqueue = true;
     }
@@ -798,8 +809,6 @@ __attribute__((optimize("O3"))) void sched_wakeup(struct thread *t) {
       spinlock_release(&prev_cpu->queue_lock);
     }
 
-    t->cpu_index = target->cpu_id;
-
     spinlock_acquire(&target->queue_lock);
     if (t->state == THREAD_BLOCKED || t->state == THREAD_SLEEPING) {
       bool still_current =
@@ -807,7 +816,12 @@ __attribute__((optimize("O3"))) void sched_wakeup(struct thread *t) {
       sched_deadline_remove_locked(target, t);
       t->state = still_current ? THREAD_RUNNING : THREAD_READY;
       t->wakeup_ticks = 0;
-      if (!still_current) {
+      if (!still_current && !t->se.on_rq) {
+        /* Publish the target only once the enqueue is serialized under its
+         * queue_lock; a stale/racy cpu_index makes the deadline and removal
+         * paths operate on another CPU's list/tree.  The on_rq check refuses
+         * to link an entity that a racing expire/wakeup already enqueued. */
+        t->cpu_index = target->cpu_id;
         eevfd_place_entity(&target->eevfd, &t->se, false);
         eevfd_enqueue_entity(&target->eevfd, &t->se);
         t->on_runqueue = true;

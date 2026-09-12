@@ -10,6 +10,7 @@
 #include "apic/lapic.h"
 #include "arch/x86_64/extable.h"
 #include "fault.h"
+#include "features.h"
 #include "fpu.h"
 #include "kpf_dump.h"
 #include "ktrack.h"
@@ -450,10 +451,31 @@ static void send_eoi(struct registers *regs) {
     return;
   if (regs->int_no < 32)
     return;
-  if (apic_mode)
+  if (apic_mode) {
+    /* Bring-up diagnostic: prove the LAPIC page is reachable in the active
+     * address space before the store faults on it.  serial_write_sync() does
+     * not take klog locks, so this is safe even when the interrupt landed in
+     * the middle of a klog print (which is exactly when the missing mapping
+     * used to show up). */
+    uint64_t lapic_va = lapic_get_va();
+    if (lapic_va) {
+      uint64_t cr3;
+      __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
+      uint64_t cr3_base = cr3 & PAGE_MASK;
+      if (!vmm_debug_walk(cr3_base, lapic_va, NULL)) {
+        static volatile unsigned eoi_reported;
+        if (!__atomic_exchange_n(&eoi_reported, 1, __ATOMIC_ACQ_REL)) {
+          vmm_debug_dump_walk("eoi-missing active", cr3_base, lapic_va);
+          vmm_debug_dump_walk("eoi-missing kernel",
+                              (uint64_t)(uintptr_t)vmm_get_kernel_pml4(),
+                              lapic_va);
+        }
+      }
+    }
     lapic_send_eoi();
-  else if (regs->int_no <= 47)
+  } else if (regs->int_no <= 47) {
     pic_send_eoi(regs->int_no - 32);
+  }
 }
 
 // Exception Handling & Signals
@@ -1056,7 +1078,12 @@ void isr_handler(struct registers *regs) {
     handler(regs);
 
     if ((regs->cs & 0x3) == 0x3) {
+      /* Signal frame construction writes the user stack directly.  The CPU
+       * clears RFLAGS.AC on exception entry, so open a window here (no-op
+       * without SMAP). */
+      user_access_begin();
       signal_deliver(regs);
+      user_access_end();
     }
 
     send_eoi(regs);
@@ -1071,7 +1098,9 @@ void isr_handler(struct registers *regs) {
 
   if (regs->int_no >= 32) {
     if ((regs->cs & 0x3) == 0x3) {
+      user_access_begin();
       signal_deliver(regs);
+      user_access_end();
     }
     send_eoi(regs);
     sched_check_resched((regs->cs & 0x3) == 0x3);

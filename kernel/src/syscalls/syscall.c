@@ -604,7 +604,12 @@ void syscall_init(void) {
 
   wrmsr(IA32_LSTAR, (uint64_t)syscall_entry);
 
-  wrmsr(IA32_FMASK, 0x200);
+  /* Mask IF and AC on SYSCALL entry.  Clearing AC matters for SMAP: RFLAGS.AC
+   * is user-settable (popfq), and without this a process could enter the
+   * kernel with AC already set and bypass supervisor access prevention for
+   * the whole syscall.  syscall_entry.asm re-opens AC deliberately, only for
+   * the dispatch window. */
+  wrmsr(IA32_FMASK, 0x200 | (1ULL << 18));
 
   klog_puts("[OK] Syscall Infrastructure (MSRs) initialized.\n");
 }

@@ -17,6 +17,28 @@ static volatile bool serial_initialized = false;
 
 static inline int is_transmit_empty(void) { return inb(COM1 + 5) & 0x20; }
 
+/* Lock-free, non-blocking fallback for when serial_lock is already held by
+ * this CPU (a fault inside a logging section) or by a CPU that cannot make
+ * progress.  Dropping bytes is always better than deadlocking the machine;
+ * this is only reached on contention. */
+static inline void serial_try_putbyte(char c) {
+  if (is_transmit_empty())
+    outb(COM1, c);
+}
+
+/* Bounded wait for serial_lock.  Normal contention (another CPU mid-drain)
+ * resolves in microseconds, so this keeps concurrent reports serialized.
+ * Only a genuinely wedged holder falls through to the lock-free path. */
+#define SERIAL_LOCK_SPIN_LIMIT 100000u
+static inline bool serial_lock_bounded(void) {
+  for (uint32_t i = 0; i < SERIAL_LOCK_SPIN_LIMIT; i++) {
+    if (spinlock_try_acquire(&serial_lock))
+      return true;
+    __asm__ volatile("pause" ::: "memory");
+  }
+  return false;
+}
+
 void serial_init(void) {
   spinlock_acquire(&serial_lock);
 
@@ -73,7 +95,10 @@ uint32_t serial_pending_bytes(void) {
 
 // Drain as many queued bytes as the UART FIFO can accept right now (non-blocking)
 void serial_flush(void) {
-  spinlock_acquire(&serial_lock);
+  /* Called from the BSP timer tick: never block, or a contended log lock
+   * stops this CPU from taking ticks and the hang detector fires. */
+  if (!spinlock_try_acquire(&serial_lock))
+    return;
   serial_drain_fifo_locked();
   spinlock_release(&serial_lock);
 }
@@ -81,7 +106,16 @@ void serial_flush(void) {
 // Synchronously drain the entire ring buffer until empty.
 // Safe for panics and shutdown; includes timeout to prevent infinite hangs.
 void serial_flush_sync(void) {
-  spinlock_acquire(&serial_lock);
+  if (!spinlock_try_acquire(&serial_lock)) {
+    /* Panic on the CPU that holds serial_lock: draining lock-free is the only
+     * way out.  Racing another drain can drop bytes; that is fine here. */
+    uint32_t guard = 0;
+    while (serial_tail != serial_head && guard++ < SERIAL_BUF_SIZE) {
+      serial_putchar_sync(serial_buf[serial_tail]);
+      serial_tail = (serial_tail + 1) & SERIAL_BUF_MASK;
+    }
+    return;
+  }
 
   while (serial_tail != serial_head) {
     uint32_t timeout = 1000000;
@@ -107,7 +141,12 @@ void serial_flush_sync(void) {
 }
 
 void serial_putchar(char c) {
-  spinlock_acquire(&serial_lock);
+  if (!serial_lock_bounded()) {
+    if (c == '\n')
+      serial_try_putbyte('\r');
+    serial_try_putbyte(c);
+    return;
+  }
   if (c == '\n')
     serial_enqueue_locked('\r');
   serial_enqueue_locked(c);
@@ -119,11 +158,17 @@ void serial_write(const char *data, size_t length) {
   if (!data || length == 0)
     return;
 
-  spinlock_acquire(&serial_lock);
+  if (!serial_lock_bounded()) {
+    for (size_t i = 0; i < length; i++) {
+      if (data[i] == '\n')
+        serial_try_putbyte('\r');
+      serial_try_putbyte(data[i]);
+    }
+    return;
+  }
 
   uint32_t head = serial_head;
   uint32_t tail = serial_tail;
-  bool was_empty = (head == tail);
   uint32_t free_space = (tail - head - 1) & SERIAL_BUF_MASK;
 
   for (size_t i = 0; i < length; i++) {

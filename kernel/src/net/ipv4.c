@@ -3,6 +3,7 @@
 #include "console/klog.h"
 #include "lib/string.h"
 #include "lock/spinlock.h"
+#include "mm/heap.h"
 #include "net/core.h"
 #include "net/ipv6.h"
 #include "sched/sched.h"
@@ -23,8 +24,9 @@
 #define ICMP_ECHO_REQUEST 8
 #define ICMP_PORT_UNREACHABLE_TYPE 3
 #define ICMP_PORT_UNREACHABLE_CODE 3
-#define ARP_CACHE_SIZE 16
+#define ARP_CACHE_SIZE 64
 #define ARP_REACHABLE_MS 60000
+#define ARP_RESOLVE_WAIT_MS 50
 
 typedef void (*udp_handler_t)(uint32_t, uint16_t, uint16_t,
                                const uint8_t *, uint16_t);
@@ -204,13 +206,24 @@ static int arp_send(uint16_t operation, const uint8_t destination_mac[6],
   return ethernet_send(destination_mac, ETH_TYPE_ARP, &packet, sizeof(packet));
 }
 
+static bool in_net_worker_thread(void) {
+  struct thread *cur = sched_get_current();
+  return cur && strcmp(cur->comm, "net-worker") == 0;
+}
+
 static bool arp_resolve(uint32_t ip, uint8_t mac[6]) {
   static const uint8_t broadcast[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
   static const uint8_t zero[6] = {0};
   if (arp_lookup(ip, mac))
     return true;
 
-  for (uint8_t attempt = 0; attempt < 3; attempt++) {
+  /* A worker thread cannot wait for an ARP reply because it is also the
+   * thread that would process it.  From other contexts a short wait keeps
+   * the first packet of a connection from being dropped. */
+  bool can_wait = !in_net_worker_thread();
+  uint8_t attempts = can_wait ? 2 : 1;
+
+  for (uint8_t attempt = 0; attempt < attempts; attempt++) {
     spinlock_acquire(&arp_lock);
     struct arp_entry *entry = arp_get_slot_locked(ip);
     entry->ip = ip;
@@ -220,7 +233,9 @@ static bool arp_resolve(uint32_t ip, uint8_t mac[6]) {
     spinlock_release(&arp_lock);
     if (arp_send(ARP_OP_REQUEST, broadcast, ip, zero) != 0)
       return false;
-    uint64_t deadline = lapic_timer_get_ticks() + 500;
+
+    uint64_t deadline = lapic_timer_get_ticks() +
+                        (can_wait ? ARP_RESOLVE_WAIT_MS : 0);
     while (lapic_timer_get_ticks() < deadline) {
       if (arp_lookup(ip, mac))
         return true;
@@ -252,10 +267,15 @@ static void handle_arp(const uint8_t *payload, size_t length) {
   }
 }
 
-static int ipv4_send(uint32_t destination, uint8_t protocol,
-                     const void *payload, size_t payload_length) {
+static int ipv4_send_tos(uint32_t destination, uint8_t protocol, uint8_t tos,
+                         const void *payload, size_t payload_length) {
   if (payload_length + sizeof(struct ipv4_header) > NET_MTU_ETHERNET)
     return -1;
+
+  struct net_device *dev = net_device_default();
+  if (!dev)
+    return -1;
+
   uint32_t next_hop =
       ((destination & config.netmask) == (config.address & config.netmask))
           ? destination
@@ -264,10 +284,18 @@ static int ipv4_send(uint32_t destination, uint8_t protocol,
   if (!arp_resolve(next_hop, destination_mac))
     return -1;
 
-  uint8_t packet[NET_MTU_ETHERNET];
-  struct ipv4_header *header = (struct ipv4_header *)packet;
+  /* Build the whole Ethernet frame in one buffer: no intermediate packet
+   * copy beyond the payload itself. */
+  uint8_t frame[NET_FRAME_MAX - 4];
+  struct eth_header *eth = (struct eth_header *)frame;
+  memcpy(eth->destination, destination_mac, 6);
+  memcpy(eth->source, dev->mac, 6);
+  eth->type = be16(ETH_TYPE_IPV4);
+
+  struct ipv4_header *header = (struct ipv4_header *)(frame + sizeof(*eth));
   memset(header, 0, sizeof(*header));
   header->version_ihl = 0x45;
+  header->dscp_ecn = tos;
   header->total_length =
       be16((uint16_t)(sizeof(*header) + payload_length));
   header->identification = be16(next_ip_id++);
@@ -277,9 +305,15 @@ static int ipv4_send(uint32_t destination, uint8_t protocol,
   put_ip(header->source, config.address);
   put_ip(header->destination, destination);
   header->checksum = be16(checksum(header, sizeof(*header)));
-  memcpy(packet + sizeof(*header), payload, payload_length);
-  return ethernet_send(destination_mac, ETH_TYPE_IPV4, packet,
-                       sizeof(*header) + payload_length);
+
+  memcpy(frame + sizeof(*eth) + sizeof(*header), payload, payload_length);
+  return dev->ops->transmit(dev, frame,
+                            sizeof(*eth) + sizeof(*header) + payload_length);
+}
+
+static int ipv4_send(uint32_t destination, uint8_t protocol,
+                     const void *payload, size_t payload_length) {
+  return ipv4_send_tos(destination, protocol, 0, payload, payload_length);
 }
 
 static void handle_icmp(uint32_t source, const uint8_t *payload, size_t length) {
@@ -326,10 +360,134 @@ static void handle_udp(uint32_t src_ip, const uint8_t *ip_hdr,
   if (udp_handler) {
     udp_handler(src_ip, src_port, dst_port,
                 seg + 8, (uint16_t)(udp_len - 8));
-  } else {
+  } else if (ip_hdr) {
     send_icmp_port_unreachable(src_ip, ip_hdr,
                                sizeof(struct ipv4_header) + udp_len);
   }
+}
+
+/* ---- IPv4 fragment reassembly ------------------------------------------- */
+
+#define IP_REASM_SLOTS 4
+#define IP_REASM_MAX_BYTES 65535
+#define IP_REASM_TIMEOUT_MS 10000
+
+struct ip_reasm {
+  bool used;
+  uint32_t src, dst;
+  uint16_t id;
+  uint8_t proto;
+  uint16_t total_len;   /* known once the final fragment arrives */
+  size_t received;
+  uint8_t *data;
+  uint8_t *bitmap;      /* one bit per received byte */
+  uint64_t last;
+};
+
+static struct ip_reasm reasm[IP_REASM_SLOTS];
+static spinlock_t reasm_lock = SPINLOCK_INIT;
+
+static void reasm_release_locked(struct ip_reasm *r) {
+  kfree(r->data);
+  kfree(r->bitmap);
+  memset(r, 0, sizeof(*r));
+}
+
+static struct ip_reasm *reasm_get_locked(uint32_t src, uint32_t dst,
+                                         uint16_t id, uint8_t proto,
+                                         uint64_t now) {
+  for (uint32_t i = 0; i < IP_REASM_SLOTS; i++) {
+    struct ip_reasm *r = &reasm[i];
+    if (r->used && now - r->last > IP_REASM_TIMEOUT_MS)
+      reasm_release_locked(r);
+  }
+  for (uint32_t i = 0; i < IP_REASM_SLOTS; i++) {
+    struct ip_reasm *r = &reasm[i];
+    if (r->used && r->src == src && r->dst == dst && r->id == id &&
+        r->proto == proto)
+      return r;
+  }
+  for (uint32_t i = 0; i < IP_REASM_SLOTS; i++) {
+    struct ip_reasm *r = &reasm[i];
+    if (r->used)
+      continue;
+    r->data = kmalloc(IP_REASM_MAX_BYTES);
+    r->bitmap = kmalloc(IP_REASM_MAX_BYTES / 8);
+    if (!r->data || !r->bitmap) {
+      kfree(r->data);
+      kfree(r->bitmap);
+      memset(r, 0, sizeof(*r));
+      return NULL;
+    }
+    memset(r->bitmap, 0, IP_REASM_MAX_BYTES / 8);
+    r->used = true;
+    r->src = src;
+    r->dst = dst;
+    r->id = id;
+    r->proto = proto;
+    r->last = now;
+    return r;
+  }
+  return NULL;
+}
+
+static void handle_ipv4_fragment(const uint8_t *packet,
+                                 const struct ipv4_header *hdr,
+                                 size_t header_len, uint16_t frag) {
+  uint16_t offset = (uint16_t)((frag & 0x1fff) * 8);
+  bool more = (frag & 0x2000) != 0;
+  uint16_t total = be16(hdr->total_length);
+  if (total < header_len)
+    return;
+  size_t plen = total - header_len;
+  if ((size_t)offset + plen > IP_REASM_MAX_BYTES)
+    return;
+
+  uint32_t src = get_ip(hdr->source);
+  uint32_t dst = get_ip(hdr->destination);
+  uint16_t id = be16(hdr->identification);
+  uint64_t now = lapic_timer_get_ticks();
+
+  spinlock_acquire(&reasm_lock);
+  struct ip_reasm *r = reasm_get_locked(src, dst, id, hdr->protocol, now);
+  if (!r) {
+    spinlock_release(&reasm_lock);
+    return;
+  }
+
+  const uint8_t *payload = packet + header_len;
+  memcpy(r->data + offset, payload, plen);
+  for (size_t i = 0; i < plen; i++) {
+    size_t b = (size_t)offset + i;
+    uint8_t mask = (uint8_t)(1u << (b & 7));
+    if (!(r->bitmap[b >> 3] & mask)) {
+      r->bitmap[b >> 3] |= mask;
+      r->received++;
+    }
+  }
+  r->last = now;
+  if (!more)
+    r->total_len = (uint16_t)(offset + plen);
+
+  if (r->total_len && r->received >= r->total_len) {
+    uint8_t *data = r->data;
+    uint8_t proto = r->proto;
+    size_t len = r->total_len;
+    r->data = NULL;
+    r->bitmap = NULL;
+    reasm_release_locked(r);
+    spinlock_release(&reasm_lock);
+
+    if (proto == IP_PROTO_UDP)
+      handle_udp(src, NULL, data, len);
+    else if (proto == IP_PROTO_TCP && tcp_handler)
+      tcp_handler(src, dst, data, len);
+    else if (proto == IP_PROTO_ICMP)
+      handle_icmp(src, data, len);
+    kfree(data);
+    return;
+  }
+  spinlock_release(&reasm_lock);
 }
 
 static void handle_ipv4(const uint8_t *packet, size_t length) {
@@ -343,8 +501,11 @@ static void handle_ipv4(const uint8_t *packet, size_t length) {
       header_length > length || total_length < header_length ||
       total_length > length || checksum(packet, header_length) != 0)
     return;
-  if (be16(header->flags_fragment) & 0x3fff)
+  uint16_t frag = be16(header->flags_fragment);
+  if (frag & 0x3fff) { /* MF set or non-zero offset (DF is 0x4000) */
+    handle_ipv4_fragment(packet, header, header_length, frag);
     return;
+  }
   uint32_t destination = get_ip(header->destination);
   if (destination != config.address && destination != 0xffffffff)
     return;
@@ -393,6 +554,8 @@ bool net_phase4_init(void) {
     return false;
   spinlock_init(&arp_lock);
   memset(arp_cache, 0, sizeof(arp_cache));
+  spinlock_init(&reasm_lock);
+  memset(reasm, 0, sizeof(reasm));
   config.address = IPV4_ADDR(10, 0, 2, 15);
   config.netmask = IPV4_ADDR(255, 255, 255, 0);
   config.gateway = IPV4_ADDR(10, 0, 2, 2);
@@ -424,6 +587,11 @@ void ipv4_apply_config(const struct ipv4_config *cfg) {
 int ipv4_send_raw(uint32_t dst_ip, uint8_t proto,
                   const void *payload, size_t payload_len) {
   return ipv4_send(dst_ip, proto, payload, payload_len);
+}
+
+int ipv4_send_raw_tos(uint32_t dst_ip, uint8_t proto, uint8_t tos,
+                      const void *payload, size_t payload_len) {
+  return ipv4_send_tos(dst_ip, proto, tos, payload, payload_len);
 }
 
 void ipv4_set_udp_handler(void (*handler)(uint32_t, uint16_t, uint16_t,

@@ -1,6 +1,13 @@
 #include "eevfd.h"
 #include "../apic/lapic_timer.h"
 
+/* Kernel allocations all live in the higher half.  A pointer below it means a
+ * stale/corrupted runqueue link; dereferencing it would turn a scheduler
+ * wobble into a fatal kernel-mode fault on a user address. */
+static inline bool eevfd_ptr_sane(const void *p) {
+    return (uint64_t)p >= 0xFFFF800000000000ULL;
+}
+
 static void eevfd_update_min_deadline(struct rb_node *node) {
     if (!node)
         return;
@@ -80,7 +87,7 @@ void eevfd_set_slice(struct sched_entity *se, uint64_t slice_ns) {
 }
 
 void eevfd_place_entity(struct eevfd_rq *rq, struct sched_entity *se, bool initial_spawn) {
-    if (!rq || !se)
+    if (!rq || !se || !eevfd_ptr_sane(rq) || !eevfd_ptr_sane(se))
         return;
 
     uint64_t slice_v = calc_slice_vruntime(se->slice_ns, se->weight, se->wmult);
@@ -118,7 +125,13 @@ void eevfd_place_entity(struct eevfd_rq *rq, struct sched_entity *se, bool initi
 }
 
 __attribute__((optimize("O3"))) void eevfd_enqueue_entity(struct eevfd_rq *rq, struct sched_entity *se) {
-    if (!rq || !se || se->on_rq)
+    if (!rq || !se || !eevfd_ptr_sane(rq) || !eevfd_ptr_sane(se) || se->on_rq)
+        return;
+
+    /* A node with leftover linkage but on_rq == false is the signature of a
+     * double insertion (or a torn dequeue); linking it again turns the tree
+     * into a cycle and the next insert walks freed/arbitrary memory. */
+    if (se->rb_node.__rb_parent_color || se->rb_node.rb_left || se->rb_node.rb_right)
         return;
 
     struct rb_node **link = &rq->tasks_tree.rb_node;
@@ -162,7 +175,7 @@ __attribute__((optimize("O3"))) void eevfd_enqueue_entity(struct eevfd_rq *rq, s
 }
 
 __attribute__((optimize("O3"))) void eevfd_dequeue_entity(struct eevfd_rq *rq, struct sched_entity *se) {
-    if (!rq || !se || !se->on_rq)
+    if (!rq || !se || !eevfd_ptr_sane(rq) || !eevfd_ptr_sane(se) || !se->on_rq)
         return;
 
     /* Snapshot lag before removal so wakeup placement can use it */

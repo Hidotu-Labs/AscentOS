@@ -873,6 +873,100 @@ install_apk "mpg123-libs" "main"
 install_apk "speex" "main"
 install_apk "gst-plugins-good" "community"
 install_apk "gst-plugins-ugly" "community"
+
+# GStreamer plugin libraries are dlopen()ed by WebKit's media engine, so apk
+# dependency metadata cannot see their providers.  Install every runtime
+# provider explicitly; otherwise the plugins are present but fail to load and
+# format support silently degrades.
+#
+# gst-libav supplies the software decoders (avdec_h264, avdec_aac, ...).
+# Alpine's gst-plugins-good/bad/ugly ship no faad plugin, so this is the only
+# software H.264/AAC path besides openh264/v4l2codecs (hardware).
+install_apk "gst-libav" "community"
+# gst-libav links libavcodec/libavfilter/libavformat/libavutil.  Only
+# ffmpeg-libavcodec/-libavformat are installed earlier, and they cannot even
+# load without libavutil.so.58, so complete the FFmpeg 6 runtime here.
+install_apk "ffmpeg-libavutil" "community"
+install_apk "ffmpeg-libavfilter" "community"
+install_apk "ffmpeg-libswscale" "community"
+install_apk "ffmpeg-libswresample" "community"
+install_apk "ffmpeg-libpostproc" "community"
+# Optional providers linked by libavcodec/libavformat (AV1, VPL, modules,
+# Blu-ray, RIST, ZeroMQ) and their own dependencies.
+install_apk "rav1e-libs" "community"
+install_apk "libSvtAv1Enc" "community"
+install_apk "onevpl-libs" "community"
+install_apk "libopenmpt" "community"
+install_apk "libbluray" "community"
+install_apk "librist" "community"
+install_apk "mbedtls" "main"
+install_apk "cjson" "main"
+install_apk "libzmq" "main"
+install_apk "libsodium" "main"
+# libavfilter also links libplacebo.  The edge 7.x build installed for
+# Mocktail exports a different soname (libplacebo.so.360), so install the
+# v3.21 build (libplacebo.so.338) that libavfilter.so.9 was built against;
+# both versioned libraries coexist.  Its shader/Vulkan backend providers:
+install_apk "libplacebo" "community"
+install_apk "glslang-libs" "main"
+install_apk "shaderc" "community"
+install_apk "spirv-tools" "main"
+install_apk "libdovi" "community"
+install_apk "lilv-libs" "community"
+install_apk "serd-libs" "community"
+install_apk "sord-libs" "community"
+install_apk "sratom" "community"
+install_apk "zix-libs" "community"
+install_apk "zimg" "community"
+install_apk "vidstab" "community"
+# Broken GStreamer plugins with present plugin files but missing providers:
+# libgstde265 (HEVC), libgstopenh264 (H.264), libgstassrender (subtitles),
+# libgsta52dec (AC-3), libgstopenjpeg (JPEG 2000).
+install_apk "libde265" "main"
+install_apk "openh264" "community"
+install_apk "libass" "community"
+install_apk "libunibreak" "community"
+install_apk "a52dec" "community"
+install_apk "openjpeg" "main"
+# Remaining codec providers for shipped gst-plugins-bad/ugly plugins
+# (AMR, GSM, AAC encode, tracker modules, tempo/pitch, tags, Bluetooth).
+install_apk "opencore-amr" "community"
+install_apk "gsm" "main"
+install_apk "faac" "community"
+install_apk "libmodplug" "community"
+install_apk "soundtouch" "community"
+install_apk "libtag" "community"
+install_apk "sbc" "community"
+install_apk "libldac" "community"
+install_apk "libfreeaptx" "community"
+# ALSA resample plugins, PipeWire WebRTC echo cancellation (spa aec), and
+# libcamera capture (spa libcamera).
+install_apk "libsamplerate" "main"
+install_apk "webrtc-audio-processing-1" "community"
+install_apk "libcamera" "community"
+install_apk "libcamera-ipa" "community"
+# Enchant loads its backends from /usr/lib/enchant-2 at runtime; without them
+# WebKit spell checking finds no dictionaries at all.
+install_apk "enchant2" "community"
+install_apk "enchant2-aspell" "community"
+install_apk "enchant2-hunspell" "community"
+install_apk "enchant2-nuspell" "community"
+install_apk "enchant2-data" "community"
+install_apk "aspell-libs" "main"
+install_apk "libhunspell" "main"
+install_apk "nuspell-libs" "community"
+# Providers for the remaining low-use plugins: FireWire cameras (dc1394),
+# DirectFB (plus its tslib input backend), neon HTTP, OpenEXR images.
+install_apk "libdc1394" "community"
+install_apk "directfb" "community"
+install_apk "tslib" "community"
+install_apk "neon" "main"
+install_apk "openexr-libopenexr" "community"
+install_apk "openexr-libiex" "community"
+install_apk "openexr-libilmthread" "community"
+install_apk "openexr-libopenexrcore" "community"
+install_apk "imath" "community"
+
 install_apk "harfbuzz-icu" "main"
 install_apk "hyphen" "community"
 install_apk "icu-data-en" "main"
@@ -1673,6 +1767,8 @@ install_apk "krunner" "community"
 install_apk "kservice" "community"
 install_apk "ktextwidgets" "community"
 install_apk "kwallet" "community"
+install_apk "kquickcharts" "community"
+install_apk "kquickcharts-dev" "community"
 install_apk "kwalletmanager" "community"
 install_apk "kwindowsystem" "community"
 # solid-libs carries libKF6Solid.so.6 (needed by libKF6KIOGui.so.6)

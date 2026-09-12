@@ -6,13 +6,32 @@ global clear_user
 global strncpy_from_user
 global strnlen_user
 
+extern cpu_has_smap_flag
+
 section .text
+
+; Open a user-access window for one routine.  The caller's RFLAGS are saved on
+; the stack and restored by USER_ACCESS_END, so an outer coarse window (AC
+; already set by the syscall entry path) is preserved rather than clobbered.
+; stac is #UD on CPUs without SMAP, hence the runtime gate.
+%macro USER_ACCESS_BEGIN 0
+    pushfq
+    cmp byte [rel cpu_has_smap_flag], 0
+    je %%smap_done
+    stac
+%%smap_done:
+%endmacro
+
+%macro USER_ACCESS_END 0
+    popfq
+%endmacro
 
 ; -----------------------------------------------------------------------------
 ; unsigned long copy_from_user(void *to, const void *from, unsigned long n)
 ; rdi = to (kernel dst), rsi = from (user src), rdx = n (bytes)
 ; -----------------------------------------------------------------------------
 copy_from_user:
+    USER_ACCESS_BEGIN
     test rdx, rdx
     jz cfu_success
 
@@ -32,10 +51,12 @@ cfu_copy_insn:
 
 cfu_success:
     xor eax, eax
+    USER_ACCESS_END
     ret
 
 cfu_error_all:
     mov rax, rdx
+    USER_ACCESS_END
     ret
 
 cfu_fixup_landing:
@@ -43,6 +64,7 @@ cfu_fixup_landing:
     xor eax, eax
     rep stosb
     pop rax
+    USER_ACCESS_END
     ret
 
 ; -----------------------------------------------------------------------------
@@ -50,6 +72,7 @@ cfu_fixup_landing:
 ; rdi = to (user dst), rsi = from (kernel src), rdx = n (bytes)
 ; -----------------------------------------------------------------------------
 copy_to_user:
+    USER_ACCESS_BEGIN
     test rdx, rdx
     jz ctu_success
 
@@ -69,14 +92,17 @@ ctu_copy_insn:
 
 ctu_success:
     xor eax, eax
+    USER_ACCESS_END
     ret
 
 ctu_error_all:
     mov rax, rdx
+    USER_ACCESS_END
     ret
 
 ctu_fixup_landing:
     mov rax, rcx
+    USER_ACCESS_END
     ret
 
 ; -----------------------------------------------------------------------------
@@ -84,6 +110,7 @@ ctu_fixup_landing:
 ; rdi = to (user dst), rsi = n (bytes)
 ; -----------------------------------------------------------------------------
 clear_user:
+    USER_ACCESS_BEGIN
     test rsi, rsi
     jz cu_success
 
@@ -103,14 +130,17 @@ cu_clear_insn:
 
 cu_success:
     xor eax, eax
+    USER_ACCESS_END
     ret
 
 cu_error_all:
     mov rax, rsi
+    USER_ACCESS_END
     ret
 
 cu_fixup_landing:
     mov rax, rcx
+    USER_ACCESS_END
     ret
 
 ; -----------------------------------------------------------------------------
@@ -120,6 +150,7 @@ cu_fixup_landing:
 ; Returns: number of characters copied (excluding trailing NUL), or -EFAULT (-14)
 ; -----------------------------------------------------------------------------
 strncpy_from_user:
+    USER_ACCESS_BEGIN
     test rdx, rdx
     jle sn_zero
 
@@ -196,6 +227,7 @@ sn_sub_fetch_insn:
 
 sn_store_nul_only:
     mov byte [rdi], 0
+    USER_ACCESS_END
     ret
 
     ; 3. Remaining bytes (< 8 bytes)
@@ -215,15 +247,18 @@ sn_tail_fetch_insn:
     jmp sn_tail_loop
 
 sn_done:
+    USER_ACCESS_END
     ret
 
 sn_zero:
     xor eax, eax
+    USER_ACCESS_END
     ret
 
 sn_fault:
 sn_fixup_landing:
     mov rax, -14            ; -EFAULT
+    USER_ACCESS_END
     ret
 
 ; -----------------------------------------------------------------------------
@@ -233,6 +268,7 @@ sn_fixup_landing:
 ; Returns: length INCLUDING the trailing NUL character, or 0 on fault
 ; -----------------------------------------------------------------------------
 strnlen_user:
+    USER_ACCESS_BEGIN
     test rsi, rsi
     jle sl_zero
 
@@ -290,6 +326,7 @@ sl_zero_in_qword:
     shr r11, 3              ; Number of non-zero bytes (0..7)
     add rax, r11
     inc rax                 ; +1 for the NUL byte itself
+    USER_ACCESS_END
     ret
 
     ; 3. Tail bytes
@@ -308,12 +345,14 @@ sl_tail_fetch_insn:
 
 sl_done_count:
 sl_done:
+    USER_ACCESS_END
     ret
 
 sl_zero:
 sl_fault:
 sl_fixup_landing:
     xor eax, eax
+    USER_ACCESS_END
     ret
 
 ; -----------------------------------------------------------------------------

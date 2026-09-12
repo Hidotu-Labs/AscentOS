@@ -80,6 +80,60 @@ ifeq ($(LOCKDIAG_SELFTEST),1)
 override CPPFLAGS += -DLOCKDIAG_SELFTEST=1
 endif
 
+# NVMe controller self-tests at boot (disable/enable/Identify cycles).  Used by
+# scripts/nvme-stress.sh; a normal build compiles them out.
+#
+#   make NVME_SELFTEST=1                    50 cycles (default)
+#   make NVME_SELFTEST=1 NVME_SELFTEST_CYCLES=1000
+#   make NVME_SELFTEST=1 NVME_SELFTEST_IDENTIFY_OPS=10000
+ifeq ($(NVME_SELFTEST),1)
+override CPPFLAGS += -DNVME_SELFTEST=1
+ifneq ($(NVME_SELFTEST_CYCLES),)
+override CPPFLAGS += -DNVME_SELFTEST_CYCLES=$(NVME_SELFTEST_CYCLES)
+endif
+ifneq ($(NVME_SELFTEST_IDENTIFY_OPS),)
+override CPPFLAGS += -DNVME_SELFTEST_IDENTIFY_OPS=$(NVME_SELFTEST_IDENTIFY_OPS)
+endif
+ifeq ($(NVME_SELFTEST_FAULT_TIMEOUT),1)
+override CPPFLAGS += -DNVME_SELFTEST_FAULT_TIMEOUT=1
+ifneq ($(NVME_SELFTEST_FAULT_INDEX),)
+override CPPFLAGS += -DNVME_SELFTEST_FAULT_INDEX=$(NVME_SELFTEST_FAULT_INDEX)u
+endif
+endif
+endif
+
+# NVMe completion interrupt knobs (Phase 4).  The driver falls back through
+# MSI-X -> MSI -> INTx -> polled; these force a lower mode for the stress
+# matrix.  NVME_FAULT_DROP_IRQ consumes completions in the handler but delays
+# the waiter wakeup, exercising the scheduler-tick fallback.
+ifeq ($(NVME_NOIRQ),1)
+override CPPFLAGS += -DNVME_NOIRQ=1
+endif
+ifeq ($(NVME_DISABLE_MSIX),1)
+override CPPFLAGS += -DNVME_DISABLE_MSIX=1
+endif
+ifeq ($(NVME_DISABLE_MSI),1)
+override CPPFLAGS += -DNVME_DISABLE_MSI=1
+endif
+ifeq ($(NVME_FAULT_DROP_IRQ),1)
+override CPPFLAGS += -DNVME_FAULT_DROP_IRQ=1
+endif
+
+# NVMe Phase 5 knobs.
+#   NVME_SELFTEST_DATA=1     allow the destructive 4Kn/multi-NS/recovery
+#                            self-tests (scratch media only)
+#   NVME_FUA=1               issue every block write with FUA
+#   NVME_RESET_RECOVERY=1    reset + retry an I/O command after a timeout
+ifeq ($(NVME_SELFTEST_DATA),1)
+override CPPFLAGS += -DNVME_SELFTEST_DATA=1
+endif
+ifeq ($(NVME_FUA),1)
+override CPPFLAGS += -DNVME_FUA=1
+endif
+ifeq ($(NVME_RESET_RECOVERY),1)
+override CPPFLAGS += -DNVME_RESET_RECOVERY=1
+endif
+
 ifeq ($(ARCH),x86_64)
     NASMFLAGS := -g
 endif

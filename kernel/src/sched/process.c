@@ -782,10 +782,6 @@ bool process_exec_argv(const char **argv) {
     return false;
   }
 
-  klog_puts("[PROC] New PML4 phys = ");
-  klog_uint64((uint64_t)pml4);
-  klog_puts("\n");
-
   // Switch to the newly created, clean address space
   struct thread *current = sched_get_current();
   if (current && current->mm) {

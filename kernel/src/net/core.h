@@ -39,6 +39,7 @@ typedef void (*net_rx_handler_t)(struct net_packet *);
 
 void net_core_init(void);
 void net_core_start_worker(void);
+void net_core_start_timer(void);
 int net_device_register(struct net_device *);
 int net_device_unregister(struct net_device *);
 struct net_device *net_device_default(void);

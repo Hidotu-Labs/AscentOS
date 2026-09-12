@@ -153,6 +153,7 @@ struct context {
   uint64_t r12;
   uint64_t rbp;
   uint64_t rbx;
+  uint64_t rflags;   // RFLAGS (carries the coarse SMAP AC window)
   uint64_t ret_addr; // RIP (pushed automatically by call)
 } __attribute__((packed));
 

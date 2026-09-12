@@ -26,6 +26,10 @@ void ipv4_arp_flush(void);
 int ipv4_send_raw(uint32_t dst_ip, uint8_t proto,
                   const void *payload, size_t payload_len);
 
+/* Same, with an explicit TOS/DSCP byte (UDP sockets may request one). */
+int ipv4_send_raw_tos(uint32_t dst_ip, uint8_t proto, uint8_t tos,
+                  const void *payload, size_t payload_len);
+
 void ipv4_set_udp_handler(void (*handler)(uint32_t src_ip, uint16_t src_port,
                                           uint16_t dst_port,const uint8_t *payload,uint16_t length));
 

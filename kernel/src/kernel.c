@@ -31,6 +31,7 @@
 #include "drivers/storage/ahci.h"
 #include "drivers/storage/ata.h"
 #include "drivers/storage/block.h"
+#include "drivers/storage/nvme.h"
 #include "drivers/storage/ramdisk.h"
 #include "drivers/timer/hpet.h"
 #include "drivers/timer/pit.h"
@@ -386,6 +387,12 @@ void kmain_high_half(void) {
                            " Initializing Scheduler...\n");
   sched_init();
 
+  /* ── SMEP/SMAP hardware test ──
+   * Runs after sched_init(): the test deliberately takes page faults, and the
+   * #PF path needs a valid current thread (cpu_init() has already set GS). */
+  extern void test_smep_smap(void);
+  test_smep_smap();
+
   if (lapic_base && ioapic_base) {
     klog_puts("\n" KLOG_CLR_GREEN "[  OK  ]" KLOG_CLR_RESET
               " Switching to APIC interrupt mode...\n");
@@ -466,7 +473,15 @@ void kmain_high_half(void) {
   uhci_init();
   ohci_init();
 
-  // VirtIO subsystem
+  // Storage controllers.  NVMe probes before AHCI so a machine with both
+  // prefers the NVMe namespace for the root filesystem.
+  nvme_init();
+#ifdef NVME_SELFTEST
+  {
+    extern void nvme_selftest(void);
+    nvme_selftest();
+  }
+#endif
 
   if (ahci_init() == 0) {
     ata_init();

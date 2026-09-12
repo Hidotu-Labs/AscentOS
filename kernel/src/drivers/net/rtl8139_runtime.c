@@ -101,28 +101,25 @@ int rtl8139_transmit(struct net_device *dev, const void *frame, size_t length) {
   }
 
   spinlock_acquire(&tx_lock);
-  reclaim_tx_locked();
   uint8_t slot = tx_next;
   bool found = false;
-  for (uint32_t i = 0; i < TX_COUNT; i++) {
-    slot = (uint8_t)((tx_next + i) % TX_COUNT);
-    if (!tx_busy[slot]) {
-      found = true;
-      break;
-    }
-  }
-  if (!found) {
-    for (int retry = 0; retry < 5000 && !found; retry++) {
-      hal_cpu_relax();
-      reclaim_tx_locked();
-      for (uint32_t i = 0; i < TX_COUNT; i++) {
-        slot = (uint8_t)((tx_next + i) % TX_COUNT);
-        if (!tx_busy[slot]) {
-          found = true;
-          break;
-        }
+  for (int attempt = 0; attempt < 32 && !found; attempt++) {
+    reclaim_tx_locked();
+    for (uint32_t i = 0; i < TX_COUNT; i++) {
+      slot = (uint8_t)((tx_next + i) % TX_COUNT);
+      if (!tx_busy[slot]) {
+        found = true;
+        break;
       }
     }
+    if (found)
+      break;
+    /* All four descriptors are in flight.  Drop the lock and let the
+     * scheduler (and the TX-complete IRQ) make progress instead of spinning
+     * with interrupts disabled. */
+    spinlock_release(&tx_lock);
+    sched_yield();
+    spinlock_acquire(&tx_lock);
   }
   if (!found) {
     dev->stats.tx_dropped++;

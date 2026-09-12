@@ -4,6 +4,7 @@
 #include "../console/klog.h"
 #include "../cpu/gdt.h"
 #include "../cpu/msr.h"
+#include "../drivers/storage/nvme.h"
 #include "../drivers/timer/rtc.h"
 #include "../lib/string.h"
 #include "../mm/heap.h"
@@ -1921,17 +1922,16 @@ static uint64_t sys_getcpu(uint64_t cpu_ptr, uint64_t node_ptr, uint64_t tcache,
   (void)a5;
 
   struct cpu_info *ci = cpu_get_current();
+  uint32_t cpu_id = ci ? ci->cpu_id : 0;
+  uint32_t node = 0; // single NUMA node
 
-  if (cpu_ptr) {
-    uint32_t *p = (uint32_t *)cpu_ptr;
-    *p = ci ? ci->cpu_id : 0;
-  }
-
-  if (node_ptr) {
-    uint32_t *p = (uint32_t *)node_ptr;
-    *p = 0; // single NUMA node
-  }
-
+  /* SMAP-safe copies (the old direct stores faulted under SMAP). */
+  if (cpu_ptr &&
+      copy_to_user((void *)cpu_ptr, &cpu_id, sizeof(cpu_id)) != 0)
+    return (uint64_t)-14;
+  if (node_ptr &&
+      copy_to_user((void *)node_ptr, &node, sizeof(node)) != 0)
+    return (uint64_t)-14;
   return 0;
 }
 
@@ -2716,7 +2716,11 @@ static uint64_t sys_sched_setaffinity(uint64_t pid, uint64_t len,
   if (!vmm_is_user_addr_range_valid(user_mask_ptr, sizeof(uint64_t)))
     return (uint64_t)-14;
 
-  uint64_t mask = *(uint64_t *)user_mask_ptr;
+  /* SMAP-safe copy: the old direct dereference faulted under SMAP and made
+   * every affinity request fail silently. */
+  uint64_t mask = 0;
+  if (copy_from_user(&mask, (const void *)user_mask_ptr, sizeof(mask)) != 0)
+    return (uint64_t)-14;
 
   // Sanity check: must have at least one valid CPU in the mask
   uint32_t cpu_count = cpu_get_count();
@@ -2765,8 +2769,12 @@ static uint64_t sys_sched_getaffinity(uint64_t pid, uint64_t len,
   if (!vmm_is_user_addr_range_writable(user_mask_ptr, copy_bytes))
     return (uint64_t)-14; // EFAULT
 
-  memset((void *)user_mask_ptr, 0, copy_bytes);
-  *(uint64_t *)user_mask_ptr = mask;
+  /* SMAP-safe: stage in a kernel buffer and copy out. */
+  uint8_t kbuf[128];
+  memset(kbuf, 0, copy_bytes);
+  memcpy(kbuf, &mask, sizeof(mask));
+  if (copy_to_user((void *)user_mask_ptr, kbuf, copy_bytes) != 0)
+    return (uint64_t)-14; // EFAULT
   return copy_bytes;
 }
 
@@ -3096,18 +3104,21 @@ static uint64_t sys_reboot(uint64_t magic1, uint64_t magic2, uint64_t cmd,
   case LINUX_REBOOT_CMD_RESTART:
   case LINUX_REBOOT_CMD_RESTART2:
     klog_puts("[REBOOT] System reboot requested via syscall.\n");
+    nvme_shutdown(); /* graceful CC.SHN before resetting the machine */
     acpi_reboot();
     /* noreturn */
     break;
 
   case LINUX_REBOOT_CMD_POWER_OFF:
     klog_puts("[REBOOT] System power-off requested via syscall.\n");
+    nvme_shutdown(); /* graceful CC.SHN before power is removed */
     acpi_poweroff();
     /* noreturn */
     break;
 
   case LINUX_REBOOT_CMD_HALT:
     klog_puts("[REBOOT] System halt requested via syscall.\n");
+    nvme_shutdown();
     hal_irq_disable();
     for (;;) hal_cpu_halt();
     break;

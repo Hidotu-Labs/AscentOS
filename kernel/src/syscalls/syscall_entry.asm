@@ -1,6 +1,7 @@
 global syscall_entry
 extern syscall_dispatcher
 extern console_puts
+extern cpu_has_smap_flag
 
 section .text
 
@@ -40,8 +41,25 @@ syscall_entry:
     mov rbp, rsp
     and rsp, -16
 
+    ; Coarse SMAP user-access window: most syscalls in this kernel still read
+    ; and write user memory directly instead of going through copy_*_user, so
+    ; set RFLAGS.AC for the dispatch.  IA32_FMASK cleared AC on entry, and
+    ; switch_context saves/restores RFLAGS per thread so the window survives
+    ; blocking syscalls.  stac is #UD without SMAP, so gate it.
+    cmp byte [rel cpu_has_smap_flag], 0
+    je .stac_done
+    stac
+.stac_done:
+
     mov rdi, rbp
     call syscall_dispatcher
+
+    ; Close the window before returning to user mode.  The user's own AC
+    ; (stored in R11) is theirs to keep; sysret restores it.
+    cmp byte [rel cpu_has_smap_flag], 0
+    je .clac_done
+    clac
+.clac_done:
 
     ; rt_sigreturn requires IRETQ to restore user RCX and R11.
     mov rax, gs:[384]

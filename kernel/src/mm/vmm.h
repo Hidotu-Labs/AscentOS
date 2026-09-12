@@ -78,6 +78,20 @@ static inline void vmm_flush_tlb(uint64_t virtual_addr) {
 // Returns 0 if the mapping does not exist.
 uint64_t vmm_virt_to_phys(uint64_t *pml4, uint64_t virtual_addr);
 
+// ---- Bring-up diagnostics (temporary) -----------------------------------
+// Raw page-table walk that never follows a frame that is not RAM, so it is
+// safe to call when the tables are suspected corrupt (unlike
+// vmm_virt_to_phys, which faults on a garbage intermediate entry).  Fills up
+// to four raw entries (0 for levels the walk did not reach) and returns the
+// translated physical address, or 0 when the address is not mapped.
+uint64_t vmm_debug_walk(uint64_t pml4_phys, uint64_t virtual_addr,
+                        uint64_t entries[4]);
+
+// Prints the walk above with serial_write_sync(): no locks, safe from an
+// interrupt context that may have interrupted the klog path.
+void vmm_debug_dump_walk(const char *tag, uint64_t pml4_phys,
+                         uint64_t virtual_addr);
+
 // Clone all user-space page mappings (PML4 entries 0-255) from src_pml4
 // into a newly allocated PML4. Kernel higher-half entries (256-511) are
 // shallow-copied (shared). Each mapped user page gets a fresh physical

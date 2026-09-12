@@ -122,7 +122,9 @@ void ap_main(void) {
   // 0. Load the proper full kernel GDT (replaces the temporary trampoline GDT)
   // This must be done FIRST because gdt_flush zeroes data segments like GS,
   // and we depend on the 64-bit code segment for subsequent interrupt handling.
-  gdt_load_ap();
+  // Each AP also loads its own TSS so TSS.RSP0 is private to this core.
+  struct cpu_info *bootstrap = (struct cpu_info *)starting_cpu;
+  gdt_load_ap(bootstrap ? bootstrap->cpu_id : 0);
   cpu_features_init();
 
   // 1. Setup GS base using the pointer passed by the BSP

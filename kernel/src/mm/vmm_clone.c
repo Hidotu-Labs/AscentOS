@@ -335,5 +335,6 @@ uint64_t *vmm_create_pml4(void) {
     new_pml4_virt[i] = src_pml4_virt[i];
 
   vmm_lock_release();
+
   return (uint64_t *)new_pml4_phys;
 }

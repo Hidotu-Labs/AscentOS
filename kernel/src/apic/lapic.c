@@ -8,6 +8,10 @@
 
 // MMIO Base (virtual address after HHDM translation)
 static volatile uint32_t *lapic_base = NULL;
+static uint64_t lapic_phys_base = 0;
+
+uint64_t lapic_get_va(void) { return (uint64_t)lapic_base; }
+uint64_t lapic_get_phys(void) { return lapic_phys_base; }
 
 // Helper: print a 32-bit hex value
 static void print_hex32(uint32_t num) {
@@ -49,6 +53,7 @@ static void spurious_handler(struct registers *regs) {
 
 void lapic_init(uint64_t base_phys) {
   // Map the LAPIC registers into virtual memory via the HHDM
+  lapic_phys_base = base_phys;
   lapic_base = (volatile uint32_t *)(base_phys + pmm_get_hhdm_offset());
 
   console_puts("[OK] Local APIC Base: 0x");

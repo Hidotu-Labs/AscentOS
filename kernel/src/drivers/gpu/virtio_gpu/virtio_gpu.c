@@ -661,7 +661,6 @@ bool virtio_gpu_phase3_stress_test(uint32_t cycles, uint32_t frames) {
 struct virtio_gpu_gem {
     uint32_t resource_id, width, height, pitch, inflight;
     bool attached;
-    bool host_valid; // a full-frame TRANSFER to the host has been submitted
 };
 
 #define PRESENT_SLOT_SIZE 128U
@@ -1623,7 +1622,6 @@ static void virtio_gpu_commit_damage(struct drm_device *dev,
         gpu.queued_scanout_resource_id = vg->resource_id;
     bool change = queued != vg->resource_id;
     struct virtio_gpu_rect r = {0, 0, vg->width, vg->height};
-    bool have_damage = false;
     if (clips && n) {
         uint32_t x1 = vg->width, y1 = vg->height, x2 = 0, y2 = 0;
         for (uint32_t i = 0; i < n; i++) {
@@ -1652,38 +1650,31 @@ static void virtio_gpu_commit_damage(struct drm_device *dev,
             r.y = y1;
             r.width = x2 - x1;
             r.height = y2 - y1;
-            have_damage = true;
         }
     }
-    /* Selecting a different host resource normally needs a full upload: the
-     * resource may still hold pixels from an older frame.  Once a full upload
-     * has been submitted the host copy is valid, and if the DRM layer supplied
-     * the damage accumulated since (it only does so when the framebuffer was
-     * already scanned out and damage was recorded for it), a partial transfer
-     * is enough.  Virtqueue commands are processed in order, so a later
-     * partial transfer can never overtake the full one that preceded it. */
-    bool full = change && !(vg->host_valid && have_damage);
-    if (full) {
+    /* Selecting a different host resource requires a full upload: the host
+     * copy may hold pixels from an older frame.  The damage reported for a
+     * buffer switch is not a complete description of its contents either:
+     * double-buffered compositors (e.g. Weston's pixman renderer) also redraw
+     * the previous frame's damage into the new back buffer but only report
+     * the current frame's damage, so a partial transfer would leave stale
+     * pixels behind (trails/flicker).  Damage is only complete while the
+     * same resource stays selected. */
+    if (change) {
         r.x = 0;
         r.y = 0;
         r.width = vg->width;
         r.height = vg->height;
     }
-    uint64_t off = full ? 0 : ((uint64_t)r.y * vg->pitch + (uint64_t)r.x * 4ULL);
-    if (async_present_submit(head, vg, &r, off, change, &view)) {
-        if (full)
-            vg->host_valid = true;
+    uint64_t off = change ? 0 : ((uint64_t)r.y * vg->pitch + (uint64_t)r.x * 4ULL);
+    if (async_present_submit(head, vg, &r, off, change, &view))
         return;
-    }
-    bool presented = present_batch(head, vg->resource_id, &r, off, change, &view);
-    if (presented && change) {
+    if (present_batch(head, vg->resource_id, &r, off, change, &view) && change) {
         gpu.head_resource[head] = vg->resource_id;
         if (head == 0)
             gpu.scanout_resource_id = vg->resource_id;
         gpu.owns_scanout = true;
     }
-    if (presented && full)
-        vg->host_valid = true;
     virtio_gpu_complete_flip(head);
 }
 static uint32_t gpu_append_dec(char *buf, uint32_t pos, uint32_t cap, uint32_t v) {

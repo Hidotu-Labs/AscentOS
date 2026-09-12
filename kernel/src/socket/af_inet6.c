@@ -32,6 +32,12 @@ struct inet6_sock {
   wait_queue_t wait;
   struct tcp_tcb *tcp;
   bool heap_allocated;
+  /* TCP options */
+  bool tcp_nodelay;
+  bool tcp_keepalive;
+  int keepidle_s, keepintvl_s, keepcnt;
+  int linger_seconds;
+  bool shut_wr;
 };
 
 static struct inet6_sock udp6[UDP6_MAX];
@@ -154,6 +160,12 @@ static int inet6_connect(socket_t *sock, struct sockaddr *addr, int len) {
       return -114;
     s->tcp->vfs_node = sock->node;
     s->tcp->wait_queue = sock->wait_queue;
+    tcp_set_nodelay(s->tcp, s->tcp_nodelay);
+    tcp_set_reuseaddr(s->tcp, sock->reuseaddr != 0);
+    tcp_set_keepalive(s->tcp, s->tcp_keepalive, s->keepidle_s,
+                      s->keepintvl_s, s->keepcnt);
+    if (s->linger_seconds >= 0)
+      tcp_set_linger(s->tcp, s->linger_seconds);
     int r = tcp_active_open6(s->tcp, a->sin6_addr.s6_addr,
                              get16((uint8_t *)&a->sin6_port));
     if (r < 0) return r;
@@ -191,9 +203,10 @@ static int inet6_connect(socket_t *sock, struct sockaddr *addr, int len) {
 
 static ssize_t inet6_sendto(socket_t *sock, const void *buf, size_t len,
                             int flags, struct sockaddr *dest, int addrlen) {
-  (void)flags;
   struct inet6_sock *s = sock->sk;
-  if (s->tcp) return tcp_send(s->tcp, buf, len);
+  if (s->tcp)
+    return tcp_send(s->tcp, buf, len,
+                    socket_is_nonblocking(sock) || (flags & MSG_DONTWAIT));
   const uint8_t *address; uint16_t port;
   if (dest && addrlen >= (int)sizeof(struct sockaddr_in6)) {
     struct sockaddr_in6 *a = (struct sockaddr_in6 *)dest;
@@ -283,7 +296,7 @@ static int inet6_poll(socket_t *sock, int events) {
   if (s->tcp) {
     s->tcp->vfs_node = sock->node;
     if (s->tcp->state == TCP_LISTEN) {
-      if ((events & POLLIN) && s->tcp->accept_head != s->tcp->accept_tail)
+      if ((events & POLLIN) && tcp_accept_pending(s->tcp))
         r |= POLLIN;
       return r;
     }
@@ -302,7 +315,7 @@ static int inet6_poll(socket_t *sock, int events) {
 static void inet6_destroy(socket_t *sock) {
   struct inet6_sock *s = sock->sk;
   if (!s) return;
-  if (s->tcp) { tcp_close(s->tcp); tcp_free(s->tcp); s->tcp = NULL; }
+  if (s->tcp) { tcp_close(s->tcp); tcp_put(s->tcp); s->tcp = NULL; }
   if (s->heap_allocated) kfree(s);
   else { spinlock_acquire(&udp6_lock); memset(s, 0, sizeof(*s));
          spinlock_release(&udp6_lock); }
@@ -323,16 +336,21 @@ static int inet6_accept(socket_t *sock, socket_t **out) {
   struct tcp_tcb *child = tcp_accept(s->tcp, socket_is_nonblocking(sock));
   if (!child) return socket_is_nonblocking(sock) ? -11 : -4;
   socket_t *ns = socket_create(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
-  if (!ns) { tcp_free(child); return -12; }
+  if (!ns) { tcp_abort(child); return -12; }
   struct inet6_sock *n = ns->sk;
-  tcp_free(n->tcp); n->tcp = child; child->wait_queue = &n->wait;
+  tcp_free(n->tcp);
+  n->tcp = child;
+  tcp_attach_socket(child, &n->wait, ns->node);
   memcpy(n->remote, child->remote_ip6, 16); n->remote_port = child->remote_port;
   n->connected = true; ns->state = SS_CONNECTED; *out = ns; return 0;
 }
 
 static int inet6_shutdown(socket_t *sock, int how) {
   struct inet6_sock *s = sock->sk;
-  if (s && s->tcp && (how == SHUT_WR || how == SHUT_RDWR)) return tcp_close(s->tcp);
+  if (s && s->tcp && (how == SHUT_WR || how == SHUT_RDWR) && !s->shut_wr) {
+    s->shut_wr = true;
+    tcp_close(s->tcp);
+  }
   if (sock->wait_queue) wait_queue_wake_all((wait_queue_t *)sock->wait_queue);
   return 0;
 }
@@ -374,14 +392,21 @@ static ssize_t inet6_recvmsg(socket_t *sock, struct msghdr *msg, int flags) {
 static int inet6_getsockopt(socket_t *sock, int level, int option,
                             void *value, int *length) {
   if (!value || !length || *length < (int)sizeof(int)) return -22;
+  struct inet6_sock *s = sock->sk;
   int result;
   if (level == SOL_SOCKET && option == SO_ERROR) {
-    struct inet6_sock *s = sock->sk;
     result = s->tcp ? s->tcp->error : sock->error;
     if (s->tcp) s->tcp->error = 0; else sock->error = 0;
   } else if (level == SOL_SOCKET && option == SO_TYPE) result = sock->type;
   else if (level == SOL_SOCKET && option == SO_DOMAIN) result = AF_INET6;
   else if (level == SOL_SOCKET && option == SO_PROTOCOL) result = sock->protocol;
+  else if (level == SOL_SOCKET && option == SO_KEEPALIVE) result = s->tcp_keepalive ? 1 : 0;
+  else if (level == SOL_SOCKET && option == SO_ACCEPTCONN)
+    result = (s->tcp && s->tcp->state == TCP_LISTEN) ? 1 : 0;
+  else if (level == SOL_TCP && option == TCP_NODELAY) result = s->tcp_nodelay ? 1 : 0;
+  else if (level == SOL_TCP && option == TCP_KEEPIDLE) result = s->keepidle_s;
+  else if (level == SOL_TCP && option == TCP_KEEPINTVL) result = s->keepintvl_s;
+  else if (level == SOL_TCP && option == TCP_KEEPCNT) result = s->keepcnt;
   else if (level == SOL_IPV6 && option == IPV6_V6ONLY) result = 1;
   else return -92;
   *(int *)value = result; *length = sizeof(int); return 0;
@@ -389,15 +414,75 @@ static int inet6_getsockopt(socket_t *sock, int level, int option,
 
 static int inet6_setsockopt(socket_t *sock, int level, int option,
                             const void *value, int length) {
-  (void)sock;
-  if (!value || length < (int)sizeof(int)) return -22;
+  struct inet6_sock *s = sock->sk;
+  if (!s || !value || length < (int)sizeof(int)) return -22;
+  int v = *(const int *)value;
+
   if (level == SOL_IPV6 && option == IPV6_V6ONLY)
-    return *(const int *)value == 1 ? 0 : -92;
-  if (level == SOL_SOCKET && (option == SO_REUSEADDR ||
-      option == SO_KEEPALIVE || option == SO_RCVTIMEO ||
-      option == SO_SNDTIMEO)) return 0;
-  if (level == SOL_TCP && option == TCP_NODELAY) return 0;
-  return -92;
+    return v == 1 ? 0 : -92;
+
+  if (level == SOL_SOCKET) {
+    if (option == SO_REUSEADDR) {
+      sock->reuseaddr = v;
+      if (s->tcp) tcp_set_reuseaddr(s->tcp, v != 0);
+      return 0;
+    }
+    if (option == SO_KEEPALIVE) {
+      s->tcp_keepalive = v != 0;
+      if (s->tcp)
+        tcp_set_keepalive(s->tcp, s->tcp_keepalive, s->keepidle_s,
+                          s->keepintvl_s, s->keepcnt);
+      return 0;
+    }
+    if (option == SO_RCVBUF || option == SO_RCVBUFFORCE) {
+      if (s->tcp) tcp_set_rcvbuf(s->tcp, v < 0 ? 0 : (size_t)v);
+      return 0;
+    }
+    if (option == SO_SNDBUF || option == SO_SNDBUFFORCE) {
+      if (s->tcp) tcp_set_sndbuf(s->tcp, v < 0 ? 0 : (size_t)v);
+      return 0;
+    }
+    if (option == SO_LINGER && length >= (int)(2 * sizeof(int))) {
+      const int *lv = (const int *)value;
+      if (!lv[0]) s->linger_seconds = -1;
+      else if (lv[1] <= 0) s->linger_seconds = 0;
+      else s->linger_seconds = lv[1] > 3600 ? 3600 : lv[1];
+      if (s->tcp) tcp_set_linger(s->tcp, s->linger_seconds);
+      return 0;
+    }
+    if (option == SO_RCVTIMEO || option == SO_SNDTIMEO || option == SO_BROADCAST)
+      return 0;
+  }
+
+  if (level == SOL_TCP && s->tcp) {
+    switch (option) {
+    case TCP_NODELAY:
+      s->tcp_nodelay = v != 0;
+      tcp_set_nodelay(s->tcp, v != 0);
+      return 0;
+    case TCP_MAXSEG:
+      tcp_set_mss(s->tcp, (uint16_t)v);
+      return 0;
+    case TCP_KEEPIDLE:
+      s->keepidle_s = v;
+      tcp_set_keepalive(s->tcp, s->tcp_keepalive, s->keepidle_s,
+                        s->keepintvl_s, s->keepcnt);
+      return 0;
+    case TCP_KEEPINTVL:
+      s->keepintvl_s = v;
+      tcp_set_keepalive(s->tcp, s->tcp_keepalive, s->keepidle_s,
+                        s->keepintvl_s, s->keepcnt);
+      return 0;
+    case TCP_KEEPCNT:
+      s->keepcnt = v;
+      tcp_set_keepalive(s->tcp, s->tcp_keepalive, s->keepidle_s,
+                        s->keepintvl_s, s->keepcnt);
+      return 0;
+    default:
+      return 0;
+    }
+  }
+  return 0;
 }
 
 static sock_ops_t inet6_ops = {
@@ -420,7 +505,12 @@ static int inet6_create(socket_t *sock, int protocol) {
     memset(s, 0, sizeof(*s)); s->used = true; s->heap_allocated = true;
     s->parent = sock; wait_queue_init(&s->wait); s->tcp = tcp_alloc();
     if (!s->tcp) { kfree(s); return -105; }
-    s->tcp->address_family = 6; s->tcp->wait_queue = sock->wait_queue;
+    s->tcp->address_family = 6;
+    s->keepidle_s = TCP_KEEPALIVE_IDLE_DEFAULT;
+    s->keepintvl_s = TCP_KEEPALIVE_INTVL_DEFAULT;
+    s->keepcnt = TCP_KEEPALIVE_CNT_DEFAULT;
+    s->linger_seconds = -1;
+    tcp_attach_socket(s->tcp, sock->wait_queue, sock->node);
     sock->sk = s; sock->ops = &inet6_ops; return 0;
   }
   if (sock->type != SOCK_DGRAM || (protocol && protocol != IPPROTO_UDP))

@@ -397,15 +397,18 @@ uint32_t procfs_partitions_read(vfs_node_t *node, uint32_t offset,
   int pos = snprintf(buf, 4096, "major minor  #blocks  name\n\n");
   int count = block_count();
 
-  for (int i = 0; i < count; i++) {
+  for (int i = 0; i < count && pos < 4000; i++) {
     struct block_device *dev = block_get(i);
     if (!dev)
       continue;
     uint64_t blocks =
         (dev->total_sectors * (dev->sector_size ? dev->sector_size : 512)) / 1024;
-    pos += snprintf(buf + pos, 4096 - pos,
+    int written = snprintf(buf + pos, 4096 - (size_t)pos,
         "   1     %-8d%-10llu%s\n",
         i, (unsigned long long)blocks, dev->name);
+    if (written < 0 || written >= 4096 - pos)
+      break;
+    pos += written;
   }
 
   node->length = (uint32_t)pos;
@@ -1683,11 +1686,11 @@ static uint32_t procfs_net_dev_read(vfs_node_t *node, uint32_t offset,
 
 static uint32_t procfs_net_tcp_read(vfs_node_t *node, uint32_t offset,
                                     uint32_t size, uint8_t *buffer) {
-    struct tcp_entry_snapshot *snaps = kmalloc(sizeof(struct tcp_entry_snapshot) * TCP_MAX_TCBS);
+    struct tcp_entry_snapshot *snaps = kmalloc(sizeof(struct tcp_entry_snapshot) * TCP_MAX_CONNECTIONS);
     if (!snaps) return 0;
-    int n = tcp_get_snapshot(snaps, TCP_MAX_TCBS);
+    int n = tcp_get_snapshot(snaps, TCP_MAX_CONNECTIONS);
 
-    char *buf = kmalloc(256 + n * 128);
+    char *buf = kmalloc(256 + n * 176);
     if (!buf) {
         kfree(snaps);
         return 0;
@@ -1704,9 +1707,12 @@ static uint32_t procfs_net_tcp_read(vfs_node_t *node, uint32_t offset,
         fmt_port_hex(lport, snaps[i].local_port);
         fmt_port_hex(rport, snaps[i].remote_port);
         uint8_t st = tcp_state_to_linux(snaps[i].state);
-        pos += snprintf(buf + pos, 128,
-            "%4d: %s:%s %s:%s %02X 00000000:00000000 00 00000000 0 0 0\n",
-            i, lip, lport, rip, rport, st);
+        pos += snprintf(buf + pos, 176,
+            "%4d: %s:%s %s:%s %02X %08X:%08X 00 00000000 %llu 0 0 0\n",
+            i, lip, lport, rip, rport, st,
+            (unsigned)(snaps[i].bytes_sent & 0xffffffffu),
+            (unsigned)snaps[i].rx_queued,
+            (unsigned long long)snaps[i].retransmits);
     }
     kfree(snaps);
 
@@ -1722,11 +1728,16 @@ static uint32_t procfs_net_tcp_read(vfs_node_t *node, uint32_t offset,
 
 static uint32_t procfs_net_udp_read(vfs_node_t *node, uint32_t offset,
                                     uint32_t size, uint8_t *buffer) {
-    struct udp_entry_snapshot snaps[UDP_MAX_SOCKETS];
+    struct udp_entry_snapshot *snaps =
+        kmalloc(sizeof(struct udp_entry_snapshot) * UDP_MAX_SOCKETS);
+    if (!snaps) return 0;
     int n = udp_get_snapshot(snaps, UDP_MAX_SOCKETS);
 
     char *buf = kmalloc(256 + n * 128);
-    if (!buf) return 0;
+    if (!buf) {
+        kfree(snaps);
+        return 0;
+    }
 
     int pos = snprintf(buf, 256,
         "  sl  local_address rem_address   st tx_queue rx_queue "
@@ -1744,6 +1755,7 @@ static uint32_t procfs_net_udp_read(vfs_node_t *node, uint32_t offset,
             "%4d: %s:%s %s:%s %02X 00000000:00000000 00 00000000 0 0 0 0\n",
             i, lip, lport, rip, rport, st);
     }
+    kfree(snaps);
 
     node->length = (uint32_t)pos;
     if (offset >= (uint32_t)pos) { kfree(buf); return 0; }
@@ -1811,14 +1823,17 @@ static uint32_t procfs_net_if_inet6_read(vfs_node_t *node, uint32_t offset,
 
 static uint32_t procfs_net_sockstat_read(vfs_node_t *node, uint32_t offset,
                                          uint32_t size, uint8_t *buffer) {
-    struct tcp_entry_snapshot *tcp_snaps = kmalloc(sizeof(struct tcp_entry_snapshot) * TCP_MAX_TCBS);
+    struct tcp_entry_snapshot *tcp_snaps = kmalloc(sizeof(struct tcp_entry_snapshot) * TCP_MAX_CONNECTIONS);
     int tcp_n = 0;
     if (tcp_snaps) {
-        tcp_n = tcp_get_snapshot(tcp_snaps, TCP_MAX_TCBS);
+        tcp_n = tcp_get_snapshot(tcp_snaps, TCP_MAX_CONNECTIONS);
     }
 
-    struct udp_entry_snapshot udp_snaps[UDP_MAX_SOCKETS];
-    int udp_n = udp_get_snapshot(udp_snaps, UDP_MAX_SOCKETS);
+    struct udp_entry_snapshot *udp_snaps =
+        kmalloc(sizeof(struct udp_entry_snapshot) * UDP_MAX_SOCKETS);
+    int udp_n = 0;
+    if (udp_snaps)
+        udp_n = udp_get_snapshot(udp_snaps, UDP_MAX_SOCKETS);
 
     // Count established TCP connections
     int tcp_estab = 0;
@@ -1840,6 +1855,7 @@ static uint32_t procfs_net_sockstat_read(vfs_node_t *node, uint32_t offset,
         udp_n);
 
     node->length = (uint32_t)len;
+    if (udp_snaps) kfree(udp_snaps);
     if (offset >= (uint32_t)len) return 0;
     if (offset + size > (uint32_t)len) size = (uint32_t)len - offset;
     memcpy(buffer, buf + offset, size);

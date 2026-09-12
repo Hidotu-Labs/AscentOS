@@ -28,6 +28,12 @@ typedef struct inet_sock {
     int              sndtimeo_ms;   /* SO_SNDTIMEO  */
     bool             tcp_nodelay;   /* TCP_NODELAY  */
     bool             tcp_keepalive; /* SO_KEEPALIVE */
+    int              tcp_keepidle_s;  /* TCP_KEEPIDLE  (seconds) */
+    int              tcp_keepintvl_s; /* TCP_KEEPINTVL (seconds) */
+    int              tcp_keepcnt;     /* TCP_KEEPCNT */
+    int              linger_seconds;  /* SO_LINGER, -1 = disabled */
+    bool             shut_rd;
+    bool             shut_wr;
 } inet_sock_t;
 
 static inline uint32_t sa_addr(const struct sockaddr_in *a) {
@@ -63,7 +69,11 @@ static int inet_create(socket_t *sock, int protocol) {
     } else if (sock->type == SOCK_STREAM) {
         isk->tcp = tcp_alloc();
         if (!isk->tcp) { kfree(isk); return -12; }
-        isk->tcp->wait_queue = sock->wait_queue;
+        isk->tcp_keepidle_s = TCP_KEEPALIVE_IDLE_DEFAULT;
+        isk->tcp_keepintvl_s = TCP_KEEPALIVE_INTVL_DEFAULT;
+        isk->tcp_keepcnt = TCP_KEEPALIVE_CNT_DEFAULT;
+        isk->linger_seconds = -1;
+        tcp_attach_socket(isk->tcp, sock->wait_queue, sock->node);
     } else {
         isk->udp = udp_socket_alloc();
         if (!isk->udp) { kfree(isk); return -12; }
@@ -83,7 +93,7 @@ static void inet_destroy(socket_t *sock) {
         isk->udp = NULL;
     }
     if (isk->raw) raw_icmp_free(isk->raw);
-    if (isk->tcp) { tcp_close(isk->tcp); tcp_free(isk->tcp); }
+    if (isk->tcp) { tcp_close(isk->tcp); tcp_put(isk->tcp); isk->tcp = NULL; }
     kfree(isk);
     sock->sk = NULL;
 }
@@ -130,6 +140,13 @@ static int inet_connect(socket_t *sock, struct sockaddr *addr, int addrlen) {
             return -114; /* EALREADY */
         isk->tcp->vfs_node = sock->node;
         isk->tcp->wait_queue = sock->wait_queue;
+        tcp_set_nodelay(isk->tcp, isk->tcp_nodelay);
+        tcp_set_reuseaddr(isk->tcp, sock->reuseaddr != 0);
+        tcp_set_keepalive(isk->tcp, isk->tcp_keepalive,
+                          isk->tcp_keepidle_s, isk->tcp_keepintvl_s,
+                          isk->tcp_keepcnt);
+        if (isk->linger_seconds >= 0)
+            tcp_set_linger(isk->tcp, isk->linger_seconds);
         int r = tcp_active_open(isk->tcp, sa_addr(sin), sa_port(sin));
         if (r < 0) return r;
         if (socket_is_nonblocking(sock)) {
@@ -161,16 +178,41 @@ static int inet_connect(socket_t *sock, struct sockaddr *addr, int addrlen) {
     return r;
 }
 
-static int inet_listen(socket_t *sock,int backlog){inet_sock_t*isk=sock->sk;if(!isk||!isk->tcp)return-95;int r=tcp_listen(isk->tcp,backlog);if(!r)sock->state=SS_LISTENING;return r;}
-static int inet_accept(socket_t *sock,socket_t **out){inet_sock_t*isk=sock->sk;if(!isk||!isk->tcp||!out)return-22;bool nb=socket_is_nonblocking(sock);struct tcp_tcb*child=tcp_accept(isk->tcp,nb);if(!child)return nb?-11:-4;socket_t*ns=socket_create(AF_INET,SOCK_STREAM,IPPROTO_TCP);if(!ns){tcp_free(child);return-12;}inet_sock_t*nisk=ns->sk;if(nisk->tcp)tcp_free(nisk->tcp);nisk->tcp=child;child->wait_queue=ns->wait_queue;ns->state=SS_CONNECTED;*out=ns;return 0;}
+static int inet_listen(socket_t *sock, int backlog) {
+    inet_sock_t *isk = sock->sk;
+    if (!isk || !isk->tcp) return -95;
+    isk->tcp->wait_queue = sock->wait_queue;
+    isk->tcp->vfs_node = sock->node;
+    int r = tcp_listen(isk->tcp, backlog);
+    if (!r) sock->state = SS_LISTENING;
+    return r;
+}
+
+static int inet_accept(socket_t *sock, socket_t **out) {
+    inet_sock_t *isk = sock->sk;
+    if (!isk || !isk->tcp || !out) return -22;
+    bool nb = socket_is_nonblocking(sock);
+    struct tcp_tcb *child = tcp_accept(isk->tcp, nb);
+    if (!child) return nb ? -11 : -4;
+    socket_t *ns = socket_create(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (!ns) { tcp_abort(child); return -12; }
+    inet_sock_t *nisk = ns->sk;
+    if (nisk->tcp) tcp_free(nisk->tcp);
+    nisk->tcp = child;
+    tcp_attach_socket(child, ns->wait_queue, ns->node);
+    ns->state = SS_CONNECTED;
+    *out = ns;
+    return 0;
+}
 
 static ssize_t inet_sendto(socket_t *sock, const void *buf, size_t len,
                             int flags, struct sockaddr *dest, int addrlen) {
-    (void)flags;
     inet_sock_t *isk = sock->sk;
     if (!isk) return -22;
     inet_sync_node(sock, isk);
-    if (isk->tcp) return tcp_send(isk->tcp,buf,len);
+    if (isk->tcp)
+        return tcp_send(isk->tcp, buf, len,
+                        socket_is_nonblocking(sock) || (flags & MSG_DONTWAIT));
     uint32_t dip;
     uint16_t dport;
     if (dest && addrlen >= (int)sizeof(struct sockaddr_in)) {
@@ -321,23 +363,140 @@ static int inet_getsockopt(socket_t *sock, int level, int optname,
             *optlen = sizeof(int);
             return 0;
         }
+        if (optname == TCP_MAXSEG && *optlen >= (int)sizeof(int)) {
+            *(int *)optval = isk->tcp && isk->tcp->mss ? isk->tcp->mss : TCP_MAX_MSS;
+            *optlen = sizeof(int);
+            return 0;
+        }
+        if (optname == TCP_KEEPIDLE && *optlen >= (int)sizeof(int)) {
+            *(int *)optval = isk->tcp_keepidle_s;
+            *optlen = sizeof(int);
+            return 0;
+        }
+        if (optname == TCP_KEEPINTVL && *optlen >= (int)sizeof(int)) {
+            *(int *)optval = isk->tcp_keepintvl_s;
+            *optlen = sizeof(int);
+            return 0;
+        }
+        if (optname == TCP_KEEPCNT && *optlen >= (int)sizeof(int)) {
+            *(int *)optval = isk->tcp_keepcnt;
+            *optlen = sizeof(int);
+            return 0;
+        }
     }
     /* Unknown option — return ENOPROTOOPT */
     return -92;
 }
 
+static int inet_timeval_ms(const void *optval, int optlen) {
+    if (optlen >= (int)(2 * sizeof(int64_t))) {
+        const int64_t *tv = (const int64_t *)optval;
+        int64_t ms = tv[0] * 1000 + tv[1] / 1000;
+        if (ms < 0) ms = 0;
+        if (ms > 3600000) ms = 3600000;
+        return (int)ms;
+    }
+    if (optlen >= (int)sizeof(int)) {
+        int v = *(const int *)optval;
+        return v < 0 ? 0 : v;
+    }
+    return 0;
+}
+
 static int inet_setsockopt(socket_t *sock, int level, int optname,
                             const void *optval, int optlen) {
     inet_sock_t *isk = sock->sk;
-    if (!isk) return -22;
-    if (isk->raw || isk->tcp) { (void)level; (void)optname; (void)optval; (void)optlen; return 0; }
+    if (!isk || !optval) return -22;
+
     if (level == SOL_SOCKET && optlen >= (int)sizeof(int)) {
         int v = *(const int *)optval;
-        if (optname == SO_RCVTIMEO) { isk->udp->rcvtimeo_ms = v; return 0; }
-        if (optname == SO_SNDTIMEO) { isk->udp->sndtimeo_ms = v; return 0; }
+
+        if (optname == SO_RCVBUF || optname == SO_RCVBUFFORCE) {
+            if (isk->tcp) tcp_set_rcvbuf(isk->tcp, v < 0 ? 0 : (size_t)v);
+            if (isk->udp) udp_set_rcvbuf(isk->udp, v < 0 ? 0 : (size_t)v);
+            return 0;
+        }
+        if (optname == SO_SNDBUF || optname == SO_SNDBUFFORCE) {
+            if (isk->tcp) tcp_set_sndbuf(isk->tcp, v < 0 ? 0 : (size_t)v);
+            return 0;
+        }
+        if (optname == SO_KEEPALIVE) {
+            isk->tcp_keepalive = v != 0;
+            if (isk->tcp)
+                tcp_set_keepalive(isk->tcp, isk->tcp_keepalive,
+                                  isk->tcp_keepidle_s, isk->tcp_keepintvl_s,
+                                  isk->tcp_keepcnt);
+            return 0;
+        }
+        if (optname == SO_REUSEADDR) {
+            sock->reuseaddr = v;
+            if (isk->tcp) tcp_set_reuseaddr(isk->tcp, v != 0);
+            return 0;
+        }
+        if (optname == SO_RCVTIMEO) {
+            int ms = inet_timeval_ms(optval, optlen);
+            isk->rcvtimeo_ms = ms;
+            if (isk->udp) isk->udp->rcvtimeo_ms = ms;
+            return 0;
+        }
+        if (optname == SO_SNDTIMEO) {
+            int ms = inet_timeval_ms(optval, optlen);
+            isk->sndtimeo_ms = ms;
+            if (isk->udp) isk->udp->sndtimeo_ms = ms;
+            return 0;
+        }
+        if (optname == SO_LINGER && optlen >= (int)(2 * sizeof(int))) {
+            const int *lv = (const int *)optval;
+            if (!lv[0]) isk->linger_seconds = -1;
+            else if (lv[1] <= 0) isk->linger_seconds = 0;
+            else isk->linger_seconds = lv[1] > 3600 ? 3600 : lv[1];
+            if (isk->tcp) tcp_set_linger(isk->tcp, isk->linger_seconds);
+            return 0;
+        }
         if (optname == SO_BROADCAST) return 0;
-        if (optname == SO_REUSEADDR) { sock->reuseaddr = v; return 0; }
     }
+
+    if ((level == SOL_IP || level == IPPROTO_IP) && optname == 1 /* IP_TOS */
+        && optlen >= (int)sizeof(int)) {
+        if (isk->udp)
+            udp_set_tos(isk->udp, *(const int *)optval);
+        return 0;
+    }
+
+    if ((level == SOL_TCP || level == IPPROTO_TCP) && isk->tcp) {
+        if (optlen < (int)sizeof(int)) return -22;
+        int v = *(const int *)optval;
+        switch (optname) {
+        case TCP_NODELAY:
+            isk->tcp_nodelay = v != 0;
+            tcp_set_nodelay(isk->tcp, v != 0);
+            return 0;
+        case TCP_MAXSEG:
+            tcp_set_mss(isk->tcp, (uint16_t)v);
+            return 0;
+        case TCP_KEEPIDLE:
+            isk->tcp_keepidle_s = v;
+            tcp_set_keepalive(isk->tcp, isk->tcp_keepalive,
+                              isk->tcp_keepidle_s, isk->tcp_keepintvl_s,
+                              isk->tcp_keepcnt);
+            return 0;
+        case TCP_KEEPINTVL:
+            isk->tcp_keepintvl_s = v;
+            tcp_set_keepalive(isk->tcp, isk->tcp_keepalive,
+                              isk->tcp_keepidle_s, isk->tcp_keepintvl_s,
+                              isk->tcp_keepcnt);
+            return 0;
+        case TCP_KEEPCNT:
+            isk->tcp_keepcnt = v;
+            tcp_set_keepalive(isk->tcp, isk->tcp_keepalive,
+                              isk->tcp_keepidle_s, isk->tcp_keepintvl_s,
+                              isk->tcp_keepcnt);
+            return 0;
+        default:
+            return 0;
+        }
+    }
+
     if (level == IPPROTO_UDP) return 0;
     return 0;
 }
@@ -346,10 +505,10 @@ static int inet_shutdown(socket_t *sock, int how) {
     inet_sock_t *isk = sock->sk;
     if (!isk) return -107; /* ENOTCONN */
     if (isk->tcp) {
-        /* Only send FIN when write side is being closed and connection is active */
-        if ((how == SHUT_WR || how == SHUT_RDWR) &&
-            (isk->tcp->state == TCP_ESTABLISHED ||
-             isk->tcp->state == TCP_CLOSE_WAIT)) {
+        if ((how == SHUT_RD || how == SHUT_RDWR) && !isk->shut_rd)
+            isk->shut_rd = true;
+        if ((how == SHUT_WR || how == SHUT_RDWR) && !isk->shut_wr) {
+            isk->shut_wr = true;
             tcp_close(isk->tcp);
         }
     }
@@ -368,8 +527,7 @@ static int inet_poll(socket_t *sock, int events) {
         switch (isk->tcp->state) {
         case TCP_LISTEN:
             /* Readable when there's a connection to accept */
-            if ((events & POLLIN) &&
-                isk->tcp->accept_head != isk->tcp->accept_tail)
+            if ((events & POLLIN) && tcp_accept_pending(isk->tcp))
                 r |= POLLIN;
             break;
         case TCP_SYN_SENT:

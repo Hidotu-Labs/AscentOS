@@ -1,5 +1,7 @@
 #include "vmm.h"
+#include "../apic/lapic.h"
 #include "../console/klog.h"
+#include "../drivers/serial.h"
 #include "../lib/tsc.h"
 #include "../lock/lockdiag.h"
 #include "../lock/spinlock.h"
@@ -14,6 +16,19 @@
 static rawspinlock_t vmm_lock = RAWSPINLOCK_INIT;
 
 rawspinlock_t *vmm_get_lock(void) { return &vmm_lock; }
+
+/* Diagnostics used below and defined next to vmm_debug_walk() at the bottom
+ * of the file.  Declared here so page-table teardown/split paths can log. */
+static void vmm_dbg_out(const char *s);
+static void vmm_dbg_hex(uint64_t v);
+
+/* True when the virtual range [base, base + size) contains the LAPIC MMIO
+ * page as seen through the HHDM.  Used to flag any page-table operation that
+ * can affect the mapping the interrupt path depends on. */
+static bool vmm_dbg_range_has_lapic(uint64_t base, uint64_t size) {
+  uint64_t lapic_va = lapic_get_va();
+  return lapic_va != 0 && lapic_va >= base && lapic_va - base < size;
+}
 
 /* --------------------------------------------------------------------------
  * vmm_lock acquisition wrappers
@@ -128,6 +143,11 @@ static uint64_t *get_next_level(uint64_t *current_level, size_t index,
         const uint64_t address_mask = PAGE_MASK & ~((1ULL << 30) - 1ULL);
         uint64_t base = old & address_mask;
         uint64_t leaf_flags = old & ~address_mask;
+        if (base == (lapic_get_phys() & ~0x3FFFFFFFULL)) {
+          vmm_dbg_out("[VMMDBG] split 1G page covering LAPIC base=");
+          vmm_dbg_hex(base);
+          vmm_dbg_out("\n");
+        }
         for (size_t i = 0; i < 512; i++)
           new_table[i] = (base + i * (1ULL << 21)) | leaf_flags;
       } else {
@@ -140,6 +160,11 @@ static uint64_t *get_next_level(uint64_t *current_level, size_t index,
         leaf_flags &= ~((1ULL << 12) | PAGE_FLAG_PS);
         if (pat)
           leaf_flags |= PAGE_FLAG_PAT;
+        if (base == (lapic_get_phys() & ~0x1FFFFFULL)) {
+          vmm_dbg_out("[VMMDBG] split 2M page covering LAPIC base=");
+          vmm_dbg_hex(base);
+          vmm_dbg_out("\n");
+        }
         for (size_t i = 0; i < 512; i++)
           new_table[i] = (base + i * PAGE_SIZE) | leaf_flags;
       }
@@ -404,6 +429,23 @@ void vmm_free_empty_tables(uint64_t *pml4, uint64_t virtual_addr) {
   size_t pdpt_index = (virtual_addr >> 30) & 0x1FF;
   size_t pd_index   = (virtual_addr >> 21) & 0x1FF;
 
+  /* Kernel-half tables are shared between the kernel PML4 and every process
+   * PML4 (both clone paths shallow-copy entries 256..511).  Freeing one
+   * through a process PML4 hands a live table page to the PMM while the
+   * kernel (and every other process) still points at it.  Flag it loudly. */
+  if (pml4_index >= 256 &&
+      (uint64_t)(uintptr_t)pml4 !=
+          (uint64_t)(uintptr_t)vmm_get_kernel_pml4()) {
+    vmm_dbg_out("[VMMDBG] WARNING: vmm_free_empty_tables on kernel-half "
+                "address from a non-kernel PML4 va=");
+    vmm_dbg_hex(virtual_addr);
+    vmm_dbg_out(" cr3=");
+    vmm_dbg_hex((uint64_t)(uintptr_t)pml4);
+    vmm_dbg_out(" kernel=");
+    vmm_dbg_hex((uint64_t)(uintptr_t)vmm_get_kernel_pml4());
+    vmm_dbg_out("\n");
+  }
+
   uint64_t *pml4_virt = (uint64_t *)PHYS_TO_VIRT((uint64_t)pml4 & PAGE_MASK);
   if (!(pml4_virt[pml4_index] & PAGE_FLAG_PRESENT))
     return;
@@ -433,6 +475,15 @@ void vmm_free_empty_tables(uint64_t *pml4, uint64_t virtual_addr) {
 
   if (pt_empty) {
     pd_virt[pd_index] = 0;
+    if (vmm_dbg_range_has_lapic(virtual_addr, 2ULL << 20)) {
+      vmm_dbg_out("[VMMDBG] free PT: cleared PDE covering LAPIC va=");
+      vmm_dbg_hex(virtual_addr);
+      vmm_dbg_out(" pt_phys=");
+      vmm_dbg_hex(pt_phys);
+      vmm_dbg_out(" cr3=");
+      vmm_dbg_hex((uint64_t)pml4);
+      vmm_dbg_out("\n");
+    }
     tlb_flush_deferred(virtual_addr, (uint64_t)pml4);
     vmm_defer_table_free((void *)pt_phys);
 
@@ -446,6 +497,15 @@ void vmm_free_empty_tables(uint64_t *pml4, uint64_t virtual_addr) {
 
     if (pd_empty) {
       pdpt_virt[pdpt_index] = 0;
+      if (vmm_dbg_range_has_lapic(virtual_addr, 1ULL << 30)) {
+        vmm_dbg_out("[VMMDBG] free PD: cleared PDPTE covering LAPIC va=");
+        vmm_dbg_hex(virtual_addr);
+        vmm_dbg_out(" pd_phys=");
+        vmm_dbg_hex(pd_phys);
+        vmm_dbg_out(" cr3=");
+        vmm_dbg_hex((uint64_t)pml4);
+        vmm_dbg_out("\n");
+      }
       tlb_flush_deferred(virtual_addr, (uint64_t)pml4);
       vmm_defer_table_free((void *)pd_phys);
 
@@ -459,6 +519,15 @@ void vmm_free_empty_tables(uint64_t *pml4, uint64_t virtual_addr) {
 
       if (pdpt_empty) {
         pml4_virt[pml4_index] = 0;
+        if (vmm_dbg_range_has_lapic(virtual_addr, 512ULL << 30)) {
+          vmm_dbg_out("[VMMDBG] free PDPT: cleared PML4E covering LAPIC va=");
+          vmm_dbg_hex(virtual_addr);
+          vmm_dbg_out(" pdpt_phys=");
+          vmm_dbg_hex(pdpt_phys);
+          vmm_dbg_out(" cr3=");
+          vmm_dbg_hex((uint64_t)pml4);
+          vmm_dbg_out("\n");
+        }
         tlb_flush_deferred(virtual_addr, (uint64_t)pml4);
         vmm_defer_table_free((void *)pdpt_phys);
       }
@@ -585,6 +654,102 @@ out:
   return ok;
 }
 
+
+/* --------------------------------------------------------------------------
+ * Bring-up diagnostics (temporary)
+ *
+ * vmm_virt_to_phys() assumes every intermediate entry is a valid RAM page
+ * table.  When the tables are the thing under suspicion (a missing LAPIC
+ * mapping after exec, a GPF in the panic reporter) that assumption turns the
+ * diagnostic into a second fault.  This walk checks each frame against
+ * pmm_get_total_memory() before dereferencing it, and prints via
+ * serial_write_sync() so it is safe from an interrupt that interrupted klog.
+ * -------------------------------------------------------------------------- */
+
+static bool vmm_debug_frame_ok(uint64_t phys) {
+  if (phys == 0 || (phys & 0xFFF) != 0)
+    return false;
+  uint64_t total = pmm_get_total_memory();
+  return total >= PAGE_SIZE && phys < total;
+}
+
+uint64_t vmm_debug_walk(uint64_t pml4_phys, uint64_t virtual_addr,
+                        uint64_t entries[4]) {
+  uint64_t hhdm = pmm_get_hhdm_offset();
+  uint64_t table = pml4_phys & PAGE_MASK;
+
+  for (int level = 0; level < 4; level++) {
+    if (entries)
+      entries[level] = 0;
+    if (!vmm_debug_frame_ok(table))
+      return 0;
+    uint64_t *tbl = (uint64_t *)(uintptr_t)(table + hhdm);
+    uint64_t index = (virtual_addr >> (39 - level * 9)) & 0x1FF;
+    uint64_t e = tbl[index];
+    if (entries)
+      entries[level] = e;
+    if (!(e & PAGE_FLAG_PRESENT))
+      return 0;
+    if (level == 3)
+      return (e & PAGE_MASK) | (virtual_addr & 0xFFFULL);
+    if (e & PAGE_FLAG_PS) {
+      if (level == 1)
+        return (e & 0x000FFFFFC0000000ULL) | (virtual_addr & 0x3FFFFFFFULL);
+      if (level == 2)
+        return (e & 0x000FFFFFFFE00000ULL) | (virtual_addr & 0x1FFFFFULL);
+      return 0; /* PS at PML4: corruption */
+    }
+    table = e & PAGE_MASK;
+  }
+  return 0;
+}
+
+static void vmm_dbg_out(const char *s) {
+  size_t n = 0;
+  while (n < 256 && s[n])
+    n++;
+  serial_write_sync(s, n);
+}
+
+static void vmm_dbg_hex(uint64_t v) {
+  static const char hex[] = "0123456789ABCDEF";
+  char b[18];
+  b[0] = '0';
+  b[1] = 'x';
+  for (int i = 0; i < 16; i++)
+    b[2 + i] = hex[(v >> ((15 - i) * 4)) & 0xF];
+  serial_write_sync(b, sizeof(b));
+}
+
+void vmm_debug_dump_walk(const char *tag, uint64_t pml4_phys,
+                         uint64_t virtual_addr) {
+  static const char *level_name[4] = {"PML4E", "PDPTE", "PDE", "PTE"};
+  uint64_t entries[4] = {0, 0, 0, 0};
+  uint64_t phys = vmm_debug_walk(pml4_phys, virtual_addr, entries);
+
+  vmm_dbg_out("[VMMDBG] ");
+  vmm_dbg_out(tag);
+  vmm_dbg_out(" cr3=");
+  vmm_dbg_hex(pml4_phys);
+  vmm_dbg_out(" va=");
+  vmm_dbg_hex(virtual_addr);
+  vmm_dbg_out(" -> phys=");
+  vmm_dbg_hex(phys);
+  vmm_dbg_out("\n");
+  for (int i = 0; i < 4; i++) {
+    vmm_dbg_out("  ");
+    vmm_dbg_out(level_name[i]);
+    vmm_dbg_out("=");
+    vmm_dbg_hex(entries[i]);
+    if (!(entries[i] & PAGE_FLAG_PRESENT)) {
+      vmm_dbg_out(" (not present)");
+      break;
+    }
+    if (i == 3 || (entries[i] & PAGE_FLAG_PS))
+      break;
+  }
+  vmm_dbg_out("\n");
+}
 
 uint64_t vmm_virt_to_phys(uint64_t *pml4_phys, uint64_t virtual_addr) {
   size_t pml4_index = (virtual_addr >> 39) & 0x1FF;

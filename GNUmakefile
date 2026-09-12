@@ -218,8 +218,29 @@ SDL3_LDFLAGS := \
 .PHONY: all
 all: $(IMAGE_NAME).iso
 
-.PHONY: run
-run: run-$(ARCH)
+# `make run` boots the NVMe desktop with KVM; `make run-tcg` is the same
+# configuration without KVM.  The arch-specific run-x86_64 target remains the
+# TCG implementation behind run-tcg.
+.PHONY: run run-tcg
+run: edk2-ovmf $(IMAGE_NAME).iso disk.img
+	qemu-system-$(ARCH) \
+		-M q35,pcspk-audiodev=snd0 \
+		-drive if=pflash,unit=0,format=raw,file=edk2-ovmf/ovmf-code-$(ARCH).fd,readonly=on \
+		-cdrom $(IMAGE_NAME).iso \
+		-drive file=disk.img,format=raw,if=none,id=nvme0 \
+		-device nvme,serial=avoryos0,drive=nvme0 \
+		-cpu host -enable-kvm \
+		-smp 4 \
+		-serial stdio \
+		-audiodev pa,id=snd0,timer-period=2000,out.frequency=48000,out.channels=2,out.format=s16,out.buffer-length=500000,out.latency=500000 \
+		-device rtl8139,netdev=net0 \
+		-netdev user,id=net0 \
+		-device intel-hda -device hda-duplex,audiodev=snd0 \
+		-device qemu-xhci,id=xhci \
+		-device usb-kbd,bus=xhci.0 \
+		-device usb-mouse,bus=xhci.0 \
+		$(QEMUFLAGS)
+run-tcg: run-x86_64
 
 .PHONY: run-dist
 run-dist: edk2-ovmf avoryos-dist.iso
@@ -235,14 +256,16 @@ avoryos-dist.iso: limine/limine kernel disk.img limine.conf create_dist_usb.sh
 	./create_dist_usb.sh avoryos-dist.iso
 
 .PHONY: run-x86_64
-# No KVM device is available here, so a single TCG vCPU preserves host time
-# for QEMU's realtime audio callback.  Use QEMUFLAGS='-smp N' for SMP tests.
+# Default interactive target on a machine without /dev/kvm: TCG, no KVM flag,
+# root filesystem on an NVMe namespace.  run-sata-tcg keeps the old IDE/ATA
+# layout for comparison.  Use QEMUFLAGS='-smp N' for SMP tests.
 run-x86_64: edk2-ovmf $(IMAGE_NAME).iso disk.img
 	qemu-system-$(ARCH) \
 		-M q35,pcspk-audiodev=snd0 \
 		-drive if=pflash,unit=0,format=raw,file=edk2-ovmf/ovmf-code-$(ARCH).fd,readonly=on \
 		-cdrom $(IMAGE_NAME).iso \
-		-drive file=disk.img,format=raw,if=none,id=disk0 -device ide-hd,drive=disk0,bus=ide.0 \
+		-drive file=disk.img,format=raw,if=none,id=nvme0 \
+		-device nvme,serial=avoryos0,drive=nvme0 \
 		-smp 4 \
 		-serial stdio \
 		-audiodev pa,id=snd0,timer-period=2000,out.frequency=48000,out.channels=2,out.format=s16,out.buffer-length=500000,out.latency=500000 \
@@ -255,7 +278,10 @@ run-x86_64: edk2-ovmf $(IMAGE_NAME).iso disk.img
 		$(QEMUFLAGS)
 
 
-run-kvm: edk2-ovmf $(IMAGE_NAME).iso disk.img
+# Legacy SATA/IDE root disk (the pre-NVMe run layout), kept for AHCI/ATA
+# regression and A/B comparisons.  run-sata is KVM, run-sata-tcg is TCG.
+.PHONY: run-sata run-sata-tcg
+run-sata: edk2-ovmf $(IMAGE_NAME).iso disk.img
 	qemu-system-$(ARCH) \
 		-M q35,pcspk-audiodev=snd0 \
 		-drive if=pflash,unit=0,format=raw,file=edk2-ovmf/ovmf-code-$(ARCH).fd,readonly=on \
@@ -273,7 +299,90 @@ run-kvm: edk2-ovmf $(IMAGE_NAME).iso disk.img
 		-device usb-mouse,bus=xhci.0 \
 		$(QEMUFLAGS)
 
+run-sata-tcg: edk2-ovmf $(IMAGE_NAME).iso disk.img
+	qemu-system-$(ARCH) \
+		-M q35,pcspk-audiodev=snd0 \
+		-drive if=pflash,unit=0,format=raw,file=edk2-ovmf/ovmf-code-$(ARCH).fd,readonly=on \
+		-cdrom $(IMAGE_NAME).iso \
+		-drive file=disk.img,format=raw,if=none,id=disk0 -device ide-hd,drive=disk0,bus=ide.0 \
+		-smp 4 \
+		-serial stdio \
+		-audiodev pa,id=snd0,timer-period=2000,out.frequency=48000,out.channels=2,out.format=s16,out.buffer-length=500000,out.latency=500000 \
+		-device rtl8139,netdev=net0 \
+		-netdev user,id=net0 \
+		-device intel-hda -device hda-duplex,audiodev=snd0 \
+		-device qemu-xhci,id=xhci \
+		-device usb-kbd,bus=xhci.0 \
+		-device usb-mouse,bus=xhci.0 \
+		$(QEMUFLAGS)
+
 		
+
+# ── NVMe ────────────────────────────────────────────────────────────────────
+
+# run-nvme / run-nvme-tcg predate the switch of the interactive targets to
+# NVMe; they are aliases now.
+.PHONY: run-nvme run-nvme-tcg
+run-nvme: run
+run-nvme-tcg: run-tcg
+
+# Headless test image: minimal root on AHCI plus a blank NVMe scratch disk.
+# The image runs /bin/nvme_test auto at boot and powers off; the host-side
+# orchestrator is scripts/nvme-stress.sh.
+.PHONY: run-nvme-test
+run-nvme-test: edk2-ovmf $(IMAGE_NAME).iso nvme_test.img nvme_scratch.img
+	@mkdir -p build/nvme
+	qemu-system-$(ARCH) \
+		-M q35 \
+		-m 4G \
+		-drive if=pflash,unit=0,format=raw,file=edk2-ovmf/ovmf-code-$(ARCH).fd,readonly=on \
+		-cdrom $(IMAGE_NAME).iso \
+		-drive file=nvme_test.img,format=raw,if=none,id=root0 \
+		-device ide-hd,drive=root0,bus=ide.0 \
+		-drive file=nvme_scratch.img,format=raw,if=none,id=nvme0 \
+		-device nvme,serial=avoryos-test,drive=nvme0 \
+		$(if $(wildcard /dev/kvm),-cpu host -enable-kvm) \
+		-smp 4 \
+		-display none \
+		-serial file:build/nvme/run-nvme-test.log
+
+nvme_test.img: scripts/create-nvme-test.sh userland/nvme_test.elf userland/nvme_bench.elf userland/avoryd.elf userland/shutdown.elf
+	./scripts/create-nvme-test.sh
+
+nvme_scratch.img: nvme_test.img
+	@test -f $@ || ./scripts/create-nvme-test.sh
+
+# Phase 7 acceptance & hardening suites (scripts/nvme-phase7.sh).  These build
+# and boot QEMU many times; PHASE7_ARGS forwards extra runner flags, e.g.
+#   make nvme-phase7 PHASE7_ARGS="--quick"
+#   make nvme-phase7-matrix PHASE7_ARGS="--only=accel=tcg --limit=8"
+#   make nvme-phase7-dry            # prints the 72-cell matrix and commands
+.PHONY: nvme-phase7 nvme-phase7-quick nvme-phase7-dry nvme-phase7-matrix
+nvme-phase7:
+	./scripts/nvme-phase7.sh all $(PHASE7_ARGS)
+nvme-phase7-quick:
+	./scripts/nvme-phase7.sh --quick all $(PHASE7_ARGS)
+nvme-phase7-dry:
+	./scripts/nvme-phase7.sh --dry-run all $(PHASE7_ARGS)
+nvme-phase7-matrix:
+	./scripts/nvme-phase7.sh matrix $(PHASE7_ARGS)
+
+.PHONY: run-net
+# Headless KVM boot for network benchmarks.  The guest reaches host-side
+# test servers (scripts/nettest-server.py) at 10.0.2.2 under user networking.
+run-net: edk2-ovmf $(IMAGE_NAME).iso disk.img
+	qemu-system-$(ARCH) \
+		-M q35 \
+		-m 4G \
+		-drive if=pflash,unit=0,format=raw,file=edk2-ovmf/ovmf-code-$(ARCH).fd,readonly=on \
+		-cdrom $(IMAGE_NAME).iso \
+		-drive file=disk.img,format=raw,if=none,id=disk0 -device ide-hd,drive=disk0,bus=ide.0 \
+		-cpu host -enable-kvm \
+		-smp 4 \
+		-serial mon:stdio \
+		-display none \
+		-device rtl8139,netdev=net0 \
+		-netdev user,id=net0
 
 .PHONY: run-bios
 run-bios: $(IMAGE_NAME).iso disk.img
@@ -458,7 +567,7 @@ AetherDE/demo-client/aether-window: AetherDE/demo-client/main.c $(ALPINE_STAMP) 
 # Create a 5GB ext4 disk image with sample files for testing
 disk.img: GNUmakefile userland/winoptions userland/icewm-menu $(ALPINE_STAMP)
 disk.img: scripts/configure-accounts.sh userland/avory-account userland/test_accounts.sh userland/avory-login.elf
-disk.img:  userland/dns_lookup.elf
+disk.img:  userland/dns_lookup.elf userland/nettest.elf
 disk.img: userland/test_clone_futex.elf
 disk.img: userland/test_futex_pi.elf
 disk.img: userland/test_unix_sockets.elf
@@ -635,6 +744,7 @@ disk.img: assets/boot.wav userland/test.c assets/test.wav assets/jane.mp3 assets
 		echo "write userland/doom.elf bin/doom"; \
 		echo "rm bin/dns_lookup"; \
 		echo "write userland/dns_lookup.elf bin/dns_lookup"; \
+		echo "write userland/nettest.elf bin/nettest"; \
 		echo "rm test.tar"; \
 		echo "write assets/test.tar test.tar"; \
 		echo "rm bin/tglgears"; \
@@ -1099,6 +1209,14 @@ userland/avory-login.elf: userland/avory-login.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/avory-login.c -lcrypt -o userland/avory-login.elf
 
+userland/nvme_test.elf: userland/nvme_test.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/nvme_test.c -o userland/nvme_test.elf -lpthread -lm
+
+userland/nvme_bench.elf: userland/nvme_bench.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/nvme_bench.c -o userland/nvme_bench.elf -lpthread
+
 userland/hello_glibc.elf: userland/hello_glibc.c
 	$(GLIBC_CC) $(GLIBC_USER_CFLAGS) \
 		userland/hello_glibc.c -o userland/hello_glibc.elf
@@ -1166,6 +1284,10 @@ userland/apm.elf: userland/apm.c $(MUSL_LIBC)
 userland/dns_lookup.elf: userland/dns_lookup.c userland/dns_resolver.c userland/dns_resolver.h $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/dns_lookup.c userland/dns_resolver.c -o userland/dns_lookup.elf
+
+userland/nettest.elf: userland/nettest.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/nettest.c -o userland/nettest.elf
 
 # Kria programming language (Rust-based, compiled with musl for static linking)
 userland/kria-lang:

@@ -122,20 +122,25 @@ static inline void klog_write_dispatch(const char *s, size_t len) {
   serial_write(s, len);
 
   if (__builtin_expect(screen_logging_enabled, 0)) {
-    spinlock_acquire(&klog_lock);
-    for (size_t i = 0; i < len; i++) {
-      klog_putchar_screen_unlocked(s[i]);
+    /* trylock: if this CPU already holds klog_lock (a fault inside the screen
+     * path) or another CPU is mid-draw, skip the framebuffer instead of
+     * deadlocking the exception path. */
+    if (spinlock_try_acquire(&klog_lock)) {
+      for (size_t i = 0; i < len; i++) {
+        klog_putchar_screen_unlocked(s[i]);
+      }
+      spinlock_release(&klog_lock);
     }
-    spinlock_release(&klog_lock);
   }
 }
 
 void klog_putchar(char c) {
   serial_putchar(c);
   if (__builtin_expect(screen_logging_enabled, 0)) {
-    spinlock_acquire(&klog_lock);
-    klog_putchar_screen_unlocked(c);
-    spinlock_release(&klog_lock);
+    if (spinlock_try_acquire(&klog_lock)) {
+      klog_putchar_screen_unlocked(c);
+      spinlock_release(&klog_lock);
+    }
   }
 }
 

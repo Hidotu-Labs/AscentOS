@@ -47,6 +47,28 @@ bool cpu_has_fsgsbase(void) {
   return (ebx & (1U << 0)) != 0; // CPUID.(EAX=07H,ECX=0H):EBX.FSGSBASE[bit 0]
 }
 
+bool cpu_has_smep(void) {
+  uint32_t max_leaf = 0, ebx = 0, ecx = 0, edx = 0;
+  cpuid(0, 0, &max_leaf, &ebx, &ecx, &edx);
+  if (max_leaf < 7)
+    return false;
+
+  uint32_t eax = 0;
+  cpuid(7, 0, &eax, &ebx, &ecx, &edx);
+  return (ebx & (1U << 7)) != 0; // CPUID.(EAX=07H,ECX=0H):EBX.SMEP[bit 7]
+}
+
+bool cpu_has_smap(void) {
+  uint32_t max_leaf = 0, ebx = 0, ecx = 0, edx = 0;
+  cpuid(0, 0, &max_leaf, &ebx, &ecx, &edx);
+  if (max_leaf < 7)
+    return false;
+
+  uint32_t eax = 0;
+  cpuid(7, 0, &eax, &ebx, &ecx, &edx);
+  return (ebx & (1U << 20)) != 0; // CPUID.(EAX=07H,ECX=0H):EBX.SMAP[bit 20]
+}
+
 bool cpu_has_xsave(void) {
   uint32_t eax = 0, ebx = 0, ecx = 0, edx = 0;
   cpuid(1, 0, &eax, &ebx, &ecx, &edx);
@@ -77,8 +99,9 @@ static void cpu_pat_init(void) {
 }
 
 bool cpu_has_xsave_flag = false;
+bool cpu_has_smap_flag = false;
 
-// Enable SSE/SSE2, PCID, FSGSBASE, and AVX/XSAVE for long mode execution.
+// Enable SSE/SSE2, PCID, FSGSBASE, AVX/XSAVE, SMEP and SMAP for long mode.
 void cpu_features_init(void) {
   uint64_t cr0;
   __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
@@ -105,6 +128,20 @@ void cpu_features_init(void) {
   if (cpu_has_xsave()) {
     cr4 |= (1ULL << 18); // CR4.OSXSAVE (bit 18)
     cpu_has_xsave_flag = true;
+  }
+
+  // Enable SMEP: supervisor mode may not execute user-mapped pages.
+  if (cpu_has_smep()) {
+    cr4 |= (1ULL << 20); // CR4.SMEP (bit 20)
+  }
+
+  // Enable SMAP: supervisor mode may not access user-mapped pages unless
+  // RFLAGS.AC is set.  Publish the flag before CR4 changes so any uaccess
+  // path that starts between the store and the CR4 write already knows to
+  // issue stac.
+  if (cpu_has_smap()) {
+    cpu_has_smap_flag = true;
+    cr4 |= (1ULL << 21); // CR4.SMAP (bit 21)
   }
 
   __asm__ volatile("mov %0, %%cr4" : : "r"(cr4) : "memory");

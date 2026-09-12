@@ -92,7 +92,12 @@ static void out_kv(const char *key, uint64_t value) {
 // resolve, the byte is unreportable and we say so instead of touching it.
 
 static void *xlate(uint64_t vaddr) {
-  uint64_t phys = vmm_virt_to_phys(vmm_get_active_pml4(), vaddr);
+  /* Raw walk rather than vmm_virt_to_phys(): this runs while reporting a
+   * fault that may have corrupted the very page tables the normal walker
+   * would chase, and a #GP/#PF inside the reporter turns one dump into a
+   * double fault.  The raw walk refuses to follow non-RAM frames. */
+  uint64_t phys = vmm_debug_walk((uint64_t)(uintptr_t)vmm_get_active_pml4(),
+                                 vaddr, NULL);
   if (phys == 0)
     return NULL;
   return (void *)(uintptr_t)(phys + pmm_get_hhdm_offset());

@@ -87,6 +87,11 @@ bool lapic_is_ready(void);
 // Returns the BSP's APIC ID.
 uint32_t lapic_get_id(void);
 
+// Bring-up diagnostics: the LAPIC MMIO as seen through the HHDM (0 when the
+// LAPIC was never initialized) and its physical base.
+uint64_t lapic_get_va(void);
+uint64_t lapic_get_phys(void);
+
 // IPI support
 #define LAPIC_ICR_DEST_SELF        (1 << 18)
 #define LAPIC_ICR_DEST_ALL         (2 << 18)

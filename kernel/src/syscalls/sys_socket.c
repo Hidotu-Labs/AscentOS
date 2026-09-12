@@ -784,6 +784,14 @@ static uint64_t sys_getsockopt(uint64_t sockfd, uint64_t level,
       *optlen = sizeof(int);
       return 0;
     case SO_ERROR:
+      // Let the family report connection errors (e.g. failed non-blocking
+      // connect); fall back to the generic socket error.
+      if (sock->ops && sock->ops->getsockopt) {
+        int ret = sock->ops->getsockopt(sock, (int)level, (int)optname,
+                                        optval, optlen);
+        if (ret == 0)
+          return 0;
+      }
       *val = socket_get_error(sock);
       *optlen = sizeof(int);
       return 0;
@@ -840,7 +848,9 @@ static uint64_t sys_setsockopt(uint64_t sockfd, uint64_t level,
     return (uint64_t)-22; // EINVAL
   }
 
-  // Handle socket-level options
+  // Handle socket-level options. These are remembered on the generic socket
+  // and then forwarded to the family handler so TCP/UDP can apply them.
+  bool sol_handled = false;
   if ((int)level == SOL_SOCKET) {
     const int *val = (const int *)optval;
     switch ((int)optname) {
@@ -852,7 +862,8 @@ static uint64_t sys_setsockopt(uint64_t sockfd, uint64_t level,
       if (v > 1024 * 1024)
         v = 1024 * 1024; // 1MB max
       sock->rcvbuf = v;
-      return 0;
+      sol_handled = true;
+      break;
     }
     case SO_SNDBUF:
     case SO_SNDBUFFORCE: {
@@ -862,17 +873,20 @@ static uint64_t sys_setsockopt(uint64_t sockfd, uint64_t level,
       if (v > 1024 * 1024)
         v = 1024 * 1024; // 1MB max
       sock->sndbuf = v;
-      return 0;
+      sol_handled = true;
+      break;
     }
     case SO_REUSEADDR:
       sock->reuseaddr = *val;
-      return 0;
+      sol_handled = true;
+      break;
     case SO_KEEPALIVE:
     case SO_BROADCAST:
     case SO_RCVTIMEO:
     case SO_SNDTIMEO:
     case SO_LINGER:
-      return 0; // Stub success
+      sol_handled = true;
+      break;
     default:
       break;
     }
@@ -882,8 +896,13 @@ static uint64_t sys_setsockopt(uint64_t sockfd, uint64_t level,
   if (sock->ops && sock->ops->setsockopt) {
     int ret = sock->ops->setsockopt(sock, (int)level, (int)optname, optval,
                                     (int)optlen);
+    if (sol_handled)
+      return 0;
     return (uint64_t)ret;
   }
+
+  if (sol_handled)
+    return 0;
 
   // Default stub for common SOL_SOCKET options if not handled by family
   if ((int)level == SOL_SOCKET) {

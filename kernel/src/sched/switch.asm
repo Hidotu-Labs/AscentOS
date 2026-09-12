@@ -9,6 +9,12 @@ extern cpu_has_xsave_flag
 ; rdi = pointer to old thread struct
 ; rsi = pointer to new thread struct
 switch_context:
+    ; Save RFLAGS with the rest of the context.  RFLAGS.AC is the coarse SMAP
+    ; user-access window: a thread that blocks mid-syscall must resume with AC
+    ; still set, and a thread resumed from user/idle context must not inherit
+    ; somebody else's window.
+    pushfq
+
     ; Push callee-saved registers according to System V AMD64 ABI
     push rbx
     push rbp
@@ -60,6 +66,16 @@ switch_context:
     pop r12
     pop rbp
     pop rbx
+
+    ; Restore this thread's RFLAGS (including the AC window) before returning.
+    ; IF is explicitly cleared again: the scheduler invariant is that a resumed
+    ; thread runs with interrupts masked until sched_schedule() reaches its
+    ; hal_irq_enable(), and letting popfq re-enable IF here allowed an
+    ; interrupt to nest a second schedule while the first one was still
+    ; unwinding (random corrupted returns).  AC must survive - it is the
+    ; coarse SMAP window for a syscall that blocked mid-dispatch.
+    popfq
+    cli
 
     ; Return to the address left on the new thread's stack
     ret
