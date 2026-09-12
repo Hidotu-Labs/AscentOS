@@ -1,0 +1,22 @@
+# Firmware images copied from linux-firmware into the AvoryOS disk image.
+#
+# One path or glob per line, relative to the linux-firmware tree root.
+# scripts/linux-firmware-install.sh copies every match into
+# build/firmware/lib/firmware/, which the top-level image build will install at
+# /lib/firmware once amdgpu bring-up starts (Phase 6).
+#
+# Keep this list exact: shipping the whole linux-firmware tree is hundreds of
+# megabytes, and amdgpu only needs its own blobs.
+#
+# Phase 6 will add the Raphael set, for example (verify exact names against
+# the driver log and linux-firmware's WHENCE before enabling):
+#
+# amdgpu/gc_10_3_6_me.bin
+# amdgpu/gc_10_3_6_mec.bin
+# amdgpu/gc_10_3_6_mec2.bin
+# amdgpu/gc_10_3_6_pfp.bin
+# amdgpu/gc_10_3_6_rlc.bin
+# amdgpu/psp_13_0_5_sos.bin
+# amdgpu/psp_13_0_5_ta.bin
+# amdgpu/smu_13_0_5.bin
+# amdgpu/dcn_3_1_*_dmcub.bin

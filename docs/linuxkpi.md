@@ -10,8 +10,9 @@ DRM drivers (nouveau, i915, ...) and other subsystems.
 | Path | Role |
 |---|---|
 | `kernel/linux/` | Pinned upstream Linux subset, vendored by `scripts/linux-import.sh`. Gitignored; never edited. |
-| `kernel/linux-subset.txt` | Paths copied from the Linux tree (dirs/files). |
-| `kernel/linux-files.txt` | Upstream `.c` files compiled into the kernel. |
+| `scripts/linux/subset.txt` | Paths copied from the Linux tree (dirs/files). |
+| `scripts/linux/files.txt` | Upstream `.c` files compiled into the kernel. |
+| `scripts/linux/firmware-manifest.txt` | Firmware blobs staged for `/lib/firmware` by `scripts/linux-firmware-install.sh`. |
 | `kernel/linuxkpi/` | AvoryOS-written glue and implementations (initcalls, FPU, later locks/workqueues/DRM glue). |
 | `kernel/linuxkpi/include/generated/` | Hand-maintained kernel config (`autoconf.h`) and build identity for imported code. |
 | `kernel/src/linuxkpi/` | Phase 0 glue today; grows into the LinuxKPI implementation tree. |

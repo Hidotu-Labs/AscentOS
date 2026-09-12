@@ -5,8 +5,8 @@ session so the next agent can resume without re-deriving state.
 
 ## Phase 0 — scaffolding (in progress)
 
-- [x] `scripts/linux-import.sh`, `kernel/linux-subset.txt`,
-      `kernel/linux-files.txt`: pinned v6.6.* import into `kernel/linux/`.
+- [x] `scripts/linux-import.sh`, `scripts/linux/subset.txt`,
+      `scripts/linux/files.txt`: pinned v6.6.* import into `kernel/linux/`.
 - [x] `kernel/linuxkpi/include/generated/autoconf.h` plus build-identity
       headers; import script links them into the tree.
 - [x] `kernel/GNUmakefile`: per-source-group include paths and object rule for
