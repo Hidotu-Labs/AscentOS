@@ -1,5 +1,10 @@
 /build/
 /kernel/linux/
+/kernel/cc-runtime/
+/kernel/limine-protocol/
+/kernel/freestnd-c-hdrs/
+/kernel/bin-*/
+/kernel/obj-*/
 /doomgeneric/
 /limine/
 /toolchain/
