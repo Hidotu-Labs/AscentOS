@@ -111,13 +111,20 @@ session so the next agent can resume without re-deriving state.
     re-blocks until the deadline or a genuine wakeup (which clears
     `wakeup_ticks`), and syncs `jiffies` on wake via a weak hook — the one-shot
     LAPIC may not have ticked between the last sync and the wakeup.
+  - `kernel/src/linuxkpi/native_sched.c`: `linuxkpi_wake_thread()` now cancels
+    a KPI sleep directly when the waiter is an idle task.  `sched_wakeup()`
+    ignores idle threads (they are never runqueue members), so the bounded
+    completion wait in `linuxkpi_run_boot_tests()` previously had to run its
+    full 10 s timeout before returning, stalling the boot after the tests.
   - `kernel/linuxkpi/src/wait.c`: `__kpi_wake_up()` now runs wake functions
     while holding the waitqueue lock.  The previous splice-then-unlock shape
     let a timing-out waiter `finish_wait()` and reuse its stack entry while the
     waker was still calling `autoremove_wake_function`, which faulted in
     `kworker/events` once sleeps actually blocked.
 - Chunk 3.1 verified with the same 8 tests above; all `[DBG]` instrumentation
-  removed.
+  removed.  Timestamped boot capture: the 8 suites complete in ~127 ms and
+  `linuxkpi_run_boot_tests()` returns in the same millisecond as the final
+  test line (previously a 9.87 s stall from the idle-wake timeout).
 
 ### Chunk 3 — remaining deviations before drivers
 - `spin_lock()` still masks IRQs: the native scheduler does not honor the

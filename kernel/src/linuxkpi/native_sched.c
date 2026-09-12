@@ -128,8 +128,25 @@ int linuxkpi_schedule_timeout_ms(unsigned long ms) {
 }
 
 void linuxkpi_wake_thread(void *thread) {
-  if (thread)
-    sched_wakeup((struct thread *)thread);
+  struct thread *t = (struct thread *)thread;
+  if (!t)
+    return;
+
+  /* sched_wakeup() ignores idle threads: they are the per-CPU fallback task
+   * and are never runqueue members.  KPI code can still sleep in the boot
+   * thread's idle context before the first real kernel thread is scheduled
+   * (e.g. the bounded wait in linuxkpi_run_boot_tests()), so cancel the
+   * timeout here instead.  The scheduler resumes the idle fallback as soon as
+   * nothing else is runnable, and the sleep loop then sees wakeup_ticks==0
+   * and returns. */
+  if (t->is_idle) {
+    t->wakeup_ticks = 0;
+    if (t->state == THREAD_SLEEPING || t->state == THREAD_BLOCKED)
+      __atomic_store_n(&t->state, THREAD_RUNNING, __ATOMIC_RELEASE);
+    return;
+  }
+
+  sched_wakeup(t);
 }
 
 bool linuxkpi_thread_has_pending_signal(void *thread) {
