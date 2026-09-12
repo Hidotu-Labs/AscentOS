@@ -9,7 +9,7 @@
 # root partition.  Exits non-zero on any failure.
 #
 # Usage:
-#   ./scripts/nvme-stress.sh [--config=ide-scratch|nvme-root] [--selftest]
+#   ./scripts/nvme/nvme-stress.sh [--config=ide-scratch|nvme-root] [--selftest]
 #                            [--cycles=N] [--identify-ops=N]
 #                            [--data-selftest] [--allow-data-selftest]
 #                            [--recovery] [--fua]
@@ -83,12 +83,12 @@
 #   --drive-cache=none     host-side O_DIRECT + native AIO for the NVMe drive
 #
 # Long-running Phase 6 stress examples:
-#   ./scripts/nvme-stress.sh --bench --bench-mode=randwrite --bench-qd=8 \
+#   ./scripts/nvme/nvme-stress.sh --bench --bench-mode=randwrite --bench-qd=8 \
 #       --bench-seconds=3600            # 8-thread x QD64-ish contention soak
-#   ./scripts/nvme-stress.sh --bench-sweep --bench-seconds=600  # scaling soak
-#   ./scripts/nvme-stress.sh --bench-compare --bench-qd=4       # NVMe vs AHCI
+#   ./scripts/nvme/nvme-stress.sh --bench-sweep --bench-seconds=600  # scaling soak
+#   ./scripts/nvme/nvme-stress.sh --bench-compare --bench-qd=4       # NVMe vs AHCI
 #
-# Phase 7 acceptance flags (driven by scripts/nvme-phase7.sh):
+# Phase 7 acceptance flags (driven by scripts/nvme/nvme-phase7.sh):
 #   --accel=kvm|tcg      force an accelerator instead of auto-detecting KVM
 #                        (the matrix uses this for its KVM/TCG dimension).
 #   --verified-gib=N     guest runs N GiB of verified write+read passes over
@@ -98,14 +98,14 @@
 #                        flags this script generated (escape hatch for the
 #                        Phase 7 runner; arguments are not shell-expanded).
 #
-# Ready-made Phase 7 entry points live in scripts/nvme-phase7.sh:
+# Ready-made Phase 7 entry points live in scripts/nvme/nvme-phase7.sh:
 #   make nvme-phase7          # all acceptance suites
 #   make nvme-phase7-quick    # reduced counts for a smoke run
 #   make nvme-phase7-dry      # print the 72-cell matrix and commands
 #
 # Scaling acceptance (cold cache, host O_DIRECT + native AIO + ioeventfd; this
 # is the configuration that takes QEMU's per-request CPU cost out of the way):
-#   ./scripts/nvme-stress.sh --bench-matrix --bench-mode=randread \
+#   ./scripts/nvme/nvme-stress.sh --bench-matrix --bench-mode=randread \
 #       --bench-seconds=5 --min-scale=1.5 --ioeventfd --drive-cache=none
 #
 # The transfer matrix (512 B .. 4 MiB at LBA 0/mid/last/random, 4- and
@@ -117,7 +117,7 @@
 
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 ORIG_ARGS=("$@")
@@ -814,7 +814,7 @@ ide-scratch)
     )
     if [ ! -f "$SCRATCH_IMG" ]; then
         echo "[*] Building $SCRATCH_IMG..."
-        ./scripts/create-nvme-test.sh >/dev/null
+        ./scripts/nvme/create-nvme-test.sh >/dev/null
     fi
     ;;
 nvme-root)

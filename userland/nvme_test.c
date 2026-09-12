@@ -1101,7 +1101,7 @@ static int cmd_auto(uint64_t mb, uint64_t seconds, int loops,
   }
 
   /* Leave a stable marker for the host-side harness, then power off so QEMU
-   * exits by itself and scripts/nvme-stress.sh never has to kill it. */
+   * exits by itself and scripts/nvme/nvme-stress.sh never has to kill it. */
   if (rc == 0)
     printf("NVME-TEST: PASS\n");
   else

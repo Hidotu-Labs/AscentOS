@@ -15,7 +15,7 @@
  * geometry bounds, MDTS clamping, request bounds, CID exhaustion/reuse and
  * PRP builder limits, all exercised with synthetic values.
  *
- * scripts/nvme-stress.sh greps the PASS/FAIL/SKIP markers.
+ * scripts/nvme/nvme-stress.sh greps the PASS/FAIL/SKIP markers.
  */
 
 #ifdef NVME_SELFTEST

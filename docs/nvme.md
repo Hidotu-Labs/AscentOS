@@ -137,7 +137,7 @@ QEMU-side knobs used by the harness: `mdts=N`, `max_ioqpairs=N`,
 
 ## Testing
 
-Guest tools (built into `nvme_test.img` by `scripts/create-nvme-test.sh`):
+Guest tools (built into `nvme_test.img` by `scripts/nvme/create-nvme-test.sh`):
 
 - `/bin/nvme_test auto` — picks a scratch device and runs the transfer matrix
   (512 B … 4 MiB at LBA 0/mid/last/random), 4-/8-thread passes, an optional
@@ -148,7 +148,7 @@ Guest tools (built into `nvme_test.img` by `scripts/create-nvme-test.sh`):
   chosen block size and queue depth; `--sweep` checks qd4/qd1 scaling and
   `--compare` runs the same workload on an AHCI device.
 
-Host orchestrator (`scripts/nvme-stress.sh`) builds the requested kernel
+Host orchestrator (`scripts/nvme/nvme-stress.sh`) builds the requested kernel
 configuration, boots QEMU headless, checks the guest markers, verifies the
 backing images (LE64 pattern, SHA-256, 4Kn/512e pair equality) and runs
 `e2fsck -fn`/`-fy` where applicable.  Useful flags: `--selftest`,
@@ -158,18 +158,18 @@ backing images (LE64 pattern, SHA-256, 4Kn/512e pair equality) and runs
 `--soak=SECONDS`, `--bench*`, and the Phase 7 additions `--accel=kvm|tcg`,
 `--verified-gib=N`, `--guest-args=…`.
 
-Phase 7 acceptance suites (`scripts/nvme-phase7.sh`):
+Phase 7 acceptance suites (`scripts/nvme/nvme-phase7.sh`):
 
 ```sh
 make nvme-phase7-dry                     # print the 72-cell matrix + commands
 make nvme-phase7-quick                   # reduced smoke run of every suite
 make nvme-phase7                         # full acceptance run
-./scripts/nvme-phase7.sh matrix --list   # inspect the matrix
-./scripts/nvme-phase7.sh soak --hours=4  # worst-case 4 h soak
-./scripts/nvme-phase7.sh tib --target-gib=1024 --gib-per-boot=64
-./scripts/nvme-phase7.sh chaos --cuts=100
-./scripts/nvme-phase7.sh boots --count=50
-./scripts/nvme-phase7.sh ahci --count=5
+./scripts/nvme/nvme-phase7.sh matrix --list   # inspect the matrix
+./scripts/nvme/nvme-phase7.sh soak --hours=4  # worst-case 4 h soak
+./scripts/nvme/nvme-phase7.sh tib --target-gib=1024 --gib-per-boot=64
+./scripts/nvme/nvme-phase7.sh chaos --cuts=100
+./scripts/nvme/nvme-phase7.sh boots --count=50
+./scripts/nvme/nvme-phase7.sh ahci --count=5
 ```
 
 Suites are resumable: completed matrix cells, the verified-byte ledger and the
@@ -193,19 +193,19 @@ Long-running acceptance commands from the Phase 7 checklist:
 
 ```sh
 # 4 h worst-case soak: 1 vCPU TCG, 4Kn + 512e, QD 64 randwrite, lost IRQ
-./scripts/nvme-phase7.sh soak --hours=4
+./scripts/nvme/nvme-phase7.sh soak --hours=4
 
 # 1 TiB cumulative verified writes (host-side ledger, resumable)
-./scripts/nvme-phase7.sh tib --target-gib=1024 --gib-per-boot=64
+./scripts/nvme/nvme-phase7.sh tib --target-gib=1024 --gib-per-boot=64
 
 # 100 power-cut + fsck cycles (journal replay, then clean -fn)
-./scripts/nvme-phase7.sh chaos --cuts=100
+./scripts/nvme/nvme-phase7.sh chaos --cuts=100
 
 # 50 boot-loop configurations
-./scripts/nvme-phase7.sh boots --count=50
+./scripts/nvme/nvme-phase7.sh boots --count=50
 
 # AHCI/ATA regression with host pattern/SHA verification
-./scripts/nvme-phase7.sh ahci --count=5
+./scripts/nvme/nvme-phase7.sh ahci --count=5
 ```
 
 ## Phase 7 hardening audit
@@ -224,7 +224,7 @@ Each audit item from the checklist maps to code and a repeatable check.
 | Bounce zeroing | Bounce pages, the per-namespace RMW page and PRP list pages are `memset` before first use, so a short/partial transfer cannot leak stale allocator bytes | Code review; destructive 4Kn RMW self-test |
 
 The non-destructive audit cases run at every `NVME_SELFTEST=1` boot and print
-`NVME-AUDIT: PASS|FAIL|SKIP`; `scripts/nvme-stress.sh --selftest` requires the
+`NVME-AUDIT: PASS|FAIL|SKIP`; `scripts/nvme/nvme-stress.sh --selftest` requires the
 PASS marker.  Destructive cases stay behind `NVME_SELFTEST_DATA=1` and only
 touch scratch media.
 
@@ -256,6 +256,6 @@ warnings that are unrelated to this driver.
 | `kernel/src/tests/nvme/nvme_selftest.c` | boot self-test entry and markers |
 | `userland/nvme_test.c` | guest transfer matrix / soak / verified-writes / crash tool |
 | `userland/nvme_bench.c` | guest queue-scaling benchmark |
-| `scripts/create-nvme-test.sh` | builds the minimal test root image |
-| `scripts/nvme-stress.sh` | single-config QEMU boot + host verification |
-| `scripts/nvme-phase7.sh` | Phase 7 acceptance suites and matrix |
+| `scripts/nvme/create-nvme-test.sh` | builds the minimal test root image |
+| `scripts/nvme/nvme-stress.sh` | single-config QEMU boot + host verification |
+| `scripts/nvme/nvme-phase7.sh` | Phase 7 acceptance suites and matrix |

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # nvme-phase7.sh - Phase 7 acceptance & hardening runner for the AvoryOS NVMe
-# driver.  This script owns the long suites and calls scripts/nvme-stress.sh
+# driver.  This script owns the long suites and calls scripts/nvme/nvme-stress.sh
 # (which builds the kernel/images and boots QEMU) once per configuration.
 #
 # Subcommands:
@@ -49,13 +49,13 @@
 #   --timeout=SECONDS     pass an explicit QEMU timeout to nvme-stress.sh
 #
 # Examples:
-#   ./scripts/nvme-phase7.sh --list
-#   ./scripts/nvme-phase7.sh --dry-run matrix --limit=4
-#   ./scripts/nvme-phase7.sh matrix --only=accel=tcg
-#   ./scripts/nvme-phase7.sh matrix --only=lba=4kn --limit=8
-#   ./scripts/nvme-phase7.sh --quick all
-#   ./scripts/nvme-phase7.sh soak --hours=4
-#   ./scripts/nvme-phase7.sh tib --target-gib=1 --gib-per-boot=1
+#   ./scripts/nvme/nvme-phase7.sh --list
+#   ./scripts/nvme/nvme-phase7.sh --dry-run matrix --limit=4
+#   ./scripts/nvme/nvme-phase7.sh matrix --only=accel=tcg
+#   ./scripts/nvme/nvme-phase7.sh matrix --only=lba=4kn --limit=8
+#   ./scripts/nvme/nvme-phase7.sh --quick all
+#   ./scripts/nvme/nvme-phase7.sh soak --hours=4
+#   ./scripts/nvme/nvme-phase7.sh tib --target-gib=1 --gib-per-boot=1
 #
 # State (resumable):
 #   build/nvme/phase7/state/matrix.done   completed matrix cell keys
@@ -66,10 +66,10 @@
 
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-STRESS="$ROOT_DIR/scripts/nvme-stress.sh"
+STRESS="$ROOT_DIR/scripts/nvme/nvme-stress.sh"
 LOG_DIR="build/nvme/phase7"
 STATE_DIR="$LOG_DIR/state"
 RUN_ID="$(date +%Y%m%d-%H%M%S)"

@@ -242,6 +242,41 @@ run: edk2-ovmf $(IMAGE_NAME).iso disk.img
 		$(QEMUFLAGS)
 run-tcg: run-x86_64
 
+# ── VFIO passthrough (Phase 0+) ──────────────────────────────────────────────
+#
+# Boots AvoryOS with a host GPU passed through to QEMU.  The guest sees the
+# real device; once the imported Linux amdgpu driver exists, it binds to it.
+# Display output goes to the passed-through GPU's physical connectors, so this
+# target is headless from QEMU's point of view and the serial line is the
+# console.  An emulated std VGA remains so OVMF/Limine still get a GOP
+# framebuffer for the native kernel console.
+#
+#   scripts/vfio-vbios.sh 0000:0e:00.0    # host: extract VBIOS into build/vfio/
+#   make run-vfio
+#
+# Override with VFIO_BDF=... VFIO_MEM=... VFIO_ROM=... QEMUFLAGS='...'.
+VFIO_BDF ?= 0000:0e:00.0
+VFIO_MEM ?= 4G
+VFIO_ROM ?= build/vfio/vbios.rom
+VFIO_COMMA := ,
+VFIO_ROM_OPT = $(if $(wildcard $(VFIO_ROM)),$(VFIO_COMMA)romfile=$(VFIO_ROM),)
+
+.PHONY: run-vfio
+run-vfio: edk2-ovmf $(IMAGE_NAME).iso disk.img
+	qemu-system-$(ARCH) \
+		-M q35 \
+		-m $(VFIO_MEM) \
+		-cpu host -enable-kvm \
+		-smp 4 \
+		-drive if=pflash,unit=0,format=raw,file=edk2-ovmf/ovmf-code-$(ARCH).fd,readonly=on \
+		-cdrom $(IMAGE_NAME).iso \
+		-drive file=disk.img,format=raw,if=none,id=nvme0 \
+		-device nvme,serial=avoryos0,drive=nvme0 \
+		-device vfio-pci,host=$(VFIO_BDF),rombar=1$(VFIO_ROM_OPT) \
+		-display none \
+		-serial stdio \
+		$(QEMUFLAGS)
+
 .PHONY: run-dist
 run-dist: edk2-ovmf avoryos-dist.iso
 	qemu-system-$(ARCH) \
@@ -328,7 +363,7 @@ run-nvme-tcg: run-tcg
 
 # Headless test image: minimal root on AHCI plus a blank NVMe scratch disk.
 # The image runs /bin/nvme_test auto at boot and powers off; the host-side
-# orchestrator is scripts/nvme-stress.sh.
+# orchestrator is scripts/nvme/nvme-stress.sh.
 .PHONY: run-nvme-test
 run-nvme-test: edk2-ovmf $(IMAGE_NAME).iso nvme_test.img nvme_scratch.img
 	@mkdir -p build/nvme
@@ -346,26 +381,26 @@ run-nvme-test: edk2-ovmf $(IMAGE_NAME).iso nvme_test.img nvme_scratch.img
 		-display none \
 		-serial file:build/nvme/run-nvme-test.log
 
-nvme_test.img: scripts/create-nvme-test.sh userland/nvme_test.elf userland/nvme_bench.elf userland/avoryd.elf userland/shutdown.elf
-	./scripts/create-nvme-test.sh
+nvme_test.img: scripts/nvme/create-nvme-test.sh userland/nvme_test.elf userland/nvme_bench.elf userland/avoryd.elf userland/shutdown.elf
+	./scripts/nvme/create-nvme-test.sh
 
 nvme_scratch.img: nvme_test.img
-	@test -f $@ || ./scripts/create-nvme-test.sh
+	@test -f $@ || ./scripts/nvme/create-nvme-test.sh
 
-# Phase 7 acceptance & hardening suites (scripts/nvme-phase7.sh).  These build
+# Phase 7 acceptance & hardening suites (scripts/nvme/nvme-phase7.sh).  These build
 # and boot QEMU many times; PHASE7_ARGS forwards extra runner flags, e.g.
 #   make nvme-phase7 PHASE7_ARGS="--quick"
 #   make nvme-phase7-matrix PHASE7_ARGS="--only=accel=tcg --limit=8"
 #   make nvme-phase7-dry            # prints the 72-cell matrix and commands
 .PHONY: nvme-phase7 nvme-phase7-quick nvme-phase7-dry nvme-phase7-matrix
 nvme-phase7:
-	./scripts/nvme-phase7.sh all $(PHASE7_ARGS)
+	./scripts/nvme/nvme-phase7.sh all $(PHASE7_ARGS)
 nvme-phase7-quick:
-	./scripts/nvme-phase7.sh --quick all $(PHASE7_ARGS)
+	./scripts/nvme/nvme-phase7.sh --quick all $(PHASE7_ARGS)
 nvme-phase7-dry:
-	./scripts/nvme-phase7.sh --dry-run all $(PHASE7_ARGS)
+	./scripts/nvme/nvme-phase7.sh --dry-run all $(PHASE7_ARGS)
 nvme-phase7-matrix:
-	./scripts/nvme-phase7.sh matrix $(PHASE7_ARGS)
+	./scripts/nvme/nvme-phase7.sh matrix $(PHASE7_ARGS)
 
 .PHONY: run-net
 # Headless KVM boot for network benchmarks.  The guest reaches host-side
