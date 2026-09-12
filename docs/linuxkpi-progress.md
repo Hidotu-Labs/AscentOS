@@ -70,11 +70,12 @@ session so the next agent can resume without re-deriving state.
   chunk 3.
 - ~~`mutex` spins instead of sleeping~~ resolved in chunk 3 (waitqueue-based
   FIFO handoff).
-- `spin_lock()` masks IRQs (stronger than Linux) because the scheduler does
-  not yet honor the preemption counter; revisit when it does.
+- ~~`spin_lock()` masks IRQs~~ resolved in chunk 4: plain locks now disable
+  preemption, which the native scheduler honors.
 - `percpu.h` is uniprocessor emulation (single-instance variables).
 - `__kpi_ksize()` returns 0; `kfree_sensitive()` does not wipe.
-- `preempt_count` is advisory; `in_interrupt()` always false.
+- ~~`preempt_count` is advisory; `in_interrupt()` always false~~ resolved in
+  chunk 4 (scheduler hook + per-thread hardirq depth).
 
 ### Chunk 3 — timers, deferred work, sleeping synchronization (verified 2026-09-12)
 - [x] Native glue: `kpi_data` thread field, kthread-with-argument creation
@@ -127,8 +128,6 @@ session so the next agent can resume without re-deriving state.
   test line (previously a 9.87 s stall from the idle-wake timeout).
 
 ### Chunk 3 — remaining deviations before drivers
-- `spin_lock()` still masks IRQs: the native scheduler does not honor the
-  LinuxKPI preemption counter yet, so this stays until that lands.
 - `percpu.h` is still uniprocessor emulation.
 - hrtimer/timer expiry resolution is 1 ms (LAPIC deadline granularity).
 - RCU is correct but unoptimized: global reader counter, polling grace
@@ -137,11 +136,40 @@ session so the next agent can resume without re-deriving state.
   queue; `tasklet` is not implemented yet (needs an `interrupt.h` overlay).
 - `__kpi_ksize()` returns 0; `kfree_sensitive()` does not wipe.
 
-### Chunk 4 — remaining core imports (after chunk 3)
+### Chunk 4 — scheduler/preemption integration (verified 2026-09-12)
+- [x] Weak `linuxkpi_preempt_allowed()` hook honored by `sched_tick()` and the
+      reschedule IPI: a KPI thread with `preempt_count() != 0` is not switched
+      out; the tick rearms to retry, and the request stays pending.
+- [x] Plain `spin_lock()`/`spin_unlock()` disable preemption and keep IRQs
+      enabled; `irq`/`irqsave` variants still mask IRQs.
+      `preempt_enable_resched()` yields when the native `need_resched` is set.
+- [x] `in_interrupt()`/`in_softirq()` backed by per-thread hardirq depth,
+      incremented by native ISR hooks (`linuxkpi_irq_enter/exit` from
+      `src/cpu/isr.c`).  Per-thread, not per-CPU: this scheduler switches
+      threads inside handlers, and a switched-in thread must not inherit the
+      suspended handler's context.
+- [x] Tests (`test_phase1_preempt.c`): preempt/IRQ state, preempt_disable hold,
+      two-thread plain-spinlock counter stress.
+- [x] **Exit evidence** (QEMU/KVM headless, `-smp 4`, serial capture): all
+      three preempt tests OK, all chunk 1–3 tests still OK, boot proceeds past
+      the first IRQs (the hooks are NULL-safe before `cpu_init()`).
+- Deviations: `preempt_count` is per-CPU (holders cannot migrate, so that is
+  sufficient); `might_resched()`/`cond_resched()` remain no-ops;
+  `preempt_enable_resched()` skips the yield in interrupt context or with IRQs
+  disabled.
+
+### Chunk 5 — remaining core imports
 - [ ] `lib/idr.c` + `lib/radix-tree.c` (needs timers; native `radix_tree_*`
-      symbols must be renamed first), `lib/bitmap.c`, `lib/kfifo.c`.
-- [ ] uaccess/io overlays, moduleparam + cmdline, device/devres stubs,
-      vsprintf/hexdump.
+      symbols must be renamed first), `lib/bitmap.c`, `lib/kfifo.c`,
+      `lib/crc32.c`, `lib/xxhash.c`, cheap math/string extras.
+- [ ] Tests: idr alloc/find/remove/iterate; kfifo put/get roundtrip; crc32
+      known vector ("123456789" → 0xCBF43926); xxhash self-consistency.
+
+### Chunk 6 — device/module/uaccess/format polish
+- [ ] `linux/moduleparam.h` + native cmdline integration,
+      `device.h`/`driver.h` + devres, `uaccess.h`, `io.h`,
+      vsprintf/hexdump formats, `rwsem.h`, `semaphore.h`, `ww_mutex.h`,
+      `wait_bit.h`, tasklet.
 
 ## Cross-phase notes
 

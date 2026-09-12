@@ -7,13 +7,12 @@
  * thread_info machinery AvoryOS does not have yet.  The API here is the one
  * imported code actually uses, backed by GCC atomics.
  *
- * Semantics note: unlike Linux, the plain spin_lock()/spin_unlock() pair also
- * masks interrupts for the duration.  Linux disables only preemption, which
- * relies on its scheduler honoring preempt_count; AvoryOS's scheduler does
- * not (yet), so masking IRQs is the only way to make a spinlock safe on a
- * uniprocessor without risking a livelock.  irqsave/irqrestore variants keep
- * exact Linux semantics.  This will be revisited when the scheduler honors
- * the LinuxKPI preemption counter.
+ * Semantics note: plain spin_lock()/spin_unlock() disable preemption (and keep
+ * interrupts enabled), matching Linux.  The native scheduler honors the
+ * LinuxKPI preemption counter through the weak linuxkpi_preempt_allowed()
+ * hook, so a holder cannot be switched away from.  The irqsave/irq variants
+ * additionally mask interrupts and keep exact Linux semantics; they are what
+ * code shared with hard IRQ context must use.
  */
 
 #include <linux/spinlock_types.h>
@@ -51,29 +50,24 @@ static inline void spin_lock_init(spinlock_t *lock) {
   lock->irq_flags = 0;
 }
 
-/* ── plain variants (interrupt-masking here, see note above) ────────────── */
+/* ── plain variants: disable preemption, keep interrupts enabled ────────── */
 
 static __always_inline void spin_lock(spinlock_t *lock) {
-  unsigned long flags;
-  local_irq_save(flags);
+  preempt_disable();
   __kpi_spin_acquire(&lock->locked);
-  lock->irq_flags = flags;
 }
 
 static __always_inline void spin_unlock(spinlock_t *lock) {
-  unsigned long flags = lock->irq_flags;
   __kpi_spin_release(&lock->locked);
-  local_irq_restore(flags);
+  preempt_enable_resched();
 }
 
 static __always_inline bool spin_trylock(spinlock_t *lock) {
-  unsigned long flags;
-  local_irq_save(flags);
+  preempt_disable();
   if (!__kpi_spin_tryacquire(&lock->locked)) {
-    local_irq_restore(flags);
+    preempt_enable();
     return false;
   }
-  lock->irq_flags = flags;
   return true;
 }
 
@@ -83,20 +77,30 @@ static __always_inline bool spin_is_locked(const spinlock_t *lock) {
 
 /* ── irq variants ───────────────────────────────────────────────────────── */
 
-#define spin_lock_irq(lock) spin_lock(lock)
-#define spin_unlock_irq(lock) spin_unlock(lock)
+static __always_inline void spin_lock_irq(spinlock_t *lock) {
+  local_irq_disable();
+  preempt_disable();
+  __kpi_spin_acquire(&lock->locked);
+}
+
+static __always_inline void spin_unlock_irq(spinlock_t *lock) {
+  __kpi_spin_release(&lock->locked);
+  local_irq_enable();
+  preempt_enable_resched();
+}
 
 #define spin_lock_irqsave(lock, flags)                                        \
   do {                                                                        \
     local_irq_save(flags);                                                    \
+    preempt_disable();                                                        \
     __kpi_spin_acquire(&(lock)->locked);                                      \
-    (lock)->irq_flags = (flags);                                              \
   } while (0)
 
 #define spin_unlock_irqrestore(lock, flags)                                   \
   do {                                                                        \
     __kpi_spin_release(&(lock)->locked);                                      \
     local_irq_restore(flags);                                                 \
+    preempt_enable_resched();                                                 \
   } while (0)
 
 /* ── bottom-half variants (no softirqs here; plain lock is already safe) ── */

@@ -1072,7 +1072,7 @@ void isr_init_exceptions(void) {
 }
 
 
-void isr_handler(struct registers *regs) {
+static void isr_dispatch(struct registers *regs) {
   if (interrupt_handlers[regs->int_no] != 0) {
     isr_t handler = interrupt_handlers[regs->int_no];
     handler(regs);
@@ -1108,4 +1108,21 @@ void isr_handler(struct registers *regs) {
   }
 
   isr_panic(regs, "Unhandled CPU Exception");
+}
+
+void isr_handler(struct registers *regs) {
+  int is_hw_irq = (regs->int_no >= 32);
+
+  /* Track hardirq context for LinuxKPI's in_interrupt().  CPU exceptions are
+   * not interrupt context; only vectors 32+ (IRQs and IPIs) are. */
+  extern void linuxkpi_irq_enter(void) __attribute__((weak));
+  extern void linuxkpi_irq_exit(void) __attribute__((weak));
+
+  if (is_hw_irq && linuxkpi_irq_enter)
+    linuxkpi_irq_enter();
+
+  isr_dispatch(regs);
+
+  if (is_hw_irq && linuxkpi_irq_exit)
+    linuxkpi_irq_exit();
 }

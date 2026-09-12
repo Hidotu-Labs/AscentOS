@@ -293,6 +293,13 @@ struct thread {
    * for kernel threads.  Appended at the end: assembly pins offsets earlier
    * in this struct, not these. */
   void *kpi_data;
+
+  /* LinuxKPI hardirq/softirq nesting depth (kernel/src/linuxkpi/native_sched.c,
+   * via the native ISR hooks).  Per-thread, not per-CPU: the scheduler can
+   * switch to another thread from inside an interrupt handler, and that thread
+   * must not observe the suspended handler's context. */
+  uint32_t kpi_irq_depth;
+  uint32_t kpi_softirq_depth;
 };
 
 /*

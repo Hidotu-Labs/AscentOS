@@ -19,6 +19,7 @@
 extern void linuxkpi_test_phase1_libs(void);
 extern void linuxkpi_test_phase1_mem(void);
 extern void linuxkpi_test_phase1_time(void);
+extern void linuxkpi_test_phase1_preempt(void);
 
 static struct completion boot_tests_done;
 
@@ -28,6 +29,7 @@ static int linuxkpi_boot_tests_thread(void *arg) {
   linuxkpi_test_phase1_libs();
   linuxkpi_test_phase1_mem();
   linuxkpi_test_phase1_time();
+  linuxkpi_test_phase1_preempt();
 
   complete(&boot_tests_done);
   return 0;
@@ -44,6 +46,7 @@ void linuxkpi_run_boot_tests(void) {
     linuxkpi_test_phase1_libs();
     linuxkpi_test_phase1_mem();
     linuxkpi_test_phase1_time();
+    linuxkpi_test_phase1_preempt();
     return;
   }
 

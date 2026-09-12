@@ -24,6 +24,49 @@ extern void linuxkpi_jiffies_sync(void) __attribute__((weak));
 
 void *linuxkpi_current_thread(void) { return sched_get_current(); }
 
+void linuxkpi_yield(void) { sched_yield(); }
+
+/* sched_get_current() is only valid once the per-CPU GS base is installed;
+ * the IRQ hooks run from the first timer interrupt, which can precede
+ * cpu_init(). */
+static struct thread *kpi_current_thread_or_null(void) {
+  struct cpu_info *cpu = cpu_get_current();
+  return cpu ? cpu->current_thread : NULL;
+}
+
+bool linuxkpi_need_resched(void) {
+  struct thread *t = kpi_current_thread_or_null();
+  return t ? __atomic_load_n(&t->need_resched, __ATOMIC_ACQUIRE) : false;
+}
+
+/* ── hardirq context tracking (in_interrupt() backing) ──────────────────── */
+
+/* The native ISR calls these around hardware-IRQ dispatch (src/cpu/isr.c).
+ * Depth is tracked on the interrupted thread, so a different thread scheduled
+ * in from inside the handler sees depth 0; when the handler's context resumes
+ * on its original thread, the matching exit runs there too. */
+void linuxkpi_irq_enter(void) {
+  struct thread *t = kpi_current_thread_or_null();
+  if (t)
+    __atomic_add_fetch(&t->kpi_irq_depth, 1, __ATOMIC_ACQ_REL);
+}
+
+void linuxkpi_irq_exit(void) {
+  struct thread *t = kpi_current_thread_or_null();
+  if (t && __atomic_load_n(&t->kpi_irq_depth, __ATOMIC_RELAXED))
+    __atomic_sub_fetch(&t->kpi_irq_depth, 1, __ATOMIC_ACQ_REL);
+}
+
+int linuxkpi_irq_depth(void) {
+  struct thread *t = kpi_current_thread_or_null();
+  return t ? (int)__atomic_load_n(&t->kpi_irq_depth, __ATOMIC_RELAXED) : 0;
+}
+
+int linuxkpi_softirq_depth(void) {
+  struct thread *t = kpi_current_thread_or_null();
+  return t ? (int)__atomic_load_n(&t->kpi_softirq_depth, __ATOMIC_RELAXED) : 0;
+}
+
 static void linuxkpi_kthread_trampoline(void) {
   struct thread *t = sched_get_current();
   struct linuxkpi_kthread_boot *boot =

@@ -36,6 +36,14 @@ static void ipi_reschedule_handler(struct registers *regs) {
    * resumes; as with the LAPIC timer handler, that redundant EOI is harmless.
    */
   lapic_send_eoi();
+
+  /* A KPI thread inside an atomic section (preempt_count != 0) must not be
+   * switched out.  Leave the request pending: the next tick or
+   * preempt_enable_resched() services it once the section is exited. */
+  extern bool linuxkpi_preempt_allowed(void) __attribute__((weak));
+  if (linuxkpi_preempt_allowed && !linuxkpi_preempt_allowed())
+    return;
+
   sched_yield();
 }
 
@@ -659,6 +667,14 @@ __attribute__((optimize("O3"))) void sched_tick(struct registers *regs) {
     hal_irq_restore(flags);
 
     if (preempt) {
+      /* Never switch away from a KPI thread in an atomic section: rearm so
+       * the request is retried on the next tick (or serviced earlier by
+       * preempt_enable_resched()). */
+      extern bool linuxkpi_preempt_allowed(void) __attribute__((weak));
+      if (linuxkpi_preempt_allowed && !linuxkpi_preempt_allowed()) {
+        lapic_timer_rearm_if_earlier(lapic_timer_get_ms() + 1);
+        return;
+      }
       sched_schedule(false);
     }
   }

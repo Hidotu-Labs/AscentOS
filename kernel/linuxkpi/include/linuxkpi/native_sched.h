@@ -24,6 +24,21 @@ int linuxkpi_schedule_timeout_ms(unsigned long ms);
 /* Wake a thread previously blocked by the helpers above. */
 void linuxkpi_wake_thread(void *thread);
 
+/* Yield the calling thread once (native sched_yield()). */
+void linuxkpi_yield(void);
+
+/* True when the native scheduler has asked the calling thread to reschedule
+ * (sched_wakeup() on this CPU or a reschedule IPI). */
+_Bool linuxkpi_need_resched(void);
+
+/* Hardirq nesting: the native ISR wraps hardware-IRQ dispatch with
+ * linuxkpi_irq_enter()/linuxkpi_irq_exit(); the depth accessors back
+ * in_interrupt()/in_softirq().  Depth is per-thread (see struct thread). */
+void linuxkpi_irq_enter(void);
+void linuxkpi_irq_exit(void);
+int linuxkpi_irq_depth(void);
+int linuxkpi_softirq_depth(void);
+
 /* True if the thread has a pending signal. */
 _Bool linuxkpi_thread_has_pending_signal(void *thread);
 

@@ -5,9 +5,9 @@
  *
  * The structures are private to the layer: all access goes through
  * <linux/spinlock.h>, so the layout can differ from upstream's qspinlock.
- * Spinlocks carry the saved interrupt state so the plain spin_lock() variants
- * can mask interrupts (see spinlock.h for why that is stronger than Linux).
- */
+ * spinlock_t keeps the historical irq_flags slot (initialized but otherwise
+ * unused): plain locks only disable preemption, and the irqsave variants keep
+ * the saved flags in the caller's local. */
 
 #include <linux/types.h>
 
